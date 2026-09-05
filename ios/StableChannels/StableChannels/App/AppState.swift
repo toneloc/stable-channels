@@ -109,6 +109,7 @@ class AppState {
         static let pendingAmount = "pending_outbound_onchain_sats"
         static let pendingIsSendAll = "pending_outbound_is_send_all"
         static let pendingBaseline = "pending_outbound_baseline_sats"
+        static let pendingTimestamp = "pending_outbound_timestamp_secs"
     }
 
     var spendableOnchainSats: UInt64 = {
@@ -221,10 +222,12 @@ class AppState {
         let amount = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingAmount) ?? 0))
         let isSendAll = ud?.bool(forKey: BalanceCacheKey.pendingIsSendAll) ?? false
         let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingBaseline) ?? 0))
+        let timestamp = Int64(ud?.integer(forKey: BalanceCacheKey.pendingTimestamp) ?? 0)
         return BalanceCalculator.PendingOutboundSend(
             amountSats: amount,
             isSendAll: isSendAll,
-            baselineOnchainSats: baseline
+            baselineOnchainSats: baseline,
+            timestampSecs: timestamp
         )
     }
 
@@ -232,12 +235,14 @@ class AppState {
         ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: BalanceCacheKey.pendingAmount)
         ud?.set(pendingOutboundSend.isSendAll, forKey: BalanceCacheKey.pendingIsSendAll)
         ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: BalanceCacheKey.pendingBaseline)
+        ud?.set(pendingOutboundSend.timestampSecs, forKey: BalanceCacheKey.pendingTimestamp)
     }
 
     private func clearPendingOutboundSendCache(from ud: UserDefaults?) {
         ud?.removeObject(forKey: BalanceCacheKey.pendingAmount)
         ud?.removeObject(forKey: BalanceCacheKey.pendingIsSendAll)
         ud?.removeObject(forKey: BalanceCacheKey.pendingBaseline)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingTimestamp)
     }
 
     var totalBalanceUSD: Double {
@@ -3063,20 +3068,22 @@ class AppState {
         let currentOnchain = onchainBalanceSats
         let currentSpendable = spendableOnchainSats
 
+        // Immediately update UI balances with exact incremental deduction,
+        // avoiding compounded subtraction if multiple sends occur before sync finishes.
+        if isSendAll {
+            onchainBalanceSats = 0
+            spendableOnchainSats = 0
+        } else {
+            onchainBalanceSats = currentOnchain >= amountSats ? currentOnchain - amountSats : 0
+            spendableOnchainSats = currentSpendable >= amountSats ? currentSpendable - amountSats : 0
+        }
+
         pendingOutboundSend = BalanceCalculator.recordBroadcast(
             currentPending: pendingOutboundSend,
             amountSats: amountSats,
             isSendAll: isSendAll,
             currentOnchain: currentOnchain
         )
-
-        let effective = BalanceCalculator.calculateEffectiveBalances(
-            rawOnchain: currentOnchain,
-            rawSpendable: currentSpendable,
-            pending: pendingOutboundSend
-        )
-        onchainBalanceSats = effective.onchain
-        spendableOnchainSats = effective.spendable
 
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: BalanceCacheKey.onchain)
@@ -3089,11 +3096,14 @@ class AppState {
     /// Synchronizes wallets off the main actor and refreshes balances upon completion.
     private func syncWalletsInBackground() {
         let nodeService = self.nodeService
-        Task { [weak self] in
-            await Task.detached(priority: .utility) {
-                try? nodeService.syncWallets()
-            }.value
-            self?.refreshBalances()
+        Task.detached(priority: .utility) { [weak self] in
+            let syncSuccess = (try? nodeService.syncWallets()) != nil
+            await MainActor.run {
+                if syncSuccess {
+                    self?.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
+                }
+                self?.refreshBalances()
+            }
         }
     }
 

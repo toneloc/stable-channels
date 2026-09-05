@@ -476,7 +476,7 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertEqual(partial1.baselineOnchainSats, 100_000)
 
         // 2. Second partial send of 15,000 sats preserves original baseline
-        let partial2 = AppState.recordBroadcast(
+        let partial2 = BalanceCalculator.recordBroadcast(
             currentPending: partial1,
             amountSats: 15_000,
             isSendAll: false,
@@ -486,7 +486,16 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertFalse(partial2.isSendAll)
         XCTAssertEqual(partial2.baselineOnchainSats, 100_000)
 
-        // 3. Send All
+        // Effective balance against raw baseline is 65k (not 45k)
+        let effPartial2 = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: partial2
+        )
+        XCTAssertEqual(effPartial2.onchain, 65_000)
+        XCTAssertEqual(effPartial2.spendable, 60_000)
+
+        // 3. Send All directly from initial state
         let sendAll = BalanceCalculator.recordBroadcast(
             currentPending: initial,
             amountSats: 100_000,
@@ -496,6 +505,40 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertEqual(sendAll.amountSats, 100_000)
         XCTAssertTrue(sendAll.isSendAll)
         XCTAssertEqual(sendAll.baselineOnchainSats, 100_000)
+
+        // 4. Send All following an earlier partial send preserves the original baseline
+        let sendAllAfterPartial = BalanceCalculator.recordBroadcast(
+            currentPending: partial1,
+            amountSats: 80_000,
+            isSendAll: true,
+            currentOnchain: 80_000
+        )
+        XCTAssertEqual(sendAllAfterPartial.amountSats, 100_000)
+        XCTAssertTrue(sendAllAfterPartial.isSendAll)
+        XCTAssertEqual(sendAllAfterPartial.baselineOnchainSats, 100_000)
+
+        let effSendAll = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: sendAllAfterPartial
+        )
+        XCTAssertEqual(effSendAll.onchain, 0)
+        XCTAssertEqual(effSendAll.spendable, 0)
+
+        // Wallet refresh incorporating only partial send 1 (raw drops to 80k) does not prematurely clear send-all
+        let stillPendingSendAll = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 80_000,
+            pending: sendAllAfterPartial
+        )
+        XCTAssertTrue(stillPendingSendAll.isSendAll)
+
+        // Once send-all is incorporated (raw drops to 0), pending clears
+        let clearedSendAll = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 0,
+            pending: sendAllAfterPartial
+        )
+        XCTAssertFalse(clearedSendAll.isSendAll)
+        XCTAssertEqual(clearedSendAll.amountSats, 0)
     }
 
     func testConfirmationCalculatingProtocolPolymorphism() {
@@ -530,5 +573,103 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertNil(ud?.object(forKey: "pending_outbound_onchain_sats"))
         XCTAssertNil(ud?.object(forKey: "pending_outbound_is_send_all"))
         XCTAssertNil(ud?.object(forKey: "pending_outbound_baseline_sats"))
+    }
+
+    func testOverlappingConsecutiveSendsDoesNotDoubleDeduct() {
+        let appState = AppState()
+        appState.onchainBalanceSats = 100_000
+        appState.spendableOnchainSats = 95_000
+
+        // 1. First send of 30,000 sats
+        appState.onchainSendBroadcasted(amountSats: 30_000, isSendAll: false)
+        XCTAssertEqual(appState.onchainBalanceSats, 70_000)
+        XCTAssertEqual(appState.spendableOnchainSats, 65_000)
+        XCTAssertEqual(appState.pendingOutboundSend.amountSats, 30_000)
+
+        // 2. Second overlapping send of 20,000 sats before sync finishes
+        // Must display 50,000 sats (100k - 30k - 20k), NOT double-deducted 20,000 sats
+        appState.onchainSendBroadcasted(amountSats: 20_000, isSendAll: false)
+        XCTAssertEqual(
+            appState.onchainBalanceSats,
+            50_000,
+            "Consecutive overlapping send must not double-deduct earlier pending sends"
+        )
+        XCTAssertEqual(appState.spendableOnchainSats, 45_000)
+        XCTAssertEqual(appState.pendingOutboundSend.amountSats, 50_000)
+
+        // 3. Intervening refresh (LDK still reports raw 100k)
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: appState.pendingOutboundSend
+        )
+        XCTAssertEqual(effective.onchain, 50_000)
+        XCTAssertEqual(effective.spendable, 45_000)
+    }
+
+    func testPendingOutboundSendTtlExpiration() {
+        let baseTime: Int64 = 1_000_000
+        let pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: 30_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            timestampSecs: baseTime
+        )
+
+        // Within TTL (300 seconds elapsed) -> retains pending send
+        let unexpired = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            currentTimeSecs: baseTime + 300,
+            expirySecs: 600
+        )
+        XCTAssertEqual(unexpired.amountSats, 30_000)
+
+        // Beyond TTL (601 seconds elapsed) -> expires to prevent permanent balance suppression
+        let expired = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            currentTimeSecs: baseTime + 601,
+            expirySecs: 600
+        )
+        XCTAssertEqual(expired.amountSats, 0)
+        XCTAssertFalse(expired.isSendAll)
+    }
+
+    func testIncomingDepositDuringPendingSendClearsViaTtl() {
+        let baseTime: Int64 = 1_000_000
+        let pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: 30_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            timestampSecs: baseTime
+        )
+
+        // A large incoming deposit of 50k arrives, raising raw balance to 120k
+        let rawWithDeposit: UInt64 = 120_000
+
+        // Before TTL expires, balance alone does not clear because 120k > 70k
+        let beforeTtl = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawWithDeposit,
+            pending: pending,
+            currentTimeSecs: baseTime + 100,
+            expirySecs: 600
+        )
+        XCTAssertEqual(beforeTtl.amountSats, 30_000)
+
+        // After TTL expires, pending clears and user sees the updated deposit balance
+        let afterTtl = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawWithDeposit,
+            pending: pending,
+            currentTimeSecs: baseTime + 650,
+            expirySecs: 600
+        )
+        XCTAssertEqual(afterTtl.amountSats, 0)
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawWithDeposit,
+            rawSpendable: rawWithDeposit,
+            pending: afterTtl
+        )
+        XCTAssertEqual(effective.onchain, 120_000)
     }
 }
