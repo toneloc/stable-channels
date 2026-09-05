@@ -1136,6 +1136,39 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Pending received on-chain rows still missing a txid — excluded from
+     *  getPaymentsNeedingConfirmation() (which requires txid) so they'd otherwise poll forever. */
+    fun getPaymentsNeedingTxidResolution(limit: Int = 20): List<PaymentRecord> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+            FROM payments
+            WHERE (txid IS NULL OR txid = '')
+              AND payment_type = 'onchain'
+              AND direction = 'received'
+              AND status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            val list = mutableListOf<PaymentRecord>()
+            while (c.moveToNext()) {
+                list.add(PaymentRecord(
+                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                    paymentType = c.getString(2), direction = c.getString(3),
+                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                    status = c.getString(8), createdAt = c.getLong(9),
+                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
+                ))
+            }
+            list
+        }
+    }
+
     fun updatePaymentConfirmationState(paymentRowId: Long, confirmations: Int, status: String): Boolean {
         val cv = ContentValues().apply {
             put("confirmations", confirmations)

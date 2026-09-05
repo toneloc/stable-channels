@@ -1759,6 +1759,36 @@ class AppState(private val context: Context) : ViewModel() {
         return null
     }
 
+    /** Backfills txid for pending "received onchain" rows that never resolved one (e.g. a
+     *  channel-close payout, which lands on an address we weren't watching). Without this,
+     *  such rows are invisible to getPaymentsNeedingConfirmation() and stay at 0/6 forever. */
+    private fun resolveMissingReceiveTxids() {
+        val db = databaseService ?: return
+        val unresolved = db.getPaymentsNeedingTxidResolution()
+        if (unresolved.isEmpty()) return
+
+        val onchainPayments = try {
+            nodeService.node?.listPayments()
+                ?.filter { it.direction == PaymentDirection.INBOUND && it.kind is PaymentKind.Onchain }
+        } catch (e: Exception) {
+            Log.w("AppState", "listPayments lookup failed during txid backfill: ${e.message}")
+            null
+        } ?: return
+
+        unresolved.forEach { row ->
+            val paymentId = row.paymentId ?: return@forEach
+            val match = onchainPayments
+                .filter { it.amountMsat?.toLong() == row.amountMsat }
+                .maxByOrNull { it.latestUpdateTimestamp } ?: return@forEach
+            val txid = (match.kind as PaymentKind.Onchain).txid
+            db.updatePaymentTxid(paymentId, txid)
+            AuditService.log("ONCHAIN_RECEIVE_TXID_BACKFILLED", mapOf(
+                "payment_id" to paymentId,
+                "txid" to txid
+            ))
+        }
+    }
+
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && (now - lastConfirmationPollAtMs) < 15_000) {
@@ -1771,6 +1801,7 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService ?: return
         isConfirmationPolling = true
         try {
+            resolveMissingReceiveTxids()
             val tipHeight = fetchChainTipHeight() ?: return
             val pending = db.getPaymentsNeedingConfirmation(limit = 100)
             var anyUpdated = false
@@ -2087,10 +2118,28 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
-                val resolvedTxid = _lastReceiveTxid.value?.takeIf {
+                val addressMatchedTxid = _lastReceiveTxid.value?.takeIf {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
                         lastReceiveTxidAddress == receiveAddress
+                }
+                // Address matching only finds deposits to our own tracked receive address —
+                // it misses proceeds landing elsewhere (e.g. a channel-close output), leaving
+                // txid permanently null and confirmations stuck at 0/6. LDK's own payment
+                // list already knows the real txid for every inbound on-chain payment
+                // regardless of address, so fall back to it (mirrors src/user.rs's sweep).
+                val resolvedTxid = addressMatchedTxid ?: try {
+                    nodeService.node?.listPayments()
+                        ?.filter {
+                            it.direction == PaymentDirection.INBOUND &&
+                                it.kind is PaymentKind.Onchain &&
+                                it.amountMsat?.toLong() == depositSats * 1000
+                        }
+                        ?.maxByOrNull { it.latestUpdateTimestamp }
+                        ?.let { (it.kind as PaymentKind.Onchain).txid }
+                } catch (e: Exception) {
+                    Log.w("AppState", "listPayments lookup failed during deposit detection: ${e.message}")
+                    null
                 }
 
                 // Always record the deposit, mirroring iOS. When the websocket and this
