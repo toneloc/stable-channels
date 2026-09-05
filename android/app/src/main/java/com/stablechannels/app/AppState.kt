@@ -1777,15 +1777,24 @@ class AppState(private val context: Context) : ViewModel() {
 
         unresolved.forEach { row ->
             val paymentId = row.paymentId ?: return@forEach
+            // txid is the unique identity for a payment — amount is not (repeated round-number
+            // deposits are ordinary) — so only consider LDK payments no DB row has claimed yet.
+            // Re-checked per row: an earlier iteration in this same pass may just have claimed
+            // one of the amount-matching candidates.
             val match = onchainPayments
                 .filter { it.amountMsat?.toLong() == row.amountMsat }
+                .filter { !db.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) }
                 .maxByOrNull { it.latestUpdateTimestamp } ?: return@forEach
             val txid = (match.kind as PaymentKind.Onchain).txid
-            db.updatePaymentTxid(paymentId, txid)
-            AuditService.log("ONCHAIN_RECEIVE_TXID_BACKFILLED", mapOf(
-                "payment_id" to paymentId,
-                "txid" to txid
-            ))
+            // clearAddress = true: this txid came from LDK's own record, not an address match,
+            // so the row's stored address (the app's receive address at creation time) can't be
+            // used to re-verify it — see updatePaymentTxid's kdoc.
+            if (db.updatePaymentTxid(paymentId, txid, clearAddress = true)) {
+                AuditService.log("ONCHAIN_RECEIVE_TXID_BACKFILLED", mapOf(
+                    "payment_id" to paymentId,
+                    "txid" to txid
+                ))
+            }
         }
     }
 
@@ -2128,12 +2137,18 @@ class AppState(private val context: Context) : ViewModel() {
                 // txid permanently null and confirmations stuck at 0/6. LDK's own payment
                 // list already knows the real txid for every inbound on-chain payment
                 // regardless of address, so fall back to it (mirrors src/user.rs's sweep).
+                // Only consider LDK payments no existing DB row has already claimed: amount is
+                // not a unique key (repeated round-number deposits are ordinary), so without this
+                // filter the same txid could be attached to two rows, or — worse — this fallback
+                // could pick an already-recorded txid, collide on the derived dedup id below, and
+                // silently drop a genuinely new deposit.
                 val resolvedTxid = addressMatchedTxid ?: try {
                     nodeService.node?.listPayments()
                         ?.filter {
                             it.direction == PaymentDirection.INBOUND &&
                                 it.kind is PaymentKind.Onchain &&
-                                it.amountMsat?.toLong() == depositSats * 1000
+                                it.amountMsat?.toLong() == depositSats * 1000 &&
+                                db?.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) != true
                         }
                         ?.maxByOrNull { it.latestUpdateTimestamp }
                         ?.let { (it.kind as PaymentKind.Onchain).txid }
@@ -2153,6 +2168,12 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     "onchain_deposit_${java.util.UUID.randomUUID()}"
                 }
+                // When resolvedTxid came from the LDK fallback (not an address match), the
+                // stored address must not be the app's own receive address — this txid may not
+                // actually pay it, and pollPaymentConfirmations()'s address-mismatch check would
+                // otherwise clear a correctly-resolved txid and leave the row stuck. See
+                // updatePaymentTxid's kdoc for the same reasoning applied to the backfill path.
+                val resolvedFromLdkFallback = !resolvedTxid.isNullOrBlank() && resolvedTxid != addressMatchedTxid
                 val rowId = db?.recordPayment(
                     paymentId = dedupId,
                     paymentType = "onchain",
@@ -2162,7 +2183,7 @@ class AppState(private val context: Context) : ViewModel() {
                     btcPrice = price,
                     status = "pending",
                     txid = resolvedTxid,
-                    address = receiveAddress
+                    address = if (resolvedFromLdkFallback) null else receiveAddress
                 )
 
                 if (rowId != null && rowId != -1L) {
