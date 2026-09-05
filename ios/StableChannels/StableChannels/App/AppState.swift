@@ -125,6 +125,18 @@ class AppState {
 
     var hasReadyChannel: Bool = false
 
+    var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let amount = UInt64(bitPattern: Int64(ud?.integer(forKey: "pending_outbound_onchain_sats") ?? 0))
+        let isSendAll = ud?.bool(forKey: "pending_outbound_is_send_all") ?? false
+        let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: "pending_outbound_baseline_sats") ?? 0))
+        return BalanceCalculator.PendingOutboundSend(
+            amountSats: amount,
+            isSendAll: isSendAll,
+            baselineOnchainSats: baseline
+        )
+    }()
+
     /// The active LSP configuration managed by `LSPService`.
     var activeLSP: LSPConfig { lspService.activeLSP }
 
@@ -164,6 +176,28 @@ class AppState {
                 isOpeningChannel: isOpeningChannel,
                 isSweeping: isSweeping
             )
+        )
+    }
+
+    static func calculateEffectiveBalances(
+        rawOnchain: UInt64,
+        rawSpendable: UInt64,
+        pending: BalanceCalculator.PendingOutboundSend
+    ) -> (onchain: UInt64, spendable: UInt64) {
+        BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawOnchain,
+            rawSpendable: rawSpendable,
+            pending: pending
+        )
+    }
+
+    static func resolvePendingOutboundSend(
+        rawOnchain: UInt64,
+        pending: BalanceCalculator.PendingOutboundSend
+    ) -> BalanceCalculator.PendingOutboundSend {
+        BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawOnchain,
+            pending: pending
         )
     }
 
@@ -300,13 +334,7 @@ class AppState {
             guard let self else { return }
             self.confirmationUpdateEpoch += 1
             self.refreshBalances()
-            let nodeService = self.nodeService
-            Task.detached { [weak self] in
-                try? nodeService.syncWallets()
-                await MainActor.run {
-                    self?.refreshBalances()
-                }
-            }
+            self.syncWalletsInBackground()
         }
         if let db = databaseService, let polling = pollingService {
             let spvService = SPVHeaderChainService(
@@ -2937,8 +2965,22 @@ class AppState {
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
-        let onchain = balances.totalOnchainBalanceSats
+        let rawOnchain = balances.totalOnchainBalanceSats
+        let rawSpendable = balances.spendableOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
+
+        // Resolve pending outbound deduction against raw wallet observation
+        pendingOutboundSend = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawOnchain,
+            pending: pendingOutboundSend
+        )
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawOnchain,
+            rawSpendable: rawSpendable,
+            pending: pendingOutboundSend
+        )
+        let onchain = effective.onchain
+        let spendable = effective.spendable
 
         // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
         // These funds are NOT yet in total_onchain_balance_sats
@@ -2959,7 +3001,7 @@ class AppState {
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
-        spendableOnchainSats = balances.spendableOnchainBalanceSats
+        spendableOnchainSats = spendable
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {
@@ -2970,30 +3012,59 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: lightning), forKey: "cached_lightning_sats")
         ud?.set(Int64(bitPattern: onchain), forKey: "cached_onchain_sats")
-        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
+        ud?.set(Int64(bitPattern: spendable), forKey: "cached_spendable_onchain_sats")
+        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: "pending_outbound_onchain_sats")
+        ud?.set(pendingOutboundSend.isSendAll, forKey: "pending_outbound_is_send_all")
+        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: "pending_outbound_baseline_sats")
     }
 
     /// Deducts sent on-chain amount immediately from cached and in-memory balances
     /// so the UI updates with zero lag, then triggers wallet sync in the background.
     func onchainSendBroadcasted(amountSats: UInt64, isSendAll: Bool) {
+        let currentOnchain = onchainBalanceSats
+        let currentSpendable = spendableOnchainSats
+
         if isSendAll {
-            onchainBalanceSats = 0
-            spendableOnchainSats = 0
+            pendingOutboundSend = BalanceCalculator.PendingOutboundSend(
+                amountSats: currentOnchain,
+                isSendAll: true,
+                baselineOnchainSats: currentOnchain
+            )
         } else {
-            onchainBalanceSats = onchainBalanceSats >= amountSats ? onchainBalanceSats - amountSats : 0
-            spendableOnchainSats = spendableOnchainSats >= amountSats ? spendableOnchainSats - amountSats : 0
+            pendingOutboundSend = BalanceCalculator.PendingOutboundSend(
+                amountSats: pendingOutboundSend.amountSats + amountSats,
+                isSendAll: false,
+                baselineOnchainSats: pendingOutboundSend.baselineOnchainSats == 0 ? currentOnchain : pendingOutboundSend
+                    .baselineOnchainSats
+            )
         }
+
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: currentOnchain,
+            rawSpendable: currentSpendable,
+            pending: pendingOutboundSend
+        )
+        onchainBalanceSats = effective.onchain
+        spendableOnchainSats = effective.spendable
 
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: "cached_onchain_sats")
         ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
+        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: "pending_outbound_onchain_sats")
+        ud?.set(pendingOutboundSend.isSendAll, forKey: "pending_outbound_is_send_all")
+        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: "pending_outbound_baseline_sats")
 
+        syncWalletsInBackground()
+    }
+
+    /// Synchronizes wallets off the main actor and refreshes balances upon completion.
+    private func syncWalletsInBackground() {
         let nodeService = self.nodeService
-        Task.detached { [weak self] in
-            try? nodeService.syncWallets()
-            await MainActor.run {
-                self?.refreshBalances()
-            }
+        Task { [weak self] in
+            await Task.detached(priority: .utility) {
+                try? nodeService.syncWallets()
+            }.value
+            self?.refreshBalances()
         }
     }
 

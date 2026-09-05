@@ -98,4 +98,59 @@ enum BalanceCalculator {
         }
         return lightning + onchain
     }
+
+    struct PendingOutboundSend: Equatable, Sendable {
+        var amountSats: UInt64
+        var isSendAll: Bool
+        var baselineOnchainSats: UInt64
+
+        init(amountSats: UInt64 = 0, isSendAll: Bool = false, baselineOnchainSats: UInt64 = 0) {
+            self.amountSats = amountSats
+            self.isSendAll = isSendAll
+            self.baselineOnchainSats = baselineOnchainSats
+        }
+    }
+
+    /// Derives user-facing on-chain and spendable balances by subtracting any pending
+    /// outbound send that has not yet been incorporated into LDK/BDK's raw wallet view.
+    static func calculateEffectiveBalances(
+        rawOnchain: UInt64,
+        rawSpendable: UInt64,
+        pending: PendingOutboundSend
+    ) -> (onchain: UInt64, spendable: UInt64) {
+        if pending.isSendAll {
+            return (0, 0)
+        }
+        if pending.amountSats > 0 {
+            let onchain = rawOnchain >= pending.amountSats ? rawOnchain - pending.amountSats : 0
+            let spendable = rawSpendable >= pending.amountSats ? rawSpendable - pending.amountSats : 0
+            return (onchain, spendable)
+        }
+        return (rawOnchain, rawSpendable)
+    }
+
+    /// Resolves pending outbound send state against a fresh raw on-chain balance observation.
+    /// Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
+    /// to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
+    static func resolvePendingOutboundSend(
+        rawOnchain: UInt64,
+        pending: PendingOutboundSend
+    ) -> PendingOutboundSend {
+        if pending.isSendAll {
+            if rawOnchain == 0 || (pending.baselineOnchainSats > 0 && rawOnchain < pending.baselineOnchainSats) {
+                return PendingOutboundSend()
+            }
+            return pending
+        }
+        if pending.amountSats > 0 {
+            let expectedRemaining = pending.baselineOnchainSats >= pending.amountSats
+                ? pending.baselineOnchainSats - pending.amountSats
+                : 0
+            if rawOnchain <= expectedRemaining {
+                return PendingOutboundSend()
+            }
+            return pending
+        }
+        return pending
+    }
 }
