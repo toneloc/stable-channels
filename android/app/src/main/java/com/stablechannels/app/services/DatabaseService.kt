@@ -294,6 +294,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
     }
 
+    /** True if a channel_close payment record already exists for this channel_id — i.e. the
+     * channel is gone for good and will never reappear in the channels table. */
+    fun isChannelClosed(channelId: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'channel_close' LIMIT 1",
+            arrayOf(channelId)
+        )
+        return cursor.use { it.moveToFirst() }
+    }
+
     /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
     fun hasAnyChannel(): Boolean {
         val cursor = readableDatabase.rawQuery("SELECT 1 FROM channels LIMIT 1", null)
@@ -687,15 +697,23 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
             val channel = db.rawQuery(
-                "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
-                arrayOf(sync.userChannelId)
+                "SELECT channel_id, receiver_sats, sync_version, stable_sats, user_channel_id FROM channels WHERE channel_id = ?",
+                arrayOf(sync.channelId)
             ).use { c ->
                 if (!c.moveToFirst()) null else arrayOf<Any>(
-                    c.getString(0), c.getLong(1), c.getLong(2), c.getLong(3)
+                    c.getString(0), c.getLong(1), c.getLong(2), c.getLong(3), c.getString(4)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
-            if (channel[0] as String != sync.channelId) {
-                return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            } ?: run {
+                if (isChannelClosed(sync.channelId)) {
+                    return rollbackResult(db, TradeControlApplyStatus.INVALID)
+                }
+                return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            }
+            if (channel[4] as String != sync.userChannelId) {
+                AuditService.log(
+                    "USER_CHANNEL_ID_MISMATCH",
+                    mapOf("channel_id" to sync.channelId, "stored" to channel[4], "incoming" to sync.userChannelId)
+                )
             }
             val receiverSats = channel[1] as Long
             val currentVersion = channel[2] as Long
@@ -711,12 +729,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     put("sync_version", sync.syncVersion)
                     put("updated_at", System.currentTimeMillis() / 1000L)
                 }
-                if (db.update(
+                val updated = db.update(
                         "channels", channelValues,
-                        "user_channel_id = ? AND channel_id = ? AND sync_version < ?",
-                        arrayOf(sync.userChannelId, sync.channelId, sync.syncVersion.toString())
-                    ) != 1
-                ) return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                        "channel_id = ? AND sync_version < ?",
+                        arrayOf(sync.channelId, sync.syncVersion.toString())
+                    )
+                if (updated != 1) {
+                    return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                }
             }
             val tradeValues = ContentValues().apply {
                 put("payment_id", correlation.tradePaymentId)
@@ -726,7 +746,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 put("resolved_at", System.currentTimeMillis() / 1000L)
                 putNull("uncertainty_reason")
             }
-            if (db.update("trades", tradeValues, "id = ?", arrayOf(tradeId.toString())) != 1) {
+            val tradeUpdated = db.update("trades", tradeValues, "id = ?", arrayOf(tradeId.toString()))
+            if (tradeUpdated != 1) {
                 return rollbackResult(db, TradeControlApplyStatus.RETRY)
             }
             db.execSQL("COMMIT")
@@ -817,15 +838,25 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         try {
             val row = db.rawQuery(
                 """
-                SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version
-                FROM channels WHERE user_channel_id = ?
-                """.trimIndent(), arrayOf(sync.userChannelId)
+                SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version, user_channel_id
+                FROM channels WHERE channel_id = ?
+                """.trimIndent(), arrayOf(sync.channelId)
             ).use { c ->
                 if (!c.moveToFirst()) null else arrayOf<Any>(
-                    c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4)
+                    c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4), c.getString(5)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
-            if (row[0] as String != sync.channelId) return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            } ?: run {
+                if (isChannelClosed(sync.channelId)) {
+                    return rollbackResult(db, TradeControlApplyStatus.INVALID)
+                }
+                return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            }
+            if (row[5] as String != sync.userChannelId) {
+                AuditService.log(
+                    "USER_CHANNEL_ID_MISMATCH",
+                    mapOf("channel_id" to sync.channelId, "stored" to row[5], "incoming" to sync.userChannelId)
+                )
+            }
             val currentVersion = row[4] as Long
             if (sync.syncVersion <= currentVersion) {
                 db.execSQL("ROLLBACK")
@@ -850,12 +881,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 put("latest_price", trustedPrice)
                 put("updated_at", System.currentTimeMillis() / 1000L)
             }
-            if (db.update(
+            val updated = db.update(
                     "channels", cv,
-                    "user_channel_id = ? AND channel_id = ? AND sync_version < ?",
-                    arrayOf(sync.userChannelId, sync.channelId, sync.syncVersion.toString())
-                ) != 1
-            ) return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                    "channel_id = ? AND sync_version < ?",
+                    arrayOf(sync.channelId, sync.syncVersion.toString())
+                )
+            if (updated != 1) {
+                return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            }
             db.execSQL("COMMIT")
             return TradeControlApplyResult(
                 TradeControlApplyStatus.APPLIED, localBacking, sync.backingSats
