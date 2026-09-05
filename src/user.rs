@@ -371,6 +371,7 @@ pub struct UserApp {
     auto_splice_in_progress: Arc<std::sync::atomic::AtomicBool>,
     /// On-chain sats at the time the auto-splice was initiated; used to detect confirmation.
     auto_splice_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
+    pub pending_outbound_onchain_sats: Arc<std::sync::atomic::AtomicU64>,
     pub show_onchain_receive: bool,
     pub show_onchain_send: bool,
     pub show_advanced: bool,
@@ -738,6 +739,7 @@ impl UserApp {
             pending_splice: Arc::new(std::sync::Mutex::new(None)),
             auto_splice_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_splice_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_outbound_onchain_sats: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             show_onchain_receive: false,
             show_onchain_send: false,
             lightning_balance_btc: 0.0,
@@ -1032,23 +1034,31 @@ impl UserApp {
                     // every deposit, not just the latest.
                     let mut new_deposits: Vec<(String, u64, PaymentStatus)> = Vec::new();
                     for p in node_arc.list_payments() {
-                        if p.direction != PaymentDirection::Inbound {
-                            continue;
-                        }
                         let PaymentKind::Onchain { ref txid, .. } = p.kind else {
                             continue;
                         };
                         let txid = txid.to_string();
-                        if p.status == PaymentStatus::Succeeded {
-                            if let Err(e) = db.complete_payment_by_txid(&txid) {
+                        if p.direction == PaymentDirection::Inbound {
+                            if p.status == PaymentStatus::Succeeded {
+                                if let Err(e) = db.complete_payment_by_txid(&txid) {
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                }
+                            }
+                            if p.latest_update_timestamp >= thread_started_unix {
+                                new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
+                            }
+                        } else if p.direction == PaymentDirection::Outbound
+                            && p.status == PaymentStatus::Succeeded
+                        {
+                            if let Err(e) = db.update_payment_confirmations(&txid, 6, "completed") {
                                 audit_event(
-                                    "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                    "ONCHAIN_OUTBOUND_CONFIRMATION_FAILED",
                                     json!({ "txid": txid, "error": e.to_string() }),
                                 );
                             }
-                        }
-                        if p.latest_update_timestamp >= thread_started_unix {
-                            new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
                         }
                     }
 
@@ -1837,7 +1847,7 @@ impl UserApp {
                                         amount_usd,
                                         btc_price_opt,
                                         None,
-                                        "completed",
+                                        "pending",
                                         Some(&txid_str),
                                         None,
                                     );
@@ -1847,10 +1857,24 @@ impl UserApp {
                                     self.send_amount.clear();
                                     self.send_error.clear();
                                     let node_clone = Arc::clone(&self.node);
+                                    let pending_clone = Arc::clone(&self.pending_outbound_onchain_sats);
                                     std::thread::spawn(move || {
                                         let _ = node_clone.sync_wallets();
+                                        pending_clone.store(0, std::sync::atomic::Ordering::Relaxed);
                                     });
                                     self.update_balances();
+                                    let deducted_sats = if self.send_all {
+                                        self.node.list_balances().spendable_onchain_balance_sats
+                                    } else {
+                                        amount_sats
+                                    };
+                                    self.pending_outbound_onchain_sats
+                                        .store(deducted_sats, std::sync::atomic::Ordering::Relaxed);
+                                    let deducted_btc = deducted_sats as f64 / 100_000_000.0;
+                                    self.onchain_balance_btc = (self.onchain_balance_btc - deducted_btc).max(0.0);
+                                    self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
+                                    self.total_balance_btc = (self.total_balance_btc - deducted_btc).max(0.0);
+                                    self.total_balance_usd = self.total_balance_btc * self.btc_price;
                                     return true;
                                 }
                                 Err(e) => {
@@ -1909,10 +1933,17 @@ impl UserApp {
             balances.total_onchain_balance_sats,
         );
 
+        let pending_outbound = self
+            .pending_outbound_onchain_sats
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_onchain_sats = balances
+            .total_onchain_balance_sats
+            .saturating_sub(pending_outbound);
+
         // Detect incoming payment: total sats went up → trigger balance flash
         let total_sats_now = balances
             .total_lightning_balance_sats
-            .saturating_add(balances.total_onchain_balance_sats)
+            .saturating_add(total_onchain_sats)
             .saturating_sub(splice_overlap_sats);
         if self.last_known_total_sats > 0 && total_sats_now > self.last_known_total_sats {
             self.payment_flash_at = Some(std::time::Instant::now());
@@ -1920,7 +1951,7 @@ impl UserApp {
         self.last_known_total_sats = total_sats_now;
 
         self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        self.onchain_balance_btc = total_onchain_sats as f64 / 100_000_000.0;
 
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
@@ -6020,8 +6051,15 @@ impl UserApp {
             // LDK reports stale entries long after sweep confirms and funds are spent.
 
             // Total onchain balance (includes confirmed + AwaitingThresholdConfirmations)
-            let total_onchain_sats = balances.total_onchain_balance_sats;
-            let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
+            let pending_outbound = self
+                .pending_outbound_onchain_sats
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let total_onchain_sats = balances
+                .total_onchain_balance_sats
+                .saturating_sub(pending_outbound);
+            let spendable_onchain_sats = balances
+                .spendable_onchain_balance_sats
+                .saturating_sub(pending_outbound);
 
             // Get balance info
             let (btc_price, last_update, expected_usd, backing_sats, receiver_sats) = {
@@ -12432,6 +12470,7 @@ mod tests {
         let none: Option<ClosureReason> = None;
         assert_eq!(super::closure_reason_to_json(&none)["kind"], "UNKNOWN");
     }
+
 }
 
 /// Convert an LDK `ClosureReason` into a structured JSON object for the audit log so a channel
