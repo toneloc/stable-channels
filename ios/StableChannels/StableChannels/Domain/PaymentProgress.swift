@@ -64,3 +64,38 @@ extension PaymentRecord {
         (txBlockHeight ?? 0) > 0
     }
 }
+
+/// Pure balance calculator enforcing Single Responsibility by isolating
+/// balance aggregation logic from UI state management.
+enum BalanceCalculator {
+    struct ChannelState: Equatable {
+        var hasReadyChannel: Bool
+        var hasAnyChannel: Bool = false
+        var isChannelClosing: Bool = false
+        var isOpeningChannel: Bool = false
+        var isSweeping: Bool = false
+    }
+
+    static func calculateTotalBalance(
+        lightning: UInt64,
+        onchain: UInt64,
+        pendingSweep: UInt64 = 0,
+        channelState: ChannelState
+    ) -> UInt64 {
+        if channelState.isChannelClosing {
+            return onchain
+        }
+        if channelState.isOpeningChannel {
+            return lightning > 0 ? lightning : onchain
+        }
+        if channelState.isSweeping {
+            return lightning
+        }
+        // If no ready channel and no channels exist, lightning balance contains stale claimables from
+        // closed channels — never count it, even when onchainBalanceSats reaches 0 (Issue #260).
+        if !channelState.hasReadyChannel && !channelState.hasAnyChannel {
+            return onchain + pendingSweep
+        }
+        return lightning + onchain
+    }
+}
