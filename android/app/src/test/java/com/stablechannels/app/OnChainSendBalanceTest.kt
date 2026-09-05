@@ -140,4 +140,132 @@ class OnChainSendBalanceTest {
         assertEquals(6, AppState.requiredConfirmationsForType("channel_close"))
         assertEquals(6, AppState.requiredConfirmationsForType("unknown"))
     }
+
+    @Test
+    fun `calculate effective balances deducts pending outbound send`() {
+        val pendingPartial = AppState.Companion.PendingOutboundSend(
+            amountSats = 30_000L,
+            isSendAll = false,
+            baselineOnchainSats = 100_000L
+        )
+        val (onchainPartial, spendablePartial) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = pendingPartial
+        )
+        assertEquals(70_000L, onchainPartial)
+        assertEquals(65_000L, spendablePartial)
+
+        val pendingAll = AppState.Companion.PendingOutboundSend(
+            amountSats = 100_000L,
+            isSendAll = true,
+            baselineOnchainSats = 100_000L
+        )
+        val (onchainAll, spendableAll) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = pendingAll
+        )
+        assertEquals(0L, onchainAll)
+        assertEquals(0L, spendableAll)
+
+        val pendingNone = AppState.Companion.PendingOutboundSend()
+        val (onchainNone, spendableNone) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = pendingNone
+        )
+        assertEquals(100_000L, onchainNone)
+        assertEquals(95_000L, spendableNone)
+    }
+
+    @Test
+    fun `resolve pending outbound send clears only after spend is incorporated`() {
+        val pending = AppState.Companion.PendingOutboundSend(
+            amountSats = 30_000L,
+            isSendAll = false,
+            baselineOnchainSats = 100_000L
+        )
+
+        // Before wallet sync incorporates the spend: raw balance is still 100k
+        val stillPending = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pending
+        )
+        assertEquals(30_000L, stillPending.amountSats)
+        assertEquals(false, stillPending.isSendAll)
+
+        // After wallet sync incorporates the spend: raw balance dropped to 70k or less
+        val incorporated = AppState.resolvePendingOutboundSend(
+            rawOnchain = 69_850L,
+            pending = pending
+        )
+        assertEquals(0L, incorporated.amountSats)
+
+        // Send All incorporation
+        val pendingAll = AppState.Companion.PendingOutboundSend(
+            amountSats = 100_000L,
+            isSendAll = true,
+            baselineOnchainSats = 100_000L
+        )
+        val allStillPending = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pendingAll
+        )
+        assertEquals(true, allStillPending.isSendAll)
+
+        val allIncorporated = AppState.resolvePendingOutboundSend(
+            rawOnchain = 0L,
+            pending = pendingAll
+        )
+        assertEquals(false, allIncorporated.isSendAll)
+        assertEquals(0L, allIncorporated.amountSats)
+    }
+
+    @Test
+    fun `interleaving balance refresh before wallet sync completes preserves deduction and prevents ghost balance resurrection`() {
+        // Simulates:
+        // 1. Broadcast send of 30,000 sats when raw balance is 100,000 sats.
+        // 2. Intervening refresh receives old 100,000 balance from LDK before sync incorporates the spend.
+        // 3. Invariant: effective balance MUST remain 70,000 and never resurrect the pre-send 100,000.
+        val rawPreSend = 100_000L
+        val rawSpendablePreSend = 95_000L
+        val sendAmount = 30_000L
+
+        var pending = AppState.Companion.PendingOutboundSend(
+            amountSats = sendAmount,
+            isSendAll = false,
+            baselineOnchainSats = rawPreSend
+        )
+
+        // Intervening refresh: LDK still reports old 100k balance
+        val rawDuringSync = rawPreSend
+        val rawSpendableDuringSync = rawSpendablePreSend
+
+        pending = AppState.resolvePendingOutboundSend(rawOnchain = rawDuringSync, pending = pending)
+        assertEquals(30_000L, pending.amountSats)
+
+        val (effOnchainDuringSync, effSpendableDuringSync) = AppState.calculateEffectiveBalances(
+            rawOnchain = rawDuringSync,
+            rawSpendable = rawSpendableDuringSync,
+            pending = pending
+        )
+        assertEquals(70_000L, effOnchainDuringSync)
+        assertEquals(65_000L, effSpendableDuringSync)
+
+        // Once sync completes and LDK reports the incorporated balance:
+        val rawPostSync = 69_850L
+        val rawSpendablePostSync = 64_850L
+
+        pending = AppState.resolvePendingOutboundSend(rawOnchain = rawPostSync, pending = pending)
+        assertEquals(0L, pending.amountSats)
+
+        val (effOnchainPostSync, effSpendablePostSync) = AppState.calculateEffectiveBalances(
+            rawOnchain = rawPostSync,
+            rawSpendable = rawSpendablePostSync,
+            pending = pending
+        )
+        assertEquals(69_850L, effOnchainPostSync)
+        assertEquals(64_850L, effSpendablePostSync)
+    }
 }

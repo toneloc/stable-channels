@@ -111,6 +111,57 @@ class AppState(private val context: Context) : ViewModel() {
                 else -> 6
             }
         }
+
+        data class PendingOutboundSend(
+            val amountSats: Long = 0L,
+            val isSendAll: Boolean = false,
+            val baselineOnchainSats: Long = 0L
+        )
+
+        /**
+         * Derives user-facing on-chain and spendable balances by subtracting any pending
+         * outbound send that has not yet been incorporated into LDK/BDK's raw wallet view.
+         */
+        fun calculateEffectiveBalances(
+            rawOnchain: Long,
+            rawSpendable: Long,
+            pending: PendingOutboundSend
+        ): Pair<Long, Long> {
+            if (pending.isSendAll) {
+                return Pair(0L, 0L)
+            }
+            if (pending.amountSats > 0L) {
+                val onchain = (rawOnchain - pending.amountSats).coerceAtLeast(0L)
+                val spendable = (rawSpendable - pending.amountSats).coerceAtLeast(0L)
+                return Pair(onchain, spendable)
+            }
+            return Pair(rawOnchain, rawSpendable)
+        }
+
+        /**
+         * Resolves pending outbound send state against a fresh raw on-chain balance observation.
+         * Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
+         * to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
+         */
+        fun resolvePendingOutboundSend(
+            rawOnchain: Long,
+            pending: PendingOutboundSend
+        ): PendingOutboundSend {
+            if (pending.isSendAll) {
+                if (rawOnchain == 0L || (pending.baselineOnchainSats > 0L && rawOnchain < pending.baselineOnchainSats)) {
+                    return PendingOutboundSend()
+                }
+                return pending
+            }
+            if (pending.amountSats > 0L) {
+                val expectedRemaining = (pending.baselineOnchainSats - pending.amountSats).coerceAtLeast(0L)
+                if (rawOnchain <= expectedRemaining) {
+                    return PendingOutboundSend()
+                }
+                return pending
+            }
+            return pending
+        }
     }
 
     val nodeService = NodeService(context)
@@ -216,6 +267,9 @@ class AppState(private val context: Context) : ViewModel() {
     )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
 
+    var pendingOutboundSend: PendingOutboundSend = PendingOutboundSend()
+        private set
+
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
 
@@ -223,6 +277,14 @@ class AppState(private val context: Context) : ViewModel() {
         val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
         val cachedOnchain = prefs.getLong("cached_onchain_sats", 0L)
+        val pendingAmount = prefs.getLong("pending_outbound_onchain_sats", 0L)
+        val pendingIsSendAll = prefs.getBoolean("pending_outbound_is_send_all", false)
+        val pendingBaseline = prefs.getLong("pending_outbound_baseline_sats", 0L)
+        pendingOutboundSend = PendingOutboundSend(
+            amountSats = pendingAmount,
+            isSendAll = pendingIsSendAll,
+            baselineOnchainSats = pendingBaseline
+        )
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
@@ -2502,8 +2564,13 @@ class AppState(private val context: Context) : ViewModel() {
         nodeService.refreshChannels()
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
-        val onchain = balances.totalOnchainBalanceSats.toLong()
+        val rawOnchain = balances.totalOnchainBalanceSats.toLong()
+        val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
+
+        // Resolve pending outbound deduction against raw wallet observation
+        pendingOutboundSend = resolvePendingOutboundSend(rawOnchain, pendingOutboundSend)
+        val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, pendingOutboundSend)
 
         // Sync fundingTxid directly from the LDK node's channel details
         // to gracefully handle out-of-band splices (e.g. LSP-initiated)
@@ -2541,7 +2608,6 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        val spendable = balances.spendableOnchainBalanceSats.toLong()
         _spendableOnchainSats.value = spendable
 
 
@@ -2578,14 +2644,31 @@ class AppState(private val context: Context) : ViewModel() {
             .putLong("cached_onchain_sats", onchain)
             .putLong("cached_spendable_sats", spendable)
             .putLong("cached_native_sats", native)
+            .putLong("pending_outbound_onchain_sats", pendingOutboundSend.amountSats)
+            .putBoolean("pending_outbound_is_send_all", pendingOutboundSend.isSendAll)
+            .putLong("pending_outbound_baseline_sats", pendingOutboundSend.baselineOnchainSats)
             .apply()
     }
 
     fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean) {
         val currentOnchain = _onchainBalanceSats.value
         val currentSpendable = _spendableOnchainSats.value
-        val newOnchain = if (isSendAll) 0L else (currentOnchain - amountSats).coerceAtLeast(0L)
-        val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
+
+        pendingOutboundSend = if (isSendAll) {
+            PendingOutboundSend(
+                amountSats = currentOnchain,
+                isSendAll = true,
+                baselineOnchainSats = currentOnchain
+            )
+        } else {
+            PendingOutboundSend(
+                amountSats = pendingOutboundSend.amountSats + amountSats,
+                isSendAll = false,
+                baselineOnchainSats = if (pendingOutboundSend.baselineOnchainSats == 0L) currentOnchain else pendingOutboundSend.baselineOnchainSats
+            )
+        }
+
+        val (newOnchain, newSpendable) = calculateEffectiveBalances(currentOnchain, currentSpendable, pendingOutboundSend)
 
         _onchainBalanceSats.value = newOnchain
         _spendableOnchainSats.value = newSpendable
@@ -2607,6 +2690,9 @@ class AppState(private val context: Context) : ViewModel() {
         val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putLong("cached_onchain_sats", newOnchain)
             .putLong("cached_spendable_sats", newSpendable)
+            .putLong("pending_outbound_onchain_sats", pendingOutboundSend.amountSats)
+            .putBoolean("pending_outbound_is_send_all", pendingOutboundSend.isSendAll)
+            .putLong("pending_outbound_baseline_sats", pendingOutboundSend.baselineOnchainSats)
         if (!hasReady && !hasAnyChannel) {
             editor.putLong("cached_lightning_sats", 0L)
         }

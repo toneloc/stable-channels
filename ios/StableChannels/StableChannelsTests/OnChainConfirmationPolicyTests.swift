@@ -3,6 +3,28 @@ import XCTest
 
 @MainActor
 final class OnChainConfirmationPolicyTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        ud?.removeObject(forKey: "pending_outbound_onchain_sats")
+        ud?.removeObject(forKey: "pending_outbound_is_send_all")
+        ud?.removeObject(forKey: "pending_outbound_baseline_sats")
+        ud?.removeObject(forKey: "cached_onchain_sats")
+        ud?.removeObject(forKey: "cached_spendable_onchain_sats")
+        ud?.removeObject(forKey: "cached_lightning_sats")
+    }
+
+    override func tearDown() {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        ud?.removeObject(forKey: "pending_outbound_onchain_sats")
+        ud?.removeObject(forKey: "pending_outbound_is_send_all")
+        ud?.removeObject(forKey: "pending_outbound_baseline_sats")
+        ud?.removeObject(forKey: "cached_onchain_sats")
+        ud?.removeObject(forKey: "cached_spendable_onchain_sats")
+        ud?.removeObject(forKey: "cached_lightning_sats")
+        super.tearDown()
+    }
+
     // MARK: - Confirmation Policy Tests
 
     func testConfirmationPolicyThresholds() {
@@ -215,5 +237,156 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
             channelState: state
         )
         XCTAssertEqual(total, 35_000)
+    }
+
+    // MARK: - Interleaving & Pending Outbound Send Tests
+
+    func testEffectiveBalancesDeductsPendingOutbound() {
+        // Normal send: raw onchain 100k, spendable 95k, pending send 30k
+        let pendingPartial = BalanceCalculator.PendingOutboundSend(
+            amountSats: 30_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000
+        )
+        let effPartial = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: pendingPartial
+        )
+        XCTAssertEqual(effPartial.onchain, 70_000)
+        XCTAssertEqual(effPartial.spendable, 65_000)
+
+        // Send All: zeroes both balances
+        let pendingAll = BalanceCalculator.PendingOutboundSend(
+            amountSats: 100_000,
+            isSendAll: true,
+            baselineOnchainSats: 100_000
+        )
+        let effAll = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: pendingAll
+        )
+        XCTAssertEqual(effAll.onchain, 0)
+        XCTAssertEqual(effAll.spendable, 0)
+
+        // Empty pending: passes through raw balances
+        let pendingNone = BalanceCalculator.PendingOutboundSend()
+        let effNone = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: pendingNone
+        )
+        XCTAssertEqual(effNone.onchain, 100_000)
+        XCTAssertEqual(effNone.spendable, 95_000)
+    }
+
+    func testResolvePendingOutboundSendIncorporation() {
+        let pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: 30_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000
+        )
+
+        // Before wallet sync incorporates the spend: raw balance is still 100k
+        let stillPending = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending
+        )
+        XCTAssertEqual(stillPending.amountSats, 30_000, "Pending send must not clear before balance drops")
+        XCTAssertFalse(stillPending.isSendAll)
+
+        // After wallet sync incorporates the spend: raw balance dropped to 70k or less (with fees)
+        let incorporated = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 69_850,
+            pending: pending
+        )
+        XCTAssertEqual(incorporated.amountSats, 0, "Pending send must clear once spend is incorporated")
+
+        // Send All incorporation
+        let pendingAll = BalanceCalculator.PendingOutboundSend(
+            amountSats: 100_000,
+            isSendAll: true,
+            baselineOnchainSats: 100_000
+        )
+        let allStillPending = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pendingAll
+        )
+        XCTAssertTrue(allStillPending.isSendAll)
+
+        let allIncorporated = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 0,
+            pending: pendingAll
+        )
+        XCTAssertFalse(allIncorporated.isSendAll)
+        XCTAssertEqual(allIncorporated.amountSats, 0)
+    }
+
+    func testOnchainSendBroadcastedUpdatesPendingOutboundState() {
+        let appState = AppState()
+        appState.onchainBalanceSats = 100_000
+        appState.spendableOnchainSats = 95_000
+
+        // Broadcast 30,000 sats send
+        appState.onchainSendBroadcasted(amountSats: 30_000, isSendAll: false)
+        XCTAssertEqual(appState.onchainBalanceSats, 70_000)
+        XCTAssertEqual(appState.spendableOnchainSats, 65_000)
+        XCTAssertEqual(appState.pendingOutboundSend.amountSats, 30_000)
+        XCTAssertEqual(appState.pendingOutboundSend.baselineOnchainSats, 100_000)
+        XCTAssertFalse(appState.pendingOutboundSend.isSendAll)
+    }
+
+    func testRefreshBalancesBeforeSyncCompletesPreservesOptimisticDeduction() {
+        // Simulates: broadcast send of 30,000 sats when raw balance is 100,000 sats.
+        // Intervening refresh receives old 100,000 balance from LDK before sync incorporates the spend.
+        // Invariant: effective balance MUST remain 70,000 and never resurrect the pre-send 100,000.
+        let rawPreSend: UInt64 = 100_000
+        let rawSpendablePreSend: UInt64 = 95_000
+        let sendAmount: UInt64 = 30_000
+
+        var pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: sendAmount,
+            isSendAll: false,
+            baselineOnchainSats: rawPreSend
+        )
+
+        // Intervening refresh: LDK still reports old 100k balance
+        let rawDuringSync = rawPreSend
+        let rawSpendableDuringSync = rawSpendablePreSend
+
+        pending = BalanceCalculator.resolvePendingOutboundSend(rawOnchain: rawDuringSync, pending: pending)
+        XCTAssertEqual(
+            pending.amountSats,
+            30_000,
+            "Pending send deduction must not be dropped while raw balance is old"
+        )
+
+        let effectiveDuringSync = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawDuringSync,
+            rawSpendable: rawSpendableDuringSync,
+            pending: pending
+        )
+        XCTAssertEqual(
+            effectiveDuringSync.onchain,
+            70_000,
+            "Balance must not resurrect to 100,000 during intervening refresh"
+        )
+        XCTAssertEqual(effectiveDuringSync.spendable, 65_000)
+
+        // Once sync completes and LDK reports the incorporated balance (e.g. 69,850 with fee):
+        let rawPostSync: UInt64 = 69_850
+        let rawSpendablePostSync: UInt64 = 64_850
+
+        pending = BalanceCalculator.resolvePendingOutboundSend(rawOnchain: rawPostSync, pending: pending)
+        XCTAssertEqual(pending.amountSats, 0, "Pending send must clear once raw balance reflects the spend")
+
+        let effectivePostSync = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawPostSync,
+            rawSpendable: rawSpendablePostSync,
+            pending: pending
+        )
+        XCTAssertEqual(effectivePostSync.onchain, 69_850)
+        XCTAssertEqual(effectivePostSync.spendable, 64_850)
     }
 }
