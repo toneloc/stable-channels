@@ -129,21 +129,42 @@ class AppState {
     var activeLSP: LSPConfig { lspService.activeLSP }
 
     var totalBalanceSats: UInt64 {
-        if isChannelClosing {
-            return onchainBalanceSats
-        }
-        if isOpeningChannel {
-            return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats
-        }
-        if isSweeping {
-            return lightningBalanceSats
-        }
-        // If no ready channel, lightning balance contains stale claimables from
-        // closed channels — never count it, even when onchainBalanceSats reaches 0 (Issue #260).
-        if !hasReadyChannel {
-            return onchainBalanceSats + pendingSweepBalanceSats
-        }
-        return lightningBalanceSats + onchainBalanceSats
+        AppState.calculateTotalBalance(
+            lightning: lightningBalanceSats,
+            onchain: onchainBalanceSats,
+            hasReadyChannel: hasReadyChannel,
+            hasAnyChannel: !nodeService.channels.isEmpty,
+            isChannelClosing: isChannelClosing,
+            isOpeningChannel: isOpeningChannel,
+            isSweeping: isSweeping,
+            pendingSweep: pendingSweepBalanceSats
+        )
+    }
+
+    /// Static calculation entry point adhering to Single Responsibility Principle,
+    /// enabling pure functional testing without initializing full AppState graph.
+    static func calculateTotalBalance(
+        lightning: UInt64,
+        onchain: UInt64,
+        hasReadyChannel: Bool,
+        hasAnyChannel: Bool = false,
+        isChannelClosing: Bool = false,
+        isOpeningChannel: Bool = false,
+        isSweeping: Bool = false,
+        pendingSweep: UInt64 = 0
+    ) -> UInt64 {
+        BalanceCalculator.calculateTotalBalance(
+            lightning: lightning,
+            onchain: onchain,
+            pendingSweep: pendingSweep,
+            channelState: BalanceCalculator.ChannelState(
+                hasReadyChannel: hasReadyChannel,
+                hasAnyChannel: hasAnyChannel,
+                isChannelClosing: isChannelClosing,
+                isOpeningChannel: isOpeningChannel,
+                isSweeping: isSweeping
+            )
+        )
     }
 
     var totalBalanceUSD: Double {
@@ -279,8 +300,9 @@ class AppState {
             guard let self else { return }
             self.confirmationUpdateEpoch += 1
             self.refreshBalances()
+            let nodeService = self.nodeService
             Task.detached { [weak self] in
-                try? self?.nodeService.syncWallets()
+                try? nodeService.syncWallets()
                 await MainActor.run {
                     self?.refreshBalances()
                 }
@@ -2966,8 +2988,9 @@ class AppState {
         ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: "cached_onchain_sats")
         ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: "cached_spendable_onchain_sats")
 
+        let nodeService = self.nodeService
         Task.detached { [weak self] in
-            try? self?.nodeService.syncWallets()
+            try? nodeService.syncWallets()
             await MainActor.run {
                 self?.refreshBalances()
             }

@@ -135,4 +135,85 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertEqual(appState.onchainBalanceSats, 0)
         XCTAssertEqual(appState.spendableOnchainSats, 0)
     }
+
+    func testTotalBalanceOpeningChannelIncludesLightningOrOnchain() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.isOpeningChannel = true
+        appState.isChannelClosing = false
+
+        appState.lightningBalanceSats = 50_000
+        appState.onchainBalanceSats = 0
+        XCTAssertEqual(appState.totalBalanceSats, 50_000)
+
+        appState.lightningBalanceSats = 0
+        appState.onchainBalanceSats = 60_000
+        XCTAssertEqual(appState.totalBalanceSats, 60_000)
+    }
+
+    // MARK: - Pure BalanceCalculator Tests (SOLID SRP & DIP)
+
+    func testPureBalanceCalculationStaticEntryPoints() {
+        // Ready channel
+        let ready = AppState.calculateTotalBalance(
+            lightning: 100_000,
+            onchain: 50_000,
+            hasReadyChannel: true
+        )
+        XCTAssertEqual(ready, 150_000)
+
+        // Channel closing
+        let closing = AppState.calculateTotalBalance(
+            lightning: 100_000,
+            onchain: 50_000,
+            hasReadyChannel: false,
+            isChannelClosing: true
+        )
+        XCTAssertEqual(closing, 50_000)
+
+        // Sweeping
+        let sweeping = AppState.calculateTotalBalance(
+            lightning: 100_000,
+            onchain: 50_000,
+            hasReadyChannel: true,
+            isSweeping: true
+        )
+        XCTAssertEqual(sweeping, 100_000)
+
+        // Ghost balance: no ready channel & no channels exist
+        let ghost = AppState.calculateTotalBalance(
+            lightning: 100_000,
+            onchain: 0,
+            hasReadyChannel: false,
+            hasAnyChannel: false,
+            pendingSweep: 0
+        )
+        XCTAssertEqual(ghost, 0)
+
+        // Pending channel (channel exists, but not ready yet)
+        let pending = AppState.calculateTotalBalance(
+            lightning: 80_000,
+            onchain: 20_000,
+            hasReadyChannel: false,
+            hasAnyChannel: true
+        )
+        XCTAssertEqual(pending, 100_000)
+    }
+
+    func testBalanceCalculatorDirectly() {
+        let state = BalanceCalculator.ChannelState(
+            hasReadyChannel: false,
+            hasAnyChannel: false,
+            isChannelClosing: false,
+            isOpeningChannel: false,
+            isSweeping: false
+        )
+        let total = BalanceCalculator.calculateTotalBalance(
+            lightning: 90_000,
+            onchain: 30_000,
+            pendingSweep: 5_000,
+            channelState: state
+        )
+        XCTAssertEqual(total, 35_000)
+    }
 }

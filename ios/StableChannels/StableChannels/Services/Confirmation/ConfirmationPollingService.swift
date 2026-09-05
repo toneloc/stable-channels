@@ -43,12 +43,17 @@ final class ConfirmationPollingService {
             return
         }
 
+        var anyUpdated = false
         for payment in pending {
             guard !Task.isCancelled else { return }
-            await resolve(payment: payment, currentHeight: currentHeight)
+            if await resolve(payment: payment, currentHeight: currentHeight) {
+                anyUpdated = true
+            }
         }
 
-        onUpdate?()
+        if anyUpdated {
+            onUpdate?()
+        }
     }
 
     /// Revalidates both pending payments and recently completed payments (last ~12 blocks)
@@ -63,11 +68,15 @@ final class ConfirmationPollingService {
         let currentHeight = blockHeightService.currentHeight
         guard currentHeight > 0 else { return }
 
+        var anyUpdated = false
+
         // 1. Process pending payments
         if let pending = try? databaseService.paymentRepo.paymentsNeedingConfirmation() {
             for payment in pending {
                 guard !Task.isCancelled else { return }
-                await resolve(payment: payment, currentHeight: currentHeight)
+                if await resolve(payment: payment, currentHeight: currentHeight) {
+                    anyUpdated = true
+                }
             }
         }
 
@@ -87,6 +96,7 @@ final class ConfirmationPollingService {
                     // Esplora reports transaction is no longer confirmed — downgrade to pending
                     do {
                         try databaseService.paymentRepo.downgradePaymentToPending(paymentId: payment.id)
+                        anyUpdated = true
                         logger
                             .warning(
                                 "[Confirmation] Payment #\(payment.id) orphaned in reorg/gap — downgraded to pending."
@@ -100,12 +110,17 @@ final class ConfirmationPollingService {
                     }
                 case .confirmed(let progress, let blockHeight):
                     if blockHeight != payment.txBlockHeight || progress.display != payment.confirmations {
-                        try? databaseService.paymentRepo.updateConfirmations(
-                            paymentId: payment.id,
-                            paymentType: payment.paymentType,
-                            txBlockHeight: blockHeight,
-                            currentBlockHeight: currentHeight
-                        )
+                        do {
+                            try databaseService.paymentRepo.updateConfirmations(
+                                paymentId: payment.id,
+                                paymentType: payment.paymentType,
+                                txBlockHeight: blockHeight,
+                                currentBlockHeight: currentHeight
+                            )
+                            anyUpdated = true
+                        } catch {
+                            logger.error("Failed to update confirmations: \(error.localizedDescription)")
+                        }
                     }
                 case .error, .noTxid:
                     break
@@ -113,10 +128,13 @@ final class ConfirmationPollingService {
             }
         }
 
-        onUpdate?()
+        if anyUpdated {
+            onUpdate?()
+        }
     }
 
-    private func resolve(payment: PaymentRecord, currentHeight: UInt32) async {
+    @discardableResult
+    private func resolve(payment: PaymentRecord, currentHeight: UInt32) async -> Bool {
         let outcome = await confirmationService.resolve(
             payment: payment,
             currentBlockHeight: currentHeight
@@ -124,7 +142,8 @@ final class ConfirmationPollingService {
         switch outcome {
         case .confirmed(let progress, let blockHeight):
             // Skip redundant writes — only update if confirmations actually changed OR if block height changed (reorg)
-            guard progress.display != payment.confirmations || blockHeight != payment.txBlockHeight else { return }
+            guard progress.display != payment.confirmations || blockHeight != payment.txBlockHeight
+            else { return false }
             do {
                 try databaseService.paymentRepo.updateConfirmations(
                     paymentId: payment.id,
@@ -137,16 +156,19 @@ final class ConfirmationPollingService {
                     "confirmations": "\(progress.display)",
                     "block_height": "\(blockHeight)"
                 ])
+                return true
             } catch {
                 logger.error("Failed to update confirmations: \(error.localizedDescription)")
+                return false
             }
         case .error(let message):
             AuditService.log("CONFIRMATION_RESOLVE_FAILED", data: [
                 "payment_id": "\(payment.id)",
                 "error": message
             ])
+            return false
         case .pending, .noTxid:
-            break
+            return false
         }
     }
 }

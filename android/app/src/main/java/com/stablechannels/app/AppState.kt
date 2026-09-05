@@ -60,23 +60,50 @@ class AppState(private val context: Context) : ViewModel() {
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
 
+        data class ChannelState(
+            val hasReady: Boolean,
+            val hasAnyChannel: Boolean = false,
+            val isChannelClosing: Boolean = false,
+            val isOpeningChannel: Boolean = false,
+            val isSweeping: Boolean = false
+        )
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            pendingSweep: Long = 0L,
+            channelState: ChannelState
+        ): Long {
+            return when {
+                channelState.isChannelClosing -> onchain
+                channelState.isOpeningChannel -> if (lightning > 0) lightning else onchain
+                channelState.isSweeping -> lightning
+                !channelState.hasReady && !channelState.hasAnyChannel -> onchain + pendingSweep
+                else -> lightning + onchain
+            }
+        }
+
         fun calculateTotalBalance(
             lightning: Long,
             onchain: Long,
             hasReady: Boolean,
-            isChannelClosing: Boolean,
-            isSweeping: Boolean,
+            isChannelClosing: Boolean = false,
+            isSweeping: Boolean = false,
             pendingSweep: Long = 0L,
-            isOpeningChannel: Boolean = false
-        ): Long {
-            return when {
-                isChannelClosing -> onchain
-                isOpeningChannel -> if (lightning > 0) lightning else onchain
-                isSweeping -> lightning
-                !hasReady -> onchain + pendingSweep
-                else -> lightning + onchain
-            }
-        }
+            isOpeningChannel: Boolean = false,
+            hasAnyChannel: Boolean = false
+        ): Long = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            pendingSweep = pendingSweep,
+            channelState = ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = hasAnyChannel,
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping
+            )
+        )
 
         fun requiredConfirmationsForType(paymentType: String): Int {
             return when (paymentType) {
@@ -289,6 +316,13 @@ class AppState(private val context: Context) : ViewModel() {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
     var pendingSplice: PendingSplice? = null
+    private val _isOpeningChannel = MutableStateFlow(false)
+    val isOpeningChannelFlow: StateFlow<Boolean> = _isOpeningChannel
+    var isOpeningChannel: Boolean
+        get() = _isOpeningChannel.value
+        set(value) {
+            _isOpeningChannel.value = value
+        }
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
@@ -2518,13 +2552,16 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
         _totalBalanceSats.value = calculateTotalBalance(
             lightning = lightning,
             onchain = onchain,
             hasReady = hasReady,
             isChannelClosing = isChannelClosing,
             isSweeping = isSweeping,
-            pendingSweep = sweepSats
+            pendingSweep = sweepSats,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
         )
 
         // Calculate native sats (lightning minus stable portion) for slider position
@@ -2555,19 +2592,22 @@ class AppState(private val context: Context) : ViewModel() {
 
         val lightning = _lightningBalanceSats.value
         val hasReady = _hasReadyChannel.value
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
         _totalBalanceSats.value = calculateTotalBalance(
             lightning = lightning,
             onchain = newOnchain,
             hasReady = hasReady,
             isChannelClosing = isChannelClosing,
             isSweeping = isSweeping,
-            pendingSweep = _pendingSweepBalanceSats.value
+            pendingSweep = _pendingSweepBalanceSats.value,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
         )
 
         val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putLong("cached_onchain_sats", newOnchain)
             .putLong("cached_spendable_sats", newSpendable)
-        if (!hasReady) {
+        if (!hasReady && !hasAnyChannel) {
             editor.putLong("cached_lightning_sats", 0L)
         }
         editor.apply()

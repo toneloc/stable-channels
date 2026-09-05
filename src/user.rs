@@ -191,16 +191,27 @@ struct IncomingSync {
 
 /// Dynamic confirmation threshold policy for splices and on-chain transactions:
 /// - splices (splice_in, splice_out): 1 confirmation (channel established/trusted)
-/// - onchain (inbound / outbound): 6 confirmations
+/// - onchain (inbound / outbound) / channel_close: 6 confirmations
 /// - lightning: 0 confirmations
-pub fn required_confirmations_for_payment(payment_type: &str, direction: &str) -> u32 {
-    let _ = direction;
-    match payment_type {
-        "splice_in" | "splice_out" => 1,
-        "onchain" => 6,
-        "lightning" => 0,
-        _ => 0,
+pub struct ConfirmationPolicy;
+
+impl ConfirmationPolicy {
+    pub const DEFAULT_ONCHAIN_REQUIRED: u32 = 6;
+    pub const SPLICE_REQUIRED: u32 = 1;
+    pub const LIGHTNING_REQUIRED: u32 = 0;
+
+    pub fn required(payment_type: &str, _direction: &str) -> u32 {
+        match payment_type {
+            "splice_in" | "splice_out" => Self::SPLICE_REQUIRED,
+            "onchain" | "channel_close" => Self::DEFAULT_ONCHAIN_REQUIRED,
+            "lightning" => Self::LIGHTNING_REQUIRED,
+            _ => 0,
+        }
     }
+}
+
+pub fn required_confirmations_for_payment(payment_type: &str, direction: &str) -> u32 {
+    ConfirmationPolicy::required(payment_type, direction)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1795,10 +1806,17 @@ impl UserApp {
                             }
                         } else {
                             // No channel — fallback to regular onchain send
-                            let amount_sats = match self.send_amount.trim().parse::<f64>() {
-                                Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
+                            let balances = self.node.list_balances();
+                            let (amount_sats, deducted_sats) = match self.send_amount.trim().parse::<f64>() {
+                                Ok(btc) if btc > 0.0 => {
+                                    let sats = (btc * 100_000_000.0) as u64;
+                                    (sats, sats)
+                                }
                                 _ if self.send_all => {
-                                    self.node.list_balances().spendable_onchain_balance_sats
+                                    (
+                                        balances.spendable_onchain_balance_sats,
+                                        balances.total_onchain_balance_sats,
+                                    )
                                 }
                                 _ => {
                                     self.send_error = "Enter a valid amount in BTC".to_string();
@@ -1856,25 +1874,15 @@ impl UserApp {
                                     self.send_input.clear();
                                     self.send_amount.clear();
                                     self.send_error.clear();
+                                    self.pending_outbound_onchain_sats
+                                        .store(deducted_sats, std::sync::atomic::Ordering::Relaxed);
+                                    self.update_balances();
                                     let node_clone = Arc::clone(&self.node);
                                     let pending_clone = Arc::clone(&self.pending_outbound_onchain_sats);
                                     std::thread::spawn(move || {
                                         let _ = node_clone.sync_wallets();
                                         pending_clone.store(0, std::sync::atomic::Ordering::Relaxed);
                                     });
-                                    self.update_balances();
-                                    let deducted_sats = if self.send_all {
-                                        self.node.list_balances().spendable_onchain_balance_sats
-                                    } else {
-                                        amount_sats
-                                    };
-                                    self.pending_outbound_onchain_sats
-                                        .store(deducted_sats, std::sync::atomic::Ordering::Relaxed);
-                                    let deducted_btc = deducted_sats as f64 / 100_000_000.0;
-                                    self.onchain_balance_btc = (self.onchain_balance_btc - deducted_btc).max(0.0);
-                                    self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
-                                    self.total_balance_btc = (self.total_balance_btc - deducted_btc).max(0.0);
-                                    self.total_balance_usd = self.total_balance_btc * self.btc_price;
                                     return true;
                                 }
                                 Err(e) => {
@@ -12477,6 +12485,8 @@ mod tests {
         assert_eq!(super::required_confirmations_for_payment("splice_out", "outbound"), 1);
         assert_eq!(super::required_confirmations_for_payment("onchain", "inbound"), 6);
         assert_eq!(super::required_confirmations_for_payment("onchain", "outbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("channel_close", "inbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("channel_close", "outbound"), 6);
         assert_eq!(super::required_confirmations_for_payment("lightning", "inbound"), 0);
         assert_eq!(super::required_confirmations_for_payment("lightning", "outbound"), 0);
         assert_eq!(super::required_confirmations_for_payment("unknown", "outbound"), 0);
@@ -12493,13 +12503,29 @@ mod tests {
         assert_eq!(displayed_onchain, 30_000);
 
         // Send max / full balance broadcast:
-        let send_max_pending = 50_000;
+        // Even if spendable is lower than total due to anchor reserve (e.g. 48k vs 50k),
+        // send_all sets deducted_sats to total_onchain_balance_sats (50k) so display hits 0:
+        let send_max_pending = live_onchain_sats;
         let displayed_send_max = live_onchain_sats.saturating_sub(send_max_pending);
         assert_eq!(displayed_send_max, 0);
 
         // Over-deduction edge case safely saturates at 0:
         let over_deduction = 60_000;
         assert_eq!(live_onchain_sats.saturating_sub(over_deduction), 0);
+
+        // Test store-before-spawn thread lifecycle:
+        let atomic_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Main thread stores deduction BEFORE spawning sync thread:
+        atomic_pending.store(send_amount_sats, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 20_000);
+
+        // Background thread clears to 0 after sync:
+        let atomic_clone = std::sync::Arc::clone(&atomic_pending);
+        let handle = std::thread::spawn(move || {
+            atomic_clone.store(0, std::sync::atomic::Ordering::Relaxed);
+        });
+        handle.join().unwrap();
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
 

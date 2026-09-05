@@ -69,9 +69,67 @@ class OnChainSendBalanceTest {
             hasReady = false,
             isChannelClosing = false,
             isSweeping = false,
-            pendingSweep = 0L
+            pendingSweep = 0L,
+            hasAnyChannel = false
         )
         assertEquals(0L, total)
+    }
+
+    @Test
+    fun `total balance with pending channel when hasReady is false preserves lightning balance`() {
+        // A channel exists (hasAnyChannel = true) but is not ready yet (funding pending)
+        val total = AppState.calculateTotalBalance(
+            lightning = 80_000L,
+            onchain = 20_000L,
+            hasReady = false,
+            isChannelClosing = false,
+            isSweeping = false,
+            pendingSweep = 0L,
+            hasAnyChannel = true
+        )
+        assertEquals(100_000L, total)
+    }
+
+    @Test
+    fun `total balance during channel opening returns lightning if non-zero else onchain`() {
+        val totalWithLightning = AppState.calculateTotalBalance(
+            lightning = 50_000L,
+            onchain = 0L,
+            hasReady = false,
+            isChannelClosing = false,
+            isSweeping = false,
+            isOpeningChannel = true
+        )
+        assertEquals(50_000L, totalWithLightning)
+
+        val totalWithOnchain = AppState.calculateTotalBalance(
+            lightning = 0L,
+            onchain = 70_000L,
+            hasReady = false,
+            isChannelClosing = false,
+            isSweeping = false,
+            isOpeningChannel = true
+        )
+        assertEquals(70_000L, totalWithOnchain)
+    }
+
+    @Test
+    fun `total balance using ChannelState parameter object adheres to Open Closed Principle`() {
+        val state = AppState.Companion.ChannelState(
+            hasReady = false,
+            hasAnyChannel = false,
+            isChannelClosing = false,
+            isOpeningChannel = false,
+            isSweeping = false
+        )
+        val total = AppState.calculateTotalBalance(
+            lightning = 50_000L,
+            onchain = 20_000L,
+            pendingSweep = 5_000L,
+            channelState = state
+        )
+        // Without ready or existing channel, stale lightning is excluded
+        assertEquals(25_000L, total)
     }
 
     @Test
