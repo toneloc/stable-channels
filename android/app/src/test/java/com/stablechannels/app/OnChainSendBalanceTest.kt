@@ -460,4 +460,52 @@ class OnChainSendBalanceTest {
         assertEquals("pending_outbound_baseline_sats", AppState.Companion.BalanceCacheKey.PENDING_BASELINE)
         assertEquals("pending_outbound_timestamp_secs", AppState.Companion.BalanceCacheKey.PENDING_TIMESTAMP)
     }
+
+    @Test
+    fun `partial incorporation of multiple sends does not double deduct`() {
+        // Baseline 100k, spendable 95k. User performs two sends: 30k, then 20k (total pending = 50k).
+        val pending = AppState.Companion.PendingOutboundSend(
+            amountSats = 50_000L,
+            isSendAll = false,
+            baselineOnchainSats = 100_000L,
+            timestampSecs = 1_000_000L
+        )
+
+        // Stage 1: No sends incorporated into raw yet (rawOnchain = 100k)
+        val (onchain1, spendable1) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = pending
+        )
+        assertEquals(50_000L, onchain1)
+        assertEquals(45_000L, spendable1)
+
+        // Stage 2: Intermediate state - send 1 (30k) has landed in raw balance (rawOnchain = 70k),
+        // but send 2 (20k) is still unincorporated.
+        // Effective balance must remain 50k, NOT drop to 20k from double-deduction.
+        val (onchain2, spendable2) = AppState.calculateEffectiveBalances(
+            rawOnchain = 70_000L,
+            rawSpendable = 65_000L,
+            pending = pending
+        )
+        assertEquals(50_000L, onchain2)
+        assertEquals(45_000L, spendable2)
+
+        // Stage 3: Both sends incorporated into raw balance (rawOnchain = 50k)
+        val (onchain3, spendable3) = AppState.calculateEffectiveBalances(
+            rawOnchain = 50_000L,
+            rawSpendable = 45_000L,
+            pending = pending
+        )
+        assertEquals(50_000L, onchain3)
+        assertEquals(45_000L, spendable3)
+
+        val resolved = AppState.resolvePendingOutboundSend(
+            rawOnchain = 50_000L,
+            pending = pending,
+            currentTimestampSecs = 1_000_100L,
+            ttlSecs = 600L
+        )
+        assertEquals(0L, resolved.amountSats)
+    }
 }

@@ -162,6 +162,8 @@ enum BalanceCalculator {
 
     /// Derives user-facing on-chain and spendable balances by subtracting any pending
     /// outbound send that has not yet been incorporated into LDK/BDK's raw wallet view.
+    /// If raw balance has already dropped below baseline, only the unincorporated portion
+    /// of pending sends is subtracted to avoid double-deductions during partial syncs.
     static func calculateEffectiveBalances(
         rawOnchain: UInt64,
         rawSpendable: UInt64,
@@ -171,8 +173,10 @@ enum BalanceCalculator {
             return (0, 0)
         }
         if pending.amountSats > 0 {
-            let onchain = rawOnchain >= pending.amountSats ? rawOnchain - pending.amountSats : 0
-            let spendable = rawSpendable >= pending.amountSats ? rawSpendable - pending.amountSats : 0
+            let rawDrop = (rawOnchain < pending.baselineOnchainSats) ? (pending.baselineOnchainSats - rawOnchain) : 0
+            let pendingToDeduct = pending.amountSats > rawDrop ? (pending.amountSats - rawDrop) : 0
+            let onchain = rawOnchain >= pendingToDeduct ? rawOnchain - pendingToDeduct : 0
+            let spendable = rawSpendable >= pendingToDeduct ? rawSpendable - pendingToDeduct : 0
             return (onchain, spendable)
         }
         return (rawOnchain, rawSpendable)

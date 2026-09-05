@@ -672,4 +672,51 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(effective.onchain, 120_000)
     }
+
+    func testPartialIncorporationOfMultipleSendsDoesNotDoubleDeduct() {
+        // Baseline 100k, spendable 95k. User performs two sends: 30k, then 20k (total pending = 50k).
+        let pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: 50_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            timestampSecs: 1_000_000
+        )
+
+        // Stage 1: No sends incorporated into raw yet (rawOnchain = 100k)
+        let stage1 = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: pending
+        )
+        XCTAssertEqual(stage1.onchain, 50_000)
+        XCTAssertEqual(stage1.spendable, 45_000)
+
+        // Stage 2: Intermediate state - send 1 (30k) has landed in raw balance (rawOnchain = 70k),
+        // but send 2 (20k) is still unincorporated.
+        // Effective balance must remain 50k, NOT drop to 20k from double-deduction.
+        let stage2 = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 70_000,
+            rawSpendable: 65_000,
+            pending: pending
+        )
+        XCTAssertEqual(stage2.onchain, 50_000)
+        XCTAssertEqual(stage2.spendable, 45_000)
+
+        // Stage 3: Both sends incorporated into raw balance (rawOnchain = 50k)
+        let stage3 = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 50_000,
+            rawSpendable: 45_000,
+            pending: pending
+        )
+        XCTAssertEqual(stage3.onchain, 50_000)
+        XCTAssertEqual(stage3.spendable, 45_000)
+
+        let resolved = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 50_000,
+            pending: pending,
+            currentTimeSecs: 1_000_100,
+            expirySecs: 600
+        )
+        XCTAssertEqual(resolved.amountSats, 0)
+    }
 }

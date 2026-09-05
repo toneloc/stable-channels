@@ -3096,14 +3096,14 @@ class AppState {
     /// Synchronizes wallets off the main actor and refreshes balances upon completion.
     private func syncWalletsInBackground() {
         let nodeService = self.nodeService
-        Task.detached(priority: .utility) { [weak self] in
-            let syncSuccess = (try? nodeService.syncWallets()) != nil
-            await MainActor.run {
-                if syncSuccess {
-                    self?.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
-                }
-                self?.refreshBalances()
+        Task { @MainActor in
+            let syncSuccess = await Task.detached(priority: .utility) {
+                (try? nodeService.syncWallets()) != nil
+            }.value
+            if syncSuccess {
+                self.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
             }
+            self.refreshBalances()
         }
     }
 

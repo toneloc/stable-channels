@@ -186,8 +186,18 @@ class AppState(private val context: Context) : ViewModel() {
                 return Pair(0L, 0L)
             }
             if (pending.amountSats > 0L) {
-                val onchain = (rawOnchain - pending.amountSats).coerceAtLeast(0L)
-                val spendable = (rawSpendable - pending.amountSats).coerceAtLeast(0L)
+                val rawDrop = if (rawOnchain < pending.baselineOnchainSats) {
+                    pending.baselineOnchainSats - rawOnchain
+                } else {
+                    0L
+                }
+                val pendingToDeduct = if (pending.amountSats > rawDrop) {
+                    pending.amountSats - rawDrop
+                } else {
+                    0L
+                }
+                val onchain = (rawOnchain - pendingToDeduct).coerceAtLeast(0L)
+                val spendable = (rawSpendable - pendingToDeduct).coerceAtLeast(0L)
                 return Pair(onchain, spendable)
             }
             return Pair(rawOnchain, rawSpendable)
