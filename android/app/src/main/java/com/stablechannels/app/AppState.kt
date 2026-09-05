@@ -960,16 +960,41 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
-                // If SpliceNegotiated already assigned a txid, a signed splice tx exists and
-                // may already be broadcast/confirmed (even by the counterparty). A failed
-                // event arriving after that point is a stale/duplicate replay — rolling back
-                // here would mark a real splice "failed" and desync Stable USD from the
-                // node's actual balance, which only refreshBalances() (ground truth) reflects.
-                if (spliceTxid != null) {
-                    AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
-                        "channel_id" to event.channelId,
-                        "splice_txid" to spliceTxid!!
-                    ))
+                // Snapshot to a local val: spliceTxid can be mutated concurrently by the IO-thread
+                // confirmation monitor (completeConfirmedSplice can null it out the moment a splice
+                // confirms), so re-reading the field after the async check below would be a TOCTOU
+                // race that could apply this branch's rollback to a different, newer splice.
+                val capturedTxid = spliceTxid
+                if (capturedTxid != null) {
+                    // A signed splice tx exists. It may already be broadcast/confirmed (even by
+                    // the counterparty), in which case this failed event is a stale/duplicate
+                    // replay — rolling back would mark a real splice "failed" and desync Stable
+                    // USD from the node's actual balance. But the tx could also have been
+                    // genuinely abandoned before broadcast (or this could be a real failure on a
+                    // later attempt), so verify against esplora rather than assuming: if the tx
+                    // was never broadcast, this is a real failure, and it must be handled or the
+                    // confirmation monitor + "Move" lock (isSweeping) hang forever.
+                    if (doesTxExist(capturedTxid)) {
+                        AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
+                            "channel_id" to event.channelId,
+                            "splice_txid" to capturedTxid
+                        ))
+                    } else {
+                        val paymentRowId = pendingSplice?.paymentRowId
+                        isSweeping = false
+                        spliceConfirmationJob?.cancel()
+                        spliceConfirmationJob = null
+                        monitoredSpliceTxid = null
+                        pendingSplice = null
+                        // Only clear if nothing newer has taken its place in the meantime.
+                        if (spliceTxid == capturedTxid) spliceTxid = null
+                        databaseService?.failPendingSplice(paymentRowId)
+                        AuditService.log("SPLICE_FAILED", mapOf(
+                            "channel_id" to event.channelId,
+                            "splice_txid" to capturedTxid,
+                            "reason" to "txid_never_broadcast"
+                        ))
+                    }
                 } else {
                     val paymentRowId = pendingSplice?.paymentRowId
                     isSweeping = false
@@ -1477,6 +1502,35 @@ class AppState(private val context: Context) : ViewModel() {
         isSweeping = true
         spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
         spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+    }
+
+    /**
+     * Whether esplora has ever heard of this txid (broadcast, mempool, or confirmed) — distinct
+     * from isTxConfirmed(), which only reports confirmation depth. Used to tell a genuinely
+     * abandoned/never-broadcast splice tx (404 everywhere) apart from a stale failure event for a
+     * splice that did make it on-chain. If every endpoint errors out (e.g. no connectivity), we
+     * can't prove non-existence, so default to "exists" — the safer failure mode is treating a
+     * real failure as a stale replay (recoverable manually) rather than mislabeling a possibly
+     * real splice as failed.
+     */
+    private fun doesTxExist(txid: String): Boolean {
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        var reachedAnyEndpoint = false
+        for (baseUrl in urls) {
+            try {
+                val normalizedTxid = txid.substringBefore(":")
+                val request = Request.Builder()
+                    .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    reachedAnyEndpoint = true
+                    if (response.isSuccessful) return true
+                }
+            } catch (e: Exception) {
+                Log.w("AppState", "Splice existence check failed: ${e.message}")
+            }
+        }
+        return !reachedAnyEndpoint
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
