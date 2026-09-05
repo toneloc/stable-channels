@@ -1554,6 +1554,12 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun completeConfirmedSplice(txid: String) {
+        // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
+        // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
+        // — which requires an exact txid match — can never find it, permanently desyncing Stable
+        // USD from the confirmed on-chain balance. Retry the assignment now that the tx has
+        // confirmed; assignPendingSpliceTxid is a no-op if a row already carries this txid.
+        databaseService?.assignPendingSpliceTxid(txid, pendingSplice?.paymentRowId)
         val completed = databaseService?.completeSplice(txid) == true
         if (completed) {
             refreshBalances()
