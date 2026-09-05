@@ -189,6 +189,55 @@ struct IncomingSync {
     request_hash: Option<String>,
 }
 
+/// Dynamic confirmation threshold policy for splices and on-chain transactions:
+/// - splices (splice_in, splice_out): 1 confirmation (channel established/trusted)
+/// - onchain (inbound / outbound) / channel_close: 6 confirmations
+/// - lightning: 0 confirmations
+pub struct ConfirmationPolicy;
+
+impl ConfirmationPolicy {
+    pub const DEFAULT_ONCHAIN_REQUIRED: u32 = 6;
+    pub const SPLICE_REQUIRED: u32 = 1;
+    pub const LIGHTNING_REQUIRED: u32 = 0;
+
+    pub fn required(payment_type: &str, _direction: &str) -> u32 {
+        match payment_type {
+            "splice_in" | "splice_out" => Self::SPLICE_REQUIRED,
+            "onchain" | "channel_close" => Self::DEFAULT_ONCHAIN_REQUIRED,
+            "lightning" => Self::LIGHTNING_REQUIRED,
+            _ => 0,
+        }
+    }
+}
+
+pub fn required_confirmations_for_payment(payment_type: &str, direction: &str) -> u32 {
+    ConfirmationPolicy::required(payment_type, direction)
+}
+
+pub fn payment_status_display(
+    status: &str,
+    payment_type: &str,
+    direction: &str,
+    confirmations: u32,
+) -> (String, Color32) {
+    match status {
+        "completed" => ("Confirmed".to_string(), theme::SUCCESS),
+        "pending" => {
+            let threshold = required_confirmations_for_payment(payment_type, direction);
+            if threshold > 0 {
+                (
+                    format!("{}/{}", confirmations, threshold),
+                    Color32::from_rgb(234, 179, 8),
+                )
+            } else {
+                ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
+            }
+        }
+        "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
+        _ => (status.to_string(), Color32::DARK_GRAY),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
     InvalidValues,
@@ -357,6 +406,7 @@ pub struct UserApp {
     auto_splice_in_progress: Arc<std::sync::atomic::AtomicBool>,
     /// On-chain sats at the time the auto-splice was initiated; used to detect confirmation.
     auto_splice_onchain_at_start: Arc<std::sync::atomic::AtomicU64>,
+    pub pending_outbound_onchain_sats: Arc<std::sync::atomic::AtomicU64>,
     pub show_onchain_receive: bool,
     pub show_onchain_send: bool,
     pub show_advanced: bool,
@@ -724,6 +774,7 @@ impl UserApp {
             pending_splice: Arc::new(std::sync::Mutex::new(None)),
             auto_splice_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             auto_splice_onchain_at_start: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_outbound_onchain_sats: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             show_onchain_receive: false,
             show_onchain_send: false,
             lightning_balance_btc: 0.0,
@@ -1018,23 +1069,31 @@ impl UserApp {
                     // every deposit, not just the latest.
                     let mut new_deposits: Vec<(String, u64, PaymentStatus)> = Vec::new();
                     for p in node_arc.list_payments() {
-                        if p.direction != PaymentDirection::Inbound {
-                            continue;
-                        }
                         let PaymentKind::Onchain { ref txid, .. } = p.kind else {
                             continue;
                         };
                         let txid = txid.to_string();
-                        if p.status == PaymentStatus::Succeeded {
-                            if let Err(e) = db.complete_payment_by_txid(&txid) {
+                        if p.direction == PaymentDirection::Inbound {
+                            if p.status == PaymentStatus::Succeeded {
+                                if let Err(e) = db.complete_payment_by_txid(&txid) {
+                                    audit_event(
+                                        "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                        json!({ "txid": txid, "error": e.to_string() }),
+                                    );
+                                }
+                            }
+                            if p.latest_update_timestamp >= thread_started_unix {
+                                new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
+                            }
+                        } else if p.direction == PaymentDirection::Outbound
+                            && p.status == PaymentStatus::Succeeded
+                        {
+                            if let Err(e) = db.update_payment_confirmations(&txid, 6, "completed") {
                                 audit_event(
-                                    "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+                                    "ONCHAIN_OUTBOUND_CONFIRMATION_FAILED",
                                     json!({ "txid": txid, "error": e.to_string() }),
                                 );
                             }
-                        }
-                        if p.latest_update_timestamp >= thread_started_unix {
-                            new_deposits.push((txid, p.amount_msat.unwrap_or(0), p.status));
                         }
                     }
 
@@ -1771,10 +1830,17 @@ impl UserApp {
                             }
                         } else {
                             // No channel — fallback to regular onchain send
-                            let amount_sats = match self.send_amount.trim().parse::<f64>() {
-                                Ok(btc) if btc > 0.0 => (btc * 100_000_000.0) as u64,
+                            let balances = self.node.list_balances();
+                            let (amount_sats, deducted_sats) = match self.send_amount.trim().parse::<f64>() {
+                                Ok(btc) if btc > 0.0 => {
+                                    let sats = (btc * 100_000_000.0) as u64;
+                                    (sats, sats)
+                                }
                                 _ if self.send_all => {
-                                    self.node.list_balances().spendable_onchain_balance_sats
+                                    (
+                                        balances.spendable_onchain_balance_sats,
+                                        balances.total_onchain_balance_sats,
+                                    )
                                 }
                                 _ => {
                                     self.send_error = "Enter a valid amount in BTC".to_string();
@@ -1823,7 +1889,7 @@ impl UserApp {
                                         amount_usd,
                                         btc_price_opt,
                                         None,
-                                        "completed",
+                                        "pending",
                                         Some(&txid_str),
                                         None,
                                     );
@@ -1832,11 +1898,33 @@ impl UserApp {
                                     self.send_input.clear();
                                     self.send_amount.clear();
                                     self.send_error.clear();
-                                    let node_clone = Arc::clone(&self.node);
-                                    std::thread::spawn(move || {
-                                        let _ = node_clone.sync_wallets();
-                                    });
+                                    self.pending_outbound_onchain_sats
+                                        .fetch_add(deducted_sats, std::sync::atomic::Ordering::Relaxed);
                                     self.update_balances();
+                                    let node_clone = Arc::clone(&self.node);
+                                    let pending_clone = Arc::clone(&self.pending_outbound_onchain_sats);
+                                    std::thread::spawn(move || {
+                                        for attempt in 0..3 {
+                                            if node_clone.sync_wallets().is_ok() {
+                                                let cur = pending_clone
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                                pending_clone.fetch_sub(
+                                                    deducted_sats.min(cur),
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                return;
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_millis(
+                                                500 * (attempt + 1),
+                                            ));
+                                        }
+                                        let cur = pending_clone
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        pending_clone.fetch_sub(
+                                            deducted_sats.min(cur),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    });
                                     return true;
                                 }
                                 Err(e) => {
@@ -1895,10 +1983,17 @@ impl UserApp {
             balances.total_onchain_balance_sats,
         );
 
+        let pending_outbound = self
+            .pending_outbound_onchain_sats
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let total_onchain_sats = balances
+            .total_onchain_balance_sats
+            .saturating_sub(pending_outbound);
+
         // Detect incoming payment: total sats went up → trigger balance flash
         let total_sats_now = balances
             .total_lightning_balance_sats
-            .saturating_add(balances.total_onchain_balance_sats)
+            .saturating_add(total_onchain_sats)
             .saturating_sub(splice_overlap_sats);
         if self.last_known_total_sats > 0 && total_sats_now > self.last_known_total_sats {
             self.payment_flash_at = Some(std::time::Instant::now());
@@ -1906,7 +2001,7 @@ impl UserApp {
         self.last_known_total_sats = total_sats_now;
 
         self.lightning_balance_btc = balances.total_lightning_balance_sats as f64 / 100_000_000.0;
-        self.onchain_balance_btc = balances.total_onchain_balance_sats as f64 / 100_000_000.0;
+        self.onchain_balance_btc = total_onchain_sats as f64 / 100_000_000.0;
 
         self.lightning_balance_usd = self.lightning_balance_btc * self.btc_price;
         self.onchain_balance_usd = self.onchain_balance_btc * self.btc_price;
@@ -6006,8 +6101,15 @@ impl UserApp {
             // LDK reports stale entries long after sweep confirms and funds are spent.
 
             // Total onchain balance (includes confirmed + AwaitingThresholdConfirmations)
-            let total_onchain_sats = balances.total_onchain_balance_sats;
-            let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
+            let pending_outbound = self
+                .pending_outbound_onchain_sats
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let total_onchain_sats = balances
+                .total_onchain_balance_sats
+                .saturating_sub(pending_outbound);
+            let spendable_onchain_sats = balances
+                .spendable_onchain_balance_sats
+                .saturating_sub(pending_outbound);
 
             // Get balance info
             let (btc_price, last_update, expected_usd, backing_sats, receiver_sats) = {
@@ -8377,13 +8479,12 @@ impl UserApp {
                                         ),
                                     );
 
-                                    let (status_label, status_color) = match payment.status.as_str()
-                                    {
-                                        "completed" => ("Confirmed", theme::SUCCESS),
-                                        "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                                        "failed" => ("Failed", theme::DANGER_HOVER),
-                                        _ => (&*payment.status, Color32::DARK_GRAY),
-                                    };
+                                    let (status_label, status_color) = payment_status_display(
+                                        &payment.status,
+                                        &payment.payment_type,
+                                        &payment.direction,
+                                        payment.confirmations,
+                                    );
                                     let (badge_rect, _) = ui.allocate_exact_size(
                                         egui::vec2(58.0, 18.0),
                                         Sense::hover(),
@@ -8397,7 +8498,7 @@ impl UserApp {
                                     ui.painter().text(
                                         badge_rect.center(),
                                         egui::Align2::CENTER_CENTER,
-                                        status_label,
+                                        &status_label,
                                         egui::FontId::proportional(10.0),
                                         status_color,
                                     );
@@ -8674,12 +8775,12 @@ impl UserApp {
                     row(ui, "BTC Price", &Self::format_price(price));
                 }
 
-                let (status_label, status_color) = match payment.status.as_str() {
-                    "completed" => ("Confirmed", theme::SUCCESS),
-                    "pending" => ("Pending", Color32::from_rgb(234, 179, 8)),
-                    "failed" => ("Failed", theme::DANGER_HOVER),
-                    _ => (&*payment.status, Color32::DARK_GRAY),
-                };
+                let (status_label, status_color) = payment_status_display(
+                    &payment.status,
+                    &payment.payment_type,
+                    &payment.direction,
+                    payment.confirmations,
+                );
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [90.0, 18.0],
@@ -8687,13 +8788,23 @@ impl UserApp {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(status_label)
+                            RichText::new(&status_label)
                                 .size(12.0)
                                 .color(status_color)
                                 .strong(),
                         );
                     });
                 });
+                let threshold = required_confirmations_for_payment(
+                    &payment.payment_type,
+                    &payment.direction,
+                );
+                if threshold > 0 {
+                    let conf_str = format!("{}/{}", payment.confirmations, threshold);
+                    row(ui, "Confirmations", &conf_str);
+                } else if payment.confirmations > 0 {
+                    row(ui, "Confirmations", &payment.confirmations.to_string());
+                }
                 ui.add_space(2.0);
 
                 row(ui, "Date", &Self::format_timestamp(payment.created_at));
@@ -12388,6 +12499,101 @@ mod tests {
 
         let none: Option<ClosureReason> = None;
         assert_eq!(super::closure_reason_to_json(&none)["kind"], "UNKNOWN");
+    }
+
+    #[test]
+    fn test_required_confirmations_for_payment() {
+        assert_eq!(super::required_confirmations_for_payment("splice_in", "inbound"), 1);
+        assert_eq!(super::required_confirmations_for_payment("splice_out", "outbound"), 1);
+        assert_eq!(super::required_confirmations_for_payment("onchain", "inbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("onchain", "outbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("channel_close", "inbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("channel_close", "outbound"), 6);
+        assert_eq!(super::required_confirmations_for_payment("lightning", "inbound"), 0);
+        assert_eq!(super::required_confirmations_for_payment("lightning", "outbound"), 0);
+        assert_eq!(super::required_confirmations_for_payment("unknown", "outbound"), 0);
+    }
+
+    #[test]
+    fn test_payment_status_display() {
+        let (label, color) = super::payment_status_display("completed", "onchain", "inbound", 6);
+        assert_eq!(label, "Confirmed");
+        assert_eq!(color, super::theme::SUCCESS);
+
+        let (label, _) = super::payment_status_display("pending", "splice_in", "inbound", 0);
+        assert_eq!(label, "0/1");
+
+        let (label, _) = super::payment_status_display("pending", "onchain", "inbound", 3);
+        assert_eq!(label, "3/6");
+
+        let (label, _) = super::payment_status_display("pending", "lightning", "inbound", 0);
+        assert_eq!(label, "Pending");
+
+        let (label, color) = super::payment_status_display("failed", "onchain", "outbound", 0);
+        assert_eq!(label, "Failed");
+        assert_eq!(color, super::theme::DANGER_HOVER);
+    }
+
+    #[test]
+    fn test_pending_outbound_onchain_deduction() {
+        let live_onchain_sats: u64 = 50_000;
+        let send_amount_sats: u64 = 20_000;
+
+        // Immediately after broadcast:
+        let pending_outbound = send_amount_sats;
+        let displayed_onchain = live_onchain_sats.saturating_sub(pending_outbound);
+        assert_eq!(displayed_onchain, 30_000);
+
+        // Send max / full balance broadcast:
+        // Even if spendable is lower than total due to anchor reserve (e.g. 48k vs 50k),
+        // send_all sets deducted_sats to total_onchain_balance_sats (50k) so display hits 0:
+        let send_max_pending = live_onchain_sats;
+        let displayed_send_max = live_onchain_sats.saturating_sub(send_max_pending);
+        assert_eq!(displayed_send_max, 0);
+
+        // Over-deduction edge case safely saturates at 0:
+        let over_deduction = 60_000;
+        assert_eq!(live_onchain_sats.saturating_sub(over_deduction), 0);
+
+        // Test store-before-spawn thread lifecycle:
+        let atomic_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // Main thread stores deduction BEFORE spawning sync thread:
+        atomic_pending.fetch_add(send_amount_sats, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 20_000);
+
+        // Background thread clears after sync:
+        let atomic_clone = std::sync::Arc::clone(&atomic_pending);
+        let handle = std::thread::spawn(move || {
+            let cur = atomic_clone.load(std::sync::atomic::Ordering::Relaxed);
+            atomic_clone.fetch_sub(
+                send_amount_sats.min(cur),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        });
+        handle.join().unwrap();
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Consecutive sends accumulate incrementally and clear independently:
+        let multi_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        multi_pending.fetch_add(20_000, std::sync::atomic::Ordering::Relaxed);
+        multi_pending.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 30_000);
+
+        let m_clone1 = std::sync::Arc::clone(&multi_pending);
+        let h1 = std::thread::spawn(move || {
+            let cur = m_clone1.load(std::sync::atomic::Ordering::Relaxed);
+            m_clone1.fetch_sub(20_000_u64.min(cur), std::sync::atomic::Ordering::Relaxed);
+        });
+        h1.join().unwrap();
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 10_000);
+
+        let m_clone2 = std::sync::Arc::clone(&multi_pending);
+        let h2 = std::thread::spawn(move || {
+            let cur = m_clone2.load(std::sync::atomic::Ordering::Relaxed);
+            m_clone2.fetch_sub(10_000_u64.min(cur), std::sync::atomic::Ordering::Relaxed);
+        });
+        h2.join().unwrap();
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
 

@@ -54,8 +54,6 @@
 		4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127872FFEB51600D9C81F /* PaymentDatabase.swift */; };
 		4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278D2FFEC05D00D9C81F /* Constants.swift */; };
 		499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278E2FFEC05D00D9C81F /* StableControlParser.swift */; };
-		A20400000000000000000002 /* TradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20400000000000000000001 /* TradeProtocol.swift */; };
-		A20400000000000000000003 /* TradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20400000000000000000001 /* TradeProtocol.swift */; };
 		499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
@@ -128,6 +126,7 @@
 		6FC18A5668E49E3CD5E990A8 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DB261201C1C656BAAED5283 /* SettingsView.swift */; };
 		7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F22F6639A59D4B86A959586 /* Constants.swift */; };
 		7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */; };
+		70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */; };
 		76D934F4495402F7B4944BE3 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8811E90D4B2B5C5C51093A95 /* Assets.xcassets */; };
 		8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61BB0D1D623E0794FC1ED6ED /* NodeService.swift */; };
 		88769D82377C43BCF549A52C /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 702A9339F75D1A3A7B5313C7 /* HistoryView.swift */; };
@@ -138,6 +137,8 @@
 		96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */; };
 		96F38A820CB6644940199C95 /* KeychainAccess in Frameworks */ = {isa = PBXBuildFile; productRef = 79D34B41CFF9ABC3C914B624 /* KeychainAccess */; };
 		9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */; };
+		A20400000000000000000002 /* TradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20400000000000000000001 /* TradeProtocol.swift */; };
+		A20400000000000000000003 /* TradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20400000000000000000001 /* TradeProtocol.swift */; };
 		A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 134775C01F3C51CA39B262FC /* LSPSettingsView.swift */; };
 		A9F8B3821ACA38AD4DF869BD /* CloudBackupService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */; };
 		B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 955C6E8D6DB076A3B20A6F46 /* SellView.swift */; };
@@ -230,7 +231,6 @@
 		499127892FFEB51600D9C81F /* PriceFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceFetcher.swift; sourceTree = "<group>"; };
 		4991278D2FFEC05D00D9C81F /* Constants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		4991278E2FFEC05D00D9C81F /* StableControlParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableControlParser.swift; sourceTree = "<group>"; };
-		A20400000000000000000001 /* TradeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeProtocol.swift; sourceTree = "<group>"; };
 		499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationContentMutator.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
@@ -303,6 +303,7 @@
 		6DDD82B198645873A6F492F2 /* StableChannel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StableChannel.swift; sourceTree = "<group>"; };
 		6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupPromptView.swift; sourceTree = "<group>"; };
 		702A9339F75D1A3A7B5313C7 /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
+		70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainConfirmationPolicyTests.swift; sourceTree = "<group>"; };
 		786B669FA976C4646AF0D206 /* PriceChartView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartView.swift; sourceTree = "<group>"; };
 		7DB261201C1C656BAAED5283 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		7E0FAABBD08BCBF20220C850 /* SendView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendView.swift; sourceTree = "<group>"; };
@@ -313,6 +314,7 @@
 		8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityServiceTests.swift; sourceTree = "<group>"; };
 		95055FDBC76859CB74803660 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		955C6E8D6DB076A3B20A6F46 /* SellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SellView.swift; sourceTree = "<group>"; };
+		A20400000000000000000001 /* TradeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeProtocol.swift; sourceTree = "<group>"; };
 		A2BA7D52F62DF17EFF532635 /* NotificationService.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NotificationService.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		AAE0551124703F8BAA9C44C0 /* StableChannels.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StableChannels.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupModels.swift; sourceTree = "<group>"; };
@@ -724,6 +726,7 @@
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
+				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
@@ -871,6 +874,7 @@
 				49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */,
 				49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
+				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 				D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */,
 			);

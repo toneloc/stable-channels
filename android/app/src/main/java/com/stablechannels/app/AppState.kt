@@ -59,6 +59,155 @@ class AppState(private val context: Context) : ViewModel() {
         // Covers ordinary quick app-switches without keeping an unserviced cached Android
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
+
+        data class ChannelState(
+            val hasReady: Boolean,
+            val hasAnyChannel: Boolean = false,
+            val isChannelClosing: Boolean = false,
+            val isOpeningChannel: Boolean = false,
+            val isSweeping: Boolean = false
+        )
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            pendingSweep: Long = 0L,
+            channelState: ChannelState
+        ): Long {
+            return when {
+                channelState.isChannelClosing -> onchain
+                channelState.isOpeningChannel -> if (lightning > 0) lightning else onchain
+                channelState.isSweeping -> lightning
+                !channelState.hasReady && !channelState.hasAnyChannel -> onchain + pendingSweep
+                else -> lightning + onchain
+            }
+        }
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            hasReady: Boolean,
+            isChannelClosing: Boolean = false,
+            isSweeping: Boolean = false,
+            pendingSweep: Long = 0L,
+            isOpeningChannel: Boolean = false,
+            hasAnyChannel: Boolean = false
+        ): Long = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            pendingSweep = pendingSweep,
+            channelState = ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = hasAnyChannel,
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping
+            )
+        )
+
+        fun requiredConfirmationsForType(paymentType: String): Int {
+            return when (paymentType) {
+                "splice_in", "splice_out" -> 1
+                else -> 6
+            }
+        }
+
+        object BalanceCacheKey {
+            const val PREFS_NAME = "balance_cache"
+            const val LIGHTNING = "cached_lightning_sats"
+            const val ONCHAIN = "cached_onchain_sats"
+            const val SPENDABLE = "cached_spendable_sats"
+            const val NATIVE = "cached_native_sats"
+            const val PENDING_AMOUNT = "pending_outbound_onchain_sats"
+            const val PENDING_IS_SEND_ALL = "pending_outbound_is_send_all"
+            const val PENDING_BASELINE = "pending_outbound_baseline_sats"
+            const val PENDING_TIMESTAMP = "pending_outbound_timestamp_secs"
+            const val RECEIVE_ADDRESS = "onchain_receive_address"
+            const val LAST_RECEIVE_TXID = "last_receive_txid"
+            const val LAST_RECEIVE_TXID_ADDRESS = "last_receive_txid_address"
+            const val LAST_CLOSE_TXID = "last_close_txid"
+            const val LAST_CLOSE_TXID_AT = "last_close_txid_at"
+            const val FUNDING_TXID = "funding_txid"
+            const val CLOSING_FUNDING_TXID = "closing_funding_txid"
+            const val CACHED_CHANNEL_ID = "cached_channel_id"
+            const val CACHED_USER_CHANNEL_ID = "cached_user_channel_id"
+            const val CACHED_EXPECTED_USD = "cached_expected_usd"
+
+            fun clearPendingOutbound(context: Context) {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                    .remove(PENDING_AMOUNT)
+                    .remove(PENDING_IS_SEND_ALL)
+                    .remove(PENDING_BASELINE)
+                    .remove(PENDING_TIMESTAMP)
+                    .apply()
+            }
+
+            fun clearAll(context: Context) {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+            }
+        }
+
+        data class PendingOutboundSend(
+            val amountSats: Long = 0L,
+            val isSendAll: Boolean = false,
+            val baselineOnchainSats: Long = 0L,
+            val timestampSecs: Long = System.currentTimeMillis() / 1000L
+        )
+
+        /**
+         * Derives user-facing on-chain and spendable balances by subtracting any pending
+         * outbound send that has not yet been incorporated into LDK/BDK's raw wallet view.
+         */
+        fun calculateEffectiveBalances(
+            rawOnchain: Long,
+            rawSpendable: Long,
+            pending: PendingOutboundSend
+        ): Pair<Long, Long> {
+            if (pending.isSendAll) {
+                return Pair(0L, 0L)
+            }
+            if (pending.amountSats > 0L) {
+                val onchain = (rawOnchain - pending.amountSats).coerceAtLeast(0L)
+                val spendable = (rawSpendable - pending.amountSats).coerceAtLeast(0L)
+                return Pair(onchain, spendable)
+            }
+            return Pair(rawOnchain, rawSpendable)
+        }
+
+        /**
+         * Resolves pending outbound send state against a fresh raw on-chain balance observation.
+         * Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
+         * to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
+         * Includes a TTL backstop (default 600s) to prevent unobserved transactions or incoming deposits
+         * from permanently stranding pending state.
+         */
+        fun resolvePendingOutboundSend(
+            rawOnchain: Long,
+            pending: PendingOutboundSend,
+            currentTimestampSecs: Long = System.currentTimeMillis() / 1000L,
+            ttlSecs: Long = 600L
+        ): PendingOutboundSend {
+            if (pending.amountSats == 0L && !pending.isSendAll) {
+                return pending
+            }
+            if (pending.timestampSecs > 0L && (currentTimestampSecs - pending.timestampSecs) >= ttlSecs) {
+                return PendingOutboundSend()
+            }
+            if (pending.isSendAll) {
+                if (rawOnchain == 0L) {
+                    return PendingOutboundSend()
+                }
+                return pending
+            }
+            if (pending.amountSats > 0L) {
+                val expectedRemaining = (pending.baselineOnchainSats - pending.amountSats).coerceAtLeast(0L)
+                if (rawOnchain <= expectedRemaining) {
+                    return PendingOutboundSend()
+                }
+                return pending
+            }
+            return pending
+        }
     }
 
     val nodeService = NodeService(context)
@@ -113,6 +262,8 @@ class AppState(private val context: Context) : ViewModel() {
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
     private val _hasReadyChannel = MutableStateFlow(false)
     val hasReadyChannel: StateFlow<Boolean> get() = _hasReadyChannel
+    private val _pendingSweepBalanceSats = MutableStateFlow(0L)
+    val pendingSweepBalanceSats: StateFlow<Long> get() = _pendingSweepBalanceSats
 
     private val _onchainReceiveAddress = MutableStateFlow<String?>(null)
     val onchainReceiveAddress: StateFlow<String?> get() = _onchainReceiveAddress
@@ -126,13 +277,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun setLastCloseTxid(txid: String?) {
         _lastCloseTxid.value = txid
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (txid != null) {
-            editor.putString("last_close_txid", txid)
-            editor.putLong("last_close_txid_at", System.currentTimeMillis())
+            editor.putString(BalanceCacheKey.LAST_CLOSE_TXID, txid)
+            editor.putLong(BalanceCacheKey.LAST_CLOSE_TXID_AT, System.currentTimeMillis())
         } else {
-            editor.remove("last_close_txid")
-            editor.remove("last_close_txid_at")
+            editor.remove(BalanceCacheKey.LAST_CLOSE_TXID)
+            editor.remove(BalanceCacheKey.LAST_CLOSE_TXID_AT)
         }
         editor.apply()
     }
@@ -141,57 +292,74 @@ class AppState(private val context: Context) : ViewModel() {
         _lastReceiveTxid.value = txid
         lastReceiveTxidAddress = address
 
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (txid.isNullOrBlank()) {
-            editor.remove("last_receive_txid")
-            editor.remove("last_receive_txid_address")
+            editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID)
+            editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS)
         } else {
-            editor.putString("last_receive_txid", txid)
+            editor.putString(BalanceCacheKey.LAST_RECEIVE_TXID, txid)
             if (!address.isNullOrBlank()) {
-                editor.putString("last_receive_txid_address", address)
+                editor.putString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, address)
             } else {
-                editor.remove("last_receive_txid_address")
+                editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS)
             }
         }
         editor.apply()
     }
 
+    fun resetInMemoryWalletState() {
+        pendingOutboundSend = PendingOutboundSend()
+        BalanceCacheKey.clearAll(context)
+    }
 
     private val _spendableOnchainSats = MutableStateFlow(
-        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).getLong("cached_spendable_sats", 0L)
+        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).getLong(BalanceCacheKey.SPENDABLE, 0L)
     )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
+
+    @Volatile
+    var pendingOutboundSend: PendingOutboundSend = PendingOutboundSend()
+        private set
 
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
 
     init {
-        val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-        val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
-        val cachedOnchain = prefs.getLong("cached_onchain_sats", 0L)
+        val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+        val cachedLightning = prefs.getLong(BalanceCacheKey.LIGHTNING, 0L)
+        val cachedOnchain = prefs.getLong(BalanceCacheKey.ONCHAIN, 0L)
+        val pendingAmount = prefs.getLong(BalanceCacheKey.PENDING_AMOUNT, 0L)
+        val pendingIsSendAll = prefs.getBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, false)
+        val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
+        val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
+        pendingOutboundSend = PendingOutboundSend(
+            amountSats = pendingAmount,
+            isSendAll = pendingIsSendAll,
+            baselineOnchainSats = pendingBaseline,
+            timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L)
+        )
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
-                _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
-        _onchainReceiveAddress.value = prefs.getString("onchain_receive_address", null)
-        _lastReceiveTxid.value = prefs.getString("last_receive_txid", null)
-        lastReceiveTxidAddress = prefs.getString("last_receive_txid_address", null)
+        _nativeSats = MutableStateFlow(prefs.getLong(BalanceCacheKey.NATIVE, 0L))
+        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)
+        _lastReceiveTxid.value = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID, null)
+        lastReceiveTxidAddress = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, null)
 
-        val closeAt = prefs.getLong("last_close_txid_at", 0L)
+        val closeAt = prefs.getLong(BalanceCacheKey.LAST_CLOSE_TXID_AT, 0L)
         if (System.currentTimeMillis() - closeAt < 7 * 86400 * 1000L) {
-            _lastCloseTxid.value = prefs.getString("last_close_txid", null)
+            _lastCloseTxid.value = prefs.getString(BalanceCacheKey.LAST_CLOSE_TXID, null)
         } else {
             prefs.edit()
-                .remove("last_close_txid")
-                .remove("last_close_txid_at")
+                .remove(BalanceCacheKey.LAST_CLOSE_TXID)
+                .remove(BalanceCacheKey.LAST_CLOSE_TXID_AT)
                 .apply()
         }
 
-
         // Restore cached channel state so UI shows correct slider position immediately
-        val cachedChannelId = prefs.getString("cached_channel_id", null)
-        val cachedUserChannelId = prefs.getString("cached_user_channel_id", null)
-        val cachedExpectedUsd = prefs.getFloat("cached_expected_usd", 0f)
+        val cachedChannelId = prefs.getString(BalanceCacheKey.CACHED_CHANNEL_ID, null)
+        val cachedUserChannelId = prefs.getString(BalanceCacheKey.CACHED_USER_CHANNEL_ID, null)
+        val cachedExpectedUsd = prefs.getFloat(BalanceCacheKey.CACHED_EXPECTED_USD, 0f)
         if (cachedUserChannelId != null) {
             _stableChannel.value = StableChannel.defaultWithLsp(context).copy(
                 channelId = cachedChannelId ?: "",
@@ -262,6 +430,13 @@ class AppState(private val context: Context) : ViewModel() {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
     var pendingSplice: PendingSplice? = null
+    private val _isOpeningChannel = MutableStateFlow(false)
+    val isOpeningChannelFlow: StateFlow<Boolean> = _isOpeningChannel
+    var isOpeningChannel: Boolean
+        get() = _isOpeningChannel.value
+        set(value) {
+            _isOpeningChannel.value = value
+        }
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
@@ -1672,12 +1847,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun requiredConfirmationsForType(paymentType: String): Int {
-        return when (paymentType) {
-            "splice_in", "splice_out" -> 1
-            else -> 6
-        }
-    }
 
     private data class TxConfirmationStatus(
         val confirmed: Boolean,
@@ -1829,6 +1998,10 @@ class AppState(private val context: Context) : ViewModel() {
 
             if (anyUpdated) {
                 _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                try {
+                    nodeService.syncWallets()
+                } catch (_: Exception) {}
+                refreshBalances()
             }
             lastConfirmationPollAtMs = now
         } finally {
@@ -2443,8 +2616,13 @@ class AppState(private val context: Context) : ViewModel() {
         nodeService.refreshChannels()
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
-        val onchain = balances.totalOnchainBalanceSats.toLong()
+        val rawOnchain = balances.totalOnchainBalanceSats.toLong()
+        val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
+
+        // Resolve pending outbound deduction against raw wallet observation
+        pendingOutboundSend = resolvePendingOutboundSend(rawOnchain, pendingOutboundSend)
+        val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, pendingOutboundSend)
 
         // Sync fundingTxid directly from the LDK node's channel details
         // to gracefully handle out-of-band splices (e.g. LSP-initiated)
@@ -2467,10 +2645,21 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.value = _stableChannel.value.copy(counterparty = liveCounterparty)
             }
         }
+        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+        // These funds are NOT yet in total_onchain_balance_sats
+        var sweepSats = 0L
+        for (pending in balances.pendingBalancesFromChannelClosures) {
+            when (pending) {
+                is PendingSweepBalance.PendingBroadcast -> sweepSats += pending.amountSatoshis.toLong()
+                is PendingSweepBalance.BroadcastAwaitingConfirmation -> sweepSats += pending.amountSatoshis.toLong()
+                else -> {}
+            }
+        }
+        _pendingSweepBalanceSats.value = sweepSats
+
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        val spendable = balances.spendableOnchainBalanceSats.toLong()
         _spendableOnchainSats.value = spendable
 
 
@@ -2481,14 +2670,17 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        _totalBalanceSats.value = when {
-            isChannelClosing -> onchain
-            isSweeping -> lightning
-            // No open channel but both balances present: lightning is pending-close claimable
-            // that overlaps with on-chain — avoid double-count
-            !hasReady && lightning > 0 && onchain > 0 -> onchain
-            else -> lightning + onchain
-        }
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = sweepSats,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
+        )
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet
@@ -2499,12 +2691,90 @@ class AppState(private val context: Context) : ViewModel() {
         _nativeSats.value = native
 
         // Cache for instant display on next launch
-        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-            .putLong("cached_lightning_sats", lightning)
-            .putLong("cached_onchain_sats", onchain)
-            .putLong("cached_spendable_sats", spendable)
-            .putLong("cached_native_sats", native)
+        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(BalanceCacheKey.LIGHTNING, lightning)
+            .putLong(BalanceCacheKey.ONCHAIN, onchain)
+            .putLong(BalanceCacheKey.SPENDABLE, spendable)
+            .putLong(BalanceCacheKey.NATIVE, native)
+            .putLong(BalanceCacheKey.PENDING_AMOUNT, pendingOutboundSend.amountSats)
+            .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
+            .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
+            .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
             .apply()
+    }
+
+    fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean) {
+        val currentOnchain = _onchainBalanceSats.value
+        val currentSpendable = _spendableOnchainSats.value
+
+        val newOnchain = if (isSendAll) 0L else (currentOnchain - amountSats).coerceAtLeast(0L)
+        val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
+
+        val newBaseline = if (pendingOutboundSend.baselineOnchainSats == 0L) {
+            currentOnchain
+        } else {
+            pendingOutboundSend.baselineOnchainSats
+        }
+
+        pendingOutboundSend = if (isSendAll) {
+            PendingOutboundSend(
+                amountSats = pendingOutboundSend.amountSats + currentOnchain,
+                isSendAll = true,
+                baselineOnchainSats = newBaseline,
+                timestampSecs = System.currentTimeMillis() / 1000L
+            )
+        } else {
+            PendingOutboundSend(
+                amountSats = pendingOutboundSend.amountSats + amountSats,
+                isSendAll = false,
+                baselineOnchainSats = newBaseline,
+                timestampSecs = System.currentTimeMillis() / 1000L
+            )
+        }
+
+        _onchainBalanceSats.value = newOnchain
+        _spendableOnchainSats.value = newSpendable
+
+        val lightning = _lightningBalanceSats.value
+        val hasReady = _hasReadyChannel.value
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = newOnchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = _pendingSweepBalanceSats.value,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
+        )
+
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(BalanceCacheKey.ONCHAIN, newOnchain)
+            .putLong(BalanceCacheKey.SPENDABLE, newSpendable)
+            .putLong(BalanceCacheKey.PENDING_AMOUNT, pendingOutboundSend.amountSats)
+            .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
+            .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
+            .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
+        if (!hasReady && !hasAnyChannel) {
+            editor.putLong(BalanceCacheKey.LIGHTNING, 0L)
+        }
+        editor.apply()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            val syncSuccess = try {
+                nodeService.syncWallets()
+                true
+            } catch (_: Exception) {
+                false
+            }
+            withContext(Dispatchers.Main) {
+                if (syncSuccess) {
+                    pendingOutboundSend = PendingOutboundSend()
+                }
+                refreshBalances()
+            }
+        }
     }
 
     fun updateStableBalances() {
