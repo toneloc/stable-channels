@@ -47,7 +47,9 @@ struct RestoreSeedSheet: View {
                         isDisabled: isRestoring,
                         wordCount: wordCount,
                         onWordChanged: { index, word in
-                            wordFields[index] = word
+                            if index < wordFields.count {
+                                wordFields[index] = word
+                            }
                             syncMnemonicFromFields()
                         }
                     )

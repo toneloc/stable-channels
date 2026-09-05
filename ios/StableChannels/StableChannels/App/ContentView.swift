@@ -218,6 +218,7 @@ struct SyncingView: View {
 struct ErrorDisplayView: View {
     let message: String
     @Environment(AppState.self) private var appState
+    @State private var showingRestoreSheet = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -231,13 +232,54 @@ struct ErrorDisplayView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button(String(localized: "try_again", defaultValue: "Try Again")) {
+            if message.contains("Mismatched state") {
+                Button("Restore From Backup Seed") {
+                    showingRestoreSheet = true
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+            } else {
+                Button(String(localized: "try_again", defaultValue: "Try Again")) {
+                    appState.phase = .loading
+                    Task { await appState.start() }
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
+            }
+        }
+        .sheet(isPresented: $showingRestoreSheet) {
+            MismatchRecoverySheet()
+        }
+    }
+}
+
+private struct MismatchRecoverySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @State private var restoreMnemonic = ""
+    @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.maxWordCount)
+    @State private var isWordFieldsReadOnly = false
+    @State private var isImportingSeed = false
+    @State private var isRestoring = false
+    @State private var restoreError: String?
+
+    var body: some View {
+        RestoreSeedSheet(
+            restoreMnemonic: $restoreMnemonic,
+            wordFields: $wordFields,
+            isWordFieldsReadOnly: $isWordFieldsReadOnly,
+            isImportingSeed: $isImportingSeed,
+            isRestoring: $isRestoring,
+            restoreError: $restoreError,
+            onCancel: {
+                dismiss()
+            },
+            onSuccess: {
+                dismiss()
                 appState.phase = .loading
                 Task { await appState.start() }
             }
-            .buttonStyle(.bordered)
-            .padding(.top, 8)
-        }
+        )
     }
 }
 

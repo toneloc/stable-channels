@@ -30,7 +30,7 @@ struct SeedWordGridView: View {
                 .frame(width: 18, alignment: .trailing)
 
             if isReadOnly || isDisabled {
-                Text(wordFields[index])
+                Text(index < wordFields.count ? wordFields[index] : "")
                     .font(.system(.caption, design: .monospaced))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
@@ -39,7 +39,7 @@ struct SeedWordGridView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 TextField("", text: Binding(
-                    get: { wordFields[index] },
+                    get: { index < wordFields.count ? wordFields[index] : "" },
                     set: { onWordChanged?(index, $0) }
                 ))
                 .textInputAutocapitalization(.never)
