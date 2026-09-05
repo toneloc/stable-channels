@@ -1,0 +1,53 @@
+# Step 9 — Close channel
+# "User initiates a cooperative onchain channel close."
+# Identical labels on both platforms: Settings tab -> Channel row ->
+# Close channel -> "Close channel" alert -> Close channel.
+appId: com.stablechannels.app
+tags: [android, ios, close]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- tapOn: "Settings"
+- tapOn: "Channel"
+- tapOn: "Close channel"
+- assertVisible: "Close channel"
+# The copy-changes PR relabeled everything to "Close channel", so the alert
+# title, the confirm button, and the (occluded) settings button now share the
+# label. The settings button is behind the alert; the confirm button is the
+# last match. index: 1 targets it — verify on-device if the tap misses.
+- tapOn:
+    text: "Close channel"
+    index: 1
+
+# Return Home and wait until the close txid is exposed. Mining immediately
+# after tapping Close can precede the asynchronous broadcast.
+- tapOn:
+    text: "(Back|Settings)"
+    optional: true
+- tapOn:
+    text: "Home"
+    optional: true
+- extendedWaitUntil:
+    visible: "View on [Ee]xplorer"
+    timeout: 120000
+
+# Confirm the observable close transaction, then prove the channel is gone.
+- runScript:
+    file: helpers/mine_blocks.js
+- tapOn: "Settings"
+- tapOn: "Channel"
+- extendedWaitUntil:
+    visible: "No channel open yet.*"
+    timeout: 240000
+- tapOn:
+    text: "(Back|Settings)"
+    optional: true
+- tapOn:
+    text: "Home"
+    optional: true
+- extendedWaitUntil:
+    visible: "Onchain Account"
+    timeout: 30000

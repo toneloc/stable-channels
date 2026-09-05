@@ -95,15 +95,17 @@ class PriceService(private val appContext: Context? = null) {
             val lastTrustedPrice = _currentPrice.value.takeIf {
                 it > 0 && !isPriceStale()
             }
-            val usdPrices = fetchFeeds(PriceOracle.DIRECT_USD_FEEDS)
+            // Constants.DEFAULT_PRICE_FEEDS is PriceOracle.DIRECT_USD_FEEDS in production and the
+            // local E2E feed set when TestOverrides supplies one.
+            val usdPrices = fetchFeeds(Constants.DEFAULT_PRICE_FEEDS)
             val result = try {
                 PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice)
             } catch (error: PriceOracleException) {
                 if (error.quarantinesPrice) throw error
                 Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
                 coroutineScope {
-                    val usdtPrices = async { fetchFeeds(PriceOracle.BITCOIN_USDT_FEEDS) }
-                    val pegPrices = async { fetchFeeds(PriceOracle.USDT_USD_FEEDS) }
+                    val usdtPrices = async { fetchFeeds(Constants.FALLBACK_USDT_PRICE_FEEDS) }
+                    val pegPrices = async { fetchFeeds(Constants.USDT_USD_PRICE_FEEDS) }
                     PriceOracle.resolve(
                         emptyList(),
                         usdtPrices.await(),

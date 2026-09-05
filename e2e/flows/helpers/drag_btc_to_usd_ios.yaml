@@ -1,0 +1,7 @@
+appId: com.stablechannels.app
+---
+# iOS's integer-percent gesture sells about $74.88 of the $85 balance.
+- swipe:
+    start: 10%, 26%
+    end: 81%, 26%
+    duration: 2400

@@ -1422,7 +1422,27 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"
         )
         stmt.bindString(1, txid)
-        return stmt.executeUpdateDelete() > 0
+        if (stmt.executeUpdateDelete() > 0) return true
+
+        // SplicePending can be overtaken by ChannelReady. In that ordering the
+        // splice-in initiation row has no txid even though the confirmation
+        // monitor already knows the new funding txid. Only one splice can be
+        // in flight, so bind and complete the latest unstamped splice-in row.
+        val fallback = writableDatabase.compileStatement(
+            """
+            UPDATE payments
+            SET txid = ?, status = 'completed', confirmations = 1
+            WHERE rowid = (
+                SELECT rowid FROM payments
+                WHERE payment_type = 'splice_in'
+                  AND txid IS NULL
+                  AND status IN ('pending','failed')
+                ORDER BY rowid DESC LIMIT 1
+            )
+            """.trimIndent()
+        )
+        fallback.bindString(1, txid)
+        return fallback.executeUpdateDelete() > 0
     }
 
     fun getPendingSpliceTxid(): String? {

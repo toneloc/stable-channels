@@ -197,7 +197,7 @@ class StabilityProcessingService : Service() {
 
             val config = Config(
                 storageDirPath = dataDir.absolutePath,
-                network = Network.BITCOIN,
+                network = Constants.LDK_NETWORK,
                 listeningAddresses = null,
                 announcementAddresses = null,
                 nodeAlias = null,
@@ -914,7 +914,7 @@ class StabilityProcessingService : Service() {
         // Anchor to the app's last accepted price so the large-move circuit breaker also
         // protects the unattended path (mirrors the iOS notification extension).
         val lastTrustedPrice = PriceOracleAnchorStore.freshPrice(this)
-        val usdPrices = fetchOracleFeeds(PriceOracle.DIRECT_USD_FEEDS)
+        val usdPrices = fetchOracleFeeds(Constants.DEFAULT_PRICE_FEEDS)
         val price = try {
             PriceOracle.resolve(usdPrices, emptyList(), emptyList(), lastTrustedPrice).price
         } catch (error: PriceOracleException) {
@@ -923,9 +923,9 @@ class StabilityProcessingService : Service() {
                 return 0.0
             }
             Log.w(TAG, "Direct USD unavailable: ${error.message}; trying USDT fallback")
-            val fallback = fetchOracleFeeds(PriceOracle.BITCOIN_USDT_FEEDS + PriceOracle.USDT_USD_FEEDS)
-            val usdtNames = PriceOracle.BITCOIN_USDT_FEEDS.map { it.name }.toSet()
-            val pegNames = PriceOracle.USDT_USD_FEEDS.map { it.name }.toSet()
+            val fallback = fetchOracleFeeds(Constants.FALLBACK_USDT_PRICE_FEEDS + Constants.USDT_USD_PRICE_FEEDS)
+            val usdtNames = Constants.FALLBACK_USDT_PRICE_FEEDS.map { it.name }.toSet()
+            val pegNames = Constants.USDT_USD_PRICE_FEEDS.map { it.name }.toSet()
             try {
                 PriceOracle.resolve(
                     emptyList(),

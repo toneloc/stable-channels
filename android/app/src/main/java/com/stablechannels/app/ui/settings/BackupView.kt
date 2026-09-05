@@ -28,7 +28,6 @@ import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.lightningdevkit.ldknode.Network
 
 @Composable
 fun BackupView(appState: AppState) {
@@ -53,7 +52,7 @@ fun BackupView(appState: AppState) {
         scope.launch(Dispatchers.IO) {
             try {
                 appState.nodeService.stop()
-                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
+                appState.nodeService.start(Constants.LDK_NETWORK, Constants.PRIMARY_CHAIN_URL, input)
                 withContext(Dispatchers.Main) {
                     isRestoring = false
                     showRestore = false

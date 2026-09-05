@@ -1,0 +1,90 @@
+# Step 12 — Offboard Onchain
+# "User sends an onchain payment to another app. Balance shows 0."
+# Uses the platform's send-all control. No channel exists at this point
+# (post-close), so this is a true onchain wallet sweep, not a splice-out.
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain, offboard]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+
+# Confirm the pending channel-close output BEFORE sweeping so Send Max spends
+# the full balance in a single tx (regtest doesn't auto-mine; an unconfirmed or
+# late-confirming output otherwise lingers as a non-zero remainder and makes the
+# final settle-to-zero slow/variable).
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Send"      # home reachable + wallet synced to the confirmed balance
+    timeout: 30000
+
+# Never sweep while a prior splice is still reconciling.
+- extendedWaitUntil:
+    notVisible: "Move pending.*"
+    timeout: 240000
+
+- runScript:
+    file: helpers/create_address.js
+
+- tapOn: "Send"
+# Focus the send field. Platform-split: on Android the unfocused
+# OutlinedTextField renders its LABEL ("To"); on iOS "To" is a Section header
+# ABOVE the field — tapping it focuses nothing (regression seen as an empty
+# form: input lands nowhere, no Send button appears). Tap the placeholder,
+# which is the TextField itself, on iOS.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.address}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Send Max"
+      - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Send All"
+- tapOn:
+    text: "Send"
+    index: 1
+
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Done"
+          timeout: 60000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Payment sent.*"
+          timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+- runScript:
+    file: helpers/mine_blocks.js
+
+# Send-all consumes every wallet input and subtracts the miner fee from the
+# recipient output, so the local wallet must reach exactly zero sats.
+- extendedWaitUntil:
+    visible: "0\\.00.000.000 BTC"
+    timeout: 240000

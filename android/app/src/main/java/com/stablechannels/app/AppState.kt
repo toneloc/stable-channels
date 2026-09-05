@@ -14,6 +14,7 @@ import com.stablechannels.app.services.websocket.MempoolWebSocketClient
 import com.stablechannels.app.services.websocket.MempoolWebSocketService
 import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.TestOverrides
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -352,7 +353,9 @@ class AppState(private val context: Context) : ViewModel() {
 
                 // Load cached channel state so UI has correct slider/values immediately
                 loadChannelFromDB()
-                priceService.startAutoRefresh()
+                priceService.startAutoRefresh(
+            TestOverrides.priceRefreshSecs ?: Constants.PRICE_CACHE_REFRESH_SECS
+        )
 
                 // Resolve best esplora endpoint before starting node
                 chainUrl = resolveChainUrl()
@@ -389,7 +392,7 @@ class AppState(private val context: Context) : ViewModel() {
                         return@launch
                     }
                     loadChannelFromDB()  // reload — SPS may have incremented backingSats while we waited
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     resetNodeStartRetryState()
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
@@ -457,7 +460,7 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
                     refreshBalances()
@@ -480,7 +483,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+                nodeService.start(ldkNetwork(), chainUrl, mnemonic)
                 resetNodeStartRetryState()
                 _phase.value = Phase.WALLET
                 refreshBalances()
@@ -635,7 +638,7 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 loadChannelFromDB()
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, null)
+                nodeService.start(ldkNetwork(), chainUrl, null)
                 resetNodeStartRetryState()
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
@@ -1456,7 +1459,7 @@ class AppState(private val context: Context) : ViewModel() {
                     completeConfirmedSplice(normalizedTxid)
                     break
                 }
-                delay(30_000)
+                delay(Constants.SPLICE_CONFIRMATION_POLL_INTERVAL_SECS * 1000)
             }
         }
     }
@@ -2153,7 +2156,7 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             while (isActive && _spendableOnchainSats.value == 0L && _onchainBalanceSats.value > 0) {
-                delay(10_000)
+                delay(Constants.ONCHAIN_DEPOSIT_POLL_INTERVAL_SECS * 1000)
                 refreshBalances()
             }
             
@@ -2263,6 +2266,9 @@ class AppState(private val context: Context) : ViewModel() {
         }
         return null
     }
+
+    /** Network from Constants.DEFAULT_NETWORK — "regtest" only via TestOverrides (E2E). */
+    private fun ldkNetwork(): Network = Constants.LDK_NETWORK
 
     /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
