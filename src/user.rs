@@ -214,6 +214,30 @@ pub fn required_confirmations_for_payment(payment_type: &str, direction: &str) -
     ConfirmationPolicy::required(payment_type, direction)
 }
 
+pub fn payment_status_display(
+    status: &str,
+    payment_type: &str,
+    direction: &str,
+    confirmations: u32,
+) -> (String, Color32) {
+    match status {
+        "completed" => ("Confirmed".to_string(), theme::SUCCESS),
+        "pending" => {
+            let threshold = required_confirmations_for_payment(payment_type, direction);
+            if threshold > 0 {
+                (
+                    format!("{}/{}", confirmations, threshold),
+                    Color32::from_rgb(234, 179, 8),
+                )
+            } else {
+                ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
+            }
+        }
+        "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
+        _ => (status.to_string(), Color32::DARK_GRAY),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
     InvalidValues,
@@ -1875,13 +1899,31 @@ impl UserApp {
                                     self.send_amount.clear();
                                     self.send_error.clear();
                                     self.pending_outbound_onchain_sats
-                                        .store(deducted_sats, std::sync::atomic::Ordering::Relaxed);
+                                        .fetch_add(deducted_sats, std::sync::atomic::Ordering::Relaxed);
                                     self.update_balances();
                                     let node_clone = Arc::clone(&self.node);
                                     let pending_clone = Arc::clone(&self.pending_outbound_onchain_sats);
                                     std::thread::spawn(move || {
-                                        let _ = node_clone.sync_wallets();
-                                        pending_clone.store(0, std::sync::atomic::Ordering::Relaxed);
+                                        for attempt in 0..3 {
+                                            if node_clone.sync_wallets().is_ok() {
+                                                let cur = pending_clone
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                                pending_clone.fetch_sub(
+                                                    deducted_sats.min(cur),
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                return;
+                                            }
+                                            std::thread::sleep(std::time::Duration::from_millis(
+                                                500 * (attempt + 1),
+                                            ));
+                                        }
+                                        let cur = pending_clone
+                                            .load(std::sync::atomic::Ordering::Relaxed);
+                                        pending_clone.fetch_sub(
+                                            deducted_sats.min(cur),
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
                                     });
                                     return true;
                                 }
@@ -8437,22 +8479,12 @@ impl UserApp {
                                         ),
                                     );
 
-                                    let (status_label, status_color) = match payment.status.as_str() {
-                                        "completed" => ("Confirmed".to_string(), theme::SUCCESS),
-                                        "pending" => {
-                                            let threshold = required_confirmations_for_payment(
-                                                &payment.payment_type,
-                                                &payment.direction,
-                                            );
-                                            if threshold > 0 {
-                                                (format!("{}/{}", payment.confirmations, threshold), Color32::from_rgb(234, 179, 8))
-                                            } else {
-                                                ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
-                                            }
-                                        }
-                                        "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
-                                        _ => (payment.status.clone(), Color32::DARK_GRAY),
-                                    };
+                                    let (status_label, status_color) = payment_status_display(
+                                        &payment.status,
+                                        &payment.payment_type,
+                                        &payment.direction,
+                                        payment.confirmations,
+                                    );
                                     let (badge_rect, _) = ui.allocate_exact_size(
                                         egui::vec2(58.0, 18.0),
                                         Sense::hover(),
@@ -8743,22 +8775,12 @@ impl UserApp {
                     row(ui, "BTC Price", &Self::format_price(price));
                 }
 
-                let (status_label, status_color) = match payment.status.as_str() {
-                    "completed" => ("Confirmed".to_string(), theme::SUCCESS),
-                    "pending" => {
-                        let threshold = required_confirmations_for_payment(
-                            &payment.payment_type,
-                            &payment.direction,
-                        );
-                        if threshold > 0 {
-                            (format!("{}/{}", payment.confirmations, threshold), Color32::from_rgb(234, 179, 8))
-                        } else {
-                            ("Pending".to_string(), Color32::from_rgb(234, 179, 8))
-                        }
-                    }
-                    "failed" => ("Failed".to_string(), theme::DANGER_HOVER),
-                    _ => (payment.status.clone(), Color32::DARK_GRAY),
-                };
+                let (status_label, status_color) = payment_status_display(
+                    &payment.status,
+                    &payment.payment_type,
+                    &payment.direction,
+                    payment.confirmations,
+                );
                 ui.horizontal(|ui| {
                     ui.add_sized(
                         [90.0, 18.0],
@@ -12493,6 +12515,26 @@ mod tests {
     }
 
     #[test]
+    fn test_payment_status_display() {
+        let (label, color) = super::payment_status_display("completed", "onchain", "inbound", 6);
+        assert_eq!(label, "Confirmed");
+        assert_eq!(color, super::theme::SUCCESS);
+
+        let (label, _) = super::payment_status_display("pending", "splice_in", "inbound", 0);
+        assert_eq!(label, "0/1");
+
+        let (label, _) = super::payment_status_display("pending", "onchain", "inbound", 3);
+        assert_eq!(label, "3/6");
+
+        let (label, _) = super::payment_status_display("pending", "lightning", "inbound", 0);
+        assert_eq!(label, "Pending");
+
+        let (label, color) = super::payment_status_display("failed", "onchain", "outbound", 0);
+        assert_eq!(label, "Failed");
+        assert_eq!(color, super::theme::DANGER_HOVER);
+    }
+
+    #[test]
     fn test_pending_outbound_onchain_deduction() {
         let live_onchain_sats: u64 = 50_000;
         let send_amount_sats: u64 = 20_000;
@@ -12516,16 +12558,42 @@ mod tests {
         // Test store-before-spawn thread lifecycle:
         let atomic_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         // Main thread stores deduction BEFORE spawning sync thread:
-        atomic_pending.store(send_amount_sats, std::sync::atomic::Ordering::Relaxed);
+        atomic_pending.fetch_add(send_amount_sats, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 20_000);
 
-        // Background thread clears to 0 after sync:
+        // Background thread clears after sync:
         let atomic_clone = std::sync::Arc::clone(&atomic_pending);
         let handle = std::thread::spawn(move || {
-            atomic_clone.store(0, std::sync::atomic::Ordering::Relaxed);
+            let cur = atomic_clone.load(std::sync::atomic::Ordering::Relaxed);
+            atomic_clone.fetch_sub(
+                send_amount_sats.min(cur),
+                std::sync::atomic::Ordering::Relaxed,
+            );
         });
         handle.join().unwrap();
         assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        // Consecutive sends accumulate incrementally and clear independently:
+        let multi_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        multi_pending.fetch_add(20_000, std::sync::atomic::Ordering::Relaxed);
+        multi_pending.fetch_add(10_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 30_000);
+
+        let m_clone1 = std::sync::Arc::clone(&multi_pending);
+        let h1 = std::thread::spawn(move || {
+            let cur = m_clone1.load(std::sync::atomic::Ordering::Relaxed);
+            m_clone1.fetch_sub(20_000_u64.min(cur), std::sync::atomic::Ordering::Relaxed);
+        });
+        h1.join().unwrap();
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 10_000);
+
+        let m_clone2 = std::sync::Arc::clone(&multi_pending);
+        let h2 = std::thread::spawn(move || {
+            let cur = m_clone2.load(std::sync::atomic::Ordering::Relaxed);
+            m_clone2.fetch_sub(10_000_u64.min(cur), std::sync::atomic::Ordering::Relaxed);
+        });
+        h2.join().unwrap();
+        assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
 

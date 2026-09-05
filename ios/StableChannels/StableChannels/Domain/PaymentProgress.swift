@@ -29,7 +29,7 @@ struct ConfirmationProgress: Equatable {
 
     var label: String {
         if isComplete {
-            return "Confirmed"
+            return String(localized: "status_confirmed", defaultValue: "Confirmed")
         } else if raw <= 0 {
             return "0/\(required) confirmed"
         } else {
@@ -117,33 +117,45 @@ enum BalanceCalculator {
         var amountSats: UInt64
         var isSendAll: Bool
         var baselineOnchainSats: UInt64
+        var timestampSecs: Int64
 
-        init(amountSats: UInt64 = 0, isSendAll: Bool = false, baselineOnchainSats: UInt64 = 0) {
+        init(
+            amountSats: UInt64 = 0,
+            isSendAll: Bool = false,
+            baselineOnchainSats: UInt64 = 0,
+            timestampSecs: Int64 = Int64(Date().timeIntervalSince1970)
+        ) {
             self.amountSats = amountSats
             self.isSendAll = isSendAll
             self.baselineOnchainSats = baselineOnchainSats
+            self.timestampSecs = timestampSecs
         }
     }
+
+    static let defaultPendingExpirySecs: Int64 = 600
 
     /// Records an immediate outbound send broadcast and returns the updated pending state.
     static func recordBroadcast(
         currentPending: PendingOutboundSend,
         amountSats: UInt64,
         isSendAll: Bool,
-        currentOnchain: UInt64
+        currentOnchain: UInt64,
+        timestampSecs: Int64 = Int64(Date().timeIntervalSince1970)
     ) -> PendingOutboundSend {
+        let baseline = currentPending.baselineOnchainSats == 0 ? currentOnchain : currentPending.baselineOnchainSats
         if isSendAll {
             return PendingOutboundSend(
-                amountSats: currentOnchain,
+                amountSats: currentPending.amountSats + currentOnchain,
                 isSendAll: true,
-                baselineOnchainSats: currentOnchain
+                baselineOnchainSats: baseline,
+                timestampSecs: timestampSecs
             )
         } else {
             return PendingOutboundSend(
                 amountSats: currentPending.amountSats + amountSats,
                 isSendAll: false,
-                baselineOnchainSats: currentPending.baselineOnchainSats == 0 ? currentOnchain : currentPending
-                    .baselineOnchainSats
+                baselineOnchainSats: baseline,
+                timestampSecs: timestampSecs
             )
         }
     }
@@ -167,15 +179,23 @@ enum BalanceCalculator {
     }
 
     /// Resolves pending outbound send state against a fresh raw on-chain balance observation.
-    /// Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
-    /// to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
+    /// Once the raw balance proves the spend has been incorporated, or the pending TTL has expired,
+    /// pending state clears to avoid permanent balance suppression.
     static func resolvePendingOutboundSend(
         rawOnchain: UInt64,
-        pending: PendingOutboundSend
+        pending: PendingOutboundSend,
+        currentTimeSecs: Int64 = Int64(Date().timeIntervalSince1970),
+        expirySecs: Int64 = defaultPendingExpirySecs
     ) -> PendingOutboundSend {
+        guard pending.amountSats > 0 || pending.isSendAll else {
+            return pending
+        }
+        if pending.timestampSecs > 0, currentTimeSecs - pending.timestampSecs >= expirySecs {
+            return PendingOutboundSend(timestampSecs: 0)
+        }
         if pending.isSendAll {
-            if rawOnchain == 0 || (pending.baselineOnchainSats > 0 && rawOnchain < pending.baselineOnchainSats) {
-                return PendingOutboundSend()
+            if rawOnchain == 0 {
+                return PendingOutboundSend(timestampSecs: 0)
             }
             return pending
         }
@@ -184,7 +204,7 @@ enum BalanceCalculator {
                 ? pending.baselineOnchainSats - pending.amountSats
                 : 0
             if rawOnchain <= expectedRemaining {
-                return PendingOutboundSend()
+                return PendingOutboundSend(timestampSecs: 0)
             }
             return pending
         }
