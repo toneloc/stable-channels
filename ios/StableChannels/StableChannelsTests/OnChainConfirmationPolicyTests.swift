@@ -173,7 +173,7 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         XCTAssertEqual(appState.totalBalanceSats, 60_000)
     }
 
-    // MARK: - Pure BalanceCalculator Tests (SOLID SRP & DIP)
+    // MARK: - Pure BalanceCalculator Tests
 
     func testPureBalanceCalculationStaticEntryPoints() {
         // Ready channel
@@ -388,5 +388,147 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(effectivePostSync.onchain, 69_850)
         XCTAssertEqual(effectivePostSync.spendable, 64_850)
+    }
+
+    // MARK: - Progress, Broadcast, and Invariant Tests
+
+    func testPaymentRecordConfirmationProgress() {
+        let splicePayment = PaymentRecord(
+            id: 1,
+            paymentId: "p1",
+            paymentType: "splice_in",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "pending",
+            createdAt: 1_700_000_000,
+            feeMsat: 1000,
+            txid: "dummy_txid",
+            address: "bc1qtest",
+            confirmations: 0,
+            txBlockHeight: 100
+        )
+        XCTAssertTrue(splicePayment.shouldShowConfirmationProgress)
+        XCTAssertEqual(splicePayment.confirmationProgress.required, 1)
+        XCTAssertEqual(splicePayment.confirmationProgress.display, 0)
+        XCTAssertFalse(splicePayment.confirmationProgress.isComplete)
+        XCTAssertEqual(splicePayment.confirmationProgress.label, "0/1 confirmed")
+
+        let confirmedSplice = PaymentRecord(
+            id: 2,
+            paymentId: "p2",
+            paymentType: "splice_out",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "completed",
+            createdAt: 1_700_000_000,
+            feeMsat: 1000,
+            txid: "dummy_txid",
+            address: "bc1qtest",
+            confirmations: 1,
+            txBlockHeight: 100
+        )
+        XCTAssertEqual(confirmedSplice.confirmationProgress.required, 1)
+        XCTAssertEqual(confirmedSplice.confirmationProgress.display, 1)
+        XCTAssertTrue(confirmedSplice.confirmationProgress.isComplete)
+        XCTAssertEqual(confirmedSplice.confirmationProgress.label, "Confirmed")
+
+        let onchainPayment = PaymentRecord(
+            id: 3,
+            paymentId: "p3",
+            paymentType: "onchain",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "pending",
+            createdAt: 1_700_000_000,
+            feeMsat: 1000,
+            txid: "dummy_txid",
+            address: "bc1qtest",
+            confirmations: 3,
+            txBlockHeight: 100
+        )
+        XCTAssertEqual(onchainPayment.confirmationProgress.required, 6)
+        XCTAssertEqual(onchainPayment.confirmationProgress.display, 3)
+        XCTAssertFalse(onchainPayment.confirmationProgress.isComplete)
+        XCTAssertEqual(onchainPayment.confirmationProgress.label, "3/6 confirmed")
+    }
+
+    func testRecordBroadcastPureLogic() {
+        let initial = BalanceCalculator.PendingOutboundSend()
+
+        // 1. Partial send of 20,000 sats from 100,000 baseline
+        let partial1 = BalanceCalculator.recordBroadcast(
+            currentPending: initial,
+            amountSats: 20_000,
+            isSendAll: false,
+            currentOnchain: 100_000
+        )
+        XCTAssertEqual(partial1.amountSats, 20_000)
+        XCTAssertFalse(partial1.isSendAll)
+        XCTAssertEqual(partial1.baselineOnchainSats, 100_000)
+
+        // 2. Second partial send of 15,000 sats preserves original baseline
+        let partial2 = AppState.recordBroadcast(
+            currentPending: partial1,
+            amountSats: 15_000,
+            isSendAll: false,
+            currentOnchain: 80_000
+        )
+        XCTAssertEqual(partial2.amountSats, 35_000)
+        XCTAssertFalse(partial2.isSendAll)
+        XCTAssertEqual(partial2.baselineOnchainSats, 100_000)
+
+        // 3. Send All
+        let sendAll = BalanceCalculator.recordBroadcast(
+            currentPending: initial,
+            amountSats: 100_000,
+            isSendAll: true,
+            currentOnchain: 100_000
+        )
+        XCTAssertEqual(sendAll.amountSats, 100_000)
+        XCTAssertTrue(sendAll.isSendAll)
+        XCTAssertEqual(sendAll.baselineOnchainSats, 100_000)
+    }
+
+    func testConfirmationCalculatingProtocolPolymorphism() {
+        struct MockCalculator: ConfirmationCalculating {
+            func progress(for _: UInt32, currentBlockHeight _: UInt32, required: Int) -> ConfirmationProgress {
+                ConfirmationProgress(raw: 99, display: required, required: required)
+            }
+        }
+
+        let mock: ConfirmationCalculating = MockCalculator()
+        let result = mock.progress(for: 100, currentBlockHeight: 105, required: 6)
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.display, 6)
+        XCTAssertEqual(result.label, "Confirmed")
+    }
+
+    func testResetOnLogoutClearsPendingOutboundSend() {
+        let appState = AppState()
+        appState.onchainBalanceSats = 50_000
+        appState.spendableOnchainSats = 50_000
+        appState.onchainSendBroadcasted(amountSats: 20_000, isSendAll: false)
+
+        XCTAssertEqual(appState.pendingOutboundSend.amountSats, 20_000)
+
+        appState.resetInMemoryWalletState()
+
+        XCTAssertEqual(appState.pendingOutboundSend.amountSats, 0)
+        XCTAssertFalse(appState.pendingOutboundSend.isSendAll)
+        XCTAssertEqual(appState.pendingOutboundSend.baselineOnchainSats, 0)
+
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        XCTAssertNil(ud?.object(forKey: "pending_outbound_onchain_sats"))
+        XCTAssertNil(ud?.object(forKey: "pending_outbound_is_send_all"))
+        XCTAssertNil(ud?.object(forKey: "pending_outbound_baseline_sats"))
     }
 }

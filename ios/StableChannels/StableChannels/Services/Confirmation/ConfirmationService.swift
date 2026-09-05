@@ -5,10 +5,14 @@ import SwiftUI
 @MainActor
 final class ConfirmationService {
     private let provider: TxConfirmationProvider
-    private let calculator = ConfirmationCalculator()
+    private let calculator: ConfirmationCalculating
 
-    init(provider: TxConfirmationProvider) {
+    init(
+        provider: TxConfirmationProvider,
+        calculator: ConfirmationCalculating = ConfirmationCalculator()
+    ) {
         self.provider = provider
+        self.calculator = calculator
     }
 
     func resolve(

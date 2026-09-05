@@ -40,7 +40,15 @@ struct ConfirmationProgress: Equatable {
     var isComplete: Bool { display >= required }
 }
 
-struct ConfirmationCalculator {
+protocol ConfirmationCalculating: Sendable {
+    func progress(
+        for txBlockHeight: UInt32,
+        currentBlockHeight: UInt32,
+        required: Int
+    ) -> ConfirmationProgress
+}
+
+struct ConfirmationCalculator: ConfirmationCalculating {
     func progress(
         for txBlockHeight: UInt32,
         currentBlockHeight: UInt32,
@@ -63,10 +71,16 @@ extension PaymentRecord {
     var isOnchainConfirmed: Bool {
         (txBlockHeight ?? 0) > 0
     }
+
+    var confirmationProgress: ConfirmationProgress {
+        let required = ConfirmationPolicy.requiredConfirmations(for: paymentType)
+        let raw = Int(confirmations)
+        let display = min(max(raw, 0), required)
+        return ConfirmationProgress(raw: raw, display: display, required: required)
+    }
 }
 
-/// Pure balance calculator enforcing Single Responsibility by isolating
-/// balance aggregation logic from UI state management.
+/// Pure balance calculator isolating balance aggregation logic from UI state management.
 enum BalanceCalculator {
     struct ChannelState: Equatable {
         var hasReadyChannel: Bool
@@ -108,6 +122,29 @@ enum BalanceCalculator {
             self.amountSats = amountSats
             self.isSendAll = isSendAll
             self.baselineOnchainSats = baselineOnchainSats
+        }
+    }
+
+    /// Records an immediate outbound send broadcast and returns the updated pending state.
+    static func recordBroadcast(
+        currentPending: PendingOutboundSend,
+        amountSats: UInt64,
+        isSendAll: Bool,
+        currentOnchain: UInt64
+    ) -> PendingOutboundSend {
+        if isSendAll {
+            return PendingOutboundSend(
+                amountSats: currentOnchain,
+                isSendAll: true,
+                baselineOnchainSats: currentOnchain
+            )
+        } else {
+            return PendingOutboundSend(
+                amountSats: currentPending.amountSats + amountSats,
+                isSendAll: false,
+                baselineOnchainSats: currentPending.baselineOnchainSats == 0 ? currentOnchain : currentPending
+                    .baselineOnchainSats
+            )
         }
     }
 

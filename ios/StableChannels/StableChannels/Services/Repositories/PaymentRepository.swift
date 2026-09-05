@@ -187,7 +187,8 @@ final class PaymentRepository {
         paymentId: Int64,
         paymentType: String? = nil,
         txBlockHeight: UInt32,
-        currentBlockHeight: UInt32
+        currentBlockHeight: UInt32,
+        calculator: ConfirmationCalculating = ConfirmationCalculator()
     ) throws {
         let type: String
         if let paymentType {
@@ -196,13 +197,16 @@ final class PaymentRepository {
             type = try getPayment(byId: paymentId)?.paymentType ?? "onchain"
         }
         let required = ConfirmationPolicy.requiredConfirmations(for: type)
-        let rawConfs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
-        let confs = min(rawConfs, required)
-        let status = confs >= required ? "completed" : "pending"
+        let progress = calculator.progress(
+            for: txBlockHeight,
+            currentBlockHeight: currentBlockHeight,
+            required: required
+        )
+        let status = progress.isComplete ? "completed" : "pending"
         try rawSQL.execute(
             "UPDATE payments SET confirmations = ?, tx_block_height = ?, status = ? WHERE id = ?",
             params: [
-                .integer(Int64(confs)),
+                .integer(Int64(progress.display)),
                 .integer(Int64(txBlockHeight)),
                 .text(status),
                 .integer(paymentId)

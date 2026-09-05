@@ -118,28 +118,19 @@ struct PaymentDetailView: View {
 
     private func statusLabel(for payment: PaymentRecord) -> String {
         if payment.shouldShowConfirmationProgress {
-            let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
-            let confs = Int(payment.confirmations)
-            if confs >= required {
-                return String(localized: "status_confirmed", defaultValue: "Confirmed")
-            }
-            // Show confirmation count for all values below required so the label
-            // never falls through to the stored status (which may be
-            // "Completed" before the poller has run).
-            return "\(confs)/\(required) confirmed"
+            return payment.confirmationProgress.label
         }
         return payment.status.capitalized
     }
 
     @ViewBuilder
     private func confirmationProgressRow(for payment: PaymentRecord) -> some View {
-        let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
-        let confs = min(Int(payment.confirmations), required)
+        let progress = payment.confirmationProgress
         HStack {
             Text(String(localized: "label_confirmations", defaultValue: "Confirmations"))
                 .foregroundStyle(.secondary)
             Spacer()
-            if confs >= required {
+            if progress.isComplete {
                 Label(
                     String(localized: "confirmations_complete", defaultValue: "Confirmed"),
                     systemImage: "checkmark.circle.fill"
@@ -148,11 +139,11 @@ struct PaymentDetailView: View {
                 .font(.subheadline)
             } else {
                 HStack(spacing: 8) {
-                    Text("\(confs)/\(required)")
+                    Text("\(progress.display)/\(progress.required)")
                         .font(.subheadline)
-                    ProgressView(value: Double(confs), total: Double(required))
+                    ProgressView(value: Double(progress.display), total: Double(progress.required))
                         .frame(width: 60)
-                        .tint(confs > 0 ? .blue : .orange)
+                        .tint(progress.display > 0 ? .blue : .orange)
                 }
             }
         }

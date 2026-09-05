@@ -204,23 +204,17 @@ struct PaymentRowView: View {
 
     private var statusLabel: String {
         if payment.shouldShowConfirmationProgress {
-            let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
-            let confs = Int(payment.confirmations)
-            if confs >= required {
-                return String(localized: "status_confirmed", defaultValue: "Confirmed")
-            }
-            return "\(confs)/\(required) confirmed"
+            return payment.confirmationProgress.label
         }
         return payment.status.capitalized
     }
 
     private var statusColor: Color {
         if payment.shouldShowConfirmationProgress {
-            let required = ConfirmationPolicy.requiredConfirmations(for: payment.paymentType)
-            let confs = Int(payment.confirmations)
-            if confs >= required {
+            let progress = payment.confirmationProgress
+            if progress.isComplete {
                 return .green
-            } else if confs > 0 {
+            } else if progress.raw > 0 {
                 return .blue
             } else {
                 return .orange
