@@ -59,6 +59,14 @@ class AppState(private val context: Context) : ViewModel() {
         // Covers ordinary quick app-switches without keeping an unserviced cached Android
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
+
+        // How far a candidate LDK payment's timestamp may drift from an unresolved receive
+        // row's created_at and still be considered a txid match for that row. Amount alone is
+        // not a unique key (repeated round-number deposits are ordinary), so this bounds how
+        // "far away" a same-amount payment can be before it's treated as unrelated rather than
+        // guessed at. 24h comfortably covers normal balance-delta detection lag and backfill
+        // retries without matching a coincidentally-equal deposit from a different day.
+        private const val RECEIVE_TXID_MATCH_WINDOW_SECS = 24 * 60 * 60L
     }
 
     val nodeService = NodeService(context)
@@ -1778,13 +1786,18 @@ class AppState(private val context: Context) : ViewModel() {
         unresolved.forEach { row ->
             val paymentId = row.paymentId ?: return@forEach
             // txid is the unique identity for a payment — amount is not (repeated round-number
-            // deposits are ordinary) — so only consider LDK payments no DB row has claimed yet.
-            // Re-checked per row: an earlier iteration in this same pass may just have claimed
-            // one of the amount-matching candidates.
-            val match = onchainPayments
+            // deposits are ordinary) — so only consider LDK payments no DB row has claimed yet,
+            // and close in time to this row's creation (avoids pairing with an unrelated older
+            // same-amount payment). Re-checked per row: an earlier iteration in this same pass
+            // may just have claimed one of the amount-matching candidates.
+            val candidates = onchainPayments
                 .filter { it.amountMsat?.toLong() == row.amountMsat }
                 .filter { !db.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) }
-                .maxByOrNull { it.latestUpdateTimestamp } ?: return@forEach
+                .filter { kotlin.math.abs(it.latestUpdateTimestamp.toLong() - row.createdAt) <= RECEIVE_TXID_MATCH_WINDOW_SECS }
+            // If more than one candidate remains, the amount+time match is ambiguous — guessing
+            // could pair this row with the wrong (but still plausible) txid. Leave it unresolved
+            // rather than risk that; it will be retried (and may disambiguate) on the next poll.
+            val match = candidates.singleOrNull() ?: return@forEach
             val txid = (match.kind as PaymentKind.Onchain).txid
             // clearAddress = true: this txid came from LDK's own record, not an address match,
             // so the row's stored address (the app's receive address at creation time) can't be
@@ -2148,9 +2161,14 @@ class AppState(private val context: Context) : ViewModel() {
                             it.direction == PaymentDirection.INBOUND &&
                                 it.kind is PaymentKind.Onchain &&
                                 it.amountMsat?.toLong() == depositSats * 1000 &&
-                                db?.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) != true
+                                db?.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) != true &&
+                                kotlin.math.abs(it.latestUpdateTimestamp.toLong() - System.currentTimeMillis() / 1000) <= RECEIVE_TXID_MATCH_WINDOW_SECS
                         }
-                        ?.maxByOrNull { it.latestUpdateTimestamp }
+                        // If more than one unclaimed candidate matches, guessing could attach the
+                        // wrong (but still plausible) txid to this new row — leave it unresolved;
+                        // resolveMissingReceiveTxids() will retry the backfill once LDK's payment
+                        // list (and other rows' claims) make the match unambiguous.
+                        ?.singleOrNull()
                         ?.let { (it.kind as PaymentKind.Onchain).txid }
                 } catch (e: Exception) {
                     Log.w("AppState", "listPayments lookup failed during deposit detection: ${e.message}")
