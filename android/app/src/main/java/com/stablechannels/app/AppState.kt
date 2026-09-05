@@ -960,15 +960,26 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
-                val paymentRowId = pendingSplice?.paymentRowId
-                isSweeping = false
-                spliceTxid = null
-                spliceConfirmationJob?.cancel()
-                spliceConfirmationJob = null
-                monitoredSpliceTxid = null
-                pendingSplice = null
-                databaseService?.failPendingSplice(paymentRowId)
-                AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+                // If SpliceNegotiated already assigned a txid, a signed splice tx exists and
+                // may already be broadcast/confirmed (even by the counterparty). A failed
+                // event arriving after that point is a stale/duplicate replay — rolling back
+                // here would mark a real splice "failed" and desync Stable USD from the
+                // node's actual balance, which only refreshBalances() (ground truth) reflects.
+                if (spliceTxid != null) {
+                    AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
+                        "channel_id" to event.channelId,
+                        "splice_txid" to spliceTxid!!
+                    ))
+                } else {
+                    val paymentRowId = pendingSplice?.paymentRowId
+                    isSweeping = false
+                    spliceConfirmationJob?.cancel()
+                    spliceConfirmationJob = null
+                    monitoredSpliceTxid = null
+                    pendingSplice = null
+                    databaseService?.failPendingSplice(paymentRowId)
+                    AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+                }
             }
             is Event.ChannelClosed -> {
                 handleChannelClosed(event.channelId, event.userChannelId, event.counterpartyNodeId, event.reason)
