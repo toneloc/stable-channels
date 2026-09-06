@@ -4699,6 +4699,82 @@ impl UserApp {
         painter.line_segment([p2, egui::pos2(p2.x, p2.y + head)], stroke);
     }
 
+    /// Animated progress indicator with rolling petal and spiral particle trail.
+    fn paint_curve_progress_indicator(
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        primary_color: Color32,
+        glow_color: Color32,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let time = ui.input(|i| i.time);
+            ui.ctx().request_repaint();
+
+            let painter = ui.painter();
+            let center = rect.center();
+            let scale = (rect.width().min(rect.height()) / 100.0).max(0.1);
+
+            let pulse_duration = 4.2;
+            let pulse_angle = ((time % pulse_duration) / pulse_duration) as f32 * std::f32::consts::TAU;
+            let detail_scale = 0.52 + (((pulse_angle + 0.55).sin() + 1.0) / 2.0) * 0.48;
+
+            let duration = 4.6;
+            let progress = ((time % duration) / duration) as f32;
+
+            let six_petal_point = |u: f32| -> egui::Pos2 {
+                let t = u * std::f32::consts::TAU;
+                let d = 3.0 + detail_scale * 0.25;
+                let base_x = 5.0 * t.cos() + d * (5.0 * t).cos();
+                let base_y = 5.0 * t.sin() - d * (5.0 * t).sin();
+                let s = (2.2 + detail_scale * 0.45) * scale;
+                egui::pos2(center.x + base_x * s, center.y + base_y * s)
+            };
+
+            let track_color = primary_color.gamma_multiply(0.14);
+            let track_steps = 96;
+            let mut prev_pt: Option<egui::Pos2> = None;
+            for step in 0..=track_steps {
+                let u = step as f32 / track_steps as f32;
+                let pt = six_petal_point(u);
+                if let Some(p0) = prev_pt {
+                    painter.line_segment([p0, pt], egui::Stroke::new(1.2 * scale, track_color));
+                }
+                prev_pt = Some(pt);
+            }
+
+            let trail_count = 36;
+            let trail_span = 0.34;
+
+            for i in (0..trail_count).rev() {
+                let offset_frac = i as f32 / (trail_count - 1) as f32;
+                let mut u = progress - offset_frac * trail_span;
+                if u < 0.0 {
+                    u += 1.0;
+                }
+                let pt = six_petal_point(u);
+
+                let intensity = (1.0 - offset_frac).powf(0.56);
+                let particle_radius = (0.75 + (1.0 - offset_frac) * 2.25) * scale;
+
+                let t = 1.0 - offset_frac;
+                let r = (glow_color.r() as f32 + (primary_color.r() as f32 - glow_color.r() as f32) * t) as u8;
+                let g = (glow_color.g() as f32 + (primary_color.g() as f32 - glow_color.g() as f32) * t) as u8;
+                let b = (glow_color.b() as f32 + (primary_color.b() as f32 - glow_color.b() as f32) * t) as u8;
+                let alpha = (intensity * 0.85 * 255.0).clamp(0.0, 255.0) as u8;
+
+                let color = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
+                painter.circle_filled(pt, particle_radius, color);
+            }
+
+            let head_pt = six_petal_point(progress);
+            painter.circle_filled(head_pt, 6.5 * scale, primary_color.gamma_multiply(0.22));
+            painter.circle_filled(head_pt, 4.0 * scale, glow_color.gamma_multiply(0.55));
+            painter.circle_filled(head_pt, 2.2 * scale, egui::Color32::WHITE);
+        }
+        response
+    }
+
     /// Format BTC with iOS-style spaced digit groups: "0.00 039 094" (2/3/3
     /// digits separated by thin spaces). Matches iOS `btcSpacedFormatted`.
     fn format_btc_spaced(btc: f64) -> String {
@@ -5415,7 +5491,12 @@ impl UserApp {
                                     self.show_toast("Copied!", "OK");
                                 }
                             } else {
-                                ui.spinner();
+                                Self::paint_curve_progress_indicator(
+                                    ui,
+                                    egui::vec2(60.0, 34.0),
+                                    theme::IOS_BLUE,
+                                    theme::IOS_ORANGE,
+                                );
                             }
                         }
                     }

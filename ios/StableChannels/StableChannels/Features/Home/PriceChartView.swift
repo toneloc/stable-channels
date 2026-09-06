@@ -206,12 +206,15 @@ struct PriceChartView: View {
                 .padding(.horizontal)
             } else {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
+                    .fill(.quaternary.opacity(0.6))
                     .frame(height: compact ? 220 : 150)
                     .overlay {
-                        Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                        VStack(spacing: 10) {
+                            CurveProgressIndicator(curve: .sixPetalSpiral, size: 44, tint: .blue)
+                            Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.horizontal)
             }

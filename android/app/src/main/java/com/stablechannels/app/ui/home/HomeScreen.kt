@@ -50,6 +50,7 @@ import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
@@ -297,12 +298,12 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(14.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    CurveProgressIndicator(
+                        size = 20.dp,
+                        primaryColor = MaterialTheme.colorScheme.primary,
+                        glowColor = MaterialTheme.colorScheme.tertiary
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         "Syncing...",
                         style = MaterialTheme.typography.bodySmall,
