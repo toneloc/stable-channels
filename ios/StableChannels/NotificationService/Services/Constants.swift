@@ -2,6 +2,7 @@ import Foundation
 
 enum Constants {
     static let appGroup = "group.com.stablechannels.app"
+    static let appGroupIdentifier = appGroup
     static let lspPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     static let lspAddress = "stablechannels.com:9735"
     static let stableChannelTLVType: UInt64 = 13_377_331
