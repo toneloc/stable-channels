@@ -4803,7 +4803,7 @@ impl UserApp {
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
         if ui.is_rect_visible(rect) {
             let time = ui.input(|i| i.time);
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
             Self::paint_curve_on_painter(
                 ui.painter(),
                 rect,
@@ -7241,7 +7241,7 @@ impl UserApp {
                         }
                     } else {
                         let time = ui.input(|i| i.time);
-                        ui.ctx().request_repaint();
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                         let loader_rect = egui::Rect::from_center_size(
                             rect.center() - egui::vec2(0.0, 10.0),
                             egui::vec2(44.0, 44.0),
@@ -7299,7 +7299,7 @@ impl UserApp {
                         }
                     } else {
                         let time = ui.input(|i| i.time);
-                        ui.ctx().request_repaint();
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                         let loader_rect = egui::Rect::from_center_size(
                             rect.center() - egui::vec2(0.0, 10.0),
                             egui::vec2(44.0, 44.0),
@@ -7453,7 +7453,7 @@ impl UserApp {
                     }
                 } else {
                     let time = ui.input(|i| i.time);
-                    ui.ctx().request_repaint();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                     let loader_rect = egui::Rect::from_center_size(
                         inner.center() - egui::vec2(0.0, 16.0),
                         egui::vec2(68.0, 68.0),
@@ -7530,7 +7530,7 @@ impl UserApp {
                     );
                 } else {
                     let time = ui.input(|i| i.time);
-                    ui.ctx().request_repaint();
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                     let loader_rect = egui::Rect::from_center_size(
                         inner.center() - egui::vec2(0.0, 16.0),
                         egui::vec2(68.0, 68.0),
