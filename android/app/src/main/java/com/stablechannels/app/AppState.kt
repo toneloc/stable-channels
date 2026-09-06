@@ -282,6 +282,11 @@ class AppState(private val context: Context) : ViewModel() {
         }
     var pendingClosePaymentId: String? = null
     private var trackedClosingFundingTxid: String? = null
+    // Bumped whenever a new splice negotiation is established (handleSplicePending). A
+    // SpliceNegotiationFailed handler for an older splice captures this at entry; if it changes
+    // while the async esplora check is in flight, a newer splice has since started and none of
+    // the stale handler's cleanup may run against it.
+    private var spliceGeneration: Long = 0L
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -334,6 +339,7 @@ class AppState(private val context: Context) : ViewModel() {
         .readTimeout(4, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
+    private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -960,11 +966,14 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
-                // Snapshot to a local val: spliceTxid can be mutated concurrently by the IO-thread
-                // confirmation monitor (completeConfirmedSplice can null it out the moment a splice
-                // confirms), so re-reading the field after the async check below would be a TOCTOU
-                // race that could apply this branch's rollback to a different, newer splice.
+                // Snapshot to local vals: spliceTxid/pendingSplice/spliceGeneration can all be
+                // mutated concurrently by the IO-thread confirmation monitor or by a brand-new
+                // splice starting (handleSplicePending), so re-reading them after the async check
+                // below would be a TOCTOU race that could apply this branch's rollback to a
+                // different, newer splice.
                 val capturedTxid = spliceTxid
+                val capturedGeneration = spliceGeneration
+                val capturedPaymentRowId = pendingSplice?.paymentRowId
                 if (capturedTxid != null) {
                     // A signed splice tx exists. It may already be broadcast/confirmed (even by
                     // the counterparty), in which case this failed event is a stale/duplicate
@@ -974,26 +983,44 @@ class AppState(private val context: Context) : ViewModel() {
                     // later attempt), so verify against esplora rather than assuming: if the tx
                     // was never broadcast, this is a real failure, and it must be handled or the
                     // confirmation monitor + "Move" lock (isSweeping) hang forever.
-                    if (doesTxExist(capturedTxid)) {
-                        AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
-                            "channel_id" to event.channelId,
-                            "splice_txid" to capturedTxid
-                        ))
-                    } else {
-                        val paymentRowId = pendingSplice?.paymentRowId
-                        isSweeping = false
-                        spliceConfirmationJob?.cancel()
-                        spliceConfirmationJob = null
-                        monitoredSpliceTxid = null
-                        pendingSplice = null
-                        // Only clear if nothing newer has taken its place in the meantime.
-                        if (spliceTxid == capturedTxid) spliceTxid = null
-                        databaseService?.failPendingSplice(paymentRowId)
-                        AuditService.log("SPLICE_FAILED", mapOf(
-                            "channel_id" to event.channelId,
-                            "splice_txid" to capturedTxid,
-                            "reason" to "txid_never_broadcast"
-                        ))
+                    when (doesTxExist(capturedTxid)) {
+                        TxBroadcastStatus.EXISTS -> {
+                            AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
+                                "channel_id" to event.channelId,
+                                "splice_txid" to capturedTxid
+                            ))
+                        }
+                        TxBroadcastStatus.INCONCLUSIVE -> {
+                            // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity)
+                            // — preserve the splice rather than risk a false failure.
+                            AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", mapOf(
+                                "channel_id" to event.channelId,
+                                "splice_txid" to capturedTxid
+                            ))
+                        }
+                        TxBroadcastStatus.NOT_FOUND -> {
+                            if (spliceGeneration != capturedGeneration) {
+                                // A newer splice has started while the check was in flight — none
+                                // of its state belongs to this stale handler.
+                                AuditService.log("SPLICE_FAILED_STALE_GENERATION", mapOf(
+                                    "channel_id" to event.channelId,
+                                    "splice_txid" to capturedTxid
+                                ))
+                            } else {
+                                isSweeping = false
+                                spliceConfirmationJob?.cancel()
+                                spliceConfirmationJob = null
+                                monitoredSpliceTxid = null
+                                pendingSplice = null
+                                if (spliceTxid == capturedTxid) spliceTxid = null
+                                databaseService?.failPendingSplice(capturedPaymentRowId)
+                                AuditService.log("SPLICE_FAILED", mapOf(
+                                    "channel_id" to event.channelId,
+                                    "splice_txid" to capturedTxid,
+                                    "reason" to "txid_never_broadcast"
+                                ))
+                            }
+                        }
                     }
                 } else {
                     val paymentRowId = pendingSplice?.paymentRowId
@@ -1422,6 +1449,9 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
+        // A new splice is now the current operation — invalidates anything a stale
+        // SpliceNegotiationFailed handler captured for a prior attempt.
+        spliceGeneration++
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
@@ -1486,10 +1516,11 @@ class AppState(private val context: Context) : ViewModel() {
 
         spliceConfirmationJob?.cancel()
         monitoredSpliceTxid = normalizedTxid
+        val monitorGeneration = spliceGeneration
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
-                    completeConfirmedSplice(normalizedTxid)
+                    completeConfirmedSplice(normalizedTxid, monitorGeneration)
                     break
                 }
                 delay(30_000)
@@ -1513,24 +1544,9 @@ class AppState(private val context: Context) : ViewModel() {
      * real failure as a stale replay (recoverable manually) rather than mislabeling a possibly
      * real splice as failed.
      */
-    private fun doesTxExist(txid: String): Boolean {
+    private fun doesTxExist(txid: String): TxBroadcastStatus {
         val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        var reachedAnyEndpoint = false
-        for (baseUrl in urls) {
-            try {
-                val normalizedTxid = txid.substringBefore(":")
-                val request = Request.Builder()
-                    .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
-                    .build()
-                httpClient.newCall(request).execute().use { response ->
-                    reachedAnyEndpoint = true
-                    if (response.isSuccessful) return true
-                }
-            } catch (e: Exception) {
-                Log.w("AppState", "Splice existence check failed: ${e.message}")
-            }
-        }
-        return !reachedAnyEndpoint
+        return spliceBroadcastChecker.checkStatus(txid, urls)
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
@@ -1553,7 +1569,7 @@ class AppState(private val context: Context) : ViewModel() {
         return false
     }
 
-    private fun completeConfirmedSplice(txid: String) {
+    private fun completeConfirmedSplice(txid: String, expectedGeneration: Long) {
         // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
         // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
         // — which requires an exact txid match — can never find it, permanently desyncing Stable
@@ -1575,13 +1591,19 @@ class AppState(private val context: Context) : ViewModel() {
             saveChannelToDB()
         }
 
-        isSweeping = false
-        pendingSplice = null
-        sweepOnchainStart = 0
-        if (spliceTxid == txid) spliceTxid = null
-        monitoredSpliceTxid = null
-        spliceConfirmationJob = null
-        _statusMessage.value = "Move confirmed"
+        // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
+        // it — otherwise this stale monitor tears down the newer operation's state instead.
+        if (spliceGeneration == expectedGeneration) {
+            isSweeping = false
+            pendingSplice = null
+            sweepOnchainStart = 0
+            if (spliceTxid == txid) spliceTxid = null
+            monitoredSpliceTxid = null
+            spliceConfirmationJob = null
+            _statusMessage.value = "Move confirmed"
+        } else {
+            AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", mapOf("txid" to txid))
+        }
 
         AuditService.log("SPLICE_CONFIRMED", mapOf(
             "txid" to txid,
