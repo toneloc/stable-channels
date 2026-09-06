@@ -60,7 +60,7 @@ final class WalletKeychainService: MnemonicStorageProtocol {
     init(
         service: String = "com.stablechannels.wallet",
         account: String = "seed_phrase",
-        accessGroup: String? = "group.com.stablechannels.app"
+        accessGroup: String? = Constants.appGroupIdentifier
     ) {
         self.service = service
         self.account = account
