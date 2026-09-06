@@ -219,6 +219,15 @@ struct ErrorDisplayView: View {
     let message: String
     @Environment(AppState.self) private var appState
     @State private var showingRestoreSheet = false
+    @State private var showingResetConfirmation = false
+    @State private var isResetting = false
+
+    private var isMismatchError: Bool {
+        message.contains("Mismatched state")
+            || message.contains("Wallet state is inconsistent")
+            || message.contains("Restore with your recovery phrase")
+            || message.contains("Please restore using your backup seed words")
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -232,12 +241,18 @@ struct ErrorDisplayView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            if message.contains("Mismatched state") {
+            if isMismatchError {
                 Button("Restore From Backup Seed") {
                     showingRestoreSheet = true
                 }
                 .buttonStyle(.borderedProminent)
                 .padding(.top, 4)
+
+                Button("Reset and Start Fresh", role: .destructive) {
+                    showingResetConfirmation = true
+                }
+                .buttonStyle(.bordered)
+                .disabled(isResetting)
             } else {
                 Button(String(localized: "try_again", defaultValue: "Try Again")) {
                     appState.phase = .loading
@@ -246,6 +261,36 @@ struct ErrorDisplayView: View {
                 .buttonStyle(.bordered)
                 .padding(.top, 8)
             }
+        }
+        .confirmationDialog(
+            "Reset Wallet",
+            isPresented: $showingResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Erase and Start Fresh", role: .destructive) {
+                isResetting = true
+                Task {
+                    do {
+                        try AppState.wipeAllWalletState(wipePending: true)
+                        await MainActor.run {
+                            appState.phase = .loading
+                        }
+                        await appState.start()
+                    } catch {
+                        await MainActor.run {
+                            appState.phase = .error("Reset failed: \(error.localizedDescription)")
+                        }
+                    }
+                    await MainActor.run {
+                        isResetting = false
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This will permanently remove the surviving seed from Keychain and local data. Any funds associated with this seed will be lost if you do not have your backup recovery phrase."
+            )
         }
         .sheet(isPresented: $showingRestoreSheet) {
             MismatchRecoverySheet()

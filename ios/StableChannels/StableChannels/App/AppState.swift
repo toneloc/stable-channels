@@ -540,12 +540,13 @@ class AppState {
             }
         }
 
-        // Delete active keychain mnemonic
-        try keychain.deleteMnemonic()
-
-        // Only delete pending slot on explicit full wipe, never during restore wipe!
+        // Only delete pending slot and clear lifecycle markers on explicit full wipe, never during restore wipe!
         if wipePending {
             try keychain.deletePendingMnemonic()
+            let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            ud?.removeObject(forKey: "restore_phase")
+            ud?.removeObject(forKey: "restore_in_progress")
+            ud?.removeObject(forKey: "node_id")
         }
     }
 
