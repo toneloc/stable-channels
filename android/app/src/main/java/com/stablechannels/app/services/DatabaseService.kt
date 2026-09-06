@@ -1216,6 +1216,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  txid is the unique identity for a payment, so a stale/racing caller must never overwrite
      *  an already-resolved row nor attach the same txid to two rows. Returns whether it wrote.
      *
+     *  The uniqueness guard is keyed on the row's own primary key (`id`), not `payment_id`:
+     *  `payment_id` can be NULL on other rows (e.g. some channel-close bookkeeping paths), and
+     *  `payment_id != ?` evaluates to NULL/unknown for a NULL `payment_id` — SQLite then excludes
+     *  that row from the `NOT EXISTS` subquery, silently defeating the duplicate-txid check for
+     *  exactly the rows that most need it. `id` is never NULL, so this can't happen.
+     *
      *  [clearAddress]: pass true when the txid was resolved from LDK's own payment list rather
      *  than an address match (e.g. txid backfill for a channel-close sweep landing on an
      *  untracked address). Those rows' stored `address` is just the app's own receive address at
@@ -1224,20 +1230,33 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  txid we just wrote, and repeat forever. Clearing the address skips that check for a
      *  ground-truth-resolved txid instead of re-verifying it against a field known to be stale. */
     fun updatePaymentTxid(paymentId: String, txid: String, clearAddress: Boolean = false): Boolean {
-        val cv = ContentValues().apply {
-            put("txid", txid)
-            if (clearAddress) putNull("address")
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val rowId = db.rawQuery(
+                "SELECT id FROM payments WHERE payment_id = ? AND (txid IS NULL OR txid = '') LIMIT 1",
+                arrayOf(paymentId)
+            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+            if (rowId == null) {
+                db.execSQL("ROLLBACK")
+                return false
+            }
+            val cv = ContentValues().apply {
+                put("txid", txid)
+                if (clearAddress) putNull("address")
+            }
+            val updated = db.update(
+                "payments",
+                cv,
+                "id = ? AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)",
+                arrayOf(rowId.toString(), txid, rowId.toString())
+            )
+            db.execSQL("COMMIT")
+            return updated > 0
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
         }
-        val updated = writableDatabase.update(
-            "payments",
-            cv,
-            """
-            payment_id = ? AND (txid IS NULL OR txid = '')
-              AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND payment_id != ?)
-            """.trimIndent(),
-            arrayOf(paymentId, txid, paymentId)
-        )
-        return updated > 0
     }
 
     /** Whether any row already carries this txid — used to avoid attaching an LDK-reported txid

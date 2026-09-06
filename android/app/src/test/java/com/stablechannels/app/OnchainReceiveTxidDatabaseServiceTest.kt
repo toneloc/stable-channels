@@ -86,6 +86,29 @@ class OnchainReceiveTxidDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun txidAlreadyUsedByRowWithNullPaymentIdIsNotReassigned() {
+        // Regression test: the duplicate-txid guard used to key its exclusion on `payment_id`,
+        // and `payment_id != ?` evaluates to NULL/unknown for a NULL payment_id row — silently
+        // defeating the NOT EXISTS check for exactly the rows most likely to need it (e.g. some
+        // channel-close bookkeeping paths leave payment_id null). The guard is now keyed on the
+        // row's own primary key (`id`), which is never null.
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = null, paymentType = "onchain", direction = "received",
+            amountMsat = 75_000, status = "completed", txid = "claimed-tx"
+        )
+        val rowB = service.recordPayment(
+            paymentId = "row-b", paymentType = "onchain", direction = "received",
+            amountMsat = 75_000, status = "pending", txid = null
+        )
+
+        assertTrue(service.isTxidRecorded("claimed-tx"))
+        assertFalse(service.updatePaymentTxid("row-b", "claimed-tx"))
+        assertNull(payment(service, rowB).txid)
+        service.close()
+    }
+
     private fun payment(service: DatabaseService, id: Long): PaymentRecord =
         service.getRecentPayments(100).single { it.id == id }
 

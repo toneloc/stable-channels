@@ -1783,33 +1783,47 @@ class AppState(private val context: Context) : ViewModel() {
             null
         } ?: return
 
-        unresolved.forEach { row ->
-            val paymentId = row.paymentId ?: return@forEach
-            // txid is the unique identity for a payment — amount is not (repeated round-number
-            // deposits are ordinary) — so only consider LDK payments no DB row has claimed yet,
-            // and close in time to this row's creation (avoids pairing with an unrelated older
-            // same-amount payment). Re-checked per row: an earlier iteration in this same pass
-            // may just have claimed one of the amount-matching candidates.
-            val candidates = onchainPayments
+        // txid is the unique identity for a payment — amount is not (repeated round-number
+        // deposits are ordinary) — so only ever consider LDK payments no DB row has claimed yet,
+        // and close in time to a row's creation (avoids pairing with an unrelated older
+        // same-amount payment). Build every plausible (row, candidate) pairing up front rather
+        // than matching row-by-row: assigning greedily by ascending time delta lets the tightest,
+        // least-ambiguous pairs claim their candidate first, so two rows that each have two
+        // same-amount candidates can still both resolve correctly instead of both being rejected
+        // as ambiguous forever (a real deadlock the old row-by-row singleOrNull() could hit).
+        data class Pairing(val row: PaymentRecord, val txid: String, val deltaSecs: Long)
+        val pairings = unresolved.flatMap { row ->
+            if (row.paymentId == null) return@flatMap emptyList<Pairing>()
+            onchainPayments
                 .filter { it.amountMsat?.toLong() == row.amountMsat }
                 .filter { !db.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) }
-                .filter { kotlin.math.abs(it.latestUpdateTimestamp.toLong() - row.createdAt) <= RECEIVE_TXID_MATCH_WINDOW_SECS }
-            // If more than one candidate remains, the amount+time match is ambiguous — guessing
-            // could pair this row with the wrong (but still plausible) txid. Leave it unresolved
-            // rather than risk that; it will be retried (and may disambiguate) on the next poll.
-            val match = candidates.singleOrNull() ?: return@forEach
-            val txid = (match.kind as PaymentKind.Onchain).txid
+                .mapNotNull {
+                    val delta = kotlin.math.abs(it.latestUpdateTimestamp.toLong() - row.createdAt)
+                    if (delta <= RECEIVE_TXID_MATCH_WINDOW_SECS) {
+                        Pairing(row, (it.kind as PaymentKind.Onchain).txid, delta)
+                    } else null
+                }
+        }.sortedBy { it.deltaSecs }
+
+        val claimedRowIds = mutableSetOf<Long>()
+        val claimedTxids = mutableSetOf<String>()
+        for (pairing in pairings) {
+            if (pairing.row.id in claimedRowIds || pairing.txid in claimedTxids) continue
+            val paymentId = pairing.row.paymentId ?: continue
             // clearAddress = true: this txid came from LDK's own record, not an address match,
             // so the row's stored address (the app's receive address at creation time) can't be
             // used to re-verify it — see updatePaymentTxid's kdoc.
-            if (db.updatePaymentTxid(paymentId, txid, clearAddress = true)) {
+            if (db.updatePaymentTxid(paymentId, pairing.txid, clearAddress = true)) {
+                claimedRowIds += pairing.row.id
+                claimedTxids += pairing.txid
                 AuditService.log("ONCHAIN_RECEIVE_TXID_BACKFILLED", mapOf(
                     "payment_id" to paymentId,
-                    "txid" to txid
+                    "txid" to pairing.txid
                 ))
             }
         }
     }
+
 
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
         val now = System.currentTimeMillis()
