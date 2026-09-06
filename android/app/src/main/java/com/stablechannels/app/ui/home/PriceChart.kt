@@ -30,7 +30,10 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PriceRecord
 import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.ui.components.CurvePattern
+import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.usdFormatted
+import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -392,11 +395,21 @@ fun PriceChart(
                     modifier = Modifier.fillMaxWidth().height(160.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text(
-                        "Collecting price data...",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        CurveProgressIndicator(
+                            size = 68.dp,
+                            pattern = CurvePattern.SIX_PETAL_SPIRAL,
+                            primaryColor = Color(0xFF38BDF8)
+                        )
+                        Text(
+                            "Collecting price data...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -412,4 +425,38 @@ private fun downsample(records: List<PriceRecord>, maxPoints: Int): List<PriceRe
     if (records.size <= maxPoints) return records
     val step = (records.size - 1).toDouble() / (maxPoints - 1)
     return (0 until maxPoints).map { i -> records[(i * step).toInt().coerceAtMost(records.size - 1)] }
+}
+
+@Preview(showBackground = true)
+@Composable
+private fun PriceChartCollectingDataPreview() {
+    MaterialTheme {
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            colors = androidx.compose.material3.CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.background
+            )
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth().height(160.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CurveProgressIndicator(
+                        size = 68.dp,
+                        pattern = CurvePattern.SIX_PETAL_SPIRAL,
+                        primaryColor = Color(0xFF38BDF8)
+                    )
+                    Text(
+                        "Collecting price data...",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
 }

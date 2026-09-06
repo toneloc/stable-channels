@@ -209,8 +209,8 @@ struct PriceChartView: View {
                     .fill(.quaternary.opacity(0.6))
                     .frame(height: compact ? 220 : 150)
                     .overlay {
-                        VStack(spacing: 10) {
-                            CurveProgressIndicator(curve: .sixPetalSpiral, size: 44, tint: .blue)
+                        VStack(spacing: 12) {
+                            CurveProgressIndicator(curve: .sixPetalSpiral, size: 68, tint: .blue)
                             Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -321,4 +321,9 @@ struct PriceChartCard: View, Equatable {
     let compact: Bool
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.compact == rhs.compact }
     var body: some View { PriceChartView(compact: compact) }
+}
+
+#Preview("Collecting Price Data") {
+    PriceChartCard(compact: false)
+        .environment(AppState())
 }

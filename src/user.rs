@@ -4727,7 +4727,7 @@ impl UserApp {
                 let d = 3.0 + detail_scale * 0.25;
                 let base_x = 5.0 * t.cos() + d * (5.0 * t).cos();
                 let base_y = 5.0 * t.sin() - d * (5.0 * t).sin();
-                let s = (2.2 + detail_scale * 0.45) * scale;
+                let s = (2.2 + detail_scale * 0.45) * 1.85 * scale;
                 egui::pos2(center.x + base_x * s, center.y + base_y * s)
             };
 
@@ -4755,7 +4755,7 @@ impl UserApp {
                 let pt = six_petal_point(u);
 
                 let intensity = (1.0 - offset_frac).powf(0.56);
-                let particle_radius = (0.75 + (1.0 - offset_frac) * 2.25) * scale;
+                let particle_radius = (1.0 + (1.0 - offset_frac) * 2.8) * scale;
 
                 let t = 1.0 - offset_frac;
                 let r = (glow_color.r() as f32 + (primary_color.r() as f32 - glow_color.r() as f32) * t) as u8;

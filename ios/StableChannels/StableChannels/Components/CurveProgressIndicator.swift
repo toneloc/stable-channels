@@ -70,7 +70,7 @@ struct CurveProgressIndicator: View {
             )
 
             let fade = pow(1.0 - tailOffset, 0.56)
-            let radius = (0.7 + fade * 2.3) * scale
+            let radius = max(1.2, (1.0 + fade * 2.8) * scale)
             let opacity = 0.04 + fade * 0.94
 
             let particleRect = CGRect(
@@ -94,12 +94,12 @@ struct CurveProgressIndicator: View {
             let d = 3.0 + detailScale * 0.25
             let baseX = 5.0 * cos(t) + d * cos(5.0 * t)
             let baseY = 5.0 * sin(t) - d * sin(5.0 * t)
-            let s = 2.2 + detailScale * 0.45
+            let s = (2.2 + detailScale * 0.45) * 1.85
             return (50.0 + baseX * s, 50.0 + baseY * s)
 
         case .spiralSearch:
             let angle = t * 4.0
-            let radius = 8.0 + (1.0 - cos(t)) * (8.5 + detailScale * 2.4)
+            let radius = (8.0 + (1.0 - cos(t)) * (8.5 + detailScale * 2.4)) * 1.4
             return (50.0 + cos(angle) * radius, 50.0 + sin(angle) * radius)
         }
     }
@@ -108,9 +108,42 @@ struct CurveProgressIndicator: View {
 typealias MathCurveLoader = CurveProgressIndicator
 
 #Preview {
-    VStack(spacing: 32) {
-        CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
-        CurveProgressIndicator(curve: .spiralSearch, size: 72, tint: .blue)
+    VStack(spacing: 28) {
+        HStack(spacing: 40) {
+            VStack(spacing: 8) {
+                CurveProgressIndicator(curve: .sixPetalSpiral, size: 76, tint: .orange)
+                Text("Six-Petal")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(spacing: 8) {
+                CurveProgressIndicator(curve: .spiralSearch, size: 76, tint: .blue)
+                Text("Spiral Search")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        Divider()
+
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Price Feed Not Fetched (Chart Card)")
+                .font(.caption.bold())
+                .foregroundStyle(.secondary)
+
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color(.secondarySystemBackground))
+                .frame(height: 150)
+                .overlay {
+                    VStack(spacing: 12) {
+                        CurveProgressIndicator(curve: .sixPetalSpiral, size: 68, tint: .blue)
+                        Text("Collecting price data...")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+        }
     }
     .padding()
 }

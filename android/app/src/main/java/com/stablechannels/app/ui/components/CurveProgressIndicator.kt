@@ -101,7 +101,7 @@ fun CurveProgressIndicator(
 
             val pt = calculateCurvePoint(pattern, u, detailScale, center, scale)
             val intensity = (1f - offsetFrac).pow(0.56f)
-            val particleRadius = (0.75f + (1f - offsetFrac) * 2.25f) * scale
+            val particleRadius = maxOf(1.2f, (1.0f + (1f - offsetFrac) * 2.8f) * scale)
             val particleColor = lerp(glowColor, primaryColor, 1f - offsetFrac)
 
             drawCircle(
@@ -120,7 +120,7 @@ fun CurveProgressIndicator(
         )
         drawCircle(
             color = glowColor.copy(alpha = 0.55f),
-            radius = 4f * scale,
+            radius = 4.0f * scale,
             center = headPt
         )
         drawCircle(
@@ -165,12 +165,12 @@ private fun calculateCurvePoint(
             val d = 3f + detailScale * 0.25f
             val baseX = 5f * cos(t) + d * cos(5f * t)
             val baseY = 5f * sin(t) - d * sin(5f * t)
-            val s = (2.2f + detailScale * 0.45f) * viewportScale
+            val s = (2.2f + detailScale * 0.45f) * 1.85f * viewportScale
             Offset(center.x + baseX * s, center.y + baseY * s)
         }
         CurvePattern.SPIRAL_SEARCH -> {
             val angle = t * 4f
-            val radius = (8f + (1f - cos(t)) * (8.5f + detailScale * 2.4f)) * viewportScale
+            val radius = (8f + (1f - cos(t)) * (8.5f + detailScale * 2.4f)) * 1.4f * viewportScale
             Offset(center.x + cos(angle) * radius, center.y + sin(angle) * radius)
         }
     }
