@@ -50,7 +50,6 @@ import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.AppState
-import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
@@ -298,10 +297,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    CurveProgressIndicator(
-                        size = 20.dp,
-                        primaryColor = MaterialTheme.colorScheme.primary,
-                        glowColor = MaterialTheme.colorScheme.tertiary
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(

@@ -233,9 +233,8 @@ struct SellView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                Image(systemName: "clock.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.orange)
+                CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
+                    .padding(.bottom, 4)
 
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
@@ -246,9 +245,6 @@ struct SellView: View {
                 ) + " BTC for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-
-                ProgressView()
-                    .padding(.top, 4)
 
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Waiting for LSP confirmation..."))
                     .font(.caption)
@@ -325,4 +321,27 @@ struct SellView: View {
         }
         isExecuting = false
     }
+}
+
+#Preview("Sell - Order Pending") {
+    VStack(spacing: 20) {
+        CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
+            .padding(.bottom, 4)
+
+        Text("Order Pending")
+            .font(.title2.bold())
+
+        Text("Converting 0.00500000 BTC for $485.20")
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+
+        Text("Waiting for LSP confirmation...")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+
+        Button("Done") { }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+    }
+    .padding()
 }

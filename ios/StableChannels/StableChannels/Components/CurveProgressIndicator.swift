@@ -107,43 +107,77 @@ struct CurveProgressIndicator: View {
 
 typealias MathCurveLoader = CurveProgressIndicator
 
-#Preview {
-    VStack(spacing: 28) {
-        HStack(spacing: 40) {
-            VStack(spacing: 8) {
-                CurveProgressIndicator(curve: .sixPetalSpiral, size: 76, tint: .orange)
-                Text("Six-Petal")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(spacing: 8) {
-                CurveProgressIndicator(curve: .spiralSearch, size: 76, tint: .blue)
-                Text("Spiral Search")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-
-        Divider()
-
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Price Feed Not Fetched (Chart Card)")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color(.secondarySystemBackground))
-                .frame(height: 150)
-                .overlay {
-                    VStack(spacing: 12) {
-                        CurveProgressIndicator(curve: .sixPetalSpiral, size: 68, tint: .blue)
-                        Text("Collecting price data...")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+#Preview("All Planted Loaders Gallery") {
+    ScrollView {
+        VStack(spacing: 28) {
+            // Standalone Curves
+            HStack(spacing: 40) {
+                VStack(spacing: 8) {
+                    CurveProgressIndicator(curve: .sixPetalSpiral, size: 76, tint: .orange)
+                    Text("Six-Petal Spiral")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
                 }
+
+                VStack(spacing: 8) {
+                    CurveProgressIndicator(curve: .spiralSearch, size: 76, tint: .blue)
+                    Text("Spiral Search")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 8)
+
+            Divider()
+
+            // 1. Price Chart Card - Collecting Price Data
+            VStack(alignment: .leading, spacing: 8) {
+                Text("1. Price Chart (PriceChartView)")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(.secondarySystemBackground))
+                    .frame(height: 150)
+                    .overlay {
+                        VStack(spacing: 12) {
+                            CurveProgressIndicator(curve: .spiralSearch, size: 68, tint: .blue)
+                            Text("Collecting price data...")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+            }
+
+            Divider()
+
+            // 2. Buy / Sell - Order Pending Dialog
+            VStack(alignment: .leading, spacing: 8) {
+                Text("2. Trade Execution (BuyView / SellView)")
+                    .font(.caption.bold())
+                    .foregroundStyle(.secondary)
+
+                VStack(spacing: 14) {
+                    CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
+                        .padding(.bottom, 2)
+
+                    Text("Order Pending")
+                        .font(.headline.bold())
+
+                    Text("Converting 0.00500000 BTC for $485.20")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Text("Waiting for LSP confirmation...")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding()
+                .frame(maxWidth: .infinity)
+                .background(Color(.secondarySystemBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+            }
         }
+        .padding()
     }
-    .padding()
 }

@@ -401,7 +401,7 @@ fun PriceChart(
                     ) {
                         CurveProgressIndicator(
                             size = 68.dp,
-                            pattern = CurvePattern.SIX_PETAL_SPIRAL,
+                            pattern = CurvePattern.SPIRAL_SEARCH,
                             primaryColor = Color(0xFF38BDF8)
                         )
                         Text(
@@ -447,7 +447,7 @@ private fun PriceChartCollectingDataPreview() {
                 ) {
                     CurveProgressIndicator(
                         size = 68.dp,
-                        pattern = CurvePattern.SIX_PETAL_SPIRAL,
+                        pattern = CurvePattern.SPIRAL_SEARCH,
                         primaryColor = Color(0xFF38BDF8)
                     )
                     Text(
