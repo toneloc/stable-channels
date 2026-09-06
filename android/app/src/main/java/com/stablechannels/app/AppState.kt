@@ -337,7 +337,10 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun resetInMemoryWalletState() {
-        pendingOutboundSend = PendingOutboundSend()
+        synchronized(pendingLock) {
+            sendGeneration++
+            pendingOutboundSend = PendingOutboundSend()
+        }
         BalanceCacheKey.clearAll(context)
     }
 
@@ -345,6 +348,9 @@ class AppState(private val context: Context) : ViewModel() {
         context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).getLong(BalanceCacheKey.SPENDABLE, 0L)
     )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
+
+    private val pendingLock = Any()
+    private var sendGeneration: Long = 0L
 
     @Volatile
     var pendingOutboundSend: PendingOutboundSend = PendingOutboundSend()
@@ -2787,8 +2793,11 @@ class AppState(private val context: Context) : ViewModel() {
         val hasReady = nodeService.channels.any { it.isChannelReady }
 
         // Resolve pending outbound deduction against raw wallet observation
-        pendingOutboundSend = resolvePendingOutboundSend(rawOnchain, pendingOutboundSend)
-        val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, pendingOutboundSend)
+        val effectivePending = synchronized(pendingLock) {
+            pendingOutboundSend = resolvePendingOutboundSend(rawOnchain, pendingOutboundSend)
+            pendingOutboundSend
+        }
+        val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, effectivePending)
 
         // Sync fundingTxid directly from the LDK node's channel details
         // to gracefully handle out-of-band splices (e.g. LSP-initiated)
@@ -2876,26 +2885,29 @@ class AppState(private val context: Context) : ViewModel() {
         val newOnchain = if (isSendAll) 0L else (currentOnchain - amountSats).coerceAtLeast(0L)
         val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
 
-        val newBaseline = if (pendingOutboundSend.baselineOnchainSats == 0L) {
-            currentOnchain
-        } else {
-            pendingOutboundSend.baselineOnchainSats
-        }
+        val gen = synchronized(pendingLock) {
+            val newBaseline = if (pendingOutboundSend.baselineOnchainSats == 0L) {
+                currentOnchain
+            } else {
+                pendingOutboundSend.baselineOnchainSats
+            }
 
-        pendingOutboundSend = if (isSendAll) {
-            PendingOutboundSend(
-                amountSats = pendingOutboundSend.amountSats + currentOnchain,
-                isSendAll = true,
-                baselineOnchainSats = newBaseline,
-                timestampSecs = System.currentTimeMillis() / 1000L
-            )
-        } else {
-            PendingOutboundSend(
-                amountSats = pendingOutboundSend.amountSats + amountSats,
-                isSendAll = false,
-                baselineOnchainSats = newBaseline,
-                timestampSecs = System.currentTimeMillis() / 1000L
-            )
+            pendingOutboundSend = if (isSendAll) {
+                PendingOutboundSend(
+                    amountSats = pendingOutboundSend.amountSats + currentOnchain,
+                    isSendAll = true,
+                    baselineOnchainSats = newBaseline,
+                    timestampSecs = System.currentTimeMillis() / 1000L
+                )
+            } else {
+                PendingOutboundSend(
+                    amountSats = pendingOutboundSend.amountSats + amountSats,
+                    isSendAll = false,
+                    baselineOnchainSats = newBaseline,
+                    timestampSecs = System.currentTimeMillis() / 1000L
+                )
+            }
+            ++sendGeneration
         }
 
         _onchainBalanceSats.value = newOnchain
@@ -2936,7 +2948,11 @@ class AppState(private val context: Context) : ViewModel() {
             }
             withContext(Dispatchers.Main) {
                 if (syncSuccess) {
-                    pendingOutboundSend = PendingOutboundSend()
+                    synchronized(pendingLock) {
+                        if (gen == sendGeneration) {
+                            pendingOutboundSend = PendingOutboundSend()
+                        }
+                    }
                 }
                 refreshBalances()
             }

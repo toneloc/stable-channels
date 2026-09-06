@@ -140,6 +140,8 @@ class AppState {
         return AppState.loadCachedPendingOutboundSend(from: ud)
     }()
 
+    private var sendGeneration: Int64 = 0
+
     /// The active LSP configuration managed by `LSPService`.
     var activeLSP: LSPConfig { lspService.activeLSP }
 
@@ -567,6 +569,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
+        sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
         transactionLinkService.clearCloseTxid()
@@ -3090,17 +3093,21 @@ class AppState {
         ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: BalanceCacheKey.spendable)
         persistPendingOutboundSend(to: ud)
 
-        syncWalletsInBackground()
+        sendGeneration += 1
+        let currentGen = sendGeneration
+        syncWalletsInBackground(expectedGeneration: currentGen)
     }
 
     /// Synchronizes wallets off the main actor and refreshes balances upon completion.
-    private func syncWalletsInBackground() {
+    /// If expectedGeneration is provided, the pending outbound send is only cleared if
+    /// no subsequent sends have been broadcast while the sync was in-flight.
+    private func syncWalletsInBackground(expectedGeneration: Int64? = nil) {
         let nodeService = self.nodeService
         Task { @MainActor in
             let syncSuccess = await Task.detached(priority: .utility) {
                 (try? nodeService.syncWallets()) != nil
             }.value
-            if syncSuccess {
+            if syncSuccess, let expected = expectedGeneration, expected == self.sendGeneration {
                 self.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
             }
             self.refreshBalances()
