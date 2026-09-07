@@ -1136,39 +1136,6 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** Pending received on-chain rows still missing a txid — excluded from
-     *  getPaymentsNeedingConfirmation() (which requires txid) so they'd otherwise poll forever. */
-    fun getPaymentsNeedingTxidResolution(limit: Int = 20): List<PaymentRecord> {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
-            FROM payments
-            WHERE (txid IS NULL OR txid = '')
-              AND payment_type = 'onchain'
-              AND direction = 'received'
-              AND status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT ?
-            """.trimIndent(),
-            arrayOf(limit.toString())
-        )
-        return cursor.use { c ->
-            val list = mutableListOf<PaymentRecord>()
-            while (c.moveToNext()) {
-                list.add(PaymentRecord(
-                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
-                    paymentType = c.getString(2), direction = c.getString(3),
-                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
-                    status = c.getString(8), createdAt = c.getLong(9),
-                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
-                ))
-            }
-            list
-        }
-    }
-
     fun updatePaymentConfirmationState(paymentRowId: Long, confirmations: Int, status: String): Boolean {
         val cv = ContentValues().apply {
             put("confirmations", confirmations)
@@ -1220,16 +1187,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  `payment_id` can be NULL on other rows (e.g. some channel-close bookkeeping paths), and
      *  `payment_id != ?` evaluates to NULL/unknown for a NULL `payment_id` — SQLite then excludes
      *  that row from the `NOT EXISTS` subquery, silently defeating the duplicate-txid check for
-     *  exactly the rows that most need it. `id` is never NULL, so this can't happen.
-     *
-     *  [clearAddress]: pass true when the txid was resolved from LDK's own payment list rather
-     *  than an address match (e.g. txid backfill for a channel-close sweep landing on an
-     *  untracked address). Those rows' stored `address` is just the app's own receive address at
-     *  creation time, not necessarily where this txid actually paid — pollPaymentConfirmations()'s
-     *  address-mismatch check would otherwise see a real payment as "wrong address", clear the
-     *  txid we just wrote, and repeat forever. Clearing the address skips that check for a
-     *  ground-truth-resolved txid instead of re-verifying it against a field known to be stale. */
-    fun updatePaymentTxid(paymentId: String, txid: String, clearAddress: Boolean = false): Boolean {
+     *  exactly the rows that most need it. `id` is never NULL, so this can't happen. */
+    fun updatePaymentTxid(paymentId: String, txid: String): Boolean {
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
@@ -1243,7 +1202,6 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             val cv = ContentValues().apply {
                 put("txid", txid)
-                if (clearAddress) putNull("address")
             }
             val updated = db.update(
                 "payments",
@@ -1257,15 +1215,6 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
             throw e
         }
-    }
-
-    /** Whether any row already carries this txid — used to avoid attaching an LDK-reported txid
-     *  to more than one payment row when matching candidates by amount (amount is not unique). */
-    fun isTxidRecorded(txid: String): Boolean {
-        return readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
-            arrayOf(txid)
-        ).use { it.moveToFirst() }
     }
 
     private data class PendingPlaceholder(val id: Long, val amountMsat: Long)

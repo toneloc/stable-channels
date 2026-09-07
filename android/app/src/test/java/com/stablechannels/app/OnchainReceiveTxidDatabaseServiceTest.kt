@@ -17,10 +17,9 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
 
-/** Covers the txid-keyed guards added to updatePaymentTxid()/isTxidRecorded() so that backfilling
- *  a missing onchain-receive txid (via AppState.resolveMissingReceiveTxids) can't attach the same
- *  txid to two amount-matching rows,
- *  nor overwrite a row that's already resolved. */
+/** Covers the guards in updatePaymentTxid() that keep concurrent/racing close-txid resolvers
+ *  (CloseTxidResolver, the ChannelClosed event handler, and detectOnchainDeposit's close-payout
+ *  path) from attaching the same txid to two rows or overwriting an already-resolved row. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class OnchainReceiveTxidDatabaseServiceTest {
@@ -51,7 +50,6 @@ class OnchainReceiveTxidDatabaseServiceTest {
             amountMsat = 100_000, status = "pending", txid = null
         )
 
-        assertTrue(service.isTxidRecorded("shared-tx"))
         assertFalse(service.updatePaymentTxid("row-b", "shared-tx"))
         assertNull(payment(service, rowB).txid)
         service.close()
@@ -71,18 +69,17 @@ class OnchainReceiveTxidDatabaseServiceTest {
     }
 
     @Test
-    fun unclaimedTxidIsAssignedAndAddressIsClearedWhenRequested() {
+    fun unclaimedTxidIsAssigned() {
         val service = DatabaseService(context)
         val rowId = service.recordPayment(
             paymentId = "row-a", paymentType = "onchain", direction = "received",
             amountMsat = 50_000, status = "pending", txid = null, address = "bc1qtracked"
         )
 
-        assertFalse(service.isTxidRecorded("fresh-tx"))
-        assertTrue(service.updatePaymentTxid("row-a", "fresh-tx", clearAddress = true))
+        assertTrue(service.updatePaymentTxid("row-a", "fresh-tx"))
         val updated = payment(service, rowId)
         assertEquals("fresh-tx", updated.txid)
-        assertNull(updated.address)
+        assertEquals("bc1qtracked", updated.address)
         service.close()
     }
 
@@ -103,7 +100,6 @@ class OnchainReceiveTxidDatabaseServiceTest {
             amountMsat = 75_000, status = "pending", txid = null
         )
 
-        assertTrue(service.isTxidRecorded("claimed-tx"))
         assertFalse(service.updatePaymentTxid("row-b", "claimed-tx"))
         assertNull(payment(service, rowB).txid)
         service.close()

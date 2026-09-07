@@ -43,24 +43,6 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
-        /** The timestamp to use as a payment's match cost against a DB row's creation time.
-         *  Prefers the confirmed block's timestamp (ConfirmationStatus.Confirmed.timestamp) when
-         *  available — that value is set once by consensus and can never change again, unlike
-         *  latestUpdateTimestamp, which LDK updates on every payment/confirmation state change
-         *  and can silently shift an already-committed match's cost on a later poll (demonstrated
-         *  by OnchainTxidMatcherTest's timestamp-shift case). Falls back to latestUpdateTimestamp
-         *  only for still-unconfirmed candidates, where no more authoritative timestamp exists
-         *  yet — necessary because showing a probable txid before confirmation is the point of
-         *  both callers, but it means an unconfirmed match can still be superseded by a stricter
-         *  same-amount candidate on a later poll (the DB uniqueness guard and
-         *  OnchainTxidMatcher's invariance check are what keep that safe, not this function).
-         *  A pure function (no AppState/Android dependency) so it's directly unit-testable. */
-        fun onchainMatchTimestamp(payment: PaymentDetails): Long {
-            val onchain = payment.kind as? PaymentKind.Onchain
-            val confirmed = onchain?.status as? ConfirmationStatus.Confirmed
-            return confirmed?.timestamp?.toLong() ?: payment.latestUpdateTimestamp.toLong()
-        }
-
         /**
          * Set to true right before launching an in-app activity that backgrounds the app
          * (e.g. the log share sheet). [MainActivity] honors this only for a short grace window
@@ -77,14 +59,6 @@ class AppState(private val context: Context) : ViewModel() {
         // Covers ordinary quick app-switches without keeping an unserviced cached Android
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
-
-        // How far a candidate LDK payment's timestamp may drift from an unresolved receive
-        // row's created_at and still be considered a txid match for that row. Amount alone is
-        // not a unique key (repeated round-number deposits are ordinary), so this bounds how
-        // "far away" a same-amount payment can be before it's treated as unrelated rather than
-        // guessed at. 24h comfortably covers normal balance-delta detection lag and backfill
-        // retries without matching a coincidentally-equal deposit from a different day.
-        private const val RECEIVE_TXID_MATCH_WINDOW_SECS = 24 * 60 * 60L
     }
 
     val nodeService = NodeService(context)
@@ -1785,57 +1759,6 @@ class AppState(private val context: Context) : ViewModel() {
         return null
     }
 
-    /** Backfills txid for pending "received onchain" rows that never resolved one (e.g. a
-     *  channel-close payout, which lands on an address we weren't watching). Without this,
-     *  such rows are invisible to getPaymentsNeedingConfirmation() and stay at 0/6 forever. */
-    private fun resolveMissingReceiveTxids() {
-        val db = databaseService ?: return
-        val unresolved = db.getPaymentsNeedingTxidResolution()
-        if (unresolved.isEmpty()) return
-
-        val onchainPayments = try {
-            nodeService.node?.listPayments()
-                ?.filter { it.direction == PaymentDirection.INBOUND && it.kind is PaymentKind.Onchain }
-        } catch (e: Exception) {
-            Log.w("AppState", "listPayments lookup failed during txid backfill: ${e.message}")
-            null
-        } ?: return
-
-        // txid is the unique identity for a payment — amount is not (repeated round-number
-        // deposits are ordinary) — so only ever consider LDK payments no DB row has claimed yet,
-        // and close in time to a row's creation (avoids pairing with an unrelated older
-        // same-amount payment). Build every plausible (row, candidate) edge up front and hand it
-        // to OnchainTxidMatcher, which only commits a pairing when it's the same in every
-        // maximum-cardinality, minimum-cost assignment — never a guess between equally valid
-        // options (see its kdoc for the two-row/two-candidate case this specifically handles).
-        val rowsById = unresolved.filter { it.paymentId != null }.associateBy { it.id }
-        val edges = unresolved.flatMap { row ->
-            if (row.paymentId == null) return@flatMap emptyList<TxidMatchEdge>()
-            onchainPayments
-                .filter { it.amountMsat?.toLong() == row.amountMsat }
-                .filter { !db.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) }
-                .mapNotNull {
-                    val delta = kotlin.math.abs(onchainMatchTimestamp(it) - row.createdAt)
-                    if (delta <= RECEIVE_TXID_MATCH_WINDOW_SECS) {
-                        TxidMatchEdge(row.id, (it.kind as PaymentKind.Onchain).txid, delta)
-                    } else null
-                }
-        }
-
-        for ((rowId, txid) in OnchainTxidMatcher.resolve(edges)) {
-            val paymentId = rowsById[rowId]?.paymentId ?: continue
-            // clearAddress = true: this txid came from LDK's own record, not an address match,
-            // so the row's stored address (the app's receive address at creation time) can't be
-            // used to re-verify it — see updatePaymentTxid's kdoc.
-            if (db.updatePaymentTxid(paymentId, txid, clearAddress = true)) {
-                AuditService.log("ONCHAIN_RECEIVE_TXID_BACKFILLED", mapOf(
-                    "payment_id" to paymentId,
-                    "txid" to txid
-                ))
-            }
-        }
-    }
-
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && (now - lastConfirmationPollAtMs) < 15_000) {
@@ -1848,7 +1771,6 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService ?: return
         isConfirmationPolling = true
         try {
-            resolveMissingReceiveTxids()
             val tipHeight = fetchChainTipHeight() ?: return
             val pending = db.getPaymentsNeedingConfirmation(limit = 100)
             var anyUpdated = false
@@ -2165,18 +2087,14 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
-                // Only an address match is authoritative enough to persist immediately — it's
-                // proof this specific tx pays our own tracked receive address. LDK's payment list
-                // also knows every inbound on-chain payment's txid regardless of address, but
-                // matching it here by amount+timestamp proximity against a single detected
-                // deposit (no other unresolved rows to disambiguate against, and LDK's list may
-                // not have caught up with a just-detected deposit yet) is a much weaker signal
-                // than resolveMissingReceiveTxids()'s bipartite matcher, which re-evaluates every
-                // unresolved row together on each poll and only commits a pairing when it's
-                // invariant across every optimal assignment. So leave the row's txid null here
-                // when there's no address match — the periodic backfill will resolve it once
-                // LDK's list (and any other pending rows) make the true match unambiguous,
-                // instead of this path locking in a first guess that later data can't correct.
+                // Only an address match is authoritative enough to persist a txid — it's proof
+                // this specific tx pays our own tracked receive address. Matching by amount and
+                // timestamp proximity against LDK's payment list is not proof of identity (an
+                // unrelated same-amount payment can be the only visible candidate), so — mirroring
+                // iOS's DepositRecorder, which either resolves via a direct address lookup or
+                // leaves the row permanently txid-less — we never guess here. When there's no
+                // address match, the row simply stays without a txid/confirmation link; the user
+                // can re-generate a receive address to recover it if this happens.
                 val resolvedTxid = _lastReceiveTxid.value?.takeIf {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
