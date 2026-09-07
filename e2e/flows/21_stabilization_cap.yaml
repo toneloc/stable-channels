@@ -23,7 +23,9 @@ env:
 - assertVisible: "Maximum additional trade: \\$\\d+\\.\\d\\d"
 
 # Manual over-limit entry: $85 gross of an $85 balance exceeds the cap and must
-# be rejected client-side with the same dollar-max copy — before any fee is sent.
+# be rejected client-side — before any fee is sent. The error is two lines
+# (dollar max + "Keeps a small BTC reserve in the channel."); match on the
+# reserve line, which only the error carries ((?s) lets .* cross the newline).
 - tapOn: "\\$?0\\.00"
 - inputText: "85"
 - runFlow:
@@ -33,7 +35,7 @@ env:
       - hideKeyboard
 - tapOn: "Continue"
 - extendedWaitUntil:
-    visible: "Maximum additional trade: \\$\\d+\\.\\d\\d"
+    visible: "(?s).*Keeps a small BTC reserve in the channel.*"
     timeout: 10000
 
 # Reopen the sheet clean (flow 02's proven pattern) and use Max: the prefilled
