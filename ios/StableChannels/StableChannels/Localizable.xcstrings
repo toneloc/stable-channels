@@ -1,6 +1,18 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "maximum_additional_trade" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Maximum additional trade: $%.2f" } }
+      }
+    },
+    "stabilization_reserve_explanation" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keeps at least 1% and a small reserve in BTC for network fees." } }
+      }
+    },
     "" : {
       "localizations" : {
         "ar" : {

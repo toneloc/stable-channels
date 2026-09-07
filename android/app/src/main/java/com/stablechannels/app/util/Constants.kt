@@ -4,6 +4,10 @@ import android.content.Context
 import java.io.File
 
 object Constants {
+    // Trade-entry only; never enforce these limits during settlement or reconciliation.
+    const val MAX_STABLE_ALLOCATION_PERCENT = 99L
+    const val ABSOLUTE_MIN_NATIVE_SATS = 2_000L
+    const val CLIENT_SAFETY_MARGIN_SATS = 50L
     const val SATS_IN_BTC: Long = 100_000_000L
     const val STABLE_CHANNEL_TLV_TYPE: Long = 13_377_331L
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"

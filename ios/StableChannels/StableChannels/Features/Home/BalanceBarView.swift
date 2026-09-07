@@ -16,11 +16,13 @@ struct BalanceBarView: View {
     let nativeSats: UInt64
     let totalSats: UInt64
     let btcPrice: Double
+    var maxSellUSD: Double = 0
     var onDragStarted: (() -> Void)?
     var onTradeRequest: ((TradeDirection, Double) -> Void)?
 
     @State private var dragOffset: CGFloat = 0
     @State private var isPressing = false
+    @State private var atSellLimit = false
     @State private var pulseScale: CGFloat = 1.0
 
     private let thumbDiameter: CGFloat = 28
@@ -39,6 +41,10 @@ struct BalanceBarView: View {
         GeometryReader { geo in
             let barWidth = geo.size.width
             let baseX = barWidth * stableFraction
+            let maxSellOffset = min(
+                max(0, barWidth - baseX),
+                totalUSD > 0 ? barWidth * max(0, maxSellUSD) / totalUSD : 0
+            )
             let thumbX = max(0, min(barWidth, baseX + dragOffset))
             let visFrac = barWidth > 0 ? thumbX / barWidth : stableFraction
             let h = interactive ? barHeight : 10
@@ -84,7 +90,8 @@ struct BalanceBarView: View {
                         .scaleEffect(isPressing ? 1.15 : pulseScale)
                         .overlay(alignment: .top) {
                             if isPressing {
-                                Text("\(usdPct)% USD  \(btcPct)% BTC")
+                                Text(atSellLimit ? StabilizationPolicy
+                                    .maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)) : "\(usdPct)% USD  \(btcPct)% BTC")
                                     .font(.caption2.bold())
                                     .fixedSize()
                                     .foregroundStyle(.primary)
@@ -114,12 +121,14 @@ struct BalanceBarView: View {
                         if !isPressing {
                             guard abs(value.startLocation.x - baseX) < thumbDiameter * 1.5 else { return }
                             isPressing = true
+                            atSellLimit = false
                             onDragStarted?()
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         }
                         guard isPressing else { return }
                         let translation = value.location.x - value.startLocation.x
-                        dragOffset = max(-baseX, min(barWidth - baseX, translation))
+                        atSellLimit = translation > maxSellOffset
+                        dragOffset = max(-baseX, min(maxSellOffset, translation))
                     }
                     .onEnded { _ in
                         guard isPressing else {
@@ -138,7 +147,7 @@ struct BalanceBarView: View {
                         let direction: TradeDirection = dragOffset > 0 ? .sell : .buy
                         let clamped = direction == .buy
                             ? min(tradeUSD, stableUSD)
-                            : min(tradeUSD, nativeUSD)
+                            : min(tradeUSD, maxSellUSD)
                         onTradeRequest?(direction, clamped)
                         // Hold thumb at dragged position, then snap back after sheet appears
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {

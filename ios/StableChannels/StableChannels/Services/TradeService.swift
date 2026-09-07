@@ -18,13 +18,27 @@ final class TradeService {
         self.databaseService = databaseService
     }
 
+    private func liveSnapshot(sc: StableChannel, price: Double) -> StabilizationSnapshot? {
+        guard let channel = nodeService.node?.listChannels()
+            .first(where: { $0.userChannelId == sc.userChannelId && $0.isChannelReady }) else { return nil }
+        let capacity = channel.outboundCapacityMsat / 1000
+        return StabilizationSnapshot(receiverSats: capacity + (channel.unspendablePunishmentReserve ?? 0),
+                                     spendableSats: capacity, backingSats: sc.backingSats,
+                                     expectedUSD: sc.expectedUSD.amount, price: price)
+    }
+
+    func maxSellCents(sc: StableChannel, price: Double) -> UInt64 {
+        liveSnapshot(sc: sc, price: price)?.maxOrderCents() ?? 0
+    }
+
     func executeBuy(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
         price: Double
     ) throws -> TradeExecutionResult? {
-        guard amountUSD > 0, amountUSD <= sc.expectedUSD.amount, price > 0 else { return nil }
+        guard amountUSD.isFinite, amountUSD > 0, amountUSD <= sc.expectedUSD.amount, price.isFinite,
+              price > 0 else { throw TradeValidationError.invalidAmount }
         let netAmount = amountUSD - feeUSD
         return try preparePersistAndSend(
             sc: sc,
@@ -41,10 +55,10 @@ final class TradeService {
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
-        price: Double,
-        maxUSD: Double
+        price: Double
     ) throws -> TradeExecutionResult? {
-        guard amountUSD > 0, price > 0 else { return nil }
+        guard amountUSD.isFinite, amountUSD > 0, price.isFinite,
+              price > 0 else { throw TradeValidationError.invalidAmount }
         let netAmount = amountUSD - feeUSD
         return try preparePersistAndSend(
             sc: sc,
@@ -52,7 +66,7 @@ final class TradeService {
             amountUSD: amountUSD,
             amountBTC: netAmount / price,
             feeUSD: feeUSD,
-            newExpectedUSD: min(sc.expectedUSD.amount + netAmount, maxUSD),
+            newExpectedUSD: sc.expectedUSD.amount + netAmount,
             price: price
         )
     }
@@ -66,19 +80,27 @@ final class TradeService {
         newExpectedUSD: Double,
         price: Double
     ) throws -> TradeExecutionResult? {
+        guard let snapshot = liveSnapshot(sc: sc, price: price) else { throw TradeValidationError.unavailable }
+        if newExpectedUSD > sc.expectedUSD.amount {
+            guard amountUSD * 100 < Double(Int64.max),
+                  snapshot.accepts(UInt64((amountUSD * 100 + 1e-7).rounded(.down))) else {
+                throw TradeValidationError.stabilizationLimit(snapshot.maxOrderCents())
+            }
+        }
         guard let prepared = TradeProtocol.prepare(
             channelId: sc.channelId,
             userChannelId: sc.userChannelId,
             currentExpectedUSD: sc.expectedUSD.amount,
             currentBackingSats: sc.backingSats,
-            receiverSats: sc.stableReceiverBTC.sats,
+            receiverSats: snapshot.receiverSats,
+            spendableSats: snapshot.spendableSats,
             action: action,
             amountUSD: amountUSD,
             amountBTC: amountBTC,
             feeUSD: feeUSD,
             newExpectedUSD: newExpectedUSD,
             quotePrice: price
-        ) else { return nil }
+        ) else { throw TradeValidationError.unsafeAllocation }
 
         // Persist the exact signed payload and local allocation before the fee can leave.
         let tradeDbId = try databaseService.channelRepo.recordPreparedTrade(prepared)

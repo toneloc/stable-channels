@@ -280,6 +280,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
+                    maxSellUSD = (appState.tradeService?.maxSellCents(sc, appState.priceService.accountingPrice.value) ?: 0L) / 100.0,
                     showBtcFormat = showBTC,
                     modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },

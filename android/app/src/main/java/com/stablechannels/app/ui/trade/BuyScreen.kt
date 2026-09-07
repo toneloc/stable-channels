@@ -233,8 +233,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                 if (tradePrice <= 0.0) {
                                     throw Exception("A fresh BTC/USD consensus is required before trading")
                                 }
-                                val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, tradePrice)
-                                    ?: throw Exception("Trade service unavailable")
+                                val service = appState.tradeService ?: throw Exception("Trade service unavailable")
+                                val result = service.executeBuy(appState.stableChannel.value, amountUSD, feeUSD, tradePrice)
                                 val awaitingResult = appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = tradePrice,

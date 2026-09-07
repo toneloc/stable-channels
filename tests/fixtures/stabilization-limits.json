@@ -1,0 +1,82 @@
+[
+  {
+    "receiver_sats": 100000,
+    "spendable_sats": 100000,
+    "backing_sats": 0,
+    "expected_usd": 0,
+    "price": 100000,
+    "max_cents": 9795
+  },
+  {
+    "receiver_sats": 200000,
+    "spendable_sats": 195000,
+    "backing_sats": 50000,
+    "expected_usd": 50,
+    "price": 100000,
+    "max_cents": 14295
+  },
+  {
+    "receiver_sats": 1000001,
+    "spendable_sats": 1000001,
+    "backing_sats": 500000,
+    "expected_usd": 500,
+    "price": 100000,
+    "max_cents": 48999
+  },
+  {
+    "receiver_sats": 200000,
+    "spendable_sats": 195000,
+    "backing_sats": 50000,
+    "expected_usd": 50,
+    "price": 80000,
+    "max_cents": 11000
+  },
+  {
+    "receiver_sats": 2050,
+    "spendable_sats": 2050,
+    "backing_sats": 0,
+    "expected_usd": 0,
+    "price": 100000,
+    "max_cents": 0
+  },
+  {
+    "receiver_sats": 100000,
+    "spendable_sats": 100000,
+    "backing_sats": 99000,
+    "expected_usd": 99,
+    "price": 100000,
+    "max_cents": 0
+  },
+  {
+    "receiver_sats": 51984,
+    "spendable_sats": 51984,
+    "backing_sats": 39810,
+    "expected_usd": 25.407,
+    "price": 63304.4,
+    "max_cents": 640
+  },
+  {
+    "receiver_sats": 51984,
+    "spendable_sats": 51984,
+    "backing_sats": 39810,
+    "expected_usd": 25.407,
+    "price": 63321.94,
+    "max_cents": 641
+  },
+  {
+    "receiver_sats": 51984,
+    "spendable_sats": 51984,
+    "backing_sats": 39810,
+    "expected_usd": 25.407,
+    "price": 63425.91,
+    "max_cents": 642
+  },
+  {
+    "receiver_sats": 150000,
+    "spendable_sats": 150000,
+    "backing_sats": 100000,
+    "expected_usd": 100,
+    "price": 100000,
+    "max_cents": 4795
+  }
+]

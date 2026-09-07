@@ -12,6 +12,9 @@ pub struct Config {
     pub push: Option<PushConfig>,
     #[serde(default)]
     pub tls: TlsSection,
+    /// Defaults to audit-only for old-client compatibility. Enable only after shadow rollout.
+    #[serde(default)]
+    pub enforce_max_stabilization: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -119,6 +122,13 @@ mod tests {
             config_path = "/etc/ldk-server/config.toml"
         "#;
         let cfg: Config = toml::from_str(toml_text).unwrap();
+        assert!(
+            !cfg.enforce_max_stabilization,
+            "existing configs must remain in shadow mode"
+        );
+        let enforcing: Config =
+            toml::from_str(&format!("enforce_max_stabilization = true\n{toml_text}")).unwrap();
+        assert!(enforcing.enforce_max_stabilization);
         assert_eq!(cfg.node.rest_service_address, "127.0.0.1:3002");
         assert_eq!(cfg.node.network, "regtest");
         assert_eq!(cfg.storage.disk.dir_path, "/tmp/sc-data");

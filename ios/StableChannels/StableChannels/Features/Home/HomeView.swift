@@ -259,6 +259,10 @@ struct HomeView: View {
                 nativeSats: nativeSatsDisplay,
                 totalSats: appState.lightningBalanceSats,
                 btcPrice: appState.btcPrice,
+                maxSellUSD: Double(appState.tradeService?.maxSellCents(
+                    sc: appState.stableChannel,
+                    price: appState.accountingBTCPrice
+                ) ?? 0) / 100,
                 onDragStarted: { appState.ensureLSPConnected() },
                 onTradeRequest: { direction, amountUSD in
                     tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
