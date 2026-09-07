@@ -693,7 +693,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (!c.moveToFirst()) null else arrayOf<Any>(
                     c.getString(0), c.getLong(1), c.getLong(2), c.getLong(3)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            } // A missing row means the channel has since closed (deleteChannel runs on close) —
+              // that's permanent, not a transient race, so give up rather than retry forever.
+                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (channel[0] as String != sync.channelId) {
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
@@ -824,7 +826,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (!c.moveToFirst()) null else arrayOf<Any>(
                     c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            } // A missing row means the channel has since closed (deleteChannel runs on close) —
+              // that's permanent, not a transient race, so give up rather than retry forever.
+                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (row[0] as String != sync.channelId) return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val currentVersion = row[4] as Long
             if (sync.syncVersion <= currentVersion) {
