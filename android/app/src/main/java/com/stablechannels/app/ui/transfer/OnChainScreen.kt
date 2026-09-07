@@ -293,7 +293,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                             if (sendAll) {
                                 val txid = appState.nodeService.sendAllOnchain(addr)
                                 val sendSats = onchainSats
-                                appState.onchainSendBroadcasted(sendSats, isSendAll = true)
+                                appState.onchainSendBroadcasted(sendSats, isSendAll = true, txid = txid)
                                 appState.databaseService?.recordPayment(
                                     paymentId = txid, paymentType = "onchain", direction = "sent",
                                     amountMsat = sendSats * 1000,
@@ -325,7 +325,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     successTxid = null
                                 } else {
                                     val txid = appState.nodeService.sendOnchain(addr, sats)
-                                    appState.onchainSendBroadcasted(sats, isSendAll = false)
+                                    appState.onchainSendBroadcasted(sats, isSendAll = false, txid = txid)
                                     appState.databaseService?.recordPayment(
                                         paymentId = txid, paymentType = "onchain", direction = "sent",
                                         amountMsat = sats * 1000,

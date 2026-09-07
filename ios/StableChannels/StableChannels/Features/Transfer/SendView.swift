@@ -549,7 +549,7 @@ struct SendView: View {
                         txid: txid,
                         address: trimmed
                     )
-                    appState.onchainSendBroadcasted(amountSats: sats, isSendAll: false)
+                    appState.onchainSendBroadcasted(amountSats: sats, isSendAll: false, txid: txid)
                 }
                 sentAmountSats = sats
 

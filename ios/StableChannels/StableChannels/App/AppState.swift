@@ -110,6 +110,7 @@ class AppState {
         static let pendingIsSendAll = "pending_outbound_is_send_all"
         static let pendingBaseline = "pending_outbound_baseline_sats"
         static let pendingTimestamp = "pending_outbound_timestamp_secs"
+        static let pendingTxids = "pending_outbound_txids"
     }
 
     var spendableOnchainSats: UInt64 = {
@@ -225,11 +226,14 @@ class AppState {
         let isSendAll = ud?.bool(forKey: BalanceCacheKey.pendingIsSendAll) ?? false
         let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingBaseline) ?? 0))
         let timestamp = Int64(ud?.integer(forKey: BalanceCacheKey.pendingTimestamp) ?? 0)
+        let txidsStr = ud?.string(forKey: BalanceCacheKey.pendingTxids) ?? ""
+        let txids = txidsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
         return BalanceCalculator.PendingOutboundSend(
             amountSats: amount,
             isSendAll: isSendAll,
             baselineOnchainSats: baseline,
-            timestampSecs: timestamp
+            timestampSecs: timestamp,
+            txids: txids
         )
     }
 
@@ -238,6 +242,7 @@ class AppState {
         ud?.set(pendingOutboundSend.isSendAll, forKey: BalanceCacheKey.pendingIsSendAll)
         ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: BalanceCacheKey.pendingBaseline)
         ud?.set(pendingOutboundSend.timestampSecs, forKey: BalanceCacheKey.pendingTimestamp)
+        ud?.set(pendingOutboundSend.txids.joined(separator: ","), forKey: BalanceCacheKey.pendingTxids)
     }
 
     private func clearPendingOutboundSendCache(from ud: UserDefaults?) {
@@ -245,6 +250,7 @@ class AppState {
         ud?.removeObject(forKey: BalanceCacheKey.pendingIsSendAll)
         ud?.removeObject(forKey: BalanceCacheKey.pendingBaseline)
         ud?.removeObject(forKey: BalanceCacheKey.pendingTimestamp)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingTxids)
     }
 
     var totalBalanceUSD: Double {
@@ -3019,9 +3025,29 @@ class AppState {
         let lightning = balances.totalLightningBalanceSats
 
         // Resolve pending outbound deduction against raw wallet observation
+        let confirmedPredicate: (String) -> Bool = { [weak self] tid in
+            guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
+            return payments.contains { p in
+                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid, case .succeeded = p.status {
+                    return true
+                }
+                return false
+            }
+        }
+        let failedPredicate: (String) -> Bool = { [weak self] tid in
+            guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
+            return payments.contains { p in
+                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid, case .failed = p.status {
+                    return true
+                }
+                return false
+            }
+        }
         pendingOutboundSend = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: rawOnchain,
-            pending: pendingOutboundSend
+            pending: pendingOutboundSend,
+            isTxConfirmed: confirmedPredicate,
+            isTxFailed: failedPredicate
         )
         let effective = BalanceCalculator.calculateEffectiveBalances(
             rawOnchain: rawOnchain,
@@ -3067,7 +3093,7 @@ class AppState {
 
     /// Deducts sent on-chain amount immediately from cached and in-memory balances
     /// so the UI updates with zero lag, then triggers wallet sync in the background.
-    func onchainSendBroadcasted(amountSats: UInt64, isSendAll: Bool) {
+    func onchainSendBroadcasted(amountSats: UInt64, isSendAll: Bool, txid: String? = nil) {
         let currentOnchain = onchainBalanceSats
         let currentSpendable = spendableOnchainSats
 
@@ -3085,7 +3111,8 @@ class AppState {
             currentPending: pendingOutboundSend,
             amountSats: amountSats,
             isSendAll: isSendAll,
-            currentOnchain: currentOnchain
+            currentOnchain: currentOnchain,
+            txid: txid
         )
 
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -3104,10 +3131,22 @@ class AppState {
     private func syncWalletsInBackground(expectedGeneration: Int64? = nil) {
         let nodeService = self.nodeService
         Task { @MainActor in
-            let syncSuccess = await Task.detached(priority: .utility) {
-                (try? nodeService.syncWallets()) != nil
-            }.value
-            if syncSuccess, let expected = expectedGeneration, expected == self.sendGeneration {
+            var syncSuccess = false
+            for attempt in 0 ..< 3 {
+                let success = await Task.detached(priority: .utility) {
+                    (try? nodeService.syncWallets()) != nil
+                }.value
+                if success {
+                    syncSuccess = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+            }
+            if let expected = expectedGeneration, BalanceCalculator.shouldClearPendingOnSyncCompletion(
+                expectedGeneration: expected,
+                currentGeneration: self.sendGeneration,
+                syncSuccess: syncSuccess
+            ) {
                 self.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
             }
             self.refreshBalances()

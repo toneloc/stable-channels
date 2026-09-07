@@ -151,6 +151,7 @@ class AppState(private val context: Context) : ViewModel() {
             const val CACHED_CHANNEL_ID = "cached_channel_id"
             const val CACHED_USER_CHANNEL_ID = "cached_user_channel_id"
             const val CACHED_EXPECTED_USD = "cached_expected_usd"
+            const val PENDING_TXIDS = "pending_outbound_txids"
 
             fun clearPendingOutbound(context: Context) {
                 context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
@@ -158,6 +159,7 @@ class AppState(private val context: Context) : ViewModel() {
                     .remove(PENDING_IS_SEND_ALL)
                     .remove(PENDING_BASELINE)
                     .remove(PENDING_TIMESTAMP)
+                    .remove(PENDING_TXIDS)
                     .apply()
             }
 
@@ -170,8 +172,11 @@ class AppState(private val context: Context) : ViewModel() {
             val amountSats: Long = 0L,
             val isSendAll: Boolean = false,
             val baselineOnchainSats: Long = 0L,
-            val timestampSecs: Long = System.currentTimeMillis() / 1000L
-        )
+            val timestampSecs: Long = System.currentTimeMillis() / 1000L,
+            val txids: List<String> = emptyList()
+        ) {
+            val txid: String? get() = txids.firstOrNull()
+        }
 
         /**
          * Derives user-facing on-chain and spendable balances by subtracting any pending
@@ -207,21 +212,36 @@ class AppState(private val context: Context) : ViewModel() {
          * Resolves pending outbound send state against a fresh raw on-chain balance observation.
          * Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
          * to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
-         * Includes a TTL backstop (default 600s) to prevent unobserved transactions or incoming deposits
-         * from permanently stranding pending state.
+         * If the balance has not dropped (e.g. masked by an incoming deposit), authoritative transaction
+         * reconciliation (via isTxConfirmed or isTxFailed) resolves the state without re-exposing spent funds.
+         * If indexer/node sync is degraded beyond TTL, it fails closed by retaining the deduction.
          */
         fun resolvePendingOutboundSend(
             rawOnchain: Long,
             pending: PendingOutboundSend,
             currentTimestampSecs: Long = System.currentTimeMillis() / 1000L,
-            ttlSecs: Long = 600L
+            ttlSecs: Long = 600L,
+            isTxConfirmed: ((String) -> Boolean)? = null,
+            isTxFailed: ((String) -> Boolean)? = null
         ): PendingOutboundSend {
             if (pending.amountSats == 0L && !pending.isSendAll) {
                 return pending
             }
-            if (pending.timestampSecs > 0L && (currentTimestampSecs - pending.timestampSecs) >= ttlSecs) {
+
+            // 1. Authoritative transaction status check:
+            // If all pending broadcast transactions failed and were rejected, safely release the deduction.
+            if (isTxFailed != null && pending.txids.isNotEmpty() && pending.txids.all { isTxFailed(it) }) {
                 return PendingOutboundSend()
             }
+
+            // 2. Authoritative confirmation check:
+            // If all pending broadcast txids are confirmed, then even if an incoming deposit
+            // masked the raw balance drop, we know the spend was incorporated into the wallet.
+            if (isTxConfirmed != null && pending.txids.isNotEmpty() && pending.txids.all { isTxConfirmed(it) }) {
+                return PendingOutboundSend()
+            }
+
+            // 3. Raw balance drop check:
             if (pending.isSendAll) {
                 if (rawOnchain == 0L) {
                     return PendingOutboundSend()
@@ -233,9 +253,23 @@ class AppState(private val context: Context) : ViewModel() {
                 if (rawOnchain <= expectedRemaining) {
                     return PendingOutboundSend()
                 }
+                // When balance hasn't dropped and authoritative checks haven't completed,
+                // fail closed even if beyond TTL to never re-expose spent broadcast funds.
                 return pending
             }
             return pending
+        }
+
+        /**
+         * Pure helper to evaluate if a background wallet sync completion owns the active send generation
+         * and succeeded, preventing older out-of-order syncs from clearing newer pending broadcasts.
+         */
+        fun shouldClearPendingOnSyncCompletion(
+            expectedGeneration: Long,
+            currentGeneration: Long,
+            syncSuccess: Boolean
+        ): Boolean {
+            return syncSuccess && expectedGeneration == currentGeneration
         }
     }
 
@@ -367,11 +401,14 @@ class AppState(private val context: Context) : ViewModel() {
         val pendingIsSendAll = prefs.getBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, false)
         val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
         val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
+        val pendingTxidsStr = prefs.getString(BalanceCacheKey.PENDING_TXIDS, "") ?: ""
+        val pendingTxids = if (pendingTxidsStr.isNotBlank()) pendingTxidsStr.split(",").filter { it.isNotBlank() } else emptyList()
         pendingOutboundSend = PendingOutboundSend(
             amountSats = pendingAmount,
             isSendAll = pendingIsSendAll,
             baselineOnchainSats = pendingBaseline,
-            timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L)
+            timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L),
+            txids = pendingTxids
         )
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
@@ -2794,7 +2831,24 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Resolve pending outbound deduction against raw wallet observation
         val effectivePending = synchronized(pendingLock) {
-            pendingOutboundSend = resolvePendingOutboundSend(rawOnchain, pendingOutboundSend)
+            val confirmedPredicate: (String) -> Boolean = { tid ->
+                nodeService.node?.listPayments()?.any { p ->
+                    val kind = p.kind
+                    kind is PaymentKind.Onchain && kind.txid == tid && p.status == PaymentStatus.SUCCEEDED
+                } ?: false
+            }
+            val failedPredicate: (String) -> Boolean = { tid ->
+                nodeService.node?.listPayments()?.any { p ->
+                    val kind = p.kind
+                    kind is PaymentKind.Onchain && kind.txid == tid && p.status == PaymentStatus.FAILED
+                } ?: false
+            }
+            pendingOutboundSend = resolvePendingOutboundSend(
+                rawOnchain = rawOnchain,
+                pending = pendingOutboundSend,
+                isTxConfirmed = confirmedPredicate,
+                isTxFailed = failedPredicate
+            )
             pendingOutboundSend
         }
         val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, effectivePending)
@@ -2875,10 +2929,11 @@ class AppState(private val context: Context) : ViewModel() {
             .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
             .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
             .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
+            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.txids.joinToString(","))
             .apply()
     }
 
-    fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean) {
+    fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean, txid: String? = null) {
         val currentOnchain = _onchainBalanceSats.value
         val currentSpendable = _spendableOnchainSats.value
 
@@ -2891,20 +2946,28 @@ class AppState(private val context: Context) : ViewModel() {
             } else {
                 pendingOutboundSend.baselineOnchainSats
             }
+            val currentTxids = pendingOutboundSend.txids
+            val updatedTxids = if (!txid.isNullOrBlank() && !currentTxids.contains(txid)) {
+                currentTxids + txid
+            } else {
+                currentTxids
+            }
 
             pendingOutboundSend = if (isSendAll) {
                 PendingOutboundSend(
                     amountSats = pendingOutboundSend.amountSats + currentOnchain,
                     isSendAll = true,
                     baselineOnchainSats = newBaseline,
-                    timestampSecs = System.currentTimeMillis() / 1000L
+                    timestampSecs = System.currentTimeMillis() / 1000L,
+                    txids = updatedTxids
                 )
             } else {
                 PendingOutboundSend(
                     amountSats = pendingOutboundSend.amountSats + amountSats,
                     isSendAll = false,
                     baselineOnchainSats = newBaseline,
-                    timestampSecs = System.currentTimeMillis() / 1000L
+                    timestampSecs = System.currentTimeMillis() / 1000L,
+                    txids = updatedTxids
                 )
             }
             ++sendGeneration
@@ -2934,20 +2997,25 @@ class AppState(private val context: Context) : ViewModel() {
             .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
             .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
             .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
+            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.txids.joinToString(","))
         if (!hasReady && !hasAnyChannel) {
             editor.putLong(BalanceCacheKey.LIGHTNING, 0L)
         }
         editor.apply()
 
         viewModelScope.launch(Dispatchers.IO) {
-            val syncSuccess = try {
-                nodeService.syncWallets()
-                true
-            } catch (_: Exception) {
-                false
+            var syncSuccess = false
+            for (attempt in 0..2) {
+                try {
+                    nodeService.syncWallets()
+                    syncSuccess = true
+                    break
+                } catch (_: Exception) {
+                    delay(500L * (attempt + 1))
+                }
             }
             withContext(Dispatchers.Main) {
-                if (syncSuccess) {
+                if (shouldClearPendingOnSyncCompletion(gen, sendGeneration, syncSuccess)) {
                     synchronized(pendingLock) {
                         if (gen == sendGeneration) {
                             pendingOutboundSend = PendingOutboundSend()

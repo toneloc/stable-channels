@@ -245,6 +245,24 @@ pub fn payment_status_display(
     }
 }
 
+/// Determines if a pending outbound on-chain send deduction should be cleared.
+/// Clears when wallet sync succeeds (proving spend is incorporated) or when the payment
+/// reaches a terminal failed status (proving broadcast failed and inputs remain spendable).
+/// During network outages or incomplete sync, returns false (fails closed) to prevent
+/// re-exposing already-spent funds.
+pub fn should_clear_pending_outbound(
+    sync_succeeded: bool,
+    payment_status: Option<PaymentStatus>,
+) -> bool {
+    if sync_succeeded {
+        return true;
+    }
+    match payment_status {
+        Some(PaymentStatus::Failed) => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
     StabilizationLimit(u64),
@@ -1913,7 +1931,9 @@ impl UserApp {
                                     self.update_balances();
                                     let node_clone = Arc::clone(&self.node);
                                     let pending_clone = Arc::clone(&self.pending_outbound_onchain_sats);
+                                    let txid_clone = txid_str.clone();
                                     std::thread::spawn(move || {
+                                        // 1. Immediate sync retries
                                         for attempt in 0..3 {
                                             if node_clone.sync_wallets().is_ok() {
                                                 let cur = pending_clone
@@ -1928,12 +1948,36 @@ impl UserApp {
                                                 500 * (attempt + 1),
                                             ));
                                         }
-                                        let cur = pending_clone
-                                            .load(std::sync::atomic::Ordering::Relaxed);
-                                        pending_clone.fetch_sub(
-                                            deducted_sats.min(cur),
-                                            std::sync::atomic::Ordering::Relaxed,
-                                        );
+
+                                        // 2. Immediate sync attempts exhausted. Retain pending deduction!
+                                        // A network, indexer, or node-sync failure does not undo the broadcast.
+                                        // Fail closed and poll until wallet sync succeeds or the payment fails.
+                                        loop {
+                                            std::thread::sleep(std::time::Duration::from_secs(5));
+                                            let terminal_failed = node_clone.list_payments().iter().any(|p| {
+                                                if let PaymentKind::Onchain { ref txid, .. } = p.kind {
+                                                    txid.to_string() == txid_clone && p.status == PaymentStatus::Failed
+                                                } else {
+                                                    false
+                                                }
+                                            });
+                                            let sync_ok = node_clone.sync_wallets().is_ok();
+                                            let payment_status = if terminal_failed {
+                                                Some(PaymentStatus::Failed)
+                                            } else {
+                                                None
+                                            };
+
+                                            if should_clear_pending_outbound(sync_ok, payment_status) {
+                                                let cur = pending_clone
+                                                    .load(std::sync::atomic::Ordering::Relaxed);
+                                                pending_clone.fetch_sub(
+                                                    deducted_sats.min(cur),
+                                                    std::sync::atomic::Ordering::Relaxed,
+                                                );
+                                                return;
+                                            }
+                                        }
                                     });
                                     return true;
                                 }
@@ -12872,6 +12916,39 @@ mod tests {
         });
         h2.join().unwrap();
         assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_should_clear_pending_outbound() {
+        use ldk_node::payment::PaymentStatus;
+
+        // Sync success always clears pending deduction
+        assert!(super::should_clear_pending_outbound(true, None));
+        assert!(super::should_clear_pending_outbound(
+            true,
+            Some(PaymentStatus::Pending)
+        ));
+        assert!(super::should_clear_pending_outbound(
+            true,
+            Some(PaymentStatus::Succeeded)
+        ));
+
+        // Sync failure with terminal payment failure clears deduction (inputs safely spendable)
+        assert!(super::should_clear_pending_outbound(
+            false,
+            Some(PaymentStatus::Failed)
+        ));
+
+        // Sync failure during outage / pending payment FAILS CLOSED (retains deduction)
+        assert!(!super::should_clear_pending_outbound(false, None));
+        assert!(!super::should_clear_pending_outbound(
+            false,
+            Some(PaymentStatus::Pending)
+        ));
+        assert!(!super::should_clear_pending_outbound(
+            false,
+            Some(PaymentStatus::Succeeded)
+        ));
     }
 }
 

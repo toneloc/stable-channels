@@ -613,7 +613,8 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
             amountSats: 30_000,
             isSendAll: false,
             baselineOnchainSats: 100_000,
-            timestampSecs: baseTime
+            timestampSecs: baseTime,
+            txids: ["tx1"]
         )
 
         // Within TTL (300 seconds elapsed) -> retains pending send
@@ -625,52 +626,114 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         )
         XCTAssertEqual(unexpired.amountSats, 30_000)
 
-        // Beyond TTL (601 seconds elapsed) -> expires to prevent permanent balance suppression
-        let expired = BalanceCalculator.resolvePendingOutboundSend(
+        // Beyond TTL (601 seconds elapsed) -> fails closed and retains deduction during indexer/node outage
+        let pastTtl = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: 100_000,
             pending: pending,
             currentTimeSecs: baseTime + 601,
             expirySecs: 600
         )
-        XCTAssertEqual(expired.amountSats, 0)
-        XCTAssertFalse(expired.isSendAll)
+        XCTAssertEqual(pastTtl.amountSats, 30_000)
     }
 
-    func testIncomingDepositDuringPendingSendClearsViaTtl() {
+    func testIncomingDepositWithAuthoritativeTxConfirmationClearsPending() {
         let baseTime: Int64 = 1_000_000
         let pending = BalanceCalculator.PendingOutboundSend(
             amountSats: 30_000,
             isSendAll: false,
             baselineOnchainSats: 100_000,
-            timestampSecs: baseTime
+            timestampSecs: baseTime,
+            txids: ["tx1"]
         )
 
         // A large incoming deposit of 50k arrives, raising raw balance to 120k
         let rawWithDeposit: UInt64 = 120_000
 
-        // Before TTL expires, balance alone does not clear because 120k > 70k
-        let beforeTtl = BalanceCalculator.resolvePendingOutboundSend(
+        // Prior to confirmation, balance predicate alone does not clear because 120k > 70k (fails closed)
+        let unconfirmed = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: rawWithDeposit,
             pending: pending,
             currentTimeSecs: baseTime + 100,
-            expirySecs: 600
+            expirySecs: 600,
+            isTxConfirmed: { _ in false }
         )
-        XCTAssertEqual(beforeTtl.amountSats, 30_000)
+        XCTAssertEqual(unconfirmed.amountSats, 30_000)
 
-        // After TTL expires, pending clears and user sees the updated deposit balance
-        let afterTtl = BalanceCalculator.resolvePendingOutboundSend(
+        // Even past TTL, if unconfirmed it fails closed
+        let pastTtlUnconfirmed = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: rawWithDeposit,
             pending: pending,
             currentTimeSecs: baseTime + 650,
-            expirySecs: 600
+            expirySecs: 600,
+            isTxConfirmed: { _ in false }
         )
-        XCTAssertEqual(afterTtl.amountSats, 0)
+        XCTAssertEqual(pastTtlUnconfirmed.amountSats, 30_000)
+
+        // Once authoritative confirmation verifies tx1 is incorporated, pending clears
+        let confirmed = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawWithDeposit,
+            pending: pending,
+            currentTimeSecs: baseTime + 100,
+            expirySecs: 600,
+            isTxConfirmed: { $0 == "tx1" }
+        )
+        XCTAssertEqual(confirmed.amountSats, 0)
         let effective = BalanceCalculator.calculateEffectiveBalances(
             rawOnchain: rawWithDeposit,
             rawSpendable: rawWithDeposit,
-            pending: afterTtl
+            pending: confirmed
         )
         XCTAssertEqual(effective.onchain, 120_000)
+    }
+
+    func testOutOfOrderSyncCompletionCannotClearNewerBroadcastGeneration() {
+        // Generation 1 (older broadcast) finishes after Generation 2 was broadcast
+        let shouldClearOlder = BalanceCalculator.shouldClearPendingOnSyncCompletion(
+            expectedGeneration: 1,
+            currentGeneration: 2,
+            syncSuccess: true
+        )
+        XCTAssertFalse(shouldClearOlder)
+
+        // Generation 2 (current broadcast) finishes and clears
+        let shouldClearCurrent = BalanceCalculator.shouldClearPendingOnSyncCompletion(
+            expectedGeneration: 2,
+            currentGeneration: 2,
+            syncSuccess: true
+        )
+        XCTAssertTrue(shouldClearCurrent)
+    }
+
+    func testAllSyncAttemptsFailPreservesPendingDeduction() {
+        let shouldClearFailedSync = BalanceCalculator.shouldClearPendingOnSyncCompletion(
+            expectedGeneration: 1,
+            currentGeneration: 1,
+            syncSuccess: false
+        )
+        XCTAssertFalse(shouldClearFailedSync)
+    }
+
+    func testAuthoritativeTxFailureClearsPendingAndRestoresSpendable() {
+        let pending = BalanceCalculator.PendingOutboundSend(
+            amountSats: 30_000,
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            txids: ["tx_failed"]
+        )
+
+        let resolved = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            isTxFailed: { $0 == "tx_failed" }
+        )
+        XCTAssertEqual(resolved.amountSats, 0)
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: resolved
+        )
+        XCTAssertEqual(effective.onchain, 100_000)
+        XCTAssertEqual(effective.spendable, 95_000)
     }
 
     func testPartialIncorporationOfMultipleSendsDoesNotDoubleDeduct() {

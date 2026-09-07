@@ -118,17 +118,22 @@ enum BalanceCalculator {
         var isSendAll: Bool
         var baselineOnchainSats: UInt64
         var timestampSecs: Int64
+        var txids: [String]
+
+        var txid: String? { txids.first }
 
         init(
             amountSats: UInt64 = 0,
             isSendAll: Bool = false,
             baselineOnchainSats: UInt64 = 0,
-            timestampSecs: Int64 = Int64(Date().timeIntervalSince1970)
+            timestampSecs: Int64 = Int64(Date().timeIntervalSince1970),
+            txids: [String] = []
         ) {
             self.amountSats = amountSats
             self.isSendAll = isSendAll
             self.baselineOnchainSats = baselineOnchainSats
             self.timestampSecs = timestampSecs
+            self.txids = txids
         }
     }
 
@@ -140,22 +145,29 @@ enum BalanceCalculator {
         amountSats: UInt64,
         isSendAll: Bool,
         currentOnchain: UInt64,
-        timestampSecs: Int64 = Int64(Date().timeIntervalSince1970)
+        timestampSecs: Int64 = Int64(Date().timeIntervalSince1970),
+        txid: String? = nil
     ) -> PendingOutboundSend {
         let baseline = currentPending.baselineOnchainSats == 0 ? currentOnchain : currentPending.baselineOnchainSats
+        var updatedTxids = currentPending.txids
+        if let txid, !txid.isEmpty, !updatedTxids.contains(txid) {
+            updatedTxids.append(txid)
+        }
         if isSendAll {
             return PendingOutboundSend(
                 amountSats: currentPending.amountSats + currentOnchain,
                 isSendAll: true,
                 baselineOnchainSats: baseline,
-                timestampSecs: timestampSecs
+                timestampSecs: timestampSecs,
+                txids: updatedTxids
             )
         } else {
             return PendingOutboundSend(
                 amountSats: currentPending.amountSats + amountSats,
                 isSendAll: false,
                 baselineOnchainSats: baseline,
-                timestampSecs: timestampSecs
+                timestampSecs: timestampSecs,
+                txids: updatedTxids
             )
         }
     }
@@ -183,20 +195,32 @@ enum BalanceCalculator {
     }
 
     /// Resolves pending outbound send state against a fresh raw on-chain balance observation.
-    /// Once the raw balance proves the spend has been incorporated, or the pending TTL has expired,
-    /// pending state clears to avoid permanent balance suppression.
+    /// Once the raw balance proves the spend has been incorporated, or authoritative transaction
+    /// status confirms incorporation / failure, pending state clears.
+    /// Fails closed during extended indexer/node outages to prevent re-exposing spent funds.
     static func resolvePendingOutboundSend(
         rawOnchain: UInt64,
         pending: PendingOutboundSend,
-        currentTimeSecs: Int64 = Int64(Date().timeIntervalSince1970),
-        expirySecs: Int64 = defaultPendingExpirySecs
+        currentTimeSecs _: Int64 = Int64(Date().timeIntervalSince1970),
+        expirySecs _: Int64 = defaultPendingExpirySecs,
+        isTxConfirmed: ((String) -> Bool)? = nil,
+        isTxFailed: ((String) -> Bool)? = nil
     ) -> PendingOutboundSend {
         guard pending.amountSats > 0 || pending.isSendAll else {
             return pending
         }
-        if pending.timestampSecs > 0, currentTimeSecs - pending.timestampSecs >= expirySecs {
+
+        // 1. Authoritative transaction failure check:
+        if let isTxFailed, !pending.txids.isEmpty, pending.txids.allSatisfy({ isTxFailed($0) }) {
             return PendingOutboundSend(timestampSecs: 0)
         }
+
+        // 2. Authoritative transaction confirmation check:
+        if let isTxConfirmed, !pending.txids.isEmpty, pending.txids.allSatisfy({ isTxConfirmed($0) }) {
+            return PendingOutboundSend(timestampSecs: 0)
+        }
+
+        // 3. Raw balance drop check:
         if pending.isSendAll {
             if rawOnchain == 0 {
                 return PendingOutboundSend(timestampSecs: 0)
@@ -210,8 +234,19 @@ enum BalanceCalculator {
             if rawOnchain <= expectedRemaining {
                 return PendingOutboundSend(timestampSecs: 0)
             }
+            // Fail closed beyond expiry: retain deduction until authoritative reconciliation
             return pending
         }
         return pending
+    }
+
+    /// Pure helper to evaluate if a background wallet sync completion owns the active send generation
+    /// and succeeded, preventing older out-of-order syncs from clearing newer pending broadcasts.
+    static func shouldClearPendingOnSyncCompletion(
+        expectedGeneration: Int64,
+        currentGeneration: Int64,
+        syncSuccess: Bool
+    ) -> Bool {
+        return syncSuccess && expectedGeneration == currentGeneration
     }
 }

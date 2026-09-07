@@ -1,6 +1,8 @@
 package com.stablechannels.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class OnChainSendBalanceTest {
@@ -330,16 +332,17 @@ class OnChainSendBalanceTest {
     }
 
     @Test
-    fun `pending outbound send expires after TTL backstop`() {
+    fun `pending outbound send fails closed past TTL without balance drop or confirmation`() {
         val sendTimestamp = 1_700_000_000L
         val pending = AppState.Companion.PendingOutboundSend(
             amountSats = 30_000L,
             isSendAll = false,
             baselineOnchainSats = 100_000L,
-            timestampSecs = sendTimestamp
+            timestampSecs = sendTimestamp,
+            txids = listOf("tx1")
         )
 
-        // Before TTL (e.g. at 300 seconds): still pending if raw balance hasn't dropped
+        // Before TTL (at 300 seconds): retains pending send
         val active = AppState.resolvePendingOutboundSend(
             rawOnchain = 100_000L,
             pending = pending,
@@ -348,18 +351,18 @@ class OnChainSendBalanceTest {
         )
         assertEquals(30_000L, active.amountSats)
 
-        // After TTL (at 601 seconds): expired to prevent permanent balance suppression
-        val expired = AppState.resolvePendingOutboundSend(
+        // Past TTL (at 601 seconds): fails closed and retains deduction during indexer/node outage
+        val pastTtl = AppState.resolvePendingOutboundSend(
             rawOnchain = 100_000L,
             pending = pending,
             currentTimestampSecs = sendTimestamp + 601L,
             ttlSecs = 600L
         )
-        assertEquals(0L, expired.amountSats)
+        assertEquals(30_000L, pastTtl.amountSats)
     }
 
     @Test
-    fun `incoming deposit during pending window clears via TTL without stranding balance`() {
+    fun `incoming deposit with authoritative tx confirmation clears pending without stranding balance`() {
         // Baseline 100k, send 30k. Expected remaining = 70k.
         // But a 50k deposit lands concurrently, raising raw balance to 120k.
         val sendTimestamp = 1_700_000_000L
@@ -367,32 +370,45 @@ class OnChainSendBalanceTest {
             amountSats = 30_000L,
             isSendAll = false,
             baselineOnchainSats = 100_000L,
-            timestampSecs = sendTimestamp
+            timestampSecs = sendTimestamp,
+            txids = listOf("tx1")
         )
 
         val rawWithDeposit = 120_000L
 
-        // Prior to TTL, the balance predicate alone cannot clear because 120k > 70k
-        val pendingBeforeTtl = AppState.resolvePendingOutboundSend(
+        // Prior to confirmation, balance predicate alone does not clear because 120k > 70k (fails closed)
+        val pendingUnconfirmed = AppState.resolvePendingOutboundSend(
             rawOnchain = rawWithDeposit,
             pending = pending,
             currentTimestampSecs = sendTimestamp + 100L,
-            ttlSecs = 600L
+            ttlSecs = 600L,
+            isTxConfirmed = { false }
         )
-        assertEquals(30_000L, pendingBeforeTtl.amountSats)
+        assertEquals(30_000L, pendingUnconfirmed.amountSats)
 
-        // Once TTL expires, pending clears and user sees the true updated deposit balance
-        val pendingAfterTtl = AppState.resolvePendingOutboundSend(
+        // Even past TTL, if unconfirmed it fails closed
+        val pendingPastTtlUnconfirmed = AppState.resolvePendingOutboundSend(
             rawOnchain = rawWithDeposit,
             pending = pending,
             currentTimestampSecs = sendTimestamp + 650L,
-            ttlSecs = 600L
+            ttlSecs = 600L,
+            isTxConfirmed = { false }
         )
-        assertEquals(0L, pendingAfterTtl.amountSats)
+        assertEquals(30_000L, pendingPastTtlUnconfirmed.amountSats)
+
+        // Once authoritative confirmation verifies tx1 is incorporated, pending clears
+        val pendingConfirmed = AppState.resolvePendingOutboundSend(
+            rawOnchain = rawWithDeposit,
+            pending = pending,
+            currentTimestampSecs = sendTimestamp + 100L,
+            ttlSecs = 600L,
+            isTxConfirmed = { it == "tx1" }
+        )
+        assertEquals(0L, pendingConfirmed.amountSats)
         val (effOnchain, _) = AppState.calculateEffectiveBalances(
             rawOnchain = rawWithDeposit,
             rawSpendable = rawWithDeposit,
-            pending = pendingAfterTtl
+            pending = pendingConfirmed
         )
         assertEquals(120_000L, effOnchain)
     }
@@ -459,6 +475,7 @@ class OnChainSendBalanceTest {
         assertEquals("pending_outbound_is_send_all", AppState.Companion.BalanceCacheKey.PENDING_IS_SEND_ALL)
         assertEquals("pending_outbound_baseline_sats", AppState.Companion.BalanceCacheKey.PENDING_BASELINE)
         assertEquals("pending_outbound_timestamp_secs", AppState.Companion.BalanceCacheKey.PENDING_TIMESTAMP)
+        assertEquals("pending_outbound_txids", AppState.Companion.BalanceCacheKey.PENDING_TXIDS)
     }
 
     @Test
@@ -507,5 +524,58 @@ class OnChainSendBalanceTest {
             ttlSecs = 600L
         )
         assertEquals(0L, resolved.amountSats)
+    }
+
+    @Test
+    fun `out of order sync completion cannot clear newer broadcast generation`() {
+        // Generation 1 (older broadcast) finishes after Generation 2 was broadcast
+        val shouldClearOlder = AppState.shouldClearPendingOnSyncCompletion(
+            expectedGeneration = 1L,
+            currentGeneration = 2L,
+            syncSuccess = true
+        )
+        assertFalse(shouldClearOlder)
+
+        // Generation 2 (current broadcast) finishes and clears
+        val shouldClearCurrent = AppState.shouldClearPendingOnSyncCompletion(
+            expectedGeneration = 2L,
+            currentGeneration = 2L,
+            syncSuccess = true
+        )
+        assertTrue(shouldClearCurrent)
+    }
+
+    @Test
+    fun `all sync attempts fail preserves pending deduction`() {
+        val shouldClearFailedSync = AppState.shouldClearPendingOnSyncCompletion(
+            expectedGeneration = 1L,
+            currentGeneration = 1L,
+            syncSuccess = false
+        )
+        assertFalse(shouldClearFailedSync)
+    }
+
+    @Test
+    fun `authoritative tx failure clears pending and restores spendable balance`() {
+        val pending = AppState.Companion.PendingOutboundSend(
+            amountSats = 30_000L,
+            isSendAll = false,
+            baselineOnchainSats = 100_000L,
+            txids = listOf("tx_failed")
+        )
+
+        val resolved = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pending,
+            isTxFailed = { it == "tx_failed" }
+        )
+        assertEquals(0L, resolved.amountSats)
+        val (effOnchain, effSpendable) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = resolved
+        )
+        assertEquals(100_000L, effOnchain)
+        assertEquals(95_000L, effSpendable)
     }
 }
