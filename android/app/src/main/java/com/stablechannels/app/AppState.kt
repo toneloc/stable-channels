@@ -66,7 +66,10 @@ class AppState(private val context: Context) : ViewModel() {
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
-        private set
+    // Bounds how long a stuck signed trade-sync message can keep retrying before we give up on
+    // it, since NodeService's event queue is strictly sequential and won't process the next LDK
+    // event (e.g. Event.ChannelClosed) until this one is acknowledged.
+    private val syncRetryTracker = SyncRetryTracker()
     private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
 
     private val _phase = MutableStateFlow(Phase.LOADING)
@@ -1077,6 +1080,20 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    // Retries the current LDK event (by throwing RetryableSyncException, which NodeService
+    // catches and re-delivers the same un-acked event) up to syncRetryTracker's time bound.
+    // Past that bound we give up and ack the event instead, so a message that can never commit
+    // (e.g. a stale/unreachable channel row) doesn't block every subsequent LDK event forever —
+    // including Event.ChannelClosed, which is required to resolve a channel-close receive's txid.
+    private fun deferSyncOrGiveUp(paymentHash: String, reason: String): Boolean {
+        if (syncRetryTracker.recordAttemptAndShouldGiveUp(paymentHash)) {
+            AuditService.log("TRADE_RESULT_GIVEN_UP", mapOf("payment_hash" to paymentHash, "reason" to reason))
+            return true
+        }
+        AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash, "reason" to reason))
+        throw RetryableSyncException(reason)
+    }
+
     private fun handleSyncMessage(
         customRecords: List<CustomTlvRecord>,
         paymentHash: String,
@@ -1091,7 +1108,8 @@ class AppState(private val context: Context) : ViewModel() {
             AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
             return true
         }
-        val db = databaseService ?: throw RetryableSyncException("Trade database unavailable")
+        val db = databaseService
+            ?: return deferSyncOrGiveUp(paymentHash, "Trade database unavailable")
         val result = when (message) {
             is TradeControlMessage.Rejected -> {
                 if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) {
@@ -1110,18 +1128,19 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     val price = priceService.currentAccountingPrice()
                     if (price <= 0.0) {
-                        AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
-                        throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+                        return deferSyncOrGiveUp(paymentHash, "Cannot apply SYNC_V1 without a trusted BTC price")
                     }
                     db.applyUncorrelatedSyncIfNewer(message, price)
                 }
             }
         }
+        if (result.status != TradeControlApplyStatus.RETRY) {
+            syncRetryTracker.clear(paymentHash)
+        }
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
-                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash))
-                throw RetryableSyncException("Signed trade result could not be committed")
+                return deferSyncOrGiveUp(paymentHash, "Signed trade result could not be committed")
             }
             TradeControlApplyStatus.INVALID -> {
                 AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
@@ -1139,7 +1158,7 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: throw RetryableSyncException("Duplicate result channel could not be reloaded")
+                    ?: return deferSyncOrGiveUp(paymentHash, "Duplicate result channel could not be reloaded")
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
@@ -1162,7 +1181,7 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: throw RetryableSyncException("Applied result channel could not be reloaded")
+                    ?: return deferSyncOrGiveUp(paymentHash, "Applied result channel could not be reloaded")
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
