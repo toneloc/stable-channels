@@ -301,9 +301,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         "Syncing...",
                         style = MaterialTheme.typography.bodySmall,

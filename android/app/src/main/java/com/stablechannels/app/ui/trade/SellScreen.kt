@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.models.USD
+import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -312,8 +313,8 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
-                    CircularProgressIndicator(Modifier.size(48.dp))
-                    Spacer(Modifier.height(8.dp))
+                    CurveProgressIndicator(size = 56.dp)
+                    Spacer(Modifier.height(12.dp))
                     Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(

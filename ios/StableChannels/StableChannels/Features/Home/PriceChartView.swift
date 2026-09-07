@@ -206,12 +206,15 @@ struct PriceChartView: View {
                 .padding(.horizontal)
             } else {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(.quaternary)
+                    .fill(.quaternary.opacity(0.6))
                     .frame(height: compact ? 220 : 150)
                     .overlay {
-                        Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
+                        VStack(spacing: 12) {
+                            CurveProgressIndicator(curve: .spiralSearch, size: 68, tint: .blue)
+                            Text(String(localized: "status_collecting_data", defaultValue: "Collecting price data..."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.horizontal)
             }
@@ -318,4 +321,9 @@ struct PriceChartCard: View, Equatable {
     let compact: Bool
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.compact == rhs.compact }
     var body: some View { PriceChartView(compact: compact) }
+}
+
+#Preview("Collecting Price Data") {
+    PriceChartCard(compact: false)
+        .environment(AppState())
 }

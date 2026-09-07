@@ -147,6 +147,13 @@ impl ChartPeriod {
     }
 }
 
+/// Mathematical curve patterns for animated progress indicators (Open/Closed & Liskov Substitution).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurvePattern {
+    SixPetalSpiral,
+    SpiralSearch,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingTrade {
     pub action: TradeAction,
@@ -953,9 +960,9 @@ impl UserApp {
                                 }
                             }
 
-                            if let Some(payment_info) = stable_channels::stable::check_stability(
-                                &node_arc, &mut sc, price,
-                            ) {
+                            if let Some(payment_info) =
+                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            {
                                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                                 let amount_usd =
                                     (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
@@ -2628,20 +2635,20 @@ impl UserApp {
                 sc.stable_receiver_btc.sats.saturating_sub(backing_after),
             )
         };
-        let amount_usd = (price > 0.0)
-            .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
+        let amount_usd = (price > 0.0).then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
         let persist = |backing_sats_before, backing_sats_after, native_sats_after| {
-            self.db.record_signed_stability_payment_and_update_allocation(
-                payment_hash,
-                &payload.settlement_id,
-                amount_msat,
-                amount_usd,
-                (price > 0.0).then_some(price),
-                &user_channel_id,
-                backing_sats_before,
-                backing_sats_after,
-                native_sats_after,
-            )
+            self.db
+                .record_signed_stability_payment_and_update_allocation(
+                    payment_hash,
+                    &payload.settlement_id,
+                    amount_msat,
+                    amount_usd,
+                    (price > 0.0).then_some(price),
+                    &user_channel_id,
+                    backing_sats_before,
+                    backing_sats_after,
+                    native_sats_after,
+                )
         };
         let mut reloaded_expected_usd = None;
         let persisted = match persist(backing_before, backing_after, native_after) {
@@ -2666,15 +2673,13 @@ impl UserApp {
                         return SignedStabilityHandling::Retry;
                     }
                 };
-                let Some(reloaded_backing_after) =
-                    stable::backing_after_lsp_to_user_stability(
-                        durable.backing_sats,
-                        durable.expected_usd,
-                        price,
-                        amount_sats,
-                        live_receiver_sats,
-                    )
-                else {
+                let Some(reloaded_backing_after) = stable::backing_after_lsp_to_user_stability(
+                    durable.backing_sats,
+                    durable.expected_usd,
+                    price,
+                    amount_sats,
+                    live_receiver_sats,
+                ) else {
                     *ack = false;
                     audit_event(
                         "STABILITY_PAYMENT_ALLOCATION_RETRY_DEFERRED",
@@ -2777,8 +2782,8 @@ impl UserApp {
             return;
         }
         let price = self.stable_channel.lock().unwrap().latest_price;
-        let amount_usd = (price > 0.0)
-            .then(|| amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price);
+        let amount_usd =
+            (price > 0.0).then(|| amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price);
         match self.db.record_payment_and_maybe_update_backing(
             Some(payment_hash),
             "lightning",
@@ -3051,8 +3056,7 @@ impl UserApp {
                     return;
                 }
 
-                let pending =
-                    payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
+                let pending = payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
                 let payment_sent_message = pending
                     .as_ref()
                     .map(|p| {
@@ -3080,10 +3084,8 @@ impl UserApp {
                         let before_reconcile = sc.clone();
                         let old_expected_usd = sc.expected_usd.0;
                         let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
-                        sc.native_sats = sc
-                            .stable_receiver_btc
-                            .sats
-                            .saturating_sub(sc.backing_sats);
+                        sc.native_sats =
+                            sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
                         stable::recompute_native(&mut sc);
 
                         let result = self.db.persist_outgoing_reconciliation(
@@ -3099,12 +3101,9 @@ impl UserApp {
                             Some(price),
                         );
                         match result {
-                            Ok(true) => Ok((
-                                true,
-                                usd_deducted,
-                                old_expected_usd,
-                                sc.expected_usd.0,
-                            )),
+                            Ok(true) => {
+                                Ok((true, usd_deducted, old_expected_usd, sc.expected_usd.0))
+                            }
                             Ok(false) => {
                                 *sc = before_reconcile;
                                 Ok((false, None, old_expected_usd, old_expected_usd))
@@ -3171,7 +3170,7 @@ impl UserApp {
                             if let Some(pid) = payment_id {
                                 self.pending_payments.remove(&pid);
                             }
-                        },
+                        }
                         Err(error) => {
                             *ack = false;
                             audit_event(
@@ -3185,7 +3184,7 @@ impl UserApp {
                             self.status_message =
                                 "Stability payment settled but could not be saved; retrying"
                                     .to_string();
-                        },
+                        }
                     }
                 }
 
@@ -3423,10 +3422,7 @@ impl UserApp {
                     // Splice rows were already completed above (exact txid match,
                     // or the legacy latest-row fallback). Everything else with a
                     // known funding txid is a regular channel open.
-                    if !completed_splice
-                        && splice_direction.is_none()
-                        && txid_str != "unknown"
-                    {
+                    if !completed_splice && splice_direction.is_none() && txid_str != "unknown" {
                         let _ = self
                             .db
                             .update_payment_confirmations(&txid_str, 1, "completed");
@@ -3568,8 +3564,7 @@ impl UserApp {
                                     };
                                     let wallet_channel_id =
                                         self.stable_channel.lock().unwrap().channel_id.to_string();
-                                    if amount_msat != 1
-                                        || rejection.channel_id != wallet_channel_id
+                                    if amount_msat != 1 || rejection.channel_id != wallet_channel_id
                                     {
                                         audit_event(
                                             "TRADE_REJECTED_V1_CONTEXT_INVALID",
@@ -3582,7 +3577,11 @@ impl UserApp {
                                         &rejection.trade_payment_id,
                                         &rejection.request_hash,
                                     ) {
-                                        Ok(Some(trade)) if trade.channel_id == rejection.channel_id => trade,
+                                        Ok(Some(trade))
+                                            if trade.channel_id == rejection.channel_id =>
+                                        {
+                                            trade
+                                        }
                                         Ok(_) => {
                                             audit_event(
                                                 "TRADE_REJECTED_V1_UNMATCHED",
@@ -3672,16 +3671,16 @@ impl UserApp {
                                 }
 
                                 let pending_trade = match correlation {
-                                    Some((trade_id, payment_id, request_hash)) => self
-                                        .db
-                                        .get_trade_by_correlation(
+                                    Some((trade_id, payment_id, request_hash)) => {
+                                        self.db.get_trade_by_correlation(
                                             trade_id,
                                             payment_id,
                                             request_hash,
-                                        ),
-                                    None => self
-                                        .db
-                                        .get_pending_trade_by_expected_usd(sync.expected_usd),
+                                        )
+                                    }
+                                    None => {
+                                        self.db.get_pending_trade_by_expected_usd(sync.expected_usd)
+                                    }
                                 };
                                 let pending_trade = match pending_trade {
                                     Ok(trade) => trade,
@@ -3766,7 +3765,9 @@ impl UserApp {
                                             native_sats,
                                             pending_trade.as_ref().map(|trade| trade.id),
                                         )
-                                        .map(|applied| (applied, applied && pending_trade.is_some()))
+                                        .map(|applied| {
+                                            (applied, applied && pending_trade.is_some())
+                                        })
                                 };
                                 match persistence {
                                     Ok((allocation_applied, trade_resolved)) => {
@@ -3834,8 +3835,7 @@ impl UserApp {
                             tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() != [1u8]
                         });
                         let has_legacy_stability_marker = custom_records.iter().any(|tlv| {
-                            tlv.type_num == STABLE_CHANNEL_TLV_TYPE
-                                && tlv.value.as_slice() == [1u8]
+                            tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]
                         });
                         if has_legacy_stability_marker {
                             audit_event(
@@ -3969,8 +3969,8 @@ impl UserApp {
 
                     // Payment success proves that the fee reached the LSP, not that it accepted the
                     // trade. Keep it pending until the LSP's signed SYNC_V1 arrives.
-                    let mut pending_trade = payment_id
-                        .and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
+                    let mut pending_trade =
+                        payment_id.and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
                     if pending_trade.is_none() {
                         if let Some(pid) = payment_id {
                             if let Some(row) = self
@@ -4055,10 +4055,7 @@ impl UserApp {
                 } => {
                     let mut handled_stability_failure = false;
                     if let Some(pid) = payment_id {
-                        match self
-                            .db
-                            .fail_pending_stability_payment(&format!("{pid}"))
-                        {
+                        match self.db.fail_pending_stability_payment(&format!("{pid}")) {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
                                 if rollback.restored {
@@ -4072,10 +4069,8 @@ impl UserApp {
                                             && sc.backing_sats == after
                                         {
                                             sc.backing_sats = before;
-                                            sc.native_sats = sc
-                                                .stable_receiver_btc
-                                                .sats
-                                                .saturating_sub(before);
+                                            sc.native_sats =
+                                                sc.stable_receiver_btc.sats.saturating_sub(before);
                                             stable::recompute_native(&mut sc);
                                             sc.last_stability_payment = 0;
                                             sc.payment_made = false;
@@ -4169,9 +4164,9 @@ impl UserApp {
                             let pending =
                                 payment_id.and_then(|pid| self.pending_payments.remove(&pid));
                             if let Some(p) = pending {
-                                let _ = self
-                                    .db
-                                    .update_payment_status(p.payment_db_id, "failed", None);
+                                let _ =
+                                    self.db
+                                        .update_payment_status(p.payment_db_id, "failed", None);
                             }
 
                             audit_event(
@@ -4471,9 +4466,8 @@ impl UserApp {
         let price = sc.latest_price;
         if !price.is_finite() || price <= 0.0 {
             drop(sc);
-            pending.retry_after = Some(
-                std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS),
-            );
+            pending.retry_after =
+                Some(std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
             self.pending_splice_deduction = Some(pending);
             audit_event(
                 "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
@@ -4554,7 +4548,10 @@ impl UserApp {
     fn lookup_funding_output_sats_esplora(txid: &str, vout: u32) -> Option<u64> {
         let url = format!("{}/tx/{}", DEFAULT_CHAIN_URL, txid);
 
-        let response = stable_channels::price_feeds::bounded_agent().get(&url).call().ok()?;
+        let response = stable_channels::price_feeds::bounded_agent()
+            .get(&url)
+            .call()
+            .ok()?;
 
         let json: serde_json::Value = response.into_json().ok()?;
         let vouts = json["vout"].as_array()?;
@@ -4699,6 +4696,126 @@ impl UserApp {
         painter.line_segment([p2, egui::pos2(p2.x, p2.y + head)], stroke);
     }
 
+    /// Pure mathematical point computation on the curve (Single Responsibility Principle).
+    fn calculate_curve_point(
+        pattern: CurvePattern,
+        u: f32,
+        detail_scale: f32,
+        center: egui::Pos2,
+        scale: f32,
+    ) -> egui::Pos2 {
+        let t = u * std::f32::consts::TAU;
+        match pattern {
+            CurvePattern::SixPetalSpiral => {
+                let d = 3.0 + detail_scale * 0.25;
+                let base_x = 5.0 * t.cos() + d * (5.0 * t).cos();
+                let base_y = 5.0 * t.sin() - d * (5.0 * t).sin();
+                let s = (2.2 + detail_scale * 0.45) * 1.85 * scale;
+                egui::pos2(center.x + base_x * s, center.y + base_y * s)
+            }
+            CurvePattern::SpiralSearch => {
+                let angle = t * 4.0;
+                let radius = (8.0 + (1.0 - t.cos()) * (8.5 + detail_scale * 2.4)) * 1.4 * scale;
+                egui::pos2(
+                    center.x + angle.cos() * radius,
+                    center.y + angle.sin() * radius,
+                )
+            }
+        }
+    }
+
+    /// Paint mathematical curve progress indicator on an egui painter (Single Responsibility & Interface Segregation).
+    fn paint_curve_on_painter(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        pattern: CurvePattern,
+        primary_color: Color32,
+        glow_color: Color32,
+        time: f64,
+    ) {
+        let center = rect.center();
+        let scale = (rect.width().min(rect.height()) / 100.0).max(0.1);
+
+        let pulse_duration = 4.2;
+        let pulse_angle = ((time % pulse_duration) / pulse_duration) as f32 * std::f32::consts::TAU;
+        let detail_scale = 0.52 + (((pulse_angle + 0.55).sin() + 1.0) / 2.0) * 0.48;
+
+        let duration = 4.6;
+        let progress = ((time % duration) / duration) as f32;
+
+        let track_color = primary_color.gamma_multiply(0.14);
+        let track_steps = 96;
+        let mut prev_pt: Option<egui::Pos2> = None;
+        for step in 0..=track_steps {
+            let u = step as f32 / track_steps as f32;
+            let pt = Self::calculate_curve_point(pattern, u, detail_scale, center, scale);
+            if let Some(p0) = prev_pt {
+                painter.line_segment([p0, pt], egui::Stroke::new(1.2 * scale, track_color));
+            }
+            prev_pt = Some(pt);
+        }
+
+        let trail_count = 36;
+        let trail_span = if pattern == CurvePattern::SpiralSearch {
+            0.28
+        } else {
+            0.34
+        };
+
+        for i in (0..trail_count).rev() {
+            let offset_frac = i as f32 / (trail_count - 1) as f32;
+            let mut u = progress - offset_frac * trail_span;
+            if u < 0.0 {
+                u += 1.0;
+            }
+            let pt = Self::calculate_curve_point(pattern, u, detail_scale, center, scale);
+
+            let intensity = (1.0 - offset_frac).powf(0.56);
+            let particle_radius = (1.0 + (1.0 - offset_frac) * 2.8) * scale;
+
+            let t = 1.0 - offset_frac;
+            let r = (glow_color.r() as f32 + (primary_color.r() as f32 - glow_color.r() as f32) * t)
+                as u8;
+            let g = (glow_color.g() as f32 + (primary_color.g() as f32 - glow_color.g() as f32) * t)
+                as u8;
+            let b = (glow_color.b() as f32 + (primary_color.b() as f32 - glow_color.b() as f32) * t)
+                as u8;
+            let alpha = (intensity * 0.85 * 255.0).clamp(0.0, 255.0) as u8;
+
+            let color = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
+            painter.circle_filled(pt, particle_radius, color);
+        }
+
+        let head_pt = Self::calculate_curve_point(pattern, progress, detail_scale, center, scale);
+        painter.circle_filled(head_pt, 6.5 * scale, primary_color.gamma_multiply(0.22));
+        painter.circle_filled(head_pt, 4.0 * scale, glow_color.gamma_multiply(0.55));
+        painter.circle_filled(head_pt, 2.2 * scale, egui::Color32::WHITE);
+    }
+
+    /// Animated progress indicator with mathematical curve particle trail (Single Responsibility).
+    fn paint_curve_progress_indicator(
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        pattern: CurvePattern,
+        primary_color: Color32,
+        glow_color: Color32,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let time = ui.input(|i| i.time);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            Self::paint_curve_on_painter(
+                ui.painter(),
+                rect,
+                pattern,
+                primary_color,
+                glow_color,
+                time,
+            );
+        }
+        response
+    }
+
     /// Format BTC with iOS-style spaced digit groups: "0.00 039 094" (2/3/3
     /// digits separated by thin spaces). Matches iOS `btcSpacedFormatted`.
     fn format_btc_spaced(btc: f64) -> String {
@@ -4778,10 +4895,7 @@ impl UserApp {
         if fee_sats == 0 {
             "Expected fee: none".to_string()
         } else {
-            format!(
-                "Expected fee: ~{}",
-                Self::format_sats_as_btc(fee_sats)
-            )
+            format!("Expected fee: ~{}", Self::format_sats_as_btc(fee_sats))
         }
     }
 
@@ -4911,8 +5025,15 @@ impl UserApp {
                 match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
                     Ok(prices) => {
                         for (date, open, high, low, close, volume) in prices {
-                            let _ = db
-                                .record_daily_price(&date, open, high, low, close, volume, Some("kraken"));
+                            let _ = db.record_daily_price(
+                                &date,
+                                open,
+                                high,
+                                low,
+                                close,
+                                volume,
+                                Some("kraken"),
+                            );
                         }
                     }
                     Err(e) => eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e),
@@ -5235,22 +5356,21 @@ impl UserApp {
                         });
 
                         cols[1].vertical_centered(|ui| {
-                            let onchain_btn = egui::Button::new(
-                                egui::RichText::new("Onchain").size(14.0).color(
+                            let onchain_btn =
+                                egui::Button::new(egui::RichText::new("Onchain").size(14.0).color(
                                     if onchain_selected {
                                         Color32::WHITE
                                     } else {
                                         Color32::BLACK
                                     },
-                                ),
-                            )
-                            .fill(if onchain_selected {
-                                theme::PRIMARY
-                            } else {
-                                theme::SELECTED_BG
-                            })
-                            .corner_radius(theme::RADIUS_SM)
-                            .min_size(egui::vec2(130.0, 34.0));
+                                ))
+                                .fill(if onchain_selected {
+                                    theme::PRIMARY
+                                } else {
+                                    theme::SELECTED_BG
+                                })
+                                .corner_radius(theme::RADIUS_SM)
+                                .min_size(egui::vec2(130.0, 34.0));
 
                             if ui.add(onchain_btn).clicked() {
                                 self.fund_tab = FundTab::Onchain;
@@ -5415,7 +5535,13 @@ impl UserApp {
                                     self.show_toast("Copied!", "OK");
                                 }
                             } else {
-                                ui.spinner();
+                                Self::paint_curve_progress_indicator(
+                                    ui,
+                                    egui::vec2(60.0, 34.0),
+                                    CurvePattern::SixPetalSpiral,
+                                    theme::IOS_BLUE,
+                                    theme::IOS_ORANGE,
+                                );
                             }
                         }
                     }
@@ -7113,6 +7239,28 @@ impl UserApp {
                                 egui::Stroke::new(2.0, color),
                             );
                         }
+                    } else {
+                        let time = ui.input(|i| i.time);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                        let loader_rect = egui::Rect::from_center_size(
+                            rect.center() - egui::vec2(0.0, 10.0),
+                            egui::vec2(44.0, 44.0),
+                        );
+                        Self::paint_curve_on_painter(
+                            painter,
+                            loader_rect,
+                            CurvePattern::SpiralSearch,
+                            theme::IOS_BLUE,
+                            theme::IOS_ORANGE,
+                            time,
+                        );
+                        painter.text(
+                            rect.center() + egui::vec2(0.0, 22.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Collecting price data...",
+                            egui::FontId::proportional(11.0),
+                            Color32::GRAY,
+                        );
                     }
                 } else {
                     let prices: Vec<f64> = self.chart_prices.iter().map(|p| p.close).collect();
@@ -7149,6 +7297,28 @@ impl UserApp {
                                 egui::Stroke::new(2.0, chart_color),
                             );
                         }
+                    } else {
+                        let time = ui.input(|i| i.time);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                        let loader_rect = egui::Rect::from_center_size(
+                            rect.center() - egui::vec2(0.0, 10.0),
+                            egui::vec2(44.0, 44.0),
+                        );
+                        Self::paint_curve_on_painter(
+                            painter,
+                            loader_rect,
+                            CurvePattern::SpiralSearch,
+                            theme::IOS_BLUE,
+                            theme::IOS_ORANGE,
+                            time,
+                        );
+                        painter.text(
+                            rect.center() + egui::vec2(0.0, 22.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Collecting price data...",
+                            egui::FontId::proportional(11.0),
+                            Color32::GRAY,
+                        );
                     }
                 }
 
@@ -7282,11 +7452,25 @@ impl UserApp {
                         );
                     }
                 } else {
+                    let time = ui.input(|i| i.time);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    let loader_rect = egui::Rect::from_center_size(
+                        inner.center() - egui::vec2(0.0, 16.0),
+                        egui::vec2(68.0, 68.0),
+                    );
+                    Self::paint_curve_on_painter(
+                        painter,
+                        loader_rect,
+                        CurvePattern::SpiralSearch,
+                        theme::IOS_BLUE,
+                        theme::IOS_ORANGE,
+                        time,
+                    );
                     painter.text(
-                        inner.center(),
+                        inner.center() + egui::vec2(0.0, 36.0),
                         egui::Align2::CENTER_CENTER,
                         "Collecting price data...",
-                        egui::FontId::proportional(14.0),
+                        egui::FontId::proportional(13.0),
                         Color32::GRAY,
                     );
                 }
@@ -7345,11 +7529,25 @@ impl UserApp {
                         label_color,
                     );
                 } else {
+                    let time = ui.input(|i| i.time);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    let loader_rect = egui::Rect::from_center_size(
+                        inner.center() - egui::vec2(0.0, 16.0),
+                        egui::vec2(68.0, 68.0),
+                    );
+                    Self::paint_curve_on_painter(
+                        painter,
+                        loader_rect,
+                        CurvePattern::SpiralSearch,
+                        theme::IOS_BLUE,
+                        theme::IOS_ORANGE,
+                        time,
+                    );
                     painter.text(
-                        inner.center(),
+                        inner.center() + egui::vec2(0.0, 36.0),
                         egui::Align2::CENTER_CENTER,
-                        "No price data available",
-                        egui::FontId::proportional(14.0),
+                        "Collecting price data...",
+                        egui::FontId::proportional(13.0),
                         Color32::GRAY,
                     );
                 }
@@ -9230,10 +9428,12 @@ impl UserApp {
                 ui.vertical_centered(|ui| {
                     if !has_ready_channel {
                         ui.label(
-                            RichText::new("Get your first payment over Lightning to activate your account")
-                                .size(11.0)
-                                .color(theme::MUTED)
-                                .italics(),
+                            RichText::new(
+                                "Get your first payment over Lightning to activate your account",
+                            )
+                            .size(11.0)
+                            .color(theme::MUTED)
+                            .italics(),
                         );
                         ui.add_space(6.0);
                     }
@@ -9866,10 +10066,7 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui
-                .add_enabled(!confirmation_blocked, confirm_btn)
-                .clicked()
-            {
+            if ui.add_enabled(!confirmation_blocked, confirm_btn).clicked() {
                 should_confirm = true;
             }
         });
@@ -10251,10 +10448,7 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui
-                .add_enabled(!confirmation_blocked, confirm_btn)
-                .clicked()
-            {
+            if ui.add_enabled(!confirmation_blocked, confirm_btn).clicked() {
                 should_confirm = true;
             }
         });
@@ -10586,8 +10780,7 @@ impl UserApp {
             btc_price,
             amount_usd,
             btc_amount,
-        )
-        {
+        ) {
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10660,8 +10853,7 @@ impl UserApp {
             btc_price,
             amount_usd,
             btc_amount,
-        )
-        {
+        ) {
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10682,46 +10874,59 @@ impl UserApp {
         if !self.show_diagnostics_window {
             return;
         }
-        
+
         let mut is_open = self.show_diagnostics_window;
         let mut do_export = false;
-        
+
         egui::Window::new("Logs & Diagnostics")
             .resizable(false)
             .collapsible(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
                 let icon_badge = |ui: &mut egui::Ui, symbol: &str, color: Color32| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, color.gamma_multiply(0.12));
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 4.0, color.gamma_multiply(0.12));
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         symbol,
                         egui::FontId::proportional(14.0),
-                        color
+                        color,
                     );
                 };
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(
-                        "Save app logs to a file for debugging and support."
-                    ).size(12.0).color(Color32::DARK_GRAY));
-                    
+                    ui.label(
+                        RichText::new("Save app logs to a file for debugging and support.")
+                            .size(12.0)
+                            .color(Color32::DARK_GRAY),
+                    );
+
                     ui.add_space(12.0);
                     let support_color = Color32::from_rgb(76, 175, 80);
 
                     ui.horizontal(|ui| {
                         icon_badge(ui, "📤", support_color);
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
-                            RichText::new("Download logs").size(14.0).color(support_color),
-                        ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Download logs")
+                                        .size(14.0)
+                                        .color(support_color),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
                             do_export = true;
                         }
                     });
                 });
             });
-            
+
         self.show_diagnostics_window = is_open;
         if do_export {
             if export_logs_to_zip() {
@@ -11463,8 +11668,7 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
         return None;
     }
     let channel_id = channel_id.to_string();
-    let expected_usd =
-        stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
+    let expected_usd = stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
     let backing_sats = payload.get("backing_sats")?.as_u64()?;
     let sync_version = payload.get("sync_version")?.as_u64()?;
     if !expected_usd.is_finite()
@@ -11573,8 +11777,7 @@ fn local_trade_backing_sats(
     let post_fee_receiver_sats = live_receiver_sats
         .checked_sub(fee_sats)
         .ok_or(LocalTradeAllocationError::FeeExceedsBalance)?;
-    let receiver_usd =
-        post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
+    let receiver_usd = post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
     if new_expected_usd > receiver_usd {
         return Err(LocalTradeAllocationError::TargetExceedsCapacity);
     }
@@ -11585,18 +11788,20 @@ fn local_trade_backing_sats(
         new_expected_usd,
         current_price,
     )
-    .ok_or(if new_expected_usd == 0.0
-        || trade_reduction_exhausts_backing(
-            current_backing_sats,
-            current_expected_usd,
-            new_expected_usd,
-            current_price,
-        )
-    {
-        LocalTradeAllocationError::SettlementRequired
-    } else {
-        LocalTradeAllocationError::UnsafeAllocation
-    })?;
+    .ok_or(
+        if new_expected_usd == 0.0
+            || trade_reduction_exhausts_backing(
+                current_backing_sats,
+                current_expected_usd,
+                new_expected_usd,
+                current_price,
+            )
+        {
+            LocalTradeAllocationError::SettlementRequired
+        } else {
+            LocalTradeAllocationError::UnsafeAllocation
+        },
+    )?;
     Ok((post_fee_receiver_sats, backing_sats))
 }
 
@@ -11764,9 +11969,9 @@ mod tests {
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
         local_sync_backing_sats, local_trade_backing_sats, max_sell_trade_usd_cents,
         parse_incoming_sync, parse_trade_rejection, parse_trade_usd_cents,
-        restrict_secret_file_permissions, sats_for_usd_cents,
-        splice_in_overlap_sats, splice_reconcile_action, write_secret_file, IncomingSync,
-        LocalTradeAllocationError, PendingSplice, SpliceReconcileAction, UserApp,
+        restrict_secret_file_permissions, sats_for_usd_cents, splice_in_overlap_sats,
+        splice_reconcile_action, write_secret_file, IncomingSync, LocalTradeAllocationError,
+        PendingSplice, SpliceReconcileAction, UserApp,
     };
     use stable_channels::db::PendingTradeRow;
 
@@ -12036,14 +12241,7 @@ mod tests {
             "an authenticated full-exit sync needs no local price",
         );
         assert_eq!(
-            local_sync_backing_sats(
-                &closed,
-                100_000,
-                100_001.0,
-                60.0,
-                59_999,
-                None,
-            ),
+            local_sync_backing_sats(&closed, 100_000, 100_001.0, 60.0, 59_999, None,),
             Ok(0),
             "a full exit with insignificant drift is safe",
         );
@@ -12366,7 +12564,9 @@ mod tests {
     fn closure_reason_structured_variants_and_unknown() {
         use ldk_node::lightning::events::ClosureReason;
 
-        let pe = Some(ClosureReason::ProcessingError { err: "bad htlc".to_string() });
+        let pe = Some(ClosureReason::ProcessingError {
+            err: "bad htlc".to_string(),
+        });
         let v = super::closure_reason_to_json(&pe);
         assert_eq!(v["kind"], "PROCESSING_ERROR");
         assert_eq!(v["err"], "bad htlc");
@@ -12406,7 +12606,10 @@ fn closure_reason_to_json(
         CR::CounterpartyForceClosed { peer_msg } => {
             json!({ "kind": "COUNTERPARTY_FORCE_CLOSED", "peer_msg": peer_msg.to_string() })
         }
-        CR::HolderForceClosed { broadcasted_latest_txn, message } => json!({
+        CR::HolderForceClosed {
+            broadcasted_latest_txn,
+            message,
+        } => json!({
             "kind": "HOLDER_FORCE_CLOSED",
             "broadcasted_latest_txn": broadcasted_latest_txn,
             "message": message,
@@ -12451,8 +12654,8 @@ fn export_logs_to_zip() -> bool {
     let zip_path = out_dir.join("stable_channels_logs.zip");
     if let Ok(file) = std::fs::File::create(&zip_path) {
         let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         // ldk-node's default filesystem logger writes to `ldk_node.log`; keep the hyphenated
         // name as a fallback in case a custom logger path is configured.
         for filename in &["audit_log.txt", "ldk_node.log", "ldk-node.log"] {
