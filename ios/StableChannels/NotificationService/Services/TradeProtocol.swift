@@ -25,6 +25,12 @@ enum StabilizationPolicy {
             Double(cents) / 100
         )
     }
+
+    static func limitExceededMessage(_ cents: UInt64) -> String {
+        let explanation = String(localized: "stabilization_reserve_explanation",
+                                 defaultValue: "Keeps a small BTC reserve in the channel.")
+        return maximumMessage(cents) + "\n" + explanation
+    }
 }
 
 enum TradeValidationError: LocalizedError {
@@ -34,7 +40,7 @@ enum TradeValidationError: LocalizedError {
         case .invalidAmount: return "Enter a positive amount within your balance and use a fresh BTC/USD quote"
         case .unavailable: return "The live channel balance is unavailable. Retry when the channel is ready."
         case .unsafeAllocation: return "This trade cannot preserve the current channel allocation safely. Settle the stability adjustment and retry."
-        case .stabilizationLimit(let cents): return StabilizationPolicy.maximumMessage(cents)
+        case .stabilizationLimit(let cents): return StabilizationPolicy.limitExceededMessage(cents)
         }
     }
 }

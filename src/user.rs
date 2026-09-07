@@ -454,6 +454,7 @@ pub struct UserApp {
     // Balance bar slider: drag to initiate buy/sell trades
     bar_slider_drag_offset: f32,
     bar_slider_dragging: bool,
+    bar_slider_at_sell_limit: bool,
     bar_slider_release_at: Option<std::time::Instant>,
 
     // History tables display toggle: false = USD, true = BTC
@@ -807,6 +808,7 @@ impl UserApp {
             bar_chart_anim: 0.0,
             bar_slider_drag_offset: 0.0,
             bar_slider_dragging: false,
+            bar_slider_at_sell_limit: false,
             bar_slider_release_at: None,
             history_show_btc: false,
             selected_payment: None,
@@ -2239,7 +2241,7 @@ impl UserApp {
             Err(reason) => {
                 self.trade_error = match reason {
                     LocalTradeAllocationError::StabilizationLimit(cents) => {
-                        format!("Maximum additional trade: ${:.2}", cents as f64 / 100.0)
+                        Self::stabilization_limit_message(cents)
                     }
                     LocalTradeAllocationError::SettlementRequired => {
                         "Settle the current stability adjustment, then retry this trade."
@@ -6422,6 +6424,7 @@ impl UserApp {
                     if let Some(p) = response.interact_pointer_pos() {
                         if (p.x - base_x).abs() < thumb_radius * 1.8 {
                             self.bar_slider_dragging = true;
+                            self.bar_slider_at_sell_limit = false;
                             self.bar_slider_drag_offset = 0.0;
                             self.bar_slider_release_at = None;
                         }
@@ -6429,9 +6432,10 @@ impl UserApp {
                 }
 
                 if response.dragged() && self.bar_slider_dragging {
-                    self.bar_slider_drag_offset = (self.bar_slider_drag_offset
-                        + response.drag_delta().x)
-                        .clamp(-max_buy_drag_offset, max_sell_drag_offset);
+                    let proposed_offset = self.bar_slider_drag_offset + response.drag_delta().x;
+                    self.bar_slider_at_sell_limit = proposed_offset > max_sell_drag_offset;
+                    self.bar_slider_drag_offset =
+                        proposed_offset.clamp(-max_buy_drag_offset, max_sell_drag_offset);
                 }
 
                 if response.drag_stopped() && self.bar_slider_dragging {
@@ -6567,8 +6571,8 @@ impl UserApp {
                     let vis_frac = (thumb_x_local / rect.width()).clamp(0.0, 1.0);
                     let usd_pct = (vis_frac * 100.0).round() as i32;
                     let btc_pct = 100 - usd_pct;
-                    let label = if self.bar_slider_drag_offset >= max_sell_drag_offset {
-                        format!("Maximum additional trade: ${:.2}", sell_available_usd)
+                    let label = if self.bar_slider_at_sell_limit {
+                        Self::stabilization_limit_message(floor_usd_cents(sell_available_usd))
                     } else {
                         format!("{}% USD  {}% BTC", usd_pct, btc_pct)
                     };
@@ -10176,6 +10180,13 @@ impl UserApp {
             .unwrap_or(0)
     }
 
+    fn stabilization_limit_message(cents: u64) -> String {
+        format!(
+            "Maximum additional trade: ${:.2}\nKeeps a small BTC reserve in the channel.",
+            cents as f64 / 100.0,
+        )
+    }
+
     fn show_sell_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
@@ -10212,11 +10223,6 @@ impl UserApp {
             .size(14.0)
             .color(Color32::DARK_GRAY),
         );
-        ui.label(
-            RichText::new("Keeps a small BTC reserve in the channel.")
-                .size(12.0)
-                .color(theme::MUTED),
-        );
         if ui.button("Max").clicked() {
             self.trade_amount_input = format!("{:.2}", available_btc_usd);
             self.trade_error.clear();
@@ -10236,7 +10242,7 @@ impl UserApp {
                 })
                 .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
                 .show(ui, |ui| {
-                    ui.add(
+                    let amount_response = ui.add(
                         egui::TextEdit::singleline(&mut self.trade_amount_input)
                             .frame(false)
                             .hint_text("0.00")
@@ -10244,6 +10250,9 @@ impl UserApp {
                             .horizontal_align(egui::Align::Center)
                             .desired_width(228.0),
                     );
+                    if amount_response.changed() {
+                        self.trade_error.clear();
+                    }
                 });
 
             // BTC equivalent below input
@@ -10305,10 +10314,7 @@ impl UserApp {
                 if btc_price < 1.0 || !btc_price.is_finite() {
                     self.trade_error = "A fresh BTC/USD consensus is required".to_string();
                 } else if amount_cents > available_btc_usd_cents {
-                    self.trade_error = format!(
-                        "Maximum additional trade: {}",
-                        Self::format_price(available_btc_usd)
-                    );
+                    self.trade_error = Self::stabilization_limit_message(available_btc_usd_cents);
                 } else {
                     // Calculate trade details
                     let fee_usd = Self::stable_trade_fee(amount);
@@ -10873,9 +10879,12 @@ impl UserApp {
         }
 
         let max_cents = self.maximum_sell_cents(btc_price);
-        if !amount_usd.is_finite() || amount_usd <= 0.0 || floor_usd_cents(amount_usd) > max_cents {
-            self.trade_error =
-                format!("Maximum additional trade: ${:.2}", max_cents as f64 / 100.0);
+        if !amount_usd.is_finite() || amount_usd <= 0.0 {
+            self.trade_error = "Enter a positive amount".to_string();
+            return;
+        }
+        if floor_usd_cents(amount_usd) > max_cents {
+            self.trade_error = Self::stabilization_limit_message(max_cents);
             return;
         }
 
@@ -12033,6 +12042,14 @@ mod tests {
 
         assert_eq!(available_cents, 1_060);
         assert!(required_sats <= native_sats);
+    }
+
+    #[test]
+    fn sell_limit_feedback_explains_the_reserve() {
+        assert_eq!(
+            UserApp::stabilization_limit_message(123),
+            "Maximum additional trade: $1.23\nKeeps a small BTC reserve in the channel.",
+        );
     }
 
     #[test]

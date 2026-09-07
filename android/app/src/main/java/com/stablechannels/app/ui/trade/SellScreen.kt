@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
+import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
@@ -102,7 +103,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 ) {
                     Text("How much BTC to convert to USD?", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
-                        onClick = { amountText = String.format(Locale.US, "%.2f", maxSellUSD) },
+                        onClick = {
+                            amountText = String.format(Locale.US, "%.2f", maxSellUSD)
+                            error = null
+                        },
                         colors = ButtonDefaults.textButtonColors(
                             containerColor = if (isSystemInDarkTheme()) {
                                 MaterialTheme.colorScheme.surfaceVariant
@@ -128,7 +132,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountText,
-                        onValueChange = { amountText = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = {
+                            amountText = it.filter { c -> c.isDigit() || c == '.' }
+                            error = null
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         textStyle = TextStyle(
                             fontSize = 44.sp,
@@ -169,7 +176,6 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
 
                 Spacer(Modifier.height(8.dp))
                 Text("Maximum additional trade: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Keeps a small BTC reserve in the channel.", style = MaterialTheme.typography.labelSmall)
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))
@@ -188,8 +194,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        if (!amountUSD.isFinite() || amountUSD <= 0 || amountUSD > maxSellUSD) {
-                            error = "Maximum additional trade: ${maxSellUSD.usdFormatted()}"
+                        if (!amountUSD.isFinite() || amountUSD <= 0) {
+                            error = "Enter a positive amount"
+                        } else if (amountUSD > maxSellUSD) {
+                            error = StabilizationPolicy.limitExceededMessage((maxSellUSD * 100 + 1e-7).toLong())
                         } else {
                             error = null
                             step = TradeStep.CONFIRM
