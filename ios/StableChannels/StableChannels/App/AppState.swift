@@ -1541,76 +1541,10 @@ class AppState {
             )
 
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
-            let capturedTxid = spliceTxid
-            let capturedGeneration = spliceGeneration
-            if let capturedTxid, !capturedTxid.isEmpty {
-                Task { [weak self] in
-                    guard let self else { return }
-                    var urls: [String] = []
-                    for url in [self.chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
-                        where !urls.contains(url) {
-                        urls.append(url)
-                    }
-                    let status = await self.spliceBroadcastChecker.checkStatus(txid: capturedTxid, endpointURLs: urls)
-                    switch status {
-                    case .exists:
-                        AuditService.log("SPLICE_FAILED_IGNORED_STALE", data: [
-                            "channel_id": "\(channelId)",
-                            "splice_txid": capturedTxid
-                        ])
-                    case .inconclusive:
-                        AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", data: [
-                            "channel_id": "\(channelId)",
-                            "splice_txid": capturedTxid
-                        ])
-                    case .notFound:
-                        self.databaseService?.spliceRepo.failLatestPendingSplice()
-                        if self.spliceGeneration != capturedGeneration {
-                            AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
-                                "channel_id": "\(channelId)",
-                                "splice_txid": capturedTxid
-                            ])
-                        } else {
-                            self.isSweeping = false
-                            self.spliceConfirmationTask?.cancel()
-                            self.spliceConfirmationTask = nil
-                            self.monitoredSpliceTxid = nil
-                            self.pendingSplice = nil
-                            if self.spliceTxid == capturedTxid {
-                                self.spliceTxid = nil
-                            }
-                            self.sweepOnchainStart = 0
-                            AuditService.log("SPLICE_FAILED", data: [
-                                "channel_id": "\(channelId)",
-                                "splice_txid": capturedTxid,
-                                "reason": "txid_never_broadcast"
-                            ])
-                            self.statusMessage = "Splice failed"
-                        }
-                    }
-                }
-            } else {
-                databaseService?.spliceRepo.failLatestPendingSplice()
-                if spliceGeneration == capturedGeneration {
-                    isSweeping = false
-                    spliceConfirmationTask?.cancel()
-                    spliceConfirmationTask = nil
-                    monitoredSpliceTxid = nil
-                    pendingSplice = nil
-                    spliceTxid = nil
-                    sweepOnchainStart = 0
-                    AuditService.log("SPLICE_FAILED", data: [
-                        "channel_id": "\(channelId)",
-                        "user_channel_id": "\(userChannelId)"
-                    ])
-                    statusMessage = "Splice failed"
-                } else {
-                    AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
-                        "channel_id": "\(channelId)",
-                        "user_channel_id": "\(userChannelId)"
-                    ])
-                }
-            }
+            handleSpliceNegotiationFailed(
+                channelId: channelId,
+                userChannelId: userChannelId
+            )
 
         case .channelClosed(let channelId, let userChannelId, let counterpartyNodeId, let reason):
             handleChannelClosed(
@@ -2429,6 +2363,100 @@ class AppState {
         updateStableBalances()
         statusMessage = "Splice pending"
         startSpliceConfirmationMonitor(txid: txidStr)
+    }
+
+    // MARK: - Splice Negotiation Failure & State Teardown
+
+    private func teardownSpliceState(
+        channelId: ChannelId,
+        capturedTxid: String?,
+        userChannelId: UserChannelId? = nil,
+        reason: String? = nil
+    ) {
+        isSweeping = false
+        spliceConfirmationTask?.cancel()
+        spliceConfirmationTask = nil
+        monitoredSpliceTxid = nil
+        pendingSplice = nil
+        if let capturedTxid {
+            if spliceTxid == capturedTxid {
+                spliceTxid = nil
+            }
+        } else {
+            spliceTxid = nil
+        }
+        sweepOnchainStart = 0
+        var logData = ["channel_id": "\(channelId)"]
+        if let capturedTxid {
+            logData["splice_txid"] = capturedTxid
+        }
+        if let userChannelId {
+            logData["user_channel_id"] = "\(userChannelId)"
+        }
+        if let reason {
+            logData["reason"] = reason
+        }
+        AuditService.log("SPLICE_FAILED", data: logData)
+        statusMessage = "Splice failed"
+    }
+
+    private func handleSpliceNegotiationFailed(
+        channelId: ChannelId,
+        userChannelId: UserChannelId
+    ) {
+        let capturedTxid = spliceTxid
+        let capturedGeneration = spliceGeneration
+        if let capturedTxid, !capturedTxid.isEmpty {
+            Task { [weak self] in
+                guard let self else { return }
+                var urls: [String] = []
+                for url in [self.chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
+                    where !urls.contains(url) {
+                    urls.append(url)
+                }
+                let status = await self.spliceBroadcastChecker.checkStatus(txid: capturedTxid, endpointURLs: urls)
+                switch status {
+                case .exists:
+                    AuditService.log("SPLICE_FAILED_IGNORED_STALE", data: [
+                        "channel_id": "\(channelId)",
+                        "splice_txid": capturedTxid
+                    ])
+                case .inconclusive:
+                    AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", data: [
+                        "channel_id": "\(channelId)",
+                        "splice_txid": capturedTxid
+                    ])
+                case .notFound:
+                    self.databaseService?.spliceRepo.failLatestPendingSplice()
+                    if self.spliceGeneration != capturedGeneration {
+                        AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
+                            "channel_id": "\(channelId)",
+                            "splice_txid": capturedTxid
+                        ])
+                    } else {
+                        self.teardownSpliceState(
+                            channelId: channelId,
+                            capturedTxid: capturedTxid,
+                            reason: "txid_never_broadcast"
+                        )
+                    }
+                }
+            }
+        } else {
+            databaseService?.spliceRepo.failLatestPendingSplice()
+            if spliceGeneration == capturedGeneration {
+                teardownSpliceState(
+                    channelId: channelId,
+                    capturedTxid: nil,
+                    userChannelId: userChannelId
+                )
+            } else {
+                AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
+                    "channel_id": "\(channelId)",
+                    "user_channel_id": "\(userChannelId)"
+                ])
+            }
+        }
     }
 
     private var spliceGeneration: UInt64 = 0

@@ -1,11 +1,64 @@
 import Foundation
 import SQLite3
 
-final class ChannelRepository {
+/// Defines a contract for determining whether a channel has permanently closed on-chain.
+protocol ChannelCloseChecking: Sendable {
+    func isChannelClosed(channelId: String, userChannelId: String?) -> Bool
+}
+
+/// Verifies whether payments or pending_operations indicate a channel is permanently closed.
+struct DefaultChannelCloseChecker: ChannelCloseChecking {
     private let rawSQL: RawSQL
 
     init(rawSQL: RawSQL) {
         self.rawSQL = rawSQL
+    }
+
+    func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {
+        do {
+            var paymentIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                paymentIds.append(userChannelId)
+                paymentIds.append("close-\(userChannelId)")
+            }
+            let placeholders = paymentIds.map { _ in "?" }.joined(separator: ", ")
+            let paymentParams: [SQLValue] = paymentIds.map { .text($0) }
+            let paymentRows = try rawSQL.query(
+                "SELECT 1 FROM payments WHERE payment_type = 'channel_close' AND payment_id IN (\(placeholders)) LIMIT 1",
+                params: paymentParams
+            )
+            if !paymentRows.isEmpty {
+                return true
+            }
+
+            var opIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                opIds.append(userChannelId)
+                opIds.append("close-\(userChannelId)")
+            }
+            let opPlaceholders = opIds.map { _ in "?" }.joined(separator: ", ")
+            let opParams: [SQLValue] = opIds.map { .text($0) }
+            let opRows = try rawSQL.query(
+                "SELECT 1 FROM pending_operations WHERE op_type = 'channel_close' AND op_id IN (\(opPlaceholders)) LIMIT 1",
+                params: opParams
+            )
+            return !opRows.isEmpty
+        } catch {
+            return false
+        }
+    }
+}
+
+final class ChannelRepository {
+    private let rawSQL: RawSQL
+    private let channelCloseChecker: ChannelCloseChecking
+
+    init(
+        rawSQL: RawSQL,
+        channelCloseChecker: ChannelCloseChecking? = nil
+    ) {
+        self.rawSQL = rawSQL
+        self.channelCloseChecker = channelCloseChecker ?? DefaultChannelCloseChecker(rawSQL: rawSQL)
     }
 
     func saveChannel(
@@ -120,37 +173,7 @@ final class ChannelRepository {
     /// True if a channel_close payment record already exists for this channel_id/user_channel_id — i.e. the
     /// channel is gone for good and will never reappear in the channels table.
     func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {
-        do {
-            var paymentIds = [channelId, "close-\(channelId)"]
-            if let userChannelId, !userChannelId.isEmpty {
-                paymentIds.append(userChannelId)
-                paymentIds.append("close-\(userChannelId)")
-            }
-            let placeholders = paymentIds.map { _ in "?" }.joined(separator: ", ")
-            let paymentParams: [SQLValue] = paymentIds.map { .text($0) }
-            let paymentRows = try rawSQL.query(
-                "SELECT 1 FROM payments WHERE payment_type = 'channel_close' AND payment_id IN (\(placeholders)) LIMIT 1",
-                params: paymentParams
-            )
-            if !paymentRows.isEmpty {
-                return true
-            }
-
-            var opIds = [channelId, "close-\(channelId)"]
-            if let userChannelId, !userChannelId.isEmpty {
-                opIds.append(userChannelId)
-                opIds.append("close-\(userChannelId)")
-            }
-            let opPlaceholders = opIds.map { _ in "?" }.joined(separator: ", ")
-            let opParams: [SQLValue] = opIds.map { .text($0) }
-            let opRows = try rawSQL.query(
-                "SELECT 1 FROM pending_operations WHERE op_type = 'channel_close' AND op_id IN (\(opPlaceholders)) LIMIT 1",
-                params: opParams
-            )
-            return !opRows.isEmpty
-        } catch {
-            return false
-        }
+        channelCloseChecker.isChannelClosed(channelId: channelId, userChannelId: userChannelId)
     }
 
     func recordTrade(
