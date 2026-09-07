@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import okhttp3.Request
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -43,6 +44,24 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
+        /**
+         * Whether resuming a pending splice confirmation on this call should skip bumping
+         * [spliceGeneration]. True only when this process is already actively monitoring the
+         * exact txid being resumed — in that case bumping would advance the counter past the
+         * value the still-running monitor captured, and since [startSpliceConfirmationMonitor]
+         * early-returns without re-arming a same-txid/active-job monitor, nothing would ever
+         * hold the new generation, wedging `isSweeping` forever once that monitor confirms.
+         * A pure function (no AppState/Android dependency) so it's directly unit-testable.
+         */
+        fun shouldSkipGenerationBumpOnResume(
+            monitorActive: Boolean,
+            monitoredTxid: String?,
+            resumedTxid: String?
+        ): Boolean {
+            val normalizedResumed = resumedTxid?.trim()
+            return monitorActive && monitoredTxid != null && monitoredTxid == normalizedResumed
+        }
+
         /**
          * Set to true right before launching an in-app activity that backgrounds the app
          * (e.g. the log share sheet). [MainActivity] honors this only for a short grace window
@@ -282,6 +301,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
     var pendingClosePaymentId: String? = null
     private var trackedClosingFundingTxid: String? = null
+    // Identifies the current splice operation, independent of pendingSplice/spliceTxid's own
+    // lifecycle (both can be null across a process restart). Bumped once per operation at the
+    // earliest point it exists — row creation (beginSpliceOut/sweepToChannel) or resumption after
+    // restart — NOT on every SpliceNegotiated, so a replayed/duplicate negotiation event for the
+    // same operation is never mistaken for a newer one. A handler captures this at entry; if it
+    // no longer matches when an async check resolves, a genuinely newer operation has since
+    // started and none of this handler's in-memory cleanup may run against it.
+    private val spliceGeneration = AtomicLong(0L)
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -334,6 +361,7 @@ class AppState(private val context: Context) : ViewModel() {
         .readTimeout(4, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .build()
+    private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -960,15 +988,86 @@ class AppState(private val context: Context) : ViewModel() {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
-                val paymentRowId = pendingSplice?.paymentRowId
-                isSweeping = false
-                spliceTxid = null
-                spliceConfirmationJob?.cancel()
-                spliceConfirmationJob = null
-                monitoredSpliceTxid = null
-                pendingSplice = null
-                databaseService?.failPendingSplice(paymentRowId)
-                AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+                // Snapshot to local vals: spliceTxid/pendingSplice/spliceGeneration can all be
+                // mutated concurrently by the IO-thread confirmation monitor or by a brand-new
+                // splice starting, so re-reading them after the async check below would be a
+                // TOCTOU race that could apply this branch's rollback to a different, newer
+                // splice — including the pre-negotiation (capturedTxid == null) branch below,
+                // which can otherwise fire for a stale/duplicate replay after a newer operation
+                // has already taken pendingSplice's place.
+                val capturedTxid = spliceTxid
+                val capturedGeneration = spliceGeneration.get()
+                val capturedPaymentRowId = pendingSplice?.paymentRowId
+                if (capturedTxid != null) {
+                    // A signed splice tx exists. It may already be broadcast/confirmed (even by
+                    // the counterparty), in which case this failed event is a stale/duplicate
+                    // replay — rolling back would mark a real splice "failed" and desync Stable
+                    // USD from the node's actual balance. But the tx could also have been
+                    // genuinely abandoned before broadcast (or this could be a real failure on a
+                    // later attempt), so verify against esplora rather than assuming: if the tx
+                    // was never broadcast, this is a real failure, and it must be handled or the
+                    // confirmation monitor + "Move" lock (isSweeping) hang forever.
+                    when (doesTxExist(capturedTxid)) {
+                        TxBroadcastStatus.EXISTS -> {
+                            AuditService.log("SPLICE_FAILED_IGNORED_STALE", mapOf(
+                                "channel_id" to event.channelId,
+                                "splice_txid" to capturedTxid
+                            ))
+                        }
+                        TxBroadcastStatus.INCONCLUSIVE -> {
+                            // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity)
+                            // — preserve the splice rather than risk a false failure.
+                            AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", mapOf(
+                                "channel_id" to event.channelId,
+                                "splice_txid" to capturedTxid
+                            ))
+                        }
+                        TxBroadcastStatus.NOT_FOUND -> {
+                            // The DB row genuinely failed regardless of what's current now — this
+                            // uses the captured row id, never a live re-read, so it can only ever
+                            // touch the row that belonged to this specific splice.
+                            databaseService?.failPendingSplice(capturedPaymentRowId)
+                            if (spliceGeneration.get() != capturedGeneration) {
+                                // A newer splice has started while the check was in flight — none
+                                // of its in-memory state belongs to this stale handler.
+                                AuditService.log("SPLICE_FAILED_STALE_GENERATION", mapOf(
+                                    "channel_id" to event.channelId,
+                                    "splice_txid" to capturedTxid
+                                ))
+                            } else {
+                                isSweeping = false
+                                spliceConfirmationJob?.cancel()
+                                spliceConfirmationJob = null
+                                monitoredSpliceTxid = null
+                                pendingSplice = null
+                                if (spliceTxid == capturedTxid) spliceTxid = null
+                                AuditService.log("SPLICE_FAILED", mapOf(
+                                    "channel_id" to event.channelId,
+                                    "splice_txid" to capturedTxid,
+                                    "reason" to "txid_never_broadcast"
+                                ))
+                            }
+                        }
+                    }
+                } else {
+                    // Pre-negotiation failure. The row still failed regardless of what's current
+                    // now. The generation guard here is defensive rather than closing a real race:
+                    // capture and compare happen back-to-back on the same event-loop thread with
+                    // no async work in between, so in practice it can only ever match — but it
+                    // keeps this branch structurally consistent with the one above and costs
+                    // nothing if some future change adds a suspend point here.
+                    databaseService?.failPendingSplice(capturedPaymentRowId)
+                    if (spliceGeneration.get() == capturedGeneration) {
+                        isSweeping = false
+                        spliceConfirmationJob?.cancel()
+                        spliceConfirmationJob = null
+                        monitoredSpliceTxid = null
+                        pendingSplice = null
+                        AuditService.log("SPLICE_FAILED", mapOf("channel_id" to event.channelId))
+                    } else {
+                        AuditService.log("SPLICE_FAILED_STALE_GENERATION", mapOf("channel_id" to event.channelId))
+                    }
+                }
             }
             is Event.ChannelClosed -> {
                 handleChannelClosed(event.channelId, event.userChannelId, event.counterpartyNodeId, event.reason)
@@ -1386,6 +1485,11 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
+        // Deliberately not bumping spliceGeneration here: it's established once at operation
+        // creation (beginSpliceOut/sweepToChannel/resumePendingSpliceConfirmation), before this
+        // event can even fire. A replayed/duplicate SpliceNegotiated for the same operation must
+        // not look like a new one, or a stale monitor holding the old generation would never see
+        // its cleanup run on confirmation (isSweeping wedged until process restart).
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
@@ -1428,6 +1532,7 @@ class AppState(private val context: Context) : ViewModel() {
         if (paymentRowId <= 0) {
             throw IllegalStateException("Could not save pending splice — splice not started")
         }
+        spliceGeneration.incrementAndGet()
         isSweeping = true
         pendingSplice = PendingSplice("out", amountSats, address, paymentRowId)
         _statusMessage.value = "Move pending..."
@@ -1450,10 +1555,15 @@ class AppState(private val context: Context) : ViewModel() {
 
         spliceConfirmationJob?.cancel()
         monitoredSpliceTxid = normalizedTxid
+        // Captured once here, not re-read later: completeConfirmedSplice must finalize the row
+        // that belonged to THIS operation, never whatever pendingSplice happens to hold by the
+        // time confirmation is observed (which could by then belong to a newer operation).
+        val monitorGeneration = spliceGeneration.get()
+        val monitorPaymentRowId = pendingSplice?.paymentRowId
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
-                    completeConfirmedSplice(normalizedTxid)
+                    completeConfirmedSplice(normalizedTxid, monitorGeneration, monitorPaymentRowId)
                     break
                 }
                 delay(30_000)
@@ -1463,9 +1573,39 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun resumePendingSpliceConfirmation() {
         if (databaseService?.hasPendingSplice() != true) return
+        val txid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
+        // In-process resumption (foreground grace-period reconnect, or startup racing a replayed
+        // SpliceNegotiated) of an operation this instance is already actively monitoring is not a
+        // new operation — bumping here would advance the counter past the value the still-running
+        // monitor captured, and since startSpliceConfirmationMonitor below early-returns without
+        // re-arming (same txid, active job), nothing would ever hold the new generation. That
+        // wedges isSweeping forever once the untouched monitor eventually confirms.
+        val alreadyMonitoring = shouldSkipGenerationBumpOnResume(
+            monitorActive = spliceConfirmationJob?.isActive == true,
+            monitoredTxid = monitoredSpliceTxid,
+            resumedTxid = txid
+        )
+        if (!alreadyMonitoring) {
+            spliceGeneration.incrementAndGet()
+        }
         isSweeping = true
-        spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
-        spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+        spliceTxid = txid
+        txid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+    }
+
+    /**
+     * Whether esplora has ever heard of this txid (broadcast, mempool, or confirmed) — distinct
+     * from isTxConfirmed(), which only reports confirmation depth. Used to tell a genuinely
+     * abandoned/never-broadcast splice tx (404 everywhere) apart from a stale failure event for a
+     * splice that did make it on-chain. If every endpoint errors out or times out (no connectivity,
+     * 429/5xx, mixed results), we can't prove non-existence, so this returns INCONCLUSIVE rather
+     * than a boolean — the caller treats that the same as "exists" (preserve the splice) since the
+     * safer failure mode is treating a real failure as a stale replay (recoverable manually) rather
+     * than mislabeling a possibly real splice as failed.
+     */
+    private fun doesTxExist(txid: String): TxBroadcastStatus {
+        val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        return spliceBroadcastChecker.checkStatus(txid, urls)
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
@@ -1488,7 +1628,16 @@ class AppState(private val context: Context) : ViewModel() {
         return false
     }
 
-    private fun completeConfirmedSplice(txid: String) {
+    private fun completeConfirmedSplice(txid: String, expectedGeneration: Long, capturedPaymentRowId: Long?) {
+        // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
+        // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
+        // — which requires an exact txid match — can never find it, permanently desyncing Stable
+        // USD from the confirmed on-chain balance. Retry the assignment now that the tx has
+        // confirmed; assignPendingSpliceTxid is a no-op if a row already carries this txid.
+        // Uses the row id captured when this monitor started, NOT the live pendingSplice — by the
+        // time this tx confirms, pendingSplice may already belong to a newer operation, and
+        // reading it here could bind this (older, unrelated) txid to that newer row.
+        databaseService?.assignPendingSpliceTxid(txid, capturedPaymentRowId)
         val completed = databaseService?.completeSplice(txid) == true
         if (completed) {
             refreshBalances()
@@ -1504,13 +1653,19 @@ class AppState(private val context: Context) : ViewModel() {
             saveChannelToDB()
         }
 
-        isSweeping = false
-        pendingSplice = null
-        sweepOnchainStart = 0
-        if (spliceTxid == txid) spliceTxid = null
-        monitoredSpliceTxid = null
-        spliceConfirmationJob = null
-        _statusMessage.value = "Move confirmed"
+        // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
+        // it — otherwise this stale monitor tears down the newer operation's state instead.
+        if (spliceGeneration.get() == expectedGeneration) {
+            isSweeping = false
+            pendingSplice = null
+            sweepOnchainStart = 0
+            if (spliceTxid == txid) spliceTxid = null
+            monitoredSpliceTxid = null
+            spliceConfirmationJob = null
+            _statusMessage.value = "Move confirmed"
+        } else {
+            AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", mapOf("txid" to txid))
+        }
 
         AuditService.log("SPLICE_CONFIRMED", mapOf(
             "txid" to txid,
@@ -2202,6 +2357,7 @@ class AppState(private val context: Context) : ViewModel() {
             _statusMessage.value = "Could not save pending move — move not started"
             return
         }
+        spliceGeneration.incrementAndGet()
         isSweeping = true
         pendingSplice = PendingSplice("in", sweepAmount, paymentRowId = paymentRowId)
 
