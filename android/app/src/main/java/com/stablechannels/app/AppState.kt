@@ -427,9 +427,16 @@ class AppState(private val context: Context) : ViewModel() {
                             if (!dbTxid.isNullOrEmpty()) {
                                 setLastCloseTxid(dbTxid)
                             } else {
-                                // Resume background resolver if it hasn't found the TX yet
+                                // Resume background resolver if it hasn't found the TX yet.
+                                // An unknown vout must NOT default to 0 — that's a real, possibly
+                                // different output of the same funding tx, and CloseTxidResolver
+                                // would accept whatever spent it as the close txid (see #264).
+                                // Leave the row unresolved instead of guessing; it will resolve
+                                // once fundingVout is known (e.g. after refreshBalances() backfills
+                                // it on the next tick, if the channel is still visible to LDK).
                                 val closeFundingTxid = fundingTxid
-                                if (closeFundingTxid != null && databaseService != null) {
+                                val closeVout = fundingVout
+                                if (closeFundingTxid != null && closeVout != null && databaseService != null) {
                                     trackedClosingFundingTxid = closeFundingTxid
                                     mempoolWebSocketService.trackTx(closeFundingTxid)
                                     val resolver = CloseTxidResolver(
@@ -445,10 +452,12 @@ class AppState(private val context: Context) : ViewModel() {
                                         resolver.resolve(
                                             paymentId = pendingCloseId,
                                             fundingTxid = closeFundingTxid,
-                                            vout = fundingVout ?: 0,
+                                            vout = closeVout,
                                             databaseService = databaseService!!
                                         )
                                     }
+                                } else if (closeFundingTxid != null && closeVout == null) {
+                                    AuditService.log("CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT", mapOf("payment_id" to pendingCloseId))
                                 }
                             }
                         }
@@ -996,8 +1005,17 @@ class AppState(private val context: Context) : ViewModel() {
         isWaitingForPayment = false
         // Check for sync message
         if (handleSyncMessage(customRecords, paymentHash, amountMsat)) {
-            refreshBalances()
-            updateStableBalances()
+            // The sync message itself is already resolved (applied/invalid/duplicate/given-up).
+            // A failure refreshing UI-facing balances afterward must not cause the whole event
+            // to be redelivered — NodeService can't tell "sync failed" from "balance refresh
+            // failed" once it retries the raw event, so that would silently restart a fresh
+            // 5-minute syncRetryTracker window for a message that already gave up.
+            try {
+                refreshBalances()
+                updateStableBalances()
+            } catch (e: Exception) {
+                Log.e("AppState", "Post-sync balance refresh failed", e)
+            }
             return
         }
 
@@ -1109,6 +1127,26 @@ class AppState(private val context: Context) : ViewModel() {
             AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
             return true
         }
+        // Bound the ENTIRE remaining processing, not just the anticipated RETRY paths. An
+        // unanticipated exception from the apply calls below (a bug, a transient SQL error,
+        // etc.) must still go through the same bounded give-up accounting as an explicit RETRY —
+        // otherwise it bypasses syncRetryTracker entirely, and NodeService's outer catch retries
+        // the raw event with unbounded backoff forever, blocking every later LDK event forever.
+        return try {
+            processSignedSyncMessage(message, paymentHash, amountMsat)
+        } catch (e: RetryableSyncException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("AppState", "Unexpected error processing signed sync message", e)
+            deferSyncOrGiveUp(paymentHash, "Unexpected error: ${e.message}")
+        }
+    }
+
+    private fun processSignedSyncMessage(
+        message: TradeControlMessage,
+        paymentHash: String,
+        amountMsat: Long
+    ): Boolean {
         val db = databaseService
             ?: return deferSyncOrGiveUp(paymentHash, "Trade database unavailable")
         val result = when (message) {
@@ -1620,7 +1658,7 @@ class AppState(private val context: Context) : ViewModel() {
             val closeFundingVout = fundingVout
                 ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                     .getInt("funding_vout", -1).takeIf { it >= 0 }
-            if (closeFundingTxid != null && databaseService != null) {
+            if (closeFundingTxid != null && closeFundingVout != null && databaseService != null) {
                 trackedClosingFundingTxid = closeFundingTxid
                 mempoolWebSocketService.trackTx(closeFundingTxid)
                 // Clear the pref now that we've consumed it
@@ -1639,10 +1677,16 @@ class AppState(private val context: Context) : ViewModel() {
                     resolver.resolve(
                         paymentId = paymentId,
                         fundingTxid = closeFundingTxid,
-                        vout = closeFundingVout ?: 0,
+                        vout = closeFundingVout,
                         databaseService = databaseService!!
                     )
                 }
+            } else if (closeFundingTxid != null && closeFundingVout == null) {
+                // Unknown vout must not default to 0 — that could be a different, unrelated
+                // output of the same funding tx, and CloseTxidResolver would accept whatever
+                // spent it as the close txid (this was #264's exact bug). Leave the row
+                // unresolved rather than risk attaching the wrong transaction.
+                AuditService.log("CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT", mapOf("payment_id" to paymentId))
             }
 
             databaseService?.deleteChannel(sc.userChannelId)
@@ -2503,7 +2547,14 @@ class AppState(private val context: Context) : ViewModel() {
                 val currentTxid = txo.txid
                 if (currentTxid != fundingTxid) {
                     fundingTxid = currentTxid
-                    fundingVout = txo.vout.toInt()
+                }
+                // Backfill independently of the txid check above: an existing wallet upgrading
+                // to this fix already has fundingTxid cached but never had fundingVout, so its
+                // txid never "changes" and the vout would otherwise stay null forever, forcing
+                // CloseTxidResolver's callers to fall back to an unproven vout=0 guess (#264).
+                val liveVout = txo.vout.toInt()
+                if (fundingVout != liveVout) {
+                    fundingVout = liveVout
                 }
             }
             // Derive the authoritative counterparty from the live channel. For an open channel
