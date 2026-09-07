@@ -45,6 +45,24 @@ class AppState(private val context: Context) : ViewModel() {
 
     companion object {
         /**
+         * Whether resuming a pending splice confirmation on this call should skip bumping
+         * [spliceGeneration]. True only when this process is already actively monitoring the
+         * exact txid being resumed — in that case bumping would advance the counter past the
+         * value the still-running monitor captured, and since [startSpliceConfirmationMonitor]
+         * early-returns without re-arming a same-txid/active-job monitor, nothing would ever
+         * hold the new generation, wedging `isSweeping` forever once that monitor confirms.
+         * A pure function (no AppState/Android dependency) so it's directly unit-testable.
+         */
+        fun shouldSkipGenerationBumpOnResume(
+            monitorActive: Boolean,
+            monitoredTxid: String?,
+            resumedTxid: String?
+        ): Boolean {
+            val normalizedResumed = resumedTxid?.trim()
+            return monitorActive && monitoredTxid != null && monitoredTxid == normalizedResumed
+        }
+
+        /**
          * Set to true right before launching an in-app activity that backgrounds the app
          * (e.g. the log share sheet). [MainActivity] honors this only for a short grace window
          * (see `SHARE_SUPPRESS_WINDOW_MS`): if the app resumes within that window the node
@@ -1033,10 +1051,11 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 } else {
                     // Pre-negotiation failure. The row still failed regardless of what's current
-                    // now, but the in-memory cleanup is guarded the same way as the branch above:
-                    // a stale/duplicate replay of this same event, arriving after a newer
-                    // operation has already replaced pendingSplice, must not tear down that newer
-                    // operation's state.
+                    // now. The generation guard here is defensive rather than closing a real race:
+                    // capture and compare happen back-to-back on the same event-loop thread with
+                    // no async work in between, so in practice it can only ever match — but it
+                    // keeps this branch structurally consistent with the one above and costs
+                    // nothing if some future change adds a suspend point here.
                     databaseService?.failPendingSplice(capturedPaymentRowId)
                     if (spliceGeneration.get() == capturedGeneration) {
                         isSweeping = false
@@ -1554,20 +1573,35 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun resumePendingSpliceConfirmation() {
         if (databaseService?.hasPendingSplice() != true) return
-        spliceGeneration.incrementAndGet()
+        val txid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
+        // In-process resumption (foreground grace-period reconnect, or startup racing a replayed
+        // SpliceNegotiated) of an operation this instance is already actively monitoring is not a
+        // new operation — bumping here would advance the counter past the value the still-running
+        // monitor captured, and since startSpliceConfirmationMonitor below early-returns without
+        // re-arming (same txid, active job), nothing would ever hold the new generation. That
+        // wedges isSweeping forever once the untouched monitor eventually confirms.
+        val alreadyMonitoring = shouldSkipGenerationBumpOnResume(
+            monitorActive = spliceConfirmationJob?.isActive == true,
+            monitoredTxid = monitoredSpliceTxid,
+            resumedTxid = txid
+        )
+        if (!alreadyMonitoring) {
+            spliceGeneration.incrementAndGet()
+        }
         isSweeping = true
-        spliceTxid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
-        spliceTxid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+        spliceTxid = txid
+        txid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
     }
 
     /**
      * Whether esplora has ever heard of this txid (broadcast, mempool, or confirmed) — distinct
      * from isTxConfirmed(), which only reports confirmation depth. Used to tell a genuinely
      * abandoned/never-broadcast splice tx (404 everywhere) apart from a stale failure event for a
-     * splice that did make it on-chain. If every endpoint errors out (e.g. no connectivity), we
-     * can't prove non-existence, so default to "exists" — the safer failure mode is treating a
-     * real failure as a stale replay (recoverable manually) rather than mislabeling a possibly
-     * real splice as failed.
+     * splice that did make it on-chain. If every endpoint errors out or times out (no connectivity,
+     * 429/5xx, mixed results), we can't prove non-existence, so this returns INCONCLUSIVE rather
+     * than a boolean — the caller treats that the same as "exists" (preserve the splice) since the
+     * safer failure mode is treating a real failure as a stale replay (recoverable manually) rather
+     * than mislabeling a possibly real splice as failed.
      */
     private fun doesTxExist(txid: String): TxBroadcastStatus {
         val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
