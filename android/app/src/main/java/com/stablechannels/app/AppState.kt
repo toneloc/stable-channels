@@ -289,6 +289,15 @@ class AppState(private val context: Context) : ViewModel() {
             context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
                 .putString("funding_txid", value).apply()
         }
+    // Mirrors fundingTxid: the real output index of the channel's funding transaction, needed
+    // so CloseTxidResolver polls the correct /tx/{txid}/outspend/{vout} endpoint instead of
+    // assuming vout 0 (a funding output isn't always at index 0 — see #264).
+    var fundingVout: Int? = null
+        set(value) {
+            field = value
+            context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                .putInt("funding_vout", value ?: -1).apply()
+        }
 
     private val _paymentFlash = MutableStateFlow(false)
     val paymentFlash: StateFlow<Boolean> = _paymentFlash
@@ -397,8 +406,9 @@ class AppState(private val context: Context) : ViewModel() {
                     _isSyncing.value = false
                     // Restore the known funding txid before the first live balance refresh so
                     // an ordinary cold start is not mistaken for a funding transition.
-                    fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-                        .getString("funding_txid", null)
+                    val balanceCachePrefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                    fundingTxid = balanceCachePrefs.getString("funding_txid", null)
+                    fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
                     connectMempoolWebSocket()
@@ -431,7 +441,7 @@ class AppState(private val context: Context) : ViewModel() {
                                         resolver.resolve(
                                             paymentId = pendingCloseId,
                                             fundingTxid = closeFundingTxid,
-                                            vout = 0,
+                                            vout = fundingVout ?: 0,
                                             databaseService = databaseService!!
                                         )
                                     }
@@ -849,6 +859,7 @@ class AppState(private val context: Context) : ViewModel() {
                 sc.userChannelId = event.userChannelId
                 _stableChannel.value = sc
                 fundingTxid = event.fundingTxo.txid
+                fundingVout = event.fundingTxo.vout.toInt()
                 refreshBalances()
                 AuditService.log("CHANNEL_PENDING", mapOf(
                     "channel_id" to event.channelId,
@@ -1389,6 +1400,7 @@ class AppState(private val context: Context) : ViewModel() {
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
+        fundingVout = newFundingTxo.split(":").getOrNull(1)?.toIntOrNull()
         // Prefer the exact in-memory row. After a process restart the LDK event can be replayed;
         // the database then accepts only one recent pending candidate and never a failed row.
         val assignedRowId = databaseService?.assignPendingSpliceTxid(
@@ -1585,6 +1597,9 @@ class AppState(private val context: Context) : ViewModel() {
             val closeFundingTxid = fundingTxid
                 ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                     .getString("closing_funding_txid", null)
+            val closeFundingVout = fundingVout
+                ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                    .getInt("funding_vout", -1).takeIf { it >= 0 }
             if (closeFundingTxid != null && databaseService != null) {
                 trackedClosingFundingTxid = closeFundingTxid
                 mempoolWebSocketService.trackTx(closeFundingTxid)
@@ -1604,7 +1619,7 @@ class AppState(private val context: Context) : ViewModel() {
                     resolver.resolve(
                         paymentId = paymentId,
                         fundingTxid = closeFundingTxid,
-                        vout = 0,
+                        vout = closeFundingVout ?: 0,
                         databaseService = databaseService!!
                     )
                 }
@@ -2353,12 +2368,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun prepareChannelCloseTracking(userChannelId: String) {
         setLastCloseTxid(null)
-        val liveTxid = nodeService.channels
+        val liveChannel = nodeService.channels
             .firstOrNull { it.userChannelId == userChannelId || it.isChannelReady }
-            ?.fundingTxo?.txid
+        val liveTxid = liveChannel?.fundingTxo?.txid
 
         if (!liveTxid.isNullOrBlank()) {
             fundingTxid = liveTxid
+            fundingVout = liveChannel.fundingTxo?.vout?.toInt()
             trackedClosingFundingTxid = liveTxid
             mempoolWebSocketService.trackTx(liveTxid)
             context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
@@ -2463,6 +2479,7 @@ class AppState(private val context: Context) : ViewModel() {
                 val currentTxid = txo.txid
                 if (currentTxid != fundingTxid) {
                     fundingTxid = currentTxid
+                    fundingVout = txo.vout.toInt()
                 }
             }
             // Derive the authoritative counterparty from the live channel. For an open channel
