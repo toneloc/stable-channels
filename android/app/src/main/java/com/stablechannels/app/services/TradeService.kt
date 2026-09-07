@@ -34,7 +34,7 @@ class TradeService(
         feeUSD: Double,
         price: Double
     ): TradeResult {
-        if (!amountUSD.isFinite() || amountUSD <= 0 || amountUSD > sc.expectedUSD.amount || !price.isFinite() || price <= 0)
+        if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount) || !price.isFinite() || price <= 0)
             throw TradeValidationException("Enter a positive amount within your stabilized USD balance and use a fresh quote")
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
