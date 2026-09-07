@@ -488,7 +488,7 @@ class AppState {
     // Pending splice info
     var pendingSplice: PendingSplice?
 
-    enum WalletRestoreError: LocalizedError {
+    enum WalletRestoreError: LocalizedError, Equatable {
         case invalidMnemonic
         case activeChannelDetected
         case channelCheckUnavailable
@@ -509,7 +509,7 @@ class AppState {
         }
     }
 
-    private func initializeDatabaseServices() throws {
+    func initializeDatabaseServices() throws {
         let db = try DatabaseService(dataDir: Constants.userDataDir)
         databaseService = db
         nodeService.databaseService = databaseService
@@ -780,7 +780,7 @@ class AppState {
         shared?.set(false, forKey: "pending_push_payment")
     }
 
-    private func dropDatabaseServices() {
+    func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
         mempoolWebSocketService.disconnect()

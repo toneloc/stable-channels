@@ -36,12 +36,20 @@ enum NodeStarterError: Error {
     /// calling it with a missing file would mint a fresh identity into the live
     /// data dir — the silent wrong-identity class. Fail closed instead.
     case missingSeedFile
+    /// Secure Keychain seed does not match plaintext seed file. Fail closed
+    /// instead of running with inconsistent identity state.
+    case seedStorageMismatch
 }
 
 /// Concrete implementation of NodeStarter
 final class DefaultNodeStarter: NodeStarter {
     private static let lspPubkey = Constants.lspPubkey
     private static let lspAddress = Constants.lspAddress
+    private let keychain: any MnemonicStorageProtocol
+
+    init(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) {
+        self.keychain = keychain
+    }
 
     func buildNode(
         dataDir: URL,
@@ -78,7 +86,6 @@ final class DefaultNodeStarter: NodeStarter {
         )
 
         // Derive node entropy
-        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
         let nodeEntropy: NodeEntropy
         do {
             let words = try keychain.loadMnemonic()
@@ -88,6 +95,19 @@ final class DefaultNodeStarter: NodeStarter {
                 logger.log("ERROR: SEED_INVALID_BIP39 - keychain")
                 throw NodeStarterError.invalidStoredMnemonic
             }
+
+            // Check if plaintext seed exists and disagrees with Keychain (storage mismatch)
+            let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+            if let plaintextWords = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
+               !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let canonicalPlaintext = BIP39.validatedCanonicalMnemonic(plaintextWords)
+                    ?? plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines)
+                if canonicalPlaintext != canonicalWords {
+                    logger.log("ERROR: SEED_STORAGE_MISMATCH - keychain and plaintext disagree")
+                    throw NodeStarterError.seedStorageMismatch
+                }
+            }
+
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
         } catch WalletKeychainError.keyNotFound {
             // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed
