@@ -22,6 +22,11 @@
 		3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623F41D841B312F0C9AE01E6 /* MainTabView.swift */; };
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490224CB302F90A500DF84AA /* PriceServiceTests.swift */; };
+		490A1334304F1467005CDA39 /* SyncRetryTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1333304F1467005CDA39 /* SyncRetryTracker.swift */; };
+		490A1335304F1467005CDA39 /* SpliceBroadcastChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */; };
+		490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */; };
+		490A133A304F147D005CDA39 /* SyncRetryTrackerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1337304F147D005CDA39 /* SyncRetryTrackerTests.swift */; };
+		490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */; };
 		491D2E883008F96B0009FADF /* PaymentDetailCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
 		492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */; };
@@ -203,6 +208,11 @@
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		490224CB302F90A500DF84AA /* PriceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceServiceTests.swift; sourceTree = "<group>"; };
+		490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastChecker.swift; sourceTree = "<group>"; };
+		490A1333304F1467005CDA39 /* SyncRetryTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncRetryTracker.swift; sourceTree = "<group>"; };
+		490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastCheckerTests.swift; sourceTree = "<group>"; };
+		490A1337304F147D005CDA39 /* SyncRetryTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncRetryTrackerTests.swift; sourceTree = "<group>"; };
+		490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeSyncParityTests.swift; sourceTree = "<group>"; };
 		491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailCoordinator.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
 		492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightResolver.swift; sourceTree = "<group>"; };
@@ -625,8 +635,10 @@
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
+				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
+				490A1333304F1467005CDA39 /* SyncRetryTracker.swift */,
 				E6EF4DE5A43647E46CAAD52B /* TradeService.swift */,
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
@@ -741,11 +753,14 @@
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
+				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
+				490A1337304F147D005CDA39 /* SyncRetryTrackerTests.swift */,
+				490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
@@ -880,6 +895,9 @@
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
+				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
+				490A133A304F147D005CDA39 /* SyncRetryTrackerTests.swift in Sources */,
+				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
 				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
 				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
 				D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */,
@@ -957,6 +975,8 @@
 				05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */,
 				49A0F0023029000000000001 /* PriceOracle.swift in Sources */,
 				49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */,
+				490A1334304F1467005CDA39 /* SyncRetryTracker.swift in Sources */,
+				490A1335304F1467005CDA39 /* SpliceBroadcastChecker.swift in Sources */,
 				37DA6E9D4F5D4BF36DD86BC8 /* ReceiveView.swift in Sources */,
 				B4C85619D6A5506E1BD9FC11 /* SellView.swift in Sources */,
 				E8C9430FF8920728747EF550 /* SendView.swift in Sources */,
