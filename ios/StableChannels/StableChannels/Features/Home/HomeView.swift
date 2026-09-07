@@ -21,12 +21,6 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    HStack {
-                        Text(String(localized: "app_name", defaultValue: "Stable Channels"))
-                            .font(.headline)
-                        Spacer()
-                    }
-
                     // Notification warning
                     if !notificationsEnabled {
                         notificationWarning

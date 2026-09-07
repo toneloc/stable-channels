@@ -128,6 +128,74 @@ class SpliceDatabaseServiceTest {
         service.close()
     }
 
+    // These model the exact race both reviewers flagged for the AppState generation guard: an
+    // old splice's stale failure/confirmation handler captures its row id before an async check,
+    // a genuinely new splice starts and creates its own row in the meantime, and only then does
+    // the stale handler act. AppState itself can't be unit-instantiated (it requires a live node
+    // + Android Application context), but its safety depends entirely on DatabaseService methods
+    // being keyed by the captured id and never touching a different row — which these tests prove
+    // directly for both splice directions.
+
+    @Test
+    fun staleFailureAfterNewSpliceOutStartedOnlyFailsOldRow() {
+        val service = DatabaseService(context)
+        val oldId = recordSplice(service, "splice_out")
+        // Old splice's failure handler would have captured oldId here, before an async check.
+        // A genuinely new splice then starts and creates its own row while that check is in
+        // flight (its captured monitor generation prevents this from happening, but the DB call
+        // itself must be safe regardless).
+        val newId = recordSplice(service, "splice_out")
+
+        // Stale handler for the OLD splice finally resolves and fails using its captured id.
+        assertTrue(service.failPendingSplice(oldId))
+        assertEquals("failed", payment(service, oldId).status)
+        assertEquals("pending", payment(service, newId).status)
+        service.close()
+    }
+
+    @Test
+    fun staleFailureAfterNewSpliceInStartedOnlyFailsOldRow() {
+        val service = DatabaseService(context)
+        val oldId = recordSplice(service, "splice_in")
+        val newId = recordSplice(service, "splice_in")
+
+        assertTrue(service.failPendingSplice(oldId))
+        assertEquals("failed", payment(service, oldId).status)
+        assertEquals("pending", payment(service, newId).status)
+        service.close()
+    }
+
+    @Test
+    fun staleConfirmationWithCapturedNullRowIdRefusesToBindWhenAmbiguous() {
+        val service = DatabaseService(context)
+        // Models a monitor resumed after a process restart (pendingSplice was never
+        // reconstructed, so its captured paymentRowId is null) whose confirmation resolves after
+        // a second, genuinely new pending splice has also been created — assignPendingSpliceTxid
+        // must refuse to guess between them rather than binding the confirmed txid to the wrong row.
+        val oldId = recordSplice(service, "splice_out")
+        val newId = recordSplice(service, "splice_out")
+
+        assertNull(service.assignPendingSpliceTxid("resumed-tx", null))
+        assertNull(payment(service, oldId).txid)
+        assertNull(payment(service, newId).txid)
+        service.close()
+    }
+
+    @Test
+    fun staleConfirmationWithCapturedRowIdBindsOnlyThatRowEvenIfNewerRowExists() {
+        val service = DatabaseService(context)
+        // Unlike the null-capture case above, a monitor that captured a concrete row id at
+        // launch must always be able to finalize that exact row, regardless of any newer splice
+        // created afterward.
+        val oldId = recordSplice(service, "splice_out")
+        val newId = recordSplice(service, "splice_out")
+
+        assertEquals(oldId, service.assignPendingSpliceTxid("late-confirm-tx", oldId))
+        assertEquals("late-confirm-tx", payment(service, oldId).txid)
+        assertNull(payment(service, newId).txid)
+        service.close()
+    }
+
     private fun recordSplice(
         service: DatabaseService,
         type: String,

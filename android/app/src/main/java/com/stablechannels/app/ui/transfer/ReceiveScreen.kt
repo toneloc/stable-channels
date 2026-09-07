@@ -72,6 +72,8 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {

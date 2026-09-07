@@ -1,6 +1,6 @@
 package com.stablechannels.app.ui.settings
 
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
@@ -136,7 +136,7 @@ fun SettingsSubViewScaffold(
             )
         }
     ) { padding ->
-        Surface(modifier = Modifier.padding(padding)) {
+        Surface(modifier = Modifier.fillMaxSize().padding(padding)) {
             content()
         }
     }

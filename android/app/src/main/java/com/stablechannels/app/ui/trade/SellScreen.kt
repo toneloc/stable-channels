@@ -1,10 +1,12 @@
 package com.stablechannels.app.ui.trade
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.ui.text.input.KeyboardType
@@ -22,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.models.USD
+import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -53,6 +56,8 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -308,8 +313,8 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
-                    CircularProgressIndicator(Modifier.size(48.dp))
-                    Spacer(Modifier.height(8.dp))
+                    CurveProgressIndicator(size = 56.dp)
+                    Spacer(Modifier.height(12.dp))
                     Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
