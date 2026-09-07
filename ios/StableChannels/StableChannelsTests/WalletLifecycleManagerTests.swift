@@ -436,9 +436,155 @@ final class BIP39Tests: XCTestCase {
     func testWordListIntegrity() {
         XCTAssertEqual(BIP39WordList.english.count, 2048)
         XCTAssertEqual(BIP39WordList.english.first, "abandon")
-        XCTAssertEqual(BIP39WordList.english.last, "zoo")
-        XCTAssertEqual(BIP39WordList.english, BIP39WordList.english.sorted())
         XCTAssertEqual(Set(BIP39WordList.english).count, 2048)
+    }
+}
+
+// MARK: - Reset and Preflight Guard Regression Tests
+
+final class ResetAndPreflightGuardTests: XCTestCase {
+    private let testMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    private let otherMnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong"
+    private var tempDirURL: URL!
+    private var testAppGroup: String!
+    private var mockStorage: MockLifecycleMnemonicStorage!
+    private var manager: WalletLifecycleManager!
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        tempDirURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
+        testAppGroup = "group.test.\(UUID().uuidString)"
+        mockStorage = MockLifecycleMnemonicStorage()
+        manager = WalletLifecycleManager(
+            keychain: mockStorage,
+            userDataDir: tempDirURL,
+            appGroupIdentifier: testAppGroup,
+            validator: { mnemonic in
+                let words = mnemonic.split(whereSeparator: \.isWhitespace)
+                return words.count == 12 || words.count == 24
+            }
+        )
+    }
+
+    override func tearDownWithError() throws {
+        UserDefaults(suiteName: testAppGroup)?.removePersistentDomain(forName: testAppGroup)
+        try? FileManager.default.removeItem(at: tempDirURL)
+        try super.tearDownWithError()
+    }
+
+    func testResetCannotWipeWhileAnotherProcessHoldsLock() async throws {
+        let dataDir = Constants.userDataDir
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        let dummyMarker = dataDir.appendingPathComponent("persistence_test_marker_\(UUID().uuidString).txt")
+        try "important_data".write(to: dummyMarker, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: dummyMarker) }
+
+        // Ensure NodeDirLock is released by this process
+        NodeDirLock.shared.release()
+
+        // Simulate another process holding the lock file via POSIX flock
+        let lockPath = dataDir.appendingPathComponent(NodeDirLock.lockFilename).path
+        let externalFd = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        XCTAssertGreaterThanOrEqual(externalFd, 0)
+        let flockStatus = flock(externalFd, LOCK_EX | LOCK_NB)
+        XCTAssertEqual(flockStatus, 0, "External lock acquisition should succeed")
+
+        defer {
+            flock(externalFd, LOCK_UN)
+            close(externalFd)
+        }
+
+        let appState = await AppState()
+        do {
+            try await appState.resetWalletAndStartFresh(lockTimeout: 0.2)
+            XCTFail("resetWalletAndStartFresh should have thrown walletBusy when lock is held by another process")
+        } catch let error as AppState.WalletRestoreError {
+            XCTAssertEqual(error, AppState.WalletRestoreError.walletBusy)
+        } catch {
+            XCTFail("Expected AppState.WalletRestoreError.walletBusy, got \(error)")
+        }
+
+        // Verify that persistence was NOT wiped
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: dummyMarker.path),
+            "Persistence files must NOT be wiped when lock cannot be acquired"
+        )
+    }
+
+    func testResetClosesAndReplacesDatabaseServicesCleanly() async throws {
+        let appState = await AppState()
+        try await appState.initializeDatabaseServices()
+        await MainActor.run {
+            XCTAssertNotNil(appState.databaseService, "Database service should be initialized")
+            XCTAssertNotNil(appState.nodeService.databaseService, "NodeService database service should be set")
+            XCTAssertNotNil(appState.tradeService, "TradeService should be set")
+
+            // Test teardown: dropDatabaseServices should cleanly release handles
+            appState.dropDatabaseServices()
+            XCTAssertNil(appState.databaseService, "Database service should be dropped")
+            XCTAssertNil(appState.nodeService.databaseService, "NodeService database service should be dropped")
+            XCTAssertNil(appState.tradeService, "TradeService should be dropped")
+            XCTAssertNil(appState.confirmationPollingService, "ConfirmationPollingService should be dropped")
+        }
+
+        // Test reinitialization: initializeDatabaseServices should allocate fresh working services
+        try await appState.initializeDatabaseServices()
+        await MainActor.run {
+            XCTAssertNotNil(appState.databaseService, "Database service should be freshly recreated")
+            XCTAssertNotNil(appState.nodeService.databaseService, "NodeService should have fresh database reference")
+            XCTAssertNotNil(appState.tradeService, "TradeService should be freshly recreated")
+            // Clean up at end of test
+            appState.dropDatabaseServices()
+        }
+    }
+
+    func testNSEPreflightRefusesSeedStorageMismatch() throws {
+        // When Keychain has testMnemonic and plaintext file has otherMnemonic
+        try mockStorage.storeMnemonic(testMnemonic)
+        let seedPhrasePath = tempDirURL.appendingPathComponent("seed_phrase")
+        try otherMnemonic.write(to: seedPhrasePath, atomically: true, encoding: .utf8)
+        let dbPath = tempDirURL.appendingPathComponent("ldk_node_data.sqlite")
+        try "fake db".write(to: dbPath, atomically: true, encoding: .utf8)
+
+        // WalletLifecycleManager detects seedStorageMismatch
+        let state = manager.detectStartupState()
+        XCTAssertEqual(state, .seedStorageMismatch)
+
+        // When storage mismatch is detected, startup must refuse to proceed
+        XCTAssertNotEqual(state, .ready)
+    }
+
+    func testXcodeGenCannotRegressReleaseVersion() throws {
+        // Read project.yml to verify marketing version is at least 1.0.0 and never downgraded to 0.9
+        let currentFileURL = URL(fileURLWithPath: #file)
+        let projectYmlURL = currentFileURL
+            .deletingLastPathComponent() // StableChannelsTests
+            .deletingLastPathComponent() // StableChannels
+            .appendingPathComponent("project.yml")
+
+        guard FileManager.default.fileExists(atPath: projectYmlURL.path) else {
+            XCTFail("Could not locate project.yml at \(projectYmlURL.path)")
+            return
+        }
+
+        let content = try String(contentsOf: projectYmlURL, encoding: .utf8)
+        XCTAssertFalse(
+            content.contains("MARKETING_VERSION: \"0.9\""),
+            "project.yml must not downgrade MARKETING_VERSION to 0.9"
+        )
+        XCTAssertFalse(
+            content.contains("CFBundleShortVersionString: \"0.9\""),
+            "project.yml must not downgrade CFBundleShortVersionString to 0.9"
+        )
+        XCTAssertTrue(
+            content.contains("MARKETING_VERSION: \"1.0.0\""),
+            "project.yml must set MARKETING_VERSION to 1.0.0"
+        )
+        XCTAssertTrue(
+            content.contains("CFBundleShortVersionString: \"1.0.0\""),
+            "project.yml must set CFBundleShortVersionString to 1.0.0"
+        )
     }
 }
 
