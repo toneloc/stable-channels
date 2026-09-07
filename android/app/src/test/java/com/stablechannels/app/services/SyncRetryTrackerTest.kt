@@ -1,5 +1,6 @@
 package com.stablechannels.app.services
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -69,5 +70,66 @@ class SyncRetryTrackerTest {
         assertTrue(tracker.recordAttemptAndShouldGiveUp("hash1"))
         // Same key attempted again right away should not immediately give up — it's a fresh window.
         assertFalse(tracker.recordAttemptAndShouldGiveUp("hash1"))
+    }
+
+    // Regression: a real device saw this exact scenario — the same stuck payment_hash retried
+    // for over 50 minutes across many app/process restarts with zero give-ups, because the
+    // in-memory-only first-attempt clock reset every restart. LDK durably persists an un-acked
+    // event and redelivers it after restart, so the window must survive a fresh tracker instance
+    // backed by the same persisted store, not just survive within one process's lifetime.
+    @Test
+    fun `first-attempt time survives recreating the tracker against the same backing store`() {
+        val store = mutableMapOf<String, Long>()
+        var now = 0L
+        fun newTracker() = SyncRetryTracker(
+            maxDurationMs = 1_000L,
+            nowMs = { now },
+            loadFirstAttempt = { key -> store[key] },
+            saveFirstAttempt = { key, ts -> store[key] = ts },
+            clearFirstAttempt = { key -> store.remove(key) }
+        )
+
+        // First "process": records the first attempt and persists it.
+        assertFalse(newTracker().recordAttemptAndShouldGiveUp("hash1"))
+        assertEquals(0L, store["hash1"])
+
+        // Process "restarts" (fresh tracker instance, same backing store). A naive in-memory-only
+        // implementation would treat this as a brand new first attempt at time 500 and never give
+        // up; this must instead recall that the window actually started at 0.
+        now = 500L
+        assertFalse(newTracker().recordAttemptAndShouldGiveUp("hash1"))
+
+        now = 1_500L
+        assertTrue(newTracker().recordAttemptAndShouldGiveUp("hash1"))
+        assertFalse(store.containsKey("hash1"))
+    }
+
+    @Test
+    fun `clear removes the persisted first-attempt time too`() {
+        val store = mutableMapOf<String, Long>()
+        var now = 0L
+        val tracker = SyncRetryTracker(
+            maxDurationMs = 1_000L,
+            nowMs = { now },
+            loadFirstAttempt = { key -> store[key] },
+            saveFirstAttempt = { key, ts -> store[key] = ts },
+            clearFirstAttempt = { key -> store.remove(key) }
+        )
+
+        assertFalse(tracker.recordAttemptAndShouldGiveUp("hash1"))
+        tracker.clear("hash1")
+        assertFalse(store.containsKey("hash1"))
+
+        now = 1_500L
+        // A fresh tracker (simulating a restart) sees no persisted entry, so this is a genuinely
+        // new first attempt rather than an immediate give-up.
+        val restarted = SyncRetryTracker(
+            maxDurationMs = 1_000L,
+            nowMs = { now },
+            loadFirstAttempt = { key -> store[key] },
+            saveFirstAttempt = { key, ts -> store[key] = ts },
+            clearFirstAttempt = { key -> store.remove(key) }
+        )
+        assertFalse(restarted.recordAttemptAndShouldGiveUp("hash1"))
     }
 }

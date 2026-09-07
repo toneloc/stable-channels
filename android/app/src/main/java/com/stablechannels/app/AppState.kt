@@ -69,8 +69,25 @@ class AppState(private val context: Context) : ViewModel() {
         private set
     // Bounds how long a stuck signed trade-sync message can keep retrying before we give up on
     // it, since NodeService's event queue is strictly sequential and won't process the next LDK
-    // event (e.g. Event.ChannelClosed) until this one is acknowledged.
-    private val syncRetryTracker = SyncRetryTracker()
+    // event (e.g. Event.ChannelClosed) until this one is acknowledged. Backed by SharedPreferences
+    // (not just in-memory) because LDK persists an un-acked event and redelivers it after the app
+    // process restarts — which Android can do well before 5 continuous minutes of foreground time
+    // ever accumulate, so an in-memory-only clock would reset every restart and never give up.
+    private val syncRetryTracker = SyncRetryTracker(
+        loadFirstAttempt = { key ->
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .getLong("first_attempt_$key", -1L)
+                .takeIf { it >= 0 }
+        },
+        saveFirstAttempt = { key, ts ->
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .edit().putLong("first_attempt_$key", ts).apply()
+        },
+        clearFirstAttempt = { key ->
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .edit().remove("first_attempt_$key").apply()
+        }
+    )
     private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
 
     private val _phase = MutableStateFlow(Phase.LOADING)
