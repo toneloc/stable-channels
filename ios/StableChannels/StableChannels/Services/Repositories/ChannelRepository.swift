@@ -117,6 +117,42 @@ final class ChannelRepository {
         try rawSQL.execute("DELETE FROM channels WHERE user_channel_id = ?", params: [.text(userChannelId)])
     }
 
+    /// True if a channel_close payment record already exists for this channel_id/user_channel_id — i.e. the
+    /// channel is gone for good and will never reappear in the channels table.
+    func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {
+        do {
+            var paymentIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                paymentIds.append(userChannelId)
+                paymentIds.append("close-\(userChannelId)")
+            }
+            let placeholders = paymentIds.map { _ in "?" }.joined(separator: ", ")
+            let paymentParams: [SQLValue] = paymentIds.map { .text($0) }
+            let paymentRows = try rawSQL.query(
+                "SELECT 1 FROM payments WHERE payment_type = 'channel_close' AND payment_id IN (\(placeholders)) LIMIT 1",
+                params: paymentParams
+            )
+            if !paymentRows.isEmpty {
+                return true
+            }
+
+            var opIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                opIds.append(userChannelId)
+                opIds.append("close-\(userChannelId)")
+            }
+            let opPlaceholders = opIds.map { _ in "?" }.joined(separator: ", ")
+            let opParams: [SQLValue] = opIds.map { .text($0) }
+            let opRows = try rawSQL.query(
+                "SELECT 1 FROM pending_operations WHERE op_type = 'channel_close' AND op_id IN (\(opPlaceholders)) LIMIT 1",
+                params: opParams
+            )
+            return !opRows.isEmpty
+        } catch {
+            return false
+        }
+    }
+
     func recordTrade(
         channelId: String,
         action: String,
@@ -449,14 +485,21 @@ final class ChannelRepository {
                     return TradeControlApplyResult(status: .invalid)
                 }
                 let channels = try rawSQL.query(
-                    "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
-                    params: [.text(sync.userChannelId)]
+                    "SELECT channel_id, receiver_sats, sync_version, stable_sats, user_channel_id FROM channels WHERE channel_id = ?",
+                    params: [.text(sync.channelId)]
                 )
                 guard let channel = channels.first else {
+                    if self.isChannelClosed(channelId: sync.channelId, userChannelId: sync.userChannelId) {
+                        return TradeControlApplyResult(status: .invalid)
+                    }
                     return TradeControlApplyResult(status: .retry)
                 }
-                guard channel.string(0) == sync.channelId else {
-                    return TradeControlApplyResult(status: .invalid)
+                if channel.string(4) != sync.userChannelId {
+                    AuditService.log("USER_CHANNEL_ID_MISMATCH", data: [
+                        "channel_id": sync.channelId,
+                        "stored": channel.string(4),
+                        "incoming": sync.userChannelId
+                    ])
                 }
                 let receiverSigned = channel.int64(1)
                 let currentVersion = channel.int64(2)
@@ -476,12 +519,12 @@ final class ChannelRepository {
                         UPDATE channels
                         SET expected_usd = ?, stable_sats = ?, native_sats = ?, sync_version = ?,
                             updated_at = strftime('%s', 'now')
-                        WHERE user_channel_id = ? AND channel_id = ? AND sync_version < ?
+                        WHERE channel_id = ? AND sync_version < ?
                         """,
                         params: [
                             .real(sync.expectedUSD), .integer(Int64(storedBacking)),
                             .integer(Int64(native)), .integer(Int64(sync.syncVersion)),
-                            .text(sync.userChannelId), .text(sync.channelId),
+                            .text(sync.channelId),
                             .integer(Int64(sync.syncVersion))
                         ]
                     )
@@ -595,16 +638,23 @@ final class ChannelRepository {
             return try rawSQL.inTransaction {
                 let rows = try rawSQL.query(
                     """
-                    SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version
-                    FROM channels WHERE user_channel_id = ?
+                    SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version, user_channel_id
+                    FROM channels WHERE channel_id = ?
                     """,
-                    params: [.text(sync.userChannelId)]
+                    params: [.text(sync.channelId)]
                 )
                 guard let channel = rows.first else {
+                    if self.isChannelClosed(channelId: sync.channelId, userChannelId: sync.userChannelId) {
+                        return TradeControlApplyResult(status: .invalid)
+                    }
                     return TradeControlApplyResult(status: .retry)
                 }
-                guard channel.string(0) == sync.channelId else {
-                    return TradeControlApplyResult(status: .invalid)
+                if channel.string(5) != sync.userChannelId {
+                    AuditService.log("USER_CHANNEL_ID_MISMATCH", data: [
+                        "channel_id": sync.channelId,
+                        "stored": channel.string(5),
+                        "incoming": sync.userChannelId
+                    ])
                 }
                 if Int64(sync.syncVersion) <= channel.int64(4) {
                     return TradeControlApplyResult(status: .duplicate)
@@ -637,12 +687,12 @@ final class ChannelRepository {
                     UPDATE channels
                     SET expected_usd = ?, stable_sats = ?, native_sats = ?, sync_version = ?,
                         latest_price = ?, updated_at = strftime('%s', 'now')
-                    WHERE user_channel_id = ? AND channel_id = ? AND sync_version < ?
+                    WHERE channel_id = ? AND sync_version < ?
                     """,
                     params: [
                         .real(sync.expectedUSD), .integer(Int64(localBacking)),
                         .integer(Int64(native)), .integer(Int64(sync.syncVersion)),
-                        .real(trustedPrice), .text(sync.userChannelId), .text(sync.channelId),
+                        .real(trustedPrice), .text(sync.channelId),
                         .integer(Int64(sync.syncVersion))
                     ]
                 )
