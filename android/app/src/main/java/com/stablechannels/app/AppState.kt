@@ -1836,7 +1836,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
         val now = System.currentTimeMillis()
         if (!force && (now - lastConfirmationPollAtMs) < 15_000) {

@@ -18,8 +18,8 @@ import org.robolectric.annotation.Config
 import java.io.File
 
 /** Covers the txid-keyed guards added to updatePaymentTxid()/isTxidRecorded() so that backfilling
- *  a missing onchain-receive txid (via AppState.resolveMissingReceiveTxids /
- *  detectOnchainDeposit's LDK fallback) can't attach the same txid to two amount-matching rows,
+ *  a missing onchain-receive txid (via AppState.resolveMissingReceiveTxids) can't attach the same
+ *  txid to two amount-matching rows,
  *  nor overwrite a row that's already resolved. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
