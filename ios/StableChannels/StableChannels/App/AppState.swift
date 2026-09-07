@@ -101,6 +101,16 @@ class AppState {
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
+    let spliceBroadcastChecker: SpliceBroadcastChecking
+    let syncRetryTracker: SyncRetryTracking
+
+    init(
+        spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
+        syncRetryTracker: SyncRetryTracking = SyncRetryTracker()
+    ) {
+        self.spliceBroadcastChecker = spliceBroadcastChecker
+        self.syncRetryTracker = syncRetryTracker
+    }
 
     // MARK: - State
 
@@ -1531,20 +1541,76 @@ class AppState {
             )
 
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
-            isSweeping = false
-            spliceTxid = nil
-            spliceConfirmationTask?.cancel()
-            spliceConfirmationTask = nil
-            monitoredSpliceTxid = nil
-            sweepOnchainStart = 0
-            pendingSplice = nil
-            databaseService?.spliceRepo.failLatestPendingSplice()
-
-            AuditService.log("SPLICE_FAILED", data: [
-                "channel_id": "\(channelId)",
-                "user_channel_id": "\(userChannelId)"
-            ])
-            statusMessage = "Splice failed"
+            let capturedTxid = spliceTxid
+            let capturedGeneration = spliceGeneration
+            if let capturedTxid, !capturedTxid.isEmpty {
+                Task { [weak self] in
+                    guard let self else { return }
+                    var urls: [String] = []
+                    for url in [self.chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
+                        where !urls.contains(url) {
+                        urls.append(url)
+                    }
+                    let status = await self.spliceBroadcastChecker.checkStatus(txid: capturedTxid, endpointURLs: urls)
+                    switch status {
+                    case .exists:
+                        AuditService.log("SPLICE_FAILED_IGNORED_STALE", data: [
+                            "channel_id": "\(channelId)",
+                            "splice_txid": capturedTxid
+                        ])
+                    case .inconclusive:
+                        AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", data: [
+                            "channel_id": "\(channelId)",
+                            "splice_txid": capturedTxid
+                        ])
+                    case .notFound:
+                        self.databaseService?.spliceRepo.failLatestPendingSplice()
+                        if self.spliceGeneration != capturedGeneration {
+                            AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
+                                "channel_id": "\(channelId)",
+                                "splice_txid": capturedTxid
+                            ])
+                        } else {
+                            self.isSweeping = false
+                            self.spliceConfirmationTask?.cancel()
+                            self.spliceConfirmationTask = nil
+                            self.monitoredSpliceTxid = nil
+                            self.pendingSplice = nil
+                            if self.spliceTxid == capturedTxid {
+                                self.spliceTxid = nil
+                            }
+                            self.sweepOnchainStart = 0
+                            AuditService.log("SPLICE_FAILED", data: [
+                                "channel_id": "\(channelId)",
+                                "splice_txid": capturedTxid,
+                                "reason": "txid_never_broadcast"
+                            ])
+                            self.statusMessage = "Splice failed"
+                        }
+                    }
+                }
+            } else {
+                databaseService?.spliceRepo.failLatestPendingSplice()
+                if spliceGeneration == capturedGeneration {
+                    isSweeping = false
+                    spliceConfirmationTask?.cancel()
+                    spliceConfirmationTask = nil
+                    monitoredSpliceTxid = nil
+                    pendingSplice = nil
+                    spliceTxid = nil
+                    sweepOnchainStart = 0
+                    AuditService.log("SPLICE_FAILED", data: [
+                        "channel_id": "\(channelId)",
+                        "user_channel_id": "\(userChannelId)"
+                    ])
+                    statusMessage = "Splice failed"
+                } else {
+                    AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
+                        "channel_id": "\(channelId)",
+                        "user_channel_id": "\(userChannelId)"
+                    ])
+                }
+            }
 
         case .channelClosed(let channelId, let userChannelId, let counterpartyNodeId, let reason):
             handleChannelClosed(
@@ -1579,11 +1645,18 @@ class AppState {
             amountMsat: amountMsat
         ) {
         case .applied:
+            syncRetryTracker.clear(key: paymentHashStr)
             refreshBalances()
             updateStableBalances()
             return
         case .retry:
-            ackToken?.shouldAck = false
+            let shouldGiveUp = syncRetryTracker.recordAttemptAndShouldGiveUp(key: paymentHashStr)
+            if shouldGiveUp {
+                AuditService.log("TRADE_RESULT_GIVEN_UP", data: ["payment_hash": paymentHashStr])
+                ackToken?.shouldAck = true
+            } else {
+                ackToken?.shouldAck = false
+            }
             return
         case .notSync:
             break
@@ -1826,9 +1899,11 @@ class AppState {
                 AuditService.log("TRADE_RESULT_DEFERRED", data: ["payment_hash": paymentHash])
                 return .retry
             case .invalid:
+                syncRetryTracker.clear(key: paymentHash)
                 AuditService.log("TRADE_RESULT_INVALID", data: ["payment_hash": paymentHash])
                 return .applied
             case .duplicate:
+                syncRetryTracker.clear(key: paymentHash)
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
                     if case .rejected(let rejection) = message {
@@ -1851,6 +1926,7 @@ class AppState {
                 stableChannel.latestPrice = channel.latestPrice
                 return .applied
             case .applied:
+                syncRetryTracker.clear(key: paymentHash)
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
                     if case .rejected(let rejection) = message {
@@ -2355,6 +2431,8 @@ class AppState {
         startSpliceConfirmationMonitor(txid: txidStr)
     }
 
+    private var spliceGeneration: UInt64 = 0
+
     func beginSpliceOut(amountSats: UInt64, address: String) throws {
         guard !isSweeping else {
             throw NSError(
@@ -2397,6 +2475,7 @@ class AppState {
                 userInfo: [NSLocalizedDescriptionKey: "Could not save pending splice — splice not started"]
             )
         }
+        spliceGeneration &+= 1
         isSweeping = true
         pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
         statusMessage = "Move pending..."
@@ -2424,11 +2503,12 @@ class AppState {
 
         spliceConfirmationTask?.cancel()
         monitoredSpliceTxid = normalizedTxid
+        let monitorGeneration = spliceGeneration
         spliceConfirmationTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
                 if await self.isTxConfirmed(normalizedTxid) {
-                    self.completeConfirmedSplice(txid: normalizedTxid)
+                    self.completeConfirmedSplice(txid: normalizedTxid, expectedGeneration: monitorGeneration)
                     return
                 }
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
@@ -2436,11 +2516,29 @@ class AppState {
         }
     }
 
+    nonisolated static func shouldSkipGenerationBumpOnResume(
+        monitorActive: Bool,
+        monitoredTxid: String?,
+        resumedTxid: String?
+    ) -> Bool {
+        let normalizedResumed = resumedTxid?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return monitorActive && monitoredTxid != nil && monitoredTxid == normalizedResumed
+    }
+
     private func resumePendingSpliceConfirmation() {
         guard let hasSplice = try? databaseService?.spliceRepo.hasPendingSplice(), hasSplice else { return }
+        let txid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
+        let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
+            monitorActive: spliceConfirmationTask != nil,
+            monitoredTxid: monitoredSpliceTxid,
+            resumedTxid: txid
+        )
+        if !alreadyMonitoring {
+            spliceGeneration &+= 1
+        }
         isSweeping = true
-        spliceTxid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
-        if let txid = spliceTxid, !txid.isEmpty {
+        spliceTxid = txid
+        if let txid, !txid.isEmpty {
             startSpliceConfirmationMonitor(txid: txid)
         }
     }
@@ -2475,7 +2573,7 @@ class AppState {
         return false
     }
 
-    private func completeConfirmedSplice(txid: String) {
+    private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) {
         let completed = databaseService?.spliceRepo.completeSplice(txid: txid) == true
         if completed {
             refreshBalances()
@@ -2493,15 +2591,19 @@ class AppState {
             saveChannelToDB()
         }
 
-        isSweeping = false
-        pendingSplice = nil
-        sweepOnchainStart = 0
-        if spliceTxid == txid {
-            spliceTxid = nil
+        if spliceGeneration == expectedGeneration {
+            isSweeping = false
+            pendingSplice = nil
+            sweepOnchainStart = 0
+            if spliceTxid == txid {
+                spliceTxid = nil
+            }
+            monitoredSpliceTxid = nil
+            spliceConfirmationTask = nil
+            statusMessage = "Move confirmed"
+        } else {
+            AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", data: ["txid": txid])
         }
-        monitoredSpliceTxid = nil
-        spliceConfirmationTask = nil
-        statusMessage = "Move confirmed"
 
         AuditService.log("SPLICE_CONFIRMED", data: [
             "txid": txid,
@@ -3060,6 +3162,7 @@ class AppState {
                     counterpartyNodeId: channel.counterpartyNodeId
                 )
                 sweepOnchainStart = balances.totalOnchainBalanceSats
+                spliceGeneration &+= 1
                 statusMessage = "Moving all onchain funds to channel..."
 
                 AuditService.log("SWEEP_TO_CHANNEL", data: [
