@@ -7,7 +7,8 @@ It does not change on-chain Send Max or Lightning payment amounts.
 ## Policy
 
 - Maximum stabilized backing: 99% of post-fee spendable receiver sats, rounded down.
-- Minimum unstabilized spendable reserve: 2,000 sats; this may bind below 99% on small channels.
+- The base cap scales with the balance, with no fixed native-sat floor. The separate client
+  safety margin below is unchanged.
 - All client entry points use a further 50-sat safety margin. If the resulting limit is zero
   or unavailable, no additional stabilization is offered.
 - The client uses its own outbound capacity minus the trade fee. The LSP uses inbound capacity
@@ -17,6 +18,7 @@ It does not change on-chain Send Max or Lightning payment amounts.
   availability, existing drift rules, and the buffered backing limit. Manual input and final
   preparation use the same validation; no target is silently reduced.
 - Max labels show the **additional gross order amount**, not the resulting total position.
+- Reserve explanation on all clients: "Keeps a small BTC reserve in the channel."
 
 Rust: `src/stabilization.rs`. Android: `StabilizationPolicy.kt`. Swift: the shared
 `NotificationService/Services/TradeProtocol.swift`, already compiled into both targets.

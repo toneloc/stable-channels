@@ -113,7 +113,7 @@ struct SellView: View {
             }
             Text(String(
                 localized: "stabilization_reserve_explanation",
-                defaultValue: "Keeps at least 1% and a small reserve in BTC for network fees."
+                defaultValue: "Keeps a small BTC reserve in the channel."
             ))
             .font(.caption).foregroundStyle(.secondary)
 

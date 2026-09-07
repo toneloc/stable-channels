@@ -1,18 +1,17 @@
 //! Trade-entry guard, not a settlement invariant. Existing positions may drift above this limit.
 
 use crate::constants::{
-    ABSOLUTE_MIN_NATIVE_SATS, CLIENT_SAFETY_MARGIN_SATS, MAX_STABLE_ALLOCATION_PERCENT,
-    SATS_IN_BTC, STABLE_CHANNEL_TRADE_FEE_RATE,
+    CLIENT_SAFETY_MARGIN_SATS, MAX_STABLE_ALLOCATION_PERCENT, SATS_IN_BTC,
+    STABLE_CHANNEL_TRADE_FEE_RATE,
 };
 
 /// Spendable means the peer's capacity, excluding that peer's punishment reserve and commitment
 /// fees. The LSP passes inbound capacity AFTER the fee payment; clients subtract the fee first.
 pub fn backing_cap(post_fee_spendable_sats: u64) -> Option<u64> {
-    let after_floor = post_fee_spendable_sats.checked_sub(ABSOLUTE_MIN_NATIVE_SATS)?;
     // Widen before multiplying so even malformed u64 inputs cannot overflow.
     let percent = (u128::from(post_fee_spendable_sats) * u128::from(MAX_STABLE_ALLOCATION_PERCENT)
         / 100) as u64;
-    Some(percent.min(after_floor))
+    Some(percent)
 }
 
 pub fn client_backing_limit(post_fee_spendable_sats: u64) -> Option<u64> {
@@ -182,15 +181,17 @@ mod tests {
     #[test]
     fn strict_integer_boundaries() {
         assert_eq!(backing_cap(1_000_001), Some(990_000));
-        assert_eq!(backing_cap(100_000), Some(98_000));
-        assert_eq!(backing_cap(1_999), None);
-        assert_eq!(client_backing_limit(2_050), None);
-        assert_eq!(client_backing_limit(2_051), Some(1));
+        assert_eq!(backing_cap(100_000), Some(99_000));
+        assert_eq!(backing_cap(5_000), Some(4_950));
+        assert_eq!(backing_cap(1_999), Some(1_979));
+        assert_eq!(backing_cap(0), Some(0));
+        assert_eq!(client_backing_limit(51), None);
+        assert_eq!(client_backing_limit(52), Some(1));
         assert!(backing_cap(u64::MAX).unwrap() < u64::MAX);
     }
     #[test]
     fn maximum_search_matches_exhaustive_small_wallets() {
-        for receiver in [2_050u64, 3_000, 9_999, 100_000] {
+        for receiver in [51u64, 52, 2_050, 3_000, 5_000, 9_999, 100_000] {
             for price in [22.0, 100_000.0, 1_000_000.0] {
                 for backing in [0, receiver / 2, receiver * 99 / 100] {
                     let s = SellSnapshot {
@@ -233,7 +234,7 @@ mod tests {
     }
     #[test]
     fn small_and_drifted_positions_cannot_increase() {
-        for (receiver, backing) in [(2_000, 0), (100_000, 99_000)] {
+        for (receiver, backing) in [(51, 0), (100_000, 99_000)] {
             let snapshot = SellSnapshot {
                 receiver_sats: receiver,
                 spendable_sats: receiver,

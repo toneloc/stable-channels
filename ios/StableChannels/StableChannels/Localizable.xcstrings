@@ -10,7 +10,7 @@
     "stabilization_reserve_explanation" : {
       "extractionState" : "manual",
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keeps at least 1% and a small reserve in BTC for network fees." } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Keeps a small BTC reserve in the channel." } }
       }
     },
     "" : {

@@ -14,16 +14,18 @@ class StabilizationPolicyTest {
     // Mirrored verbatim from tests/fixtures/stabilization-limits.json (Rust and Swift share these).
     @Test fun canonicalVectors() {
         val vectors = listOf(
-            StabilizationSnapshot(100000L, 100000L, 0L, 0.0, 100000.0) to 9795L,
-            StabilizationSnapshot(200000L, 195000L, 50000L, 50.0, 100000.0) to 14295L,
+            StabilizationSnapshot(100000L, 100000L, 0L, 0.0, 100000.0) to 9896L,
+            StabilizationSnapshot(200000L, 195000L, 50000L, 50.0, 100000.0) to 14301L,
             StabilizationSnapshot(1000001L, 1000001L, 500000L, 500.0, 100000.0) to 48999L,
             StabilizationSnapshot(200000L, 195000L, 50000L, 50.0, 80000.0) to 11000L,
-            StabilizationSnapshot(2050L, 2050L, 0L, 0.0, 100000.0) to 0L,
+            StabilizationSnapshot(2050L, 2050L, 0L, 0.0, 100000.0) to 198L,
+            StabilizationSnapshot(5000L, 5000L, 0L, 0.0, 100000.0) to 490L,
+            StabilizationSnapshot(51L, 51L, 0L, 0.0, 100000.0) to 0L,
             StabilizationSnapshot(100000L, 100000L, 99000L, 99.0, 100000.0) to 0L,
-            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63304.4) to 640L,
-            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63321.94) to 641L,
-            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63425.91) to 642L,
-            StabilizationSnapshot(150000L, 150000L, 100000L, 100.0, 100000.0) to 4795L
+            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63304.4) to 734L,
+            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63321.94) to 734L,
+            StabilizationSnapshot(51984L, 51984L, 39810L, 25.407, 63425.91) to 736L,
+            StabilizationSnapshot(150000L, 150000L, 100000L, 100.0, 100000.0) to 4845L
         )
         for ((snapshot, maximum) in vectors) {
             assertEquals(snapshot.toString(), maximum, snapshot.maxOrderCents())
@@ -46,10 +48,13 @@ class StabilizationPolicyTest {
 
     @Test fun integerBoundaryAndSmallBalances() {
         assertEquals(990_000L, StabilizationPolicy.backingCap(1_000_001))
-        assertEquals(98_000L, StabilizationPolicy.backingCap(100_000))
-        assertNull(StabilizationPolicy.backingCap(1_999))
-        assertNull(StabilizationPolicy.clientLimit(2_050))
-        assertEquals(1L, StabilizationPolicy.clientLimit(2_051))
+        assertEquals(99_000L, StabilizationPolicy.backingCap(100_000))
+        assertEquals(4_950L, StabilizationPolicy.backingCap(5_000))
+        assertEquals(1_979L, StabilizationPolicy.backingCap(1_999))
+        assertEquals(0L, StabilizationPolicy.backingCap(0))
+        assertNull(StabilizationPolicy.backingCap(-1))
+        assertNull(StabilizationPolicy.clientLimit(51))
+        assertEquals(1L, StabilizationPolicy.clientLimit(52))
         assertTrue(StabilizationPolicy.backingCap(Long.MAX_VALUE)!! < Long.MAX_VALUE)
     }
 

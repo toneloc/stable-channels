@@ -8,11 +8,11 @@ import kotlin.math.floor
 /** Trade-entry only. Keep settlements/reconciliation and USD -> BTC reductions uncapped. */
 object StabilizationPolicy {
     fun backingCap(postFeeSpendable: Long): Long? {
-        if (postFeeSpendable < Constants.ABSOLUTE_MIN_NATIVE_SATS) return null
+        if (postFeeSpendable < 0) return null
         // Quotient/remainder avoids overflowing even on malformed Long.MAX_VALUE inputs.
         val percent = (postFeeSpendable / 100) * Constants.MAX_STABLE_ALLOCATION_PERCENT +
             ((postFeeSpendable % 100) * Constants.MAX_STABLE_ALLOCATION_PERCENT) / 100
-        return minOf(percent, postFeeSpendable - Constants.ABSOLUTE_MIN_NATIVE_SATS)
+        return percent
     }
 
     fun clientLimit(postFeeSpendable: Long): Long? = backingCap(postFeeSpendable)

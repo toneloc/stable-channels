@@ -7,14 +7,11 @@ import Security
 // never enforce this policy in accepted-result reconciliation or stability settlements.
 enum StabilizationPolicy {
     static let maxStableAllocationPercent: UInt64 = 99
-    static let absoluteMinNativeSats: UInt64 = 2_000
     static let clientSafetyMarginSats: UInt64 = 50
 
     static func backingCap(_ postFeeSpendable: UInt64) -> UInt64? {
-        guard postFeeSpendable >= absoluteMinNativeSats else { return nil }
-        let percent = (postFeeSpendable / 100) * maxStableAllocationPercent
+        return (postFeeSpendable / 100) * maxStableAllocationPercent
             + ((postFeeSpendable % 100) * maxStableAllocationPercent) / 100
-        return min(percent, postFeeSpendable - absoluteMinNativeSats)
     }
 
     static func clientLimit(_ postFeeSpendable: UInt64) -> UInt64? {

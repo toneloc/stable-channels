@@ -10213,7 +10213,7 @@ impl UserApp {
             .color(Color32::DARK_GRAY),
         );
         ui.label(
-            RichText::new("Keeps at least 1% and a small reserve in BTC for network fees.")
+            RichText::new("Keeps a small BTC reserve in the channel.")
                 .size(12.0)
                 .color(theme::MUTED),
         );
@@ -12037,19 +12037,19 @@ mod tests {
 
     #[test]
     fn sell_limit_accounts_for_stable_target_drift_and_trade_fee() {
-        // Production-shaped drift, now additionally constrained by the 2k floor and 50-sat
+        // Production-shaped drift, additionally constrained by the 99% cap and 50-sat
         // client margin. The maximum must satisfy both constraints, not just raw native USD.
         assert_eq!(
             max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_304.40),
-            640,
+            734,
         );
         assert_eq!(
             max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_321.94),
-            641,
+            734,
         );
         assert_eq!(
             max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_425.91),
-            642,
+            736,
         );
     }
 
@@ -12086,7 +12086,7 @@ mod tests {
     fn sell_limit_preserves_native_reserve_even_when_target_is_fully_backed() {
         assert_eq!(
             max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, 100_000.0),
-            4_795,
+            4_845,
         );
         assert_eq!(
             max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, f64::NAN),

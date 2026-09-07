@@ -1169,16 +1169,18 @@ final class StabilizationPolicyTests: XCTestCase {
     // Mirrored verbatim from tests/fixtures/stabilization-limits.json (Rust and Kotlin share these).
     func testCanonicalVectors() {
         let vectors: [(UInt64, UInt64, UInt64, Double, Double, UInt64)] = [
-            (100000, 100000, 0, 0, 100000, 9795),
-            (200000, 195000, 50000, 50, 100000, 14295),
+            (100000, 100000, 0, 0, 100000, 9896),
+            (200000, 195000, 50000, 50, 100000, 14301),
             (1000001, 1000001, 500000, 500, 100000, 48999),
             (200000, 195000, 50000, 50, 80000, 11000),
-            (2050, 2050, 0, 0, 100000, 0),
+            (2050, 2050, 0, 0, 100000, 198),
+            (5000, 5000, 0, 0, 100000, 490),
+            (51, 51, 0, 0, 100000, 0),
             (100000, 100000, 99000, 99, 100000, 0),
-            (51984, 51984, 39810, 25.407, 63304.4, 640),
-            (51984, 51984, 39810, 25.407, 63321.94, 641),
-            (51984, 51984, 39810, 25.407, 63425.91, 642),
-            (150000, 150000, 100000, 100, 100000, 4795)
+            (51984, 51984, 39810, 25.407, 63304.4, 734),
+            (51984, 51984, 39810, 25.407, 63321.94, 734),
+            (51984, 51984, 39810, 25.407, 63425.91, 736),
+            (150000, 150000, 100000, 100, 100000, 4845)
         ]
         for (receiver, spendable, backing, expected, price, maximum) in vectors {
             let s = StabilizationSnapshot(receiverSats: receiver, spendableSats: spendable,
@@ -1202,10 +1204,12 @@ final class StabilizationPolicyTests: XCTestCase {
 
     func testIntegerAndFeeBoundaries() throws {
         XCTAssertEqual(StabilizationPolicy.backingCap(1_000_001), 990_000)
-        XCTAssertEqual(StabilizationPolicy.backingCap(100_000), 98_000)
-        XCTAssertNil(StabilizationPolicy.backingCap(1_999))
-        XCTAssertNil(StabilizationPolicy.clientLimit(2_050))
-        XCTAssertEqual(StabilizationPolicy.clientLimit(2_051), 1)
+        XCTAssertEqual(StabilizationPolicy.backingCap(100_000), 99_000)
+        XCTAssertEqual(StabilizationPolicy.backingCap(5_000), 4_950)
+        XCTAssertEqual(StabilizationPolicy.backingCap(1_999), 1_979)
+        XCTAssertEqual(StabilizationPolicy.backingCap(0), 0)
+        XCTAssertNil(StabilizationPolicy.clientLimit(51))
+        XCTAssertEqual(StabilizationPolicy.clientLimit(52), 1)
         XCTAssertLessThan(try XCTUnwrap(StabilizationPolicy.backingCap(UInt64.max)), UInt64.max)
         let original = StabilizationSnapshot(receiverSats: 200_000, spendableSats: 195_000,
                                              backingSats: 50_000, expectedUSD: 50, price: 100_000)

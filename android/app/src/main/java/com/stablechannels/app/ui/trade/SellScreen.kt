@@ -169,7 +169,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
 
                 Spacer(Modifier.height(8.dp))
                 Text("Maximum additional trade: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Keeps at least 1% and a small reserve in BTC for network fees.", style = MaterialTheme.typography.labelSmall)
+                Text("Keeps a small BTC reserve in the channel.", style = MaterialTheme.typography.labelSmall)
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))

@@ -133,7 +133,6 @@ pub const STABLE_CHANNEL_TRADE_FEE_RATE: f64 = 0.01;
 
 // Trade-entry limits only. Never apply these to stability settlements or reconciliation.
 pub const MAX_STABLE_ALLOCATION_PERCENT: u64 = 99;
-pub const ABSOLUTE_MIN_NATIVE_SATS: u64 = 2_000;
 pub const CLIENT_SAFETY_MARGIN_SATS: u64 = 50;
 
 /// Maximum difference between the wallet's signed trade quote and the LSP's local price.

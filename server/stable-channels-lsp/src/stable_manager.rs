@@ -4834,7 +4834,7 @@ mod tests {
                 .await;
             assert_eq!(result.ok, !enforced);
         }
-        let (mut manager, fake) = correlated_rejection_context(100.0, 100_000, 101_000);
+        let (mut manager, fake) = correlated_rejection_context(100.0, 100_000, 100_000);
         manager.enforce_max_stabilization = true;
         // A reduction can still be above the entry limit and must not be blocked.
         let envelope = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 99.5);
@@ -4862,16 +4862,16 @@ mod tests {
             true,
             &channel,
             50.0,
-            97.0,
-            97_000,
+            98.01,
+            98_010,
             "boundary-test"
         ));
         assert!(max_stabilization_rejected(
             true,
             &channel,
             50.0,
-            97.001,
-            97_001,
+            98.011,
+            98_011,
             "boundary-test"
         ));
         assert!(!max_stabilization_rejected(
