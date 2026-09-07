@@ -66,6 +66,7 @@ class AppState(private val context: Context) : ViewModel() {
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
+        private set
     // Bounds how long a stuck signed trade-sync message can keep retrying before we give up on
     // it, since NodeService's event queue is strictly sequential and won't process the next LDK
     // event (e.g. Event.ChannelClosed) until this one is acknowledged.
