@@ -43,6 +43,24 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
+        /** The timestamp to use as a payment's match cost against a DB row's creation time.
+         *  Prefers the confirmed block's timestamp (ConfirmationStatus.Confirmed.timestamp) when
+         *  available — that value is set once by consensus and can never change again, unlike
+         *  latestUpdateTimestamp, which LDK updates on every payment/confirmation state change
+         *  and can silently shift an already-committed match's cost on a later poll (demonstrated
+         *  by OnchainTxidMatcherTest's timestamp-shift case). Falls back to latestUpdateTimestamp
+         *  only for still-unconfirmed candidates, where no more authoritative timestamp exists
+         *  yet — necessary because showing a probable txid before confirmation is the point of
+         *  both callers, but it means an unconfirmed match can still be superseded by a stricter
+         *  same-amount candidate on a later poll (the DB uniqueness guard and
+         *  OnchainTxidMatcher's invariance check are what keep that safe, not this function).
+         *  A pure function (no AppState/Android dependency) so it's directly unit-testable. */
+        fun onchainMatchTimestamp(payment: PaymentDetails): Long {
+            val onchain = payment.kind as? PaymentKind.Onchain
+            val confirmed = onchain?.status as? ConfirmationStatus.Confirmed
+            return confirmed?.timestamp?.toLong() ?: payment.latestUpdateTimestamp.toLong()
+        }
+
         /**
          * Set to true right before launching an in-app activity that backgrounds the app
          * (e.g. the log share sheet). [MainActivity] honors this only for a short grace window
@@ -1797,7 +1815,7 @@ class AppState(private val context: Context) : ViewModel() {
                 .filter { it.amountMsat?.toLong() == row.amountMsat }
                 .filter { !db.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) }
                 .mapNotNull {
-                    val delta = kotlin.math.abs(it.latestUpdateTimestamp.toLong() - row.createdAt)
+                    val delta = kotlin.math.abs(onchainMatchTimestamp(it) - row.createdAt)
                     if (delta <= RECEIVE_TXID_MATCH_WINDOW_SECS) {
                         TxidMatchEdge(row.id, (it.kind as PaymentKind.Onchain).txid, delta)
                     } else null
@@ -2170,7 +2188,7 @@ class AppState(private val context: Context) : ViewModel() {
                                 it.kind is PaymentKind.Onchain &&
                                 it.amountMsat?.toLong() == depositSats * 1000 &&
                                 db?.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) != true &&
-                                kotlin.math.abs(it.latestUpdateTimestamp.toLong() - System.currentTimeMillis() / 1000) <= RECEIVE_TXID_MATCH_WINDOW_SECS
+                                kotlin.math.abs(onchainMatchTimestamp(it) - System.currentTimeMillis() / 1000) <= RECEIVE_TXID_MATCH_WINDOW_SECS
                         }
                         // If more than one unclaimed candidate matches, guessing could attach the
                         // wrong (but still plausible) txid to this new row — leave it unresolved;
