@@ -226,31 +226,6 @@ class NotificationService: UNNotificationServiceExtension {
             .appendingPathComponent("StableChannels")
             .appendingPathComponent("user")
 
-        let sharedUD = UserDefaults(suiteName: Constants.appGroup)
-        let isRestoring = sharedUD?.string(forKey: "restore_phase") != nil
-            || sharedUD?.bool(forKey: "restore_in_progress") == true
-
-        let dbPath = dataDir.appendingPathComponent("ldk_node_data.sqlite")
-        let hasDb = FileManager.default.fileExists(atPath: dbPath.path)
-        let seedExists = hasSeed(dataDir: dataDir)
-
-        // Refuse to start if restore is in progress or if seed exists without its database (mismatch)
-        if isRestoring || (seedExists && !hasDb) {
-            logger.log("Startup mismatch or restore in progress: deferring payment to main app")
-            sharedUD?.set(true, forKey: "pending_push_payment")
-            cleanup()
-            finish(content)
-            return
-        }
-
-        // Check for seed
-        guard seedExists else {
-            logger.log("FAILED: No seed found")
-            cleanup()
-            finish(content)
-            return
-        }
-
         // From here until the build resolves, the expire handler must defer
         // lock release to us (see lifecycleLock docs).
         lifecycleLock.lock()
@@ -258,8 +233,8 @@ class NotificationService: UNNotificationServiceExtension {
         lifecycleLock.unlock()
 
         // Cross-process exclusivity: if the main app's node holds the wallet
-        // dir (including its 30s background grace period), do NOT start a
-        // second node or touch the LDK DB — defer to the app.
+        // dir (including its 30s background grace period or during restore/reset),
+        // do NOT start a second node or touch the LDK DB — defer to the app.
         guard NodeDirLock.shared.tryAcquire(dataDir: dataDir) else {
             lifecycleLock.lock()
             buildInFlight = false
@@ -271,7 +246,7 @@ class NotificationService: UNNotificationServiceExtension {
             return
         }
 
-        // Bail before the expensive build if the window already expired.
+        // Bail before expensive preflight and build if the window already expired.
         lifecycleLock.lock()
         let expiredBeforeBuild = timeExpired
         lifecycleLock.unlock()
@@ -283,6 +258,21 @@ class NotificationService: UNNotificationServiceExtension {
             UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
             cleanup()
             return // expire handler already delivered the notification
+        }
+
+        // Preflight startup state classification under the held exclusive lock
+        let startupClassification = classifyStartupState(dataDir: dataDir)
+        guard startupClassification == .ready else {
+            lifecycleLock.lock()
+            buildInFlight = false
+            lifecycleLock.unlock()
+            logger.log("Startup classification \(startupClassification); deferring payment to main app")
+            UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
+            cleanup()
+            content.title = "Payment Pending"
+            content.body = "Open app to process your payment"
+            finish(content)
+            return
         }
 
         logger.log("Building node from \(dataDir.path)")
@@ -326,6 +316,7 @@ class NotificationService: UNNotificationServiceExtension {
             buildInFlight = false
             lifecycleLock.unlock()
             logger.log("NODE FAILED: \(error)")
+            UserDefaults(suiteName: Constants.appGroup)?.set(true, forKey: "pending_push_payment")
             cleanup()
             content.title = "Payment Pending"
             content.body = "Open app to process your payment"
@@ -410,20 +401,104 @@ class NotificationService: UNNotificationServiceExtension {
             .path
     }
 
-    private func hasSeed(dataDir: URL) -> Bool {
-        let keySeedPath = dataDir.appendingPathComponent("keys_seed")
-        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
-        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
-        let hasKeychainSeed: Bool
+    enum StartupClassification: CustomStringConvertible, Equatable {
+        case ready
+        case restoreInProgress
+        case seedStorageMismatch
+        case seedOnlyMismatch
+        case dbOnlyMismatch
+        case noWallet
+        case indeterminate(String)
+
+        var description: String {
+            switch self {
+            case .ready:
+                return "ready"
+            case .restoreInProgress:
+                return "restore_in_progress"
+            case .seedStorageMismatch:
+                return "seed_storage_mismatch"
+            case .seedOnlyMismatch:
+                return "seed_only_mismatch"
+            case .dbOnlyMismatch:
+                return "db_only_mismatch"
+            case .noWallet:
+                return "no_wallet"
+            case .indeterminate(let reason):
+                return "indeterminate(\(reason))"
+            }
+        }
+    }
+
+    func classifyStartupState(
+        dataDir: URL,
+        sharedUD: UserDefaults? = UserDefaults(suiteName: Constants.appGroup),
+        keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
+    ) -> StartupClassification {
+        let isRestoring = sharedUD?.string(forKey: "restore_phase") != nil
+            || sharedUD?.bool(forKey: "restore_in_progress") == true
+        if isRestoring {
+            return .restoreInProgress
+        }
+
+        let hasPending: Bool
+        do {
+            hasPending = try keychain.hasPendingMnemonic()
+        } catch WalletKeychainError.keyNotFound {
+            hasPending = false
+        } catch {
+            return .indeterminate("Keychain pending check failed: \(error.localizedDescription)")
+        }
+
+        if hasPending {
+            return .restoreInProgress
+        }
+
+        var hasKeychainSeed = false
+        var keychainSeed: String?
         do {
             hasKeychainSeed = try keychain.hasMnemonic()
+            keychainSeed = hasKeychainSeed ? try keychain.loadMnemonic() : nil
+        } catch WalletKeychainError.keyNotFound {
+            hasKeychainSeed = false
+            keychainSeed = nil
         } catch {
-            NSLog("[NotificationService] ERROR: KEYCHAIN_ACCESS_DENIED - \(error.localizedDescription)")
-            return false
+            return .indeterminate("Keychain access failed: \(error.localizedDescription)")
         }
-        return FileManager.default.fileExists(atPath: keySeedPath.path)
-            || hasKeychainSeed
-            || FileManager.default.fileExists(atPath: seedPhrasePath.path)
+
+        let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+        let plaintextWords = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
+        let hasPlaintext = plaintextWords != nil && !plaintextWords!.trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+
+        // Check for mismatch between Keychain and plaintext seed
+        if let kcSeed = keychainSeed, let plaintext = plaintextWords, hasPlaintext {
+            let canonicalPlaintext = BIP39.validatedCanonicalMnemonic(plaintext) ?? plaintext
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let canonicalKeychain = BIP39.validatedCanonicalMnemonic(kcSeed) ?? kcSeed
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !canonicalPlaintext.isEmpty && !canonicalKeychain.isEmpty && canonicalPlaintext != canonicalKeychain {
+                return .seedStorageMismatch
+            }
+        }
+
+        let keySeedPath = dataDir.appendingPathComponent("keys_seed")
+        let hasKeysSeed = FileManager.default.fileExists(atPath: keySeedPath.path)
+
+        let hasSeed = hasKeysSeed || hasKeychainSeed || hasPlaintext
+
+        let dbPath = dataDir.appendingPathComponent("ldk_node_data.sqlite")
+        let hasDb = FileManager.default.fileExists(atPath: dbPath.path)
+
+        if hasSeed && hasDb {
+            return .ready
+        } else if !hasSeed && !hasDb {
+            return .noWallet
+        } else if hasSeed && !hasDb {
+            return .seedOnlyMismatch
+        } else {
+            return .dbOnlyMismatch
+        }
     }
 
     // MARK: - Heartbeat
