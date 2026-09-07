@@ -102,6 +102,7 @@ object TradeProtocol {
 
     fun prepare(
         sc: StableChannel,
+        spendableSats: Long,
         action: String,
         amountUsd: Double,
         amountBtc: Double,
@@ -128,6 +129,16 @@ object TradeProtocol {
             newExpectedUsd = normalizedExpected,
             price = quotePrice
         ) ?: return null
+
+        // Trade-entry only. Accepted syncs and settlements may legitimately exceed this cap.
+        if (action == "sell" || normalizedExpected > sc.expectedUSD.amount) {
+            val snapshot = StabilizationSnapshot(sc.stableReceiverBTC.sats, spendableSats,
+                sc.backingSats, sc.expectedUSD.amount, quotePrice)
+            val limit = if (spendableSats >= feeSats) StabilizationPolicy.clientLimit(spendableSats - feeSats) else null
+            if (limit == null || backing > limit || !snapshot.accepts(floor(amountUsd * 100 + 1e-7).toLong())) {
+                throw TradeValidationException(StabilizationPolicy.maximumMessage(snapshot.maxOrderCents()))
+            }
+        }
 
         val payload = JSONObject().apply {
             put("type", Constants.TRADE_MESSAGE_TYPE)

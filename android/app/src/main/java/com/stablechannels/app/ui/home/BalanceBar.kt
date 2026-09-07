@@ -52,6 +52,7 @@ fun BalanceBar(
     nativeSats: Long,
     totalSats: Long,
     btcPrice: Double,
+    maxSellUSD: Double = 0.0,
     showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
@@ -70,6 +71,7 @@ fun BalanceBar(
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
     var hasTriggeredHaptic by remember { mutableStateOf(false) }
+    var atSellLimit by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val view = LocalView.current
@@ -81,6 +83,8 @@ fun BalanceBar(
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
 
     val baseXPx = barWidthPx * stableFraction
+    val maxSellOffset = minOf((barWidthPx * maxSellUSD.coerceAtLeast(0.0) / totalUSD).toFloat(),
+        (barWidthPx - baseXPx).coerceAtLeast(0f))
     val thumbXPx = (baseXPx + dragOffsetPx).coerceIn(0f, barWidthPx)
     val visFrac = if (barWidthPx > 0) thumbXPx / barWidthPx else stableFraction
     val usdPct = (visFrac * 100).roundToInt()
@@ -111,12 +115,13 @@ fun BalanceBar(
                 .onSizeChanged { barWidthPx = it.width.toFloat() }
                 .then(
                     if (interactive) {
-                        Modifier.pointerInput(stableFraction) {
+                        Modifier.pointerInput(stableFraction, maxSellUSD) {
                             detectDragGestures(
                                 onDragStart = { offset ->
                                     if (abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f) {
                                         isDragging = true
                                         hasTriggeredHaptic = false
+                                        atSellLimit = false
                                         scope.launch { dragOffset.snapTo(0f) }
                                         onDragStarted?.invoke()
                                     }
@@ -124,8 +129,9 @@ fun BalanceBar(
                                 onDrag = { change, dragAmount ->
                                     if (isDragging) {
                                         change.consume()
-                                        val newOffset = (dragOffset.value + dragAmount.x)
-                                            .coerceIn(-baseXPx, barWidthPx - baseXPx)
+                                        val proposedOffset = dragOffset.value + dragAmount.x
+                                        atSellLimit = proposedOffset > maxSellOffset
+                                        val newOffset = proposedOffset.coerceIn(-baseXPx, maxSellOffset)
                                         scope.launch { dragOffset.snapTo(newOffset) }
 
                                         // Haptic tick when drag first crosses $1.00 threshold
@@ -162,7 +168,7 @@ fun BalanceBar(
                                     val clamped = if (direction == TradeDirection.BUY)
                                         min(tradeUSD, stableUSD)
                                     else
-                                        min(tradeUSD, nativeUSD)
+                                        min(tradeUSD, maxSellUSD)
                                     onTradeRequest?.invoke(direction, clamped)
                                     // Hold position, then animate back (400ms ease-out)
                                     scope.launch {
@@ -250,7 +256,7 @@ fun BalanceBar(
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                "$usdPct% USD  $btcPct% BTC",
+                                if (atSellLimit) "Maximum additional trade: ${maxSellUSD.usdFormatted()}" else "$usdPct% USD  $btcPct% BTC",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
                             )

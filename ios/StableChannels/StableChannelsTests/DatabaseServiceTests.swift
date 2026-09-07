@@ -865,6 +865,7 @@ final class DatabaseServiceTests: XCTestCase {
             currentExpectedUSD: 50,
             currentBackingSats: 55_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "sell",
             amountUSD: 10,
             amountBTC: 0.000099,
@@ -907,6 +908,7 @@ final class DatabaseServiceTests: XCTestCase {
             currentExpectedUSD: 50,
             currentBackingSats: 55_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "sell",
             amountUSD: 10,
             amountBTC: 0.000099,
@@ -965,6 +967,7 @@ final class DatabaseServiceTests: XCTestCase {
             currentExpectedUSD: 50,
             currentBackingSats: 55_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "sell",
             amountUSD: 10,
             amountBTC: 0.000099,
@@ -1036,6 +1039,7 @@ final class DatabaseServiceTests: XCTestCase {
             currentExpectedUSD: prepared.newExpectedUSD,
             currentBackingSats: prepared.newBackingSats,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "buy",
             amountUSD: 1,
             amountBTC: 0.0000099,
@@ -1086,6 +1090,7 @@ final class DatabaseServiceTests: XCTestCase {
             currentExpectedUSD: 25,
             currentBackingSats: 25_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "buy",
             amountUSD: 5,
             amountBTC: 0.0000495,
@@ -1156,5 +1161,73 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(legacyChannel.backingSats, 25_000)
         let legacyTradeCount = try upgraded.rawSQL.query("SELECT COUNT(*) FROM trades")
         XCTAssertEqual(legacyTradeCount.first?.first as? Int64, 1)
+    }
+}
+
+@MainActor
+final class StabilizationPolicyTests: XCTestCase {
+    // Mirrored verbatim from tests/fixtures/stabilization-limits.json (Rust and Kotlin share these).
+    func testCanonicalVectors() {
+        let vectors: [(UInt64, UInt64, UInt64, Double, Double, UInt64)] = [
+            (100000, 100000, 0, 0, 100000, 9896),
+            (200000, 195000, 50000, 50, 100000, 14301),
+            (1000001, 1000001, 500000, 500, 100000, 48999),
+            (200000, 195000, 50000, 50, 80000, 11000),
+            (2050, 2050, 0, 0, 100000, 198),
+            (5000, 5000, 0, 0, 100000, 490),
+            (51, 51, 0, 0, 100000, 0),
+            (100000, 100000, 99000, 99, 100000, 0),
+            (51984, 51984, 39810, 25.407, 63304.4, 734),
+            (51984, 51984, 39810, 25.407, 63321.94, 734),
+            (51984, 51984, 39810, 25.407, 63425.91, 736),
+            (150000, 150000, 100000, 100, 100000, 4845)
+        ]
+        for (receiver, spendable, backing, expected, price, maximum) in vectors {
+            let s = StabilizationSnapshot(receiverSats: receiver, spendableSats: spendable,
+                                          backingSats: backing, expectedUSD: expected, price: price)
+            XCTAssertEqual(s.maxOrderCents(), maximum)
+            if maximum > 0 { XCTAssertTrue(s.accepts(maximum)) }
+            XCTAssertFalse(s.accepts(maximum + 1))
+            func prepare(_ cents: UInt64) -> PreparedMobileTrade? {
+                let amount = Double(cents) / 100
+                let fee = amount * 0.01
+                return TradeProtocol.prepare(channelId: String(repeating: "ab", count: 32), userChannelId: "7",
+                                             currentExpectedUSD: expected, currentBackingSats: backing,
+                                             receiverSats: receiver, spendableSats: spendable, action: "sell",
+                                             amountUSD: amount, amountBTC: (amount - fee) / price, feeUSD: fee,
+                                             newExpectedUSD: expected + (amount - fee), quotePrice: price)
+            }
+            if maximum > 0 { XCTAssertNotNil(prepare(maximum)) }
+            XCTAssertNil(prepare(maximum + 1))
+        }
+    }
+
+    func testIntegerAndFeeBoundaries() throws {
+        XCTAssertEqual(StabilizationPolicy.backingCap(1_000_001), 990_000)
+        XCTAssertEqual(StabilizationPolicy.backingCap(100_000), 99_000)
+        XCTAssertEqual(StabilizationPolicy.backingCap(5_000), 4_950)
+        XCTAssertEqual(StabilizationPolicy.backingCap(1_999), 1_979)
+        XCTAssertEqual(StabilizationPolicy.backingCap(0), 0)
+        XCTAssertNil(StabilizationPolicy.clientLimit(51))
+        XCTAssertEqual(StabilizationPolicy.clientLimit(52), 1)
+        XCTAssertLessThan(try XCTUnwrap(StabilizationPolicy.backingCap(UInt64.max)), UInt64.max)
+        let original = StabilizationSnapshot(receiverSats: 200_000, spendableSats: 195_000,
+                                             backingSats: 50_000, expectedUSD: 50, price: 100_000)
+        let changed = StabilizationSnapshot(receiverSats: 200_000, spendableSats: 180_000,
+                                            backingSats: 50_000, expectedUSD: 50, price: 100_000)
+        XCTAssertFalse(changed.accepts(original.maxOrderCents()))
+    }
+
+    func testDirectPrepareRejectsIncreaseButAllowsReductionAndExit() {
+        func prepare(target: Double, amount: Double, action: String) -> PreparedMobileTrade? {
+            TradeProtocol.prepare(channelId: String(repeating: "ab", count: 32), userChannelId: "7",
+                                  currentExpectedUSD: 99, currentBackingSats: 99_000, receiverSats: 100_000,
+                                  spendableSats: 100_000, action: action, amountUSD: amount,
+                                  amountBTC: amount * 0.99 / 100_000, feeUSD: amount * 0.01,
+                                  newExpectedUSD: target, quotePrice: 100_000)
+        }
+        XCTAssertNil(prepare(target: 99.495, amount: 0.5, action: "sell"))
+        XCTAssertNotNil(prepare(target: 98, amount: 1, action: "buy"))
+        XCTAssertNotNil(prepare(target: 0, amount: 99, action: "buy"))
     }
 }

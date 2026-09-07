@@ -49,6 +49,7 @@ class TradeProtocolTest {
             backingSats = 55_000
         )
         val prepared = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = sc,
             action = "sell",
             amountUsd = 10.0,

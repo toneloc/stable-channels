@@ -36,6 +36,36 @@ fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     (local_sats, remote_sats)
 }
 
+/// Trade-entry backstop only. Inbound capacity is the user's post-payment spendable balance;
+/// neither the LSP's reserve nor the fee may be subtracted from it again.
+fn max_stabilization_rejected(
+    enforced: bool,
+    channel: &Channel,
+    old_expected: f64,
+    new_expected: f64,
+    new_backing_sats: u64,
+    source: &str,
+) -> bool {
+    if new_expected <= old_expected {
+        return false;
+    }
+    let spendable = channel.inbound_capacity_msat / 1000;
+    let cap = stable_channels::stabilization::backing_cap(spendable);
+    let exceeds = cap.is_none_or(|cap| new_backing_sats > cap);
+    if exceeds {
+        stable_channels::audit::audit_event(
+            "MAX_STABILIZATION_REJECTED",
+            serde_json::json!({
+                "enforced": enforced, "source": source, "channel_id": channel.channel_id,
+                "user_channel_id": channel.user_channel_id, "post_fee_spendable_sats": spendable,
+                "cap_sats": cap, "new_backing_sats": new_backing_sats,
+                "current_expected_usd": old_expected, "new_expected_usd": new_expected,
+            }),
+        );
+    }
+    enforced && exceeds
+}
+
 fn splice_balance_change(before_sats: u64, after_sats: u64) -> (&'static str, u64) {
     if after_sats > before_sats {
         ("in", after_sats - before_sats)
@@ -232,6 +262,8 @@ impl LdkServerCalls for LdkServerClient {
 /// In-memory list of stable channels plus a handle to the shared sqlite channels table.
 pub struct StableChannelManager {
     pub stable_channels: Vec<StableChannel>,
+    /// Shadow mode by default; this flag never changes settlement/reconciliation behavior.
+    pub enforce_max_stabilization: bool,
     db: Arc<Database>,
     data_dir: PathBuf,
     /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
@@ -511,6 +543,7 @@ impl StableChannelManager {
     pub fn new(db: Arc<Database>, data_dir: PathBuf) -> Self {
         Self {
             stable_channels: Vec::new(),
+            enforce_max_stabilization: false,
             db,
             data_dir,
             spend_debounce: std::collections::HashMap::new(),
@@ -595,6 +628,26 @@ impl StableChannelManager {
             0
         };
         let native_sats = their_balance_sats.saturating_sub(backing_sats);
+
+        // Manual target increases are trade-entry too. Notes/reductions and settlement
+        // reconciliation must remain possible for a drift-inflated position.
+        if expected_usd_in.is_some()
+            && max_stabilization_rejected(
+                self.enforce_max_stabilization,
+                &channel,
+                prior_target.unwrap_or(0.0),
+                expected_usd_f,
+                backing_sats,
+                "edit",
+            )
+        {
+            return EditOutcome {
+                ok: false,
+                status: TradeRejectionReason::InsufficientCapacity
+                    .user_message()
+                    .to_string(),
+            };
+        }
 
         let user_channel_id_u128 = parse_user_channel_id(&user_channel_id_str).unwrap_or(0);
 
@@ -2837,6 +2890,12 @@ impl StableChannelManager {
                 };
                 reject_correlated!(reason);
             }
+            // Trade-entry only: never apply the cap in settlement/reconciliation.
+            if max_stabilization_rejected(self.enforce_max_stabilization, &chan,
+                current.expected_usd.0, new_expected, updated.backing_sats, "correlated")
+            {
+                reject_correlated!(TradeRejectionReason::InsufficientCapacity);
+            }
             let sync_version = match self
                 .db
                 .candidate_sync_version(&format!("{}", target_uid))
@@ -3081,6 +3140,17 @@ impl StableChannelManager {
                         "reason": "target delta cannot preserve the current stability drift",
                     }),
                 );
+                return;
+            }
+            // Trade-entry only; reductions may remain above the cap after price drift.
+            if max_stabilization_rejected(
+                self.enforce_max_stabilization,
+                &chan,
+                sc.expected_usd.0,
+                new_expected,
+                updated.backing_sats,
+                "legacy",
+            ) {
                 return;
             }
             *sc = updated;
@@ -4707,6 +4777,131 @@ mod tests {
             )
             .unwrap();
         (manager, fake)
+    }
+
+    #[tokio::test]
+    async fn stabilization_cap_correlated_shadow_and_enforcement() {
+        let envelope =
+            correlated_trade_envelope_at(&"5".repeat(64), 99.5, Some(100_000.0), test_unix_now());
+        let fee = expected_trade_fee_msat(50.0, 99.5, 100_000.0).unwrap();
+        let (mut shadow, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
+        shadow
+            .handle_trade_payment(
+                &envelope,
+                Some(&"6".repeat(64)),
+                Some(fee),
+                &fake,
+                100_000.0,
+            )
+            .await;
+        assert_eq!(
+            shadow.stable_channels[0].expected_usd.0, 99.5,
+            "shadow must not reject old clients"
+        );
+
+        let (mut enforcing, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
+        enforcing.enforce_max_stabilization = true;
+        assert_eq!(
+            correlated_rejection_reason(
+                &mut enforcing,
+                &fake,
+                &envelope,
+                &"6".repeat(64),
+                fee,
+                100_000.0
+            )
+            .await,
+            TradeRejectionReason::InsufficientCapacity
+        );
+    }
+
+    #[tokio::test]
+    async fn stabilization_cap_legacy_edit_and_reduction_paths() {
+        for enforced in [false, true] {
+            let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
+            manager.enforce_max_stabilization = enforced;
+            let envelope = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 99.5);
+            handle_trade_with_valid_fee(&mut manager, &envelope, &fake, 100_000.0).await;
+            assert_eq!(
+                manager.stable_channels[0].expected_usd.0,
+                if enforced { 50.0 } else { 99.5 }
+            );
+
+            let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 100_000);
+            manager.enforce_max_stabilization = enforced;
+            let result = manager
+                .edit_stable_channel(CHANNEL_ID_HEX, Some(99.5), None, &fake, 100_000.0)
+                .await;
+            assert_eq!(result.ok, !enforced);
+        }
+        let (mut manager, fake) = correlated_rejection_context(100.0, 100_000, 100_000);
+        manager.enforce_max_stabilization = true;
+        // A reduction can still be above the entry limit and must not be blocked.
+        let envelope = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 99.5);
+        handle_trade_with_valid_fee(&mut manager, &envelope, &fake, 100_000.0).await;
+        assert_eq!(manager.stable_channels[0].expected_usd.0, 99.5);
+    }
+
+    #[test]
+    fn stabilization_cap_uses_post_fee_user_capacity_and_audits_both_modes() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        stable_channels::audit::enable_test_capture();
+        let mut channel = make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            500_000,
+            100_000_000,
+            true,
+        );
+        // Deliberately unrelated total capacity, asymmetric reserves and a funder fee.
+        channel.inbound_capacity_msat = 99_000_000; // already paid a 1k-sat fee
+        channel.unspendable_punishment_reserve = Some(20_000);
+        channel.counterparty_unspendable_punishment_reserve = 5_000;
+        assert!(!max_stabilization_rejected(
+            true,
+            &channel,
+            50.0,
+            98.01,
+            98_010,
+            "boundary-test"
+        ));
+        assert!(max_stabilization_rejected(
+            true,
+            &channel,
+            50.0,
+            98.011,
+            98_011,
+            "boundary-test"
+        ));
+        assert!(!max_stabilization_rejected(
+            false,
+            &channel,
+            50.0,
+            99.0,
+            99_000,
+            "shadow-test"
+        ));
+        assert!(max_stabilization_rejected(
+            true,
+            &channel,
+            50.0,
+            99.0,
+            99_000,
+            "enforcing-test"
+        ));
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(events
+            .iter()
+            .any(|(name, value)| name == "MAX_STABILIZATION_REJECTED"
+                && value["source"] == "shadow-test"
+                && value["enforced"] == false));
+        assert!(events
+            .iter()
+            .any(|(name, value)| name == "MAX_STABILIZATION_REJECTED"
+                && value["source"] == "enforcing-test"
+                && value["enforced"] == true));
     }
 
     async fn correlated_rejection_reason(

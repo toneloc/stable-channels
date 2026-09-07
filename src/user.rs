@@ -210,6 +210,7 @@ struct IncomingSync {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
+    StabilizationLimit(u64),
     InvalidValues,
     LiveBalanceUnavailable,
     FeeExceedsBalance,
@@ -2204,16 +2205,6 @@ impl UserApp {
         amount_btc: f64,
     ) -> Option<(PaymentId, u64, i64)> {
         let new_expected_usd = stable::normalize_trade_expected_usd(new_expected_usd);
-        // The fee is a direct keysend amount. Account for its whole-sat channel impact before
-        // deriving the wallet's post-settlement allocation.
-        let fee_sats = if trade_price > 0.0 && fee_usd > 0.0 {
-            (fee_usd / trade_price * SATS_IN_BTC as f64) as u64
-        } else {
-            0
-        };
-        let fee_msats = fee_sats.saturating_mul(1000);
-        let amt_msat = fee_msats.max(1);
-
         // Refresh from this wallet's LDK node and derive the allocation this wallet will commit
         // after acceptance. The LSP independently derives its own allocation at its own price.
         let local_allocation = {
@@ -2222,24 +2213,65 @@ impl UserApp {
             if !balances_updated {
                 Err(LocalTradeAllocationError::LiveBalanceUnavailable)
             } else {
-                local_trade_backing_sats(
-                    sc.stable_receiver_btc.sats,
-                    fee_sats,
-                    sc.backing_sats,
-                    sc.expected_usd.0,
-                    new_expected_usd,
-                    trade_price,
-                )
-                .map(|(post_fee_receiver_sats, backing_sats)| {
-                    (
-                        sc.channel_id.to_string(),
-                        format!("{}", sc.user_channel_id),
-                        sc.counterparty,
-                        sc.expected_usd.0,
-                        post_fee_receiver_sats,
-                        backing_sats,
-                    )
-                })
+                let channel = self.node.list_channels().into_iter().find(|ch| {
+                    ch.user_channel_id.0 == sc.user_channel_id && ch.is_channel_ready
+                });
+                let snapshot = channel.map(|ch| stable_channels::stabilization::SellSnapshot {
+                    receiver_sats: (ch.outbound_capacity_msat / 1000)
+                        .saturating_add(ch.unspendable_punishment_reserve.unwrap_or(0)),
+                    spendable_sats: ch.outbound_capacity_msat / 1000,
+                    backing_sats: sc.backing_sats,
+                    expected_usd: sc.expected_usd.0,
+                    price: trade_price,
+                });
+                snapshot
+                    .ok_or(LocalTradeAllocationError::LiveBalanceUnavailable)
+                    .and_then(|snapshot| {
+                        // Derive the fee from the signed target under the same state lock.
+                        let fee_sats = stable_channels::stabilization::trade_fee_sats(
+                            sc.expected_usd.0,
+                            new_expected_usd,
+                            trade_price,
+                        )
+                        .ok_or(LocalTradeAllocationError::InvalidValues)?;
+                        // Trade-entry only. Settlements and accepted syncs are uncapped.
+                        if (trade_action == "sell" || new_expected_usd > sc.expected_usd.0)
+                            && !snapshot.accepts(floor_usd_cents(amount_usd))
+                        {
+                            return Err(LocalTradeAllocationError::StabilizationLimit(
+                                snapshot.max_order_cents(),
+                            ));
+                        }
+                        let (post_fee_receiver_sats, backing_sats) = local_trade_backing_sats(
+                            snapshot.receiver_sats,
+                            fee_sats,
+                            sc.backing_sats,
+                            sc.expected_usd.0,
+                            new_expected_usd,
+                            trade_price,
+                        )?;
+                        // Check the actual prepared target too, not just the quoted order.
+                        if new_expected_usd > sc.expected_usd.0
+                            && snapshot
+                                .spendable_sats
+                                .checked_sub(fee_sats)
+                                .and_then(stable_channels::stabilization::client_backing_limit)
+                                .is_none_or(|limit| backing_sats > limit)
+                        {
+                            return Err(LocalTradeAllocationError::StabilizationLimit(
+                                snapshot.max_order_cents(),
+                            ));
+                        }
+                        Ok((
+                            sc.channel_id.to_string(),
+                            format!("{}", sc.user_channel_id),
+                            sc.counterparty,
+                            sc.expected_usd.0,
+                            post_fee_receiver_sats,
+                            backing_sats,
+                            fee_sats,
+                        ))
+                    })
             }
         };
         let (
@@ -2249,10 +2281,14 @@ impl UserApp {
             old_expected_usd,
             post_fee_receiver_sats,
             backing_sats,
+            fee_sats,
         ) = match local_allocation {
             Ok(allocation) => allocation,
             Err(reason) => {
                 self.trade_error = match reason {
+                    LocalTradeAllocationError::StabilizationLimit(cents) => {
+                        format!("Maximum additional trade: ${:.2}", cents as f64 / 100.0)
+                    }
                     LocalTradeAllocationError::SettlementRequired => {
                         "Settle the current stability adjustment, then retry this trade."
                             .to_string()
@@ -2287,6 +2323,8 @@ impl UserApp {
                 return None;
             }
         };
+
+        let amt_msat = fee_sats.saturating_mul(1000).max(1);
 
         if self
             .db
@@ -6186,14 +6224,13 @@ impl UserApp {
             let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
-            let (btc_price, last_update, expected_usd, backing_sats, receiver_sats) = {
+            let (btc_price, last_update, expected_usd, backing_sats) = {
                 let sc = self.stable_channel.lock().unwrap();
                 (
                     sc.latest_price,
                     sc.timestamp,
                     sc.expected_usd.0,
                     sc.backing_sats,
-                    sc.stable_receiver_btc.sats,
                 )
             };
 
@@ -6238,16 +6275,8 @@ impl UserApp {
                 expected_usd,
                 btc_price,
             );
-            let (_, receiver_native_sats, _) =
-                channel_balance_split(receiver_sats, backing_sats, expected_usd, btc_price);
             let buy_available_usd = floor_usd_cents(stabilized_usd) as f64 / 100.0;
-            let sell_available_usd = max_sell_trade_usd_cents(
-                receiver_sats,
-                receiver_native_sats,
-                backing_sats,
-                expected_usd,
-                btc_price,
-            ) as f64
+            let sell_available_usd = self.maximum_sell_cents(btc_price) as f64
                 / 100.0;
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
@@ -6588,17 +6617,25 @@ impl UserApp {
                     let vis_frac = (thumb_x_local / rect.width()).clamp(0.0, 1.0);
                     let usd_pct = (vis_frac * 100.0).round() as i32;
                     let btc_pct = 100 - usd_pct;
-                    let label = format!("{}% USD  {}% BTC", usd_pct, btc_pct);
+                    let label = if self.bar_slider_drag_offset >= max_sell_drag_offset {
+                        format!("Maximum additional trade: ${:.2}", sell_available_usd)
+                    } else {
+                        format!("{}% USD  {}% BTC", usd_pct, btc_pct)
+                    };
                     let tooltip_font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
                     let galley =
                         painter.layout_no_wrap(label.clone(), tooltip_font.clone(), Color32::BLACK);
                     let pad = egui::vec2(8.0, 4.0);
                     let bubble_size = galley.size() + pad * 2.0;
                     let bubble_center = egui::pos2(
-                        thumb_x.clamp(
-                            rect.min.x + bubble_size.x / 2.0,
-                            rect.max.x - bubble_size.x / 2.0,
-                        ),
+                        if bubble_size.x >= rect.width() {
+                            rect.center().x
+                        } else {
+                            thumb_x.clamp(
+                                rect.min.x + bubble_size.x / 2.0,
+                                rect.max.x - bubble_size.x / 2.0,
+                            )
+                        },
                         rect.min.y - bubble_size.y / 2.0 - 6.0,
                     );
                     let bubble_rect = egui::Rect::from_center_size(bubble_center, bubble_size);
@@ -10170,6 +10207,25 @@ impl UserApp {
             });
     }
 
+    fn maximum_sell_cents(&self, price: f64) -> u64 {
+        let sc = self.stable_channel.lock().unwrap();
+        self.node
+            .list_channels()
+            .into_iter()
+            .find(|ch| ch.user_channel_id.0 == sc.user_channel_id && ch.is_channel_ready)
+            .map(|ch| {
+                max_sell_trade_usd_cents(
+                    (ch.outbound_capacity_msat / 1000)
+                        .saturating_add(ch.unspendable_punishment_reserve.unwrap_or(0)),
+                    ch.outbound_capacity_msat / 1000,
+                    sc.backing_sats,
+                    sc.expected_usd.0,
+                    price,
+                )
+            })
+            .unwrap_or(0)
+    }
+
     fn show_sell_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
@@ -10183,7 +10239,7 @@ impl UserApp {
         // Show the native allocation valued in USD. A price quote changes its value, not which
         // sats belong to it.
         let btc_price = get_fresh_cached_price_no_fetch();
-        let (live_receiver_sats, native_sats, current_backing_sats, current_expected_usd) = {
+        let native_sats = {
             let sc = self.stable_channel.lock().unwrap();
             let (_, native_sats, _) = channel_balance_split(
                 sc.stable_receiver_btc.sats,
@@ -10191,32 +10247,30 @@ impl UserApp {
                 sc.expected_usd.0,
                 btc_price,
             );
-            (
-                sc.stable_receiver_btc.sats,
-                native_sats,
-                sc.backing_sats,
-                sc.expected_usd.0,
-            )
+            native_sats
         };
         // Native BTC can be worth more than the channel's remaining stable-target capacity when
         // the current backing has drifted below its USD target. Show the largest cent-denominated
         // order that passes the same post-fee allocation check used when the order is submitted.
-        let available_btc_usd_cents = max_sell_trade_usd_cents(
-            live_receiver_sats,
-            native_sats,
-            current_backing_sats,
-            current_expected_usd,
-            btc_price,
-        );
+        let available_btc_usd_cents = self.maximum_sell_cents(btc_price);
         let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(
-                "Available to convert: {}",
+                "Maximum additional trade: {}",
                 Self::format_price(available_btc_usd)
             ))
             .size(14.0)
             .color(Color32::DARK_GRAY),
         );
+        ui.label(
+            RichText::new("Keeps a small BTC reserve in the channel.")
+                .size(12.0)
+                .color(theme::MUTED),
+        );
+        if ui.button("Max").clicked() {
+            self.trade_amount_input = format!("{:.2}", available_btc_usd);
+            self.trade_error.clear();
+        }
         ui.add_space(20.0);
 
         // Centered USD amount input — iOS-style rounded field
@@ -10302,7 +10356,7 @@ impl UserApp {
                     self.trade_error = "A fresh BTC/USD consensus is required".to_string();
                 } else if amount_cents > available_btc_usd_cents {
                     self.trade_error = format!(
-                        "Amount exceeds tradable channel capacity. Maximum is {}.",
+                        "Maximum additional trade: {}",
                         Self::format_price(available_btc_usd)
                     );
                 } else {
@@ -10869,6 +10923,13 @@ impl UserApp {
 
         if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
             self.trade_error = err;
+            return;
+        }
+
+        let max_cents = self.maximum_sell_cents(btc_price);
+        if !amount_usd.is_finite() || amount_usd <= 0.0 || floor_usd_cents(amount_usd) > max_cents {
+            self.trade_error =
+                format!("Maximum additional trade: ${:.2}", max_cents as f64 / 100.0);
             return;
         }
 
@@ -11889,48 +11950,19 @@ fn local_trade_backing_sats(
 /// binary search keeps this cheap even for large channels.
 fn max_sell_trade_usd_cents(
     live_receiver_sats: u64,
-    native_sats: u64,
+    spendable_sats: u64,
     current_backing_sats: u64,
     current_expected_usd: f64,
     current_price: f64,
 ) -> u64 {
-    if native_sats == 0
-        || !current_expected_usd.is_finite()
-        || current_expected_usd < 0.0
-        || !current_price.is_finite()
-        || current_price <= 0.0
-    {
-        return 0;
+    stable_channels::stabilization::SellSnapshot {
+        receiver_sats: live_receiver_sats,
+        spendable_sats,
+        backing_sats: current_backing_sats,
+        expected_usd: current_expected_usd,
+        price: current_price,
     }
-
-    let mut low = 0_u64;
-    let mut high = floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * current_price);
-    while low < high {
-        let distance = high - low;
-        let cents = low + distance / 2 + distance % 2;
-        let amount_usd = cents as f64 / 100.0;
-        let fee_usd = amount_usd * STABLE_CHANNEL_TRADE_FEE_RATE;
-        let fee_sats = (fee_usd / current_price * SATS_IN_BTC as f64) as u64;
-        let new_expected_usd = current_expected_usd + amount_usd - fee_usd;
-        let fits_native = sats_for_usd_cents(cents, current_price)
-            .is_some_and(|required_sats| required_sats <= native_sats);
-        let fits_allocation = fits_native
-            && local_trade_backing_sats(
-                live_receiver_sats,
-                fee_sats,
-                current_backing_sats,
-                current_expected_usd,
-                new_expected_usd,
-                current_price,
-            )
-            .is_ok();
-        if fits_allocation {
-            low = cents;
-        } else {
-            high = cents - 1;
-        }
-    }
-    low
+    .max_order_cents()
 }
 
 /// Derive the allocation this wallet will commit for an authenticated sync. The peer's
@@ -12084,30 +12116,59 @@ mod tests {
 
     #[test]
     fn sell_limit_accounts_for_stable_target_drift_and_trade_fee() {
-        // Production-shaped state: the native bucket is worth $7.70, but the backing is worth
-        // about $0.21 less than its $25.407 target. Only $7.50 can become a safe new target.
+        // Production-shaped drift, additionally constrained by the 99% cap and 50-sat
+        // client margin. The maximum must satisfy both constraints, not just raw native USD.
         assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_304.40),
-            750,
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_304.40),
+            734,
         );
         assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_321.94),
-            751,
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_321.94),
+            734,
         );
         assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_425.91),
-            756,
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_425.91),
+            736,
         );
     }
 
     #[test]
-    fn sell_limit_allows_the_full_native_value_when_the_target_is_fully_backed() {
+    fn sell_maximum_fits_actual_prepared_allocation() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/stabilization-limits.json"))
+                .unwrap();
+        for v in vectors.as_array().unwrap() {
+            let receiver = v["receiver_sats"].as_u64().unwrap();
+            let spendable = v["spendable_sats"].as_u64().unwrap();
+            let backing = v["backing_sats"].as_u64().unwrap();
+            let expected = v["expected_usd"].as_f64().unwrap();
+            let price = v["price"].as_f64().unwrap();
+            let maximum = max_sell_trade_usd_cents(receiver, spendable, backing, expected, price);
+            if maximum == 0 {
+                continue;
+            }
+            let amount = maximum as f64 / 100.0;
+            let target = crate::stable::normalize_trade_expected_usd(
+                expected + (amount - amount * crate::constants::STABLE_CHANNEL_TRADE_FEE_RATE),
+            );
+            let fee =
+                stable_channels::stabilization::trade_fee_sats(expected, target, price).unwrap();
+            let (_, actual_backing) =
+                local_trade_backing_sats(receiver, fee, backing, expected, target, price).unwrap();
+            let limit =
+                stable_channels::stabilization::client_backing_limit(spendable - fee).unwrap();
+            assert!(actual_backing <= limit, "{v}");
+        }
+    }
+
+    #[test]
+    fn sell_limit_preserves_native_reserve_even_when_target_is_fully_backed() {
         assert_eq!(
-            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, 100_000.0),
-            5_000,
+            max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, 100_000.0),
+            4_845,
         );
         assert_eq!(
-            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, f64::NAN),
+            max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, f64::NAN),
             0,
         );
     }
