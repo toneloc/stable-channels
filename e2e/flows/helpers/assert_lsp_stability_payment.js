@@ -36,7 +36,7 @@ while (Date.now() - start < deadlineMs && !found) {
             for (const line of lines) {
                 try {
                     const ev = JSON.parse(line);
-                    if (ev.event === 'STABILITY_PAYMENT_SENT'
+                    if (ev.event === 'STABILITY_PAYMENT_V1_SENT'
                         && ev.data && ev.data.direction === 'lsp_to_user'
                         && ev.ts > after) {
                         const amountMsat = Number(ev.data.amount_msat);

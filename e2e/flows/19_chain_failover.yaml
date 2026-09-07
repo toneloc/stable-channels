@@ -1,0 +1,42 @@
+# Step 19 — Aux: chain-source failover at startup
+# The primary Esplora URL is dead (pre-hook config); the launch probe must fall back to the secondary and the app must reach a working Home.
+#
+# Guards PR #242 (iOS failover to secondary Esplora; Android has the same
+# launch probe). There is no user-visible failover banner — reaching Home with
+# a working node IS the assertion (the audit log gains CHAIN_SOURCE_FALLBACK).
+# Requires the .pre.sh hook (dead primary_chain_url) and .post.sh (restore).
+# Needs any onboarded wallet (run after 01 or later).
+appId: com.stablechannels.app
+tags: [android, ios, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: true      # fresh process re-reads test_config (dead primary)
+# Startup must succeed via the fallback: the probe times out on the dead
+# primary within ~2s, so this should not take much longer than a normal start.
+- extendedWaitUntil:
+    visible: "(BTC → USD|USD → BTC)"
+    timeout: 90000
+
+# Prove the node came up on the fallback chain source: generate an invoice and
+# have the harness pay it (money movement requires a started, synced node).
+- tapOn: "Receive"
+- tapOn: "0.00"
+- inputText: "1"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Generate Invoice"
+- extendedWaitUntil:
+    visible: "(Copy|Your Lightning Invoice)"
+    timeout: 20000
+- copyTextFrom:
+    text: "ln.*"
+- runScript:
+    file: helpers/pay_invoice.js
+- extendedWaitUntil:
+    visible: "Receive"
+    timeout: 30000

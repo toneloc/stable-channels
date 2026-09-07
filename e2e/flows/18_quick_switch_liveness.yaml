@@ -1,0 +1,63 @@
+# Step 18 — Aux: quick app-switch keeps the node alive, no resync flash
+# Backgrounding under the 10s grace and returning must show Home instantly (no "Syncing wallet..." flash) AND leave a live node — proven by receiving a payment right after the resume.
+#
+# Guards PRs #250 (node-start race left a silently dead node) and #251
+# (deferred stop on quick switch). Android-only: Maestro's Home key does not
+# exist on iOS (flow 15 documents the same limitation). Needs any home-ready
+# wallet with a channel (run after 01 or later).
+appId: com.stablechannels.app
+tags: [android, receive, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 30000
+
+# Quick switch: away < QUICK_SWITCH_GRACE_MS (10s) — the node must keep
+# running and the return must not pass through the full-screen SyncingView.
+- pressKey: Home
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "3"
+- launchApp        # no stopApp: resumes the same process
+- assertNotVisible: "Syncing wallet\\.\\.\\."
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 10000
+- assertNotVisible: "Syncing wallet\\.\\.\\."
+
+# Liveness: the original #250 regression was a node that was silently dead
+# after the switch — the UI looked fine until money had to move. Receive $1
+# through the resumed node to prove it is actually running.
+- tapOn: "Receive"
+- tapOn: "0.00"
+- inputText: "1"
+- hideKeyboard
+- tapOn: "Generate Invoice"
+- extendedWaitUntil:
+    visible: "(Copy|Your Lightning Invoice)"
+    timeout: 20000
+- copyTextFrom:
+    text: "ln.*"
+- runScript:
+    file: helpers/pay_invoice.js
+# The receive sheet dismisses when the incoming payment event arrives.
+- extendedWaitUntil:
+    visible: "Receive"
+    timeout: 30000
+
+# Long background: away > 10s stops the node; the return takes the clean
+# restart path (a brief "Syncing wallet..." is allowed) and must land on Home.
+- pressKey: Home
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "15"
+- launchApp
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 60000

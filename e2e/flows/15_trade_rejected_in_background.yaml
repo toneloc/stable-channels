@@ -44,9 +44,14 @@ env:
 - tapOn: "Confirm Order"
 
 # Take the app away with the sheet sitting on "Order Pending", so the rejection
-# arrives while nothing is watching. Android backgrounds (Home key); iOS has no
-# Maestro Home key, so it kills the app instead — a strictly harsher variant of
-# the same scenario (result must land after a cold relaunch).
+# arrives while nothing is watching. Android backgrounds (Home key): since #251
+# the node keeps running for a 10s quick-switch grace, so the sub-second
+# rejection is delivered and committed while backgrounded-but-alive — exactly
+# the outside-the-foreground-handler commit the rehydration fix covers. The 15s
+# wait then outlasts the grace, so the return also crosses a node stop/restart
+# with the outcome committed but unseen. iOS has no Maestro Home key, so it
+# kills the app instead — a strictly harsher variant (result must land after a
+# cold relaunch).
 - runFlow:
     when:
       platform: Android
@@ -63,11 +68,13 @@ env:
       SECS: "15"
 
 # Return to the app. Maestro's relaunch may recreate the UI (dropping the sheet),
-# so assert the guarantee, not the widget. Android's node stops in background, so
-# the rejection is deterministically redelivered on return and must surface (sheet
-# or status banner). On iOS the kill loses the race with sub-second delivery — the
-# rejection was applied before death — so the post-restart invariant is the
-# allocation, asserted on both platforms below.
+# so assert the guarantee, not the widget. On Android the rejection was committed
+# during the grace window and the node has since stopped (15s > 10s grace); the
+# return restarts the node and the committed outcome must still surface (sheet or
+# status banner) — that resurfacing is the rehydration assertion. On iOS the kill
+# loses the race with sub-second delivery — the rejection was applied before
+# death — so the post-restart invariant is the allocation, asserted on both
+# platforms below. (Stopped-node redelivery itself is flow 14's assertion.)
 - launchApp
 - runFlow:
     when:

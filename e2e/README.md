@@ -173,6 +173,56 @@ Flows `10_backup_keys` and `11_import_keys` are opt-in because import needs a
 fresh app state plus a `RESTORE_SEED`; the canonical suite runs `01` through `09`
 and `12` in a single wallet lifecycle.
 
+## Auxiliary tests
+
+Regression flows distilled from closed PRs — kept OUT of the canonical
+lifecycle so the 12-step demo run above stays exactly as documented. Flows
+13–15 (trade rejection + result durability, PRs #238/#248) were the first of
+this family; 16–20 extend it. The per-PR impact analysis behind the selection
+is in `aux-tests-pr-analysis.md`, and the copy/mechanism research in
+`aux-tests-implementation-notes.md` (both repo root).
+
+| Flow | Guards against | PRs | Platforms |
+|---|---|---|---|
+| `13_trade_rejected` | trade applied despite quote deviation | #238 | android, ios |
+| `14_trade_result_after_restart` | signed trade result lost to an app kill | #248 | android, ios |
+| `15_trade_rejected_in_background` | rejection lost while UI is away | #238/#248 | android, ios |
+| `16_drift_across_trades` | stability drift silently reset by a trade | #225 #231 #233 #221 (+#194 fee lines) | android, ios |
+| `17_spliceout_restart` | pending splice-out lost or failed by an app kill | #252 #190 | android, ios* |
+| `18_quick_switch_liveness` | resync flash / silently dead node after quick switch | #250 #251 | android |
+| `19_chain_failover` | startup hard-fails when primary Esplora is down | #242 | android, ios |
+| `20_restore_guard` | restore-over-live-channel force-close (opt-in) | #174 | android, ios |
+
+Aux flows substitute into, or append to, a lifecycle:
+
+```bash
+# 16 replaces 03 (same end state: settled to par at $99,500):
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 16_drift_across_trades"
+# 17 replaces 07:
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 03_usd_stability 04_lightning_receive 05_onchain_receive 06_lightning_send 17_spliceout_restart"
+# 18 (android only) and 19 need only an onboarded wallet:
+make android FLOWS="01_onboard_lightning 18_quick_switch_liveness 19_chain_failover"
+# 20 is opt-in like 11: reveal the ACTIVE seed via 10, keep the channel open,
+# then run the guard flow directly through maestro with the seed:
+maestro test -e RESTORE_SEED="word1 ... word12" flows/20_restore_guard.yaml
+```
+
+\* iOS caveat for 17: iOS persists the splice row at the `spliceNegotiated`
+event, not at initiation, so the flow kills only after the broadcast wait; a
+pre-negotiation kill is a known iOS gap (see the analysis doc).
+
+Aux settlement assertions use `helpers/assert_stability_payment_v1.js`, which
+matches the LSP's current `STABILITY_PAYMENT_V1_SENT` audit event (as does
+flow 03's `helpers/assert_lsp_stability_payment.js`; the v1 helper adds
+direction and present/absent modes).
+
+Analyzed but NOT yet automated (see the analysis doc's backlog): stale-tip
+stability gate (#243 — the skip is deliberately silent; asserting it needs
+device-side audit logs), price-feed fail-closed trading (#239),
+onchain-receive duplicate-row integrity (#222/#228), the node.start feerate
+failover layer (#242 — needs a half-broken Esplora the harness lacks), and a
+custom-LSP switch flow (#201/#207 — needs a second harness LSP).
+
 ## Prerequisites
 
 1. **Maestro**: `curl -Ls https://get.maestro.mobile.dev | bash`

@@ -20,8 +20,8 @@ mkdir -p "$CONTAINER/Documents"
 cat > "$CONTAINER/Documents/test_config.json" << EOF
 {
   "network": "regtest",
-  "primary_chain_url": "http://${HOST}:30000",
-  "fallback_chain_url": "http://${HOST}:30000",
+  "primary_chain_url": "${SC_TEST_PRIMARY_CHAIN_URL:-http://${HOST}:30000}",
+  "fallback_chain_url": "${SC_TEST_FALLBACK_CHAIN_URL:-http://${HOST}:30000}",
   "lsp_pubkey": "${LSP_NODE_ID}",
   "lsp_address": "${HOST}:9735",
   "price_feed_base": "http://${HOST}:9737",
