@@ -140,6 +140,7 @@ final class TradeSyncParityTests: XCTestCase {
             currentExpectedUSD: 50.0,
             currentBackingSats: 55_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "sell",
             amountUSD: 10.0,
             amountBTC: 0.000099,
@@ -172,7 +173,7 @@ final class TradeSyncParityTests: XCTestCase {
 
         // Looking up channel by channel_id succeeds even though channels.user_channel_id drifted
         let result = service.channelRepo.applyCorrelatedTradeAcceptance(sync)
-        XCTAssertEqual(result.status, .applied)
+        XCTAssertEqual(result.status, TradeControlApplyStatus.applied)
     }
 
     func testCorrelatedTradeAcceptanceReturnsInvalidIfChannelMissingAndClosed() throws {
@@ -198,6 +199,7 @@ final class TradeSyncParityTests: XCTestCase {
             currentExpectedUSD: 50.0,
             currentBackingSats: 55_000,
             receiverSats: 100_000,
+            spendableSats: 100_000,
             action: "sell",
             amountUSD: 10.0,
             amountBTC: 0.000099,
@@ -245,7 +247,7 @@ final class TradeSyncParityTests: XCTestCase {
 
         // Missing channel row + closed -> returns invalid (so event can be ACKed and dropped)
         let result = service.channelRepo.applyCorrelatedTradeAcceptance(sync)
-        XCTAssertEqual(result.status, .invalid)
+        XCTAssertEqual(result.status, TradeControlApplyStatus.invalid)
     }
 
     // MARK: - applyUncorrelatedSyncIfNewer
