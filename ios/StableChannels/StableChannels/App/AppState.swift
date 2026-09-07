@@ -236,7 +236,7 @@ class AppState {
     // Pending splice info
     var pendingSplice: PendingSplice?
 
-    enum WalletRestoreError: LocalizedError {
+    enum WalletRestoreError: LocalizedError, Equatable {
         case invalidMnemonic
         case activeChannelDetected
         case channelCheckUnavailable
@@ -257,7 +257,7 @@ class AppState {
         }
     }
 
-    private func initializeDatabaseServices() throws {
+    func initializeDatabaseServices() throws {
         let db = try DatabaseService(dataDir: Constants.userDataDir)
         databaseService = db
         nodeService.databaseService = databaseService
@@ -473,6 +473,68 @@ class AppState {
         }
     }
 
+    /// Destructive reset path for orphan-keychain or unrecoverable wallet mismatch states.
+    /// Acquires the exclusive wallet-dir lock, shuts down any live handles, wipes all persistence,
+    /// and initializes a fresh wallet under exclusive lock ownership.
+    func resetWalletAndStartFresh(lockTimeout: TimeInterval = 35) async throws {
+        cancelBackgroundStop()
+
+        let priorPhase = phase
+        phase = .loading
+
+        // Own the wallet dir before stopping/wiping: reset can be reached
+        // while the lock is not held (e.g. startup failure released it),
+        // and wiping under a live NSE node would corrupt its state.
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: lockTimeout)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "resetWalletAndStartFresh"])
+            phase = priorPhase
+            throw WalletRestoreError.walletBusy
+        }
+
+        do {
+            stabilityTimer?.cancel()
+            stabilityTimer = nil
+            txidResolutionService.cancelAllLaunchers()
+            nodeService.stop()
+            resetInMemoryWalletState()
+            dropDatabaseServices()
+
+            try Self.wipeAllWalletState(wipePending: true)
+
+            try initializeDatabaseServices()
+            try await startNodeWithFailover(mnemonic: "", allowCreate: true)
+
+            let nodeId = nodeService.nodeId
+            if !nodeId.isEmpty {
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(nodeId, forKey: "node_id")
+            }
+
+            phase = .wallet
+            blockHeightService.start()
+            mempoolWebSocketService.connect()
+            Task { await confirmationPollingService?.pollOnce() }
+            refreshBalances()
+            updateStableBalances()
+            startStabilityTimer()
+            reregisterPushTokenIfNeeded()
+            txidResolutionService.replayPendingChannelCloses()
+            txidResolutionService.replayPendingOnchainReceives()
+        } catch {
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            let errorMessage: String
+            if let restoreError = error as? WalletRestoreError, restoreError == .walletBusy {
+                errorMessage = "Wallet is busy in another process. Please try again."
+            } else {
+                errorMessage = "Reset failed: \(error.localizedDescription)"
+            }
+            phase = .error(errorMessage)
+            throw error
+        }
+    }
+
     private func resetInMemoryWalletState() {
         stableChannel = .default
         statusMessage = ""
@@ -506,7 +568,7 @@ class AppState {
         shared?.set(false, forKey: "pending_push_payment")
     }
 
-    private func dropDatabaseServices() {
+    func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
         mempoolWebSocketService.disconnect()

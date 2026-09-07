@@ -271,15 +271,9 @@ struct ErrorDisplayView: View {
                 isResetting = true
                 Task {
                     do {
-                        try AppState.wipeAllWalletState(wipePending: true)
-                        await MainActor.run {
-                            appState.phase = .loading
-                        }
-                        await appState.start()
+                        try await appState.resetWalletAndStartFresh()
                     } catch {
-                        await MainActor.run {
-                            appState.phase = .error("Reset failed: \(error.localizedDescription)")
-                        }
+                        // Error message and phase transition are handled inside resetWalletAndStartFresh
                     }
                     await MainActor.run {
                         isResetting = false
