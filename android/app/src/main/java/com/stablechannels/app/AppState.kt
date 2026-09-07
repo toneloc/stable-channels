@@ -2107,9 +2107,13 @@ class AppState(private val context: Context) : ViewModel() {
                 // timestamp proximity against LDK's payment list is not proof of identity (an
                 // unrelated same-amount payment can be the only visible candidate), so — mirroring
                 // iOS's DepositRecorder, which either resolves via a direct address lookup or
-                // leaves the row permanently txid-less — we never guess here. When there's no
-                // address match, the row simply stays without a txid/confirmation link; the user
-                // can re-generate a receive address to recover it if this happens.
+                // leaves the row permanently txid-less — we never guess here. This branch only
+                // runs when there's no pending channel close (that case, the reported #264 bug,
+                // has its own authoritative fix via fundingVout-based CloseTxidResolver above);
+                // an ordinary receive with no tracked address is a rare edge case (e.g. an
+                // LSP-initiated on-chain funding outside the app's own receive flow). If it
+                // happens, the row is left without a txid/confirmation link — there is currently
+                // no way to retroactively recover it, including by generating a new address.
                 val resolvedTxid = _lastReceiveTxid.value?.takeIf {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
