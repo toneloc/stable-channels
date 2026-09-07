@@ -63,11 +63,13 @@ targets:
           - UIInterfaceOrientationPortrait
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - remote-notification
         NSCameraUsageDescription: "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
+        NSFaceIDUsageDescription: "Stable Channels uses Face ID to secure your wallet and confirm transactions."
 
   NotificationService:
     type: app-extension
@@ -75,6 +77,9 @@ targets:
     sources:
       - path: NotificationService
       - path: StableChannels/Services/PriceOracle.swift
+      - path: StableChannels/Services/Biometric/WalletKeychainService.swift
+      - path: StableChannels/Utilities/BIP39.swift
+      - path: StableChannels/Utilities/BIP39WordList.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService
@@ -105,3 +110,4 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.tests
+        GENERATE_INFOPLIST_FILE: YES

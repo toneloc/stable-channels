@@ -91,6 +91,26 @@ class AppState {
     var confirmationUpdateEpoch: Int = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
+    private let lifecycleManager = WalletLifecycleManager(
+        validator: { mnemonic in
+            // Building an LDK node to derive an identity is heavy — never on the
+            // main actor (restore UI would freeze for the whole build).
+            await Task.detached(priority: .utility) {
+                AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            }.value
+        }
+    )
+
+    init() {
+        // Set audit log path
+        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        AuditService.setLogPath(auditPath)
+
+        // Hook WalletKeychainService logging into AuditService
+        WalletKeychainService.onLog = { event, data in
+            AuditService.log(event, data: data)
+        }
+    }
 
     // MARK: - State
 
@@ -216,7 +236,7 @@ class AppState {
     // Pending splice info
     var pendingSplice: PendingSplice?
 
-    enum WalletRestoreError: LocalizedError {
+    enum WalletRestoreError: LocalizedError, Equatable {
         case invalidMnemonic
         case activeChannelDetected
         case channelCheckUnavailable
@@ -237,7 +257,7 @@ class AppState {
         }
     }
 
-    private func initializeDatabaseServices() throws {
+    func initializeDatabaseServices() throws {
         let db = try DatabaseService(dataDir: Constants.userDataDir)
         databaseService = db
         nodeService.databaseService = databaseService
@@ -311,10 +331,6 @@ class AppState {
                 self?.handleWebSocketTransactionDetected(event: event)
             }
         }
-
-        // Set audit log path
-        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
-        AuditService.setLogPath(auditPath)
     }
 
     /// Replace the active wallet with a restored seed in one app-owned flow.
@@ -391,14 +407,34 @@ class AppState {
             throw WalletRestoreError.walletBusy
         }
 
-        stabilityTimer?.cancel()
-        stabilityTimer = nil
-        txidResolutionService.cancelAllLaunchers()
-        nodeService.stop()
-
-        resetInMemoryWalletState()
-        dropDatabaseServices()
-        wipeWalletPersistence()
+        // Execute staged restore transaction via decoupled WalletLifecycleManager
+        do {
+            try await lifecycleManager.restoreMnemonic(
+                words,
+                onStopNode: {
+                    self.stabilityTimer?.cancel()
+                    self.stabilityTimer = nil
+                    self.txidResolutionService.cancelAllLaunchers()
+                    self.nodeService.stop()
+                    self.resetInMemoryWalletState()
+                    self.dropDatabaseServices()
+                },
+                onWipePersistence: {
+                    try self.wipeWalletPersistence()
+                }
+            )
+        } catch {
+            // Pre-stop failures (validation, pending-slot write) throw while the
+            // node is still running — the lock must stay held then, or the NSE
+            // could start a second node on the live wallet dir (the July
+            // multi-writer force-close class).
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            phase = .error("Restore failed: \(error.localizedDescription). Please retry.")
+            statusMessage = ""
+            throw error
+        }
 
         do {
             try initializeDatabaseServices()
@@ -437,6 +473,68 @@ class AppState {
         }
     }
 
+    /// Destructive reset path for orphan-keychain or unrecoverable wallet mismatch states.
+    /// Acquires the exclusive wallet-dir lock, shuts down any live handles, wipes all persistence,
+    /// and initializes a fresh wallet under exclusive lock ownership.
+    func resetWalletAndStartFresh(lockTimeout: TimeInterval = 35) async throws {
+        cancelBackgroundStop()
+
+        let priorPhase = phase
+        phase = .loading
+
+        // Own the wallet dir before stopping/wiping: reset can be reached
+        // while the lock is not held (e.g. startup failure released it),
+        // and wiping under a live NSE node would corrupt its state.
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: lockTimeout)) {
+            AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "resetWalletAndStartFresh"])
+            phase = priorPhase
+            throw WalletRestoreError.walletBusy
+        }
+
+        do {
+            stabilityTimer?.cancel()
+            stabilityTimer = nil
+            txidResolutionService.cancelAllLaunchers()
+            nodeService.stop()
+            resetInMemoryWalletState()
+            dropDatabaseServices()
+
+            try Self.wipeAllWalletState(wipePending: true)
+
+            try initializeDatabaseServices()
+            try await startNodeWithFailover(mnemonic: "", allowCreate: true)
+
+            let nodeId = nodeService.nodeId
+            if !nodeId.isEmpty {
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .set(nodeId, forKey: "node_id")
+            }
+
+            phase = .wallet
+            blockHeightService.start()
+            mempoolWebSocketService.connect()
+            Task { await confirmationPollingService?.pollOnce() }
+            refreshBalances()
+            updateStableBalances()
+            startStabilityTimer()
+            reregisterPushTokenIfNeeded()
+            txidResolutionService.replayPendingChannelCloses()
+            txidResolutionService.replayPendingOnchainReceives()
+        } catch {
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            let errorMessage: String
+            if let restoreError = error as? WalletRestoreError, restoreError == .walletBusy {
+                errorMessage = "Wallet is busy in another process. Please try again."
+            } else {
+                errorMessage = "Reset failed: \(error.localizedDescription)"
+            }
+            phase = .error(errorMessage)
+            throw error
+        }
+    }
+
     private func resetInMemoryWalletState() {
         stableChannel = .default
         statusMessage = ""
@@ -470,7 +568,7 @@ class AppState {
         shared?.set(false, forKey: "pending_push_payment")
     }
 
-    private func dropDatabaseServices() {
+    func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
         mempoolWebSocketService.disconnect()
@@ -482,8 +580,13 @@ class AppState {
         txidResolutionService.clearResolvers()
     }
 
-    private func wipeWalletPersistence() {
-        NodeService.wipeWalletData()
+    private func wipeWalletPersistence() throws {
+        try Self.wipeAllWalletState(wipePending: false)
+    }
+
+    static func wipeAllWalletState(wipePending: Bool = false) throws {
+        let keychain: any MnemonicStorageProtocol = WalletKeychainService.shared
+        try NodeService.wipeWalletData(keychain: keychain)
 
         let dir = Constants.userDataDir
         let filesToDelete = [
@@ -493,7 +596,19 @@ class AppState {
         ]
 
         for file in filesToDelete {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+            let path = dir.appendingPathComponent(file)
+            if FileManager.default.fileExists(atPath: path.path) {
+                try FileManager.default.removeItem(at: path)
+            }
+        }
+
+        // Only delete pending slot and clear lifecycle markers on explicit full wipe, never during restore wipe!
+        if wipePending {
+            try keychain.deletePendingMnemonic()
+            let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            ud?.removeObject(forKey: "restore_phase")
+            ud?.removeObject(forKey: "restore_in_progress")
+            ud?.removeObject(forKey: "node_id")
         }
     }
 
@@ -501,6 +616,10 @@ class AppState {
     /// throwaway node in a temp directory. Returns nil on any failure so the
     /// restore guard fails open.
     private nonisolated static func deriveNodeId(mnemonic: String) -> String? {
+        // LDKNode's generated binding aborts the process (try!) on an invalid
+        // mnemonic — full wordlist + checksum validation MUST run first. This
+        // also makes the restore validator's `deriveNodeId != nil` check safe.
+        guard let canonicalMnemonic = BIP39.validatedCanonicalMnemonic(mnemonic) else { return nil }
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("nodeid-probe-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
@@ -525,7 +644,7 @@ class AppState {
             )
         )
         builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
-        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
+        let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalMnemonic, passphrase: nil)
         guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
         return node.nodeId()
     }
@@ -591,6 +710,18 @@ class AppState {
         }
         let lockMs = elapsedMs(lockStart)
 
+        // Self-healing restore recovery: Delegate to WalletLifecycleManager
+        do {
+            try lifecycleManager.runRecoveryIfNeeded {
+                try self.wipeWalletPersistence()
+            }
+        } catch {
+            await MainActor.run {
+                phase = .error("Restore recovery failed: \(error.localizedDescription). Please restart the app.")
+            }
+            return // Stop startup, keep directory lock and marker intact
+        }
+
         // Initialize database
         let dbStart = Date()
         do {
@@ -642,12 +773,10 @@ class AppState {
         // Subscribe to push notifications (background wake)
         subscribeToPushNotifications()
 
-        // Check for existing wallet (keys_seed from default path, OR seed_phrase from mnemonic path)
-        let seedPath = Constants.userDataDir.appendingPathComponent("keys_seed")
-        let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        if FileManager.default.fileExists(atPath: seedPath.path)
-            || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
-            // Show wallet immediately with cached data from DB
+        // Evaluate startup state using WalletLifecycleManager (Issue 13 / SOLID cleanup)
+        switch lifecycleManager.detectStartupState() {
+        case .ready:
+            // Safe state: Both seed and database present. Start node.
             let hasCachedData = !stableChannel.userChannelId.isEmpty
             await MainActor.run {
                 phase = hasCachedData ? .wallet : .syncing
@@ -696,11 +825,11 @@ class AppState {
             } catch {
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
-        } else {
-            // New wallet — auto-create
+        case .newWallet:
+            // Safe state: Neither present. Auto-create new wallet.
             await MainActor.run { phase = .syncing }
             do {
-                try await startNodeWithFailover(mnemonic: "")
+                try await startNodeWithFailover(mnemonic: "", allowCreate: true)
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -720,6 +849,44 @@ class AppState {
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
+            }
+        case .seedOnlyMismatch:
+            // Mismatched state: Seed present but database missing
+            AuditService.log("STARTUP_MISMATCH_SEED_ONLY", data: [:])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Mismatched state: Wallet seed exists, but the channel database is missing. Please restore using your backup seed words."
+                    )
+            }
+        case .dbOnlyMismatch:
+            // Mismatched state: Database present but seed missing (e.g., device migration)
+            AuditService.log("STARTUP_MISMATCH_DB_ONLY", data: [:])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Mismatched state: Local channel database exists, but the wallet seed is missing. Please restore using your backup seed words."
+                    )
+            }
+        case .seedStorageMismatch:
+            AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Mismatched state: Secure Keychain seed does not match plaintext backup file. Please restore using your backup seed words."
+                    )
+            }
+        case .storageError(let msg):
+            AuditService.log("STARTUP_STORAGE_ERROR", data: ["error": msg])
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase =
+                    .error(
+                        "Secure storage access failed: \(msg). Please verify your device credentials and restart the app."
+                    )
             }
         }
     }
@@ -2790,9 +2957,9 @@ class AppState {
     ///
     /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
     /// already released its own lease) so a broken app process never starves the NSE.
-    private func startNodeWithFailover(mnemonic: String = "") async throws {
+    private func startNodeWithFailover(mnemonic: String = "", allowCreate: Bool = false) async throws {
         do {
-            try await startNodeOrFailover(mnemonic: mnemonic)
+            try await startNodeOrFailover(mnemonic: mnemonic, allowCreate: allowCreate)
         } catch {
             if !nodeService.isRunning {
                 NodeDirLock.shared.release()
@@ -2801,14 +2968,15 @@ class AppState {
         }
     }
 
-    private func startNodeOrFailover(mnemonic: String) async throws {
+    private func startNodeOrFailover(mnemonic: String, allowCreate: Bool) async throws {
         let initialURL = chainURL
         do {
             try await nodeService.start(
                 network: .bitcoin,
                 esploraURL: initialURL,
                 mnemonic: mnemonic,
-                lspConfig: activeLSP
+                lspConfig: activeLSP,
+                allowCreate: allowCreate
             )
             publishWorkingChainURL(initialURL)
         } catch {
@@ -2833,7 +3001,8 @@ class AppState {
                     network: .bitcoin,
                     esploraURL: fallbackURL,
                     mnemonic: mnemonic,
-                    lspConfig: activeLSP
+                    lspConfig: activeLSP,
+                    allowCreate: allowCreate
                 )
                 self.chainURL = fallbackURL
                 publishWorkingChainURL(fallbackURL)

@@ -218,6 +218,16 @@ struct SyncingView: View {
 struct ErrorDisplayView: View {
     let message: String
     @Environment(AppState.self) private var appState
+    @State private var showingRestoreSheet = false
+    @State private var showingResetConfirmation = false
+    @State private var isResetting = false
+
+    private var isMismatchError: Bool {
+        message.contains("Mismatched state")
+            || message.contains("Wallet state is inconsistent")
+            || message.contains("Restore with your recovery phrase")
+            || message.contains("Please restore using your backup seed words")
+    }
 
     var body: some View {
         VStack(spacing: 16) {
@@ -231,13 +241,84 @@ struct ErrorDisplayView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button(String(localized: "try_again", defaultValue: "Try Again")) {
+            if isMismatchError {
+                Button("Restore From Backup Seed") {
+                    showingRestoreSheet = true
+                }
+                .buttonStyle(.borderedProminent)
+                .padding(.top, 4)
+
+                Button("Reset and Start Fresh", role: .destructive) {
+                    showingResetConfirmation = true
+                }
+                .buttonStyle(.bordered)
+                .disabled(isResetting)
+            } else {
+                Button(String(localized: "try_again", defaultValue: "Try Again")) {
+                    appState.phase = .loading
+                    Task { await appState.start() }
+                }
+                .buttonStyle(.bordered)
+                .padding(.top, 8)
+            }
+        }
+        .confirmationDialog(
+            "Reset Wallet",
+            isPresented: $showingResetConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Erase and Start Fresh", role: .destructive) {
+                isResetting = true
+                Task {
+                    do {
+                        try await appState.resetWalletAndStartFresh()
+                    } catch {
+                        // Error message and phase transition are handled inside resetWalletAndStartFresh
+                    }
+                    await MainActor.run {
+                        isResetting = false
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(
+                "This will permanently remove the surviving seed from Keychain and local data. Any funds associated with this seed will be lost if you do not have your backup recovery phrase."
+            )
+        }
+        .sheet(isPresented: $showingRestoreSheet) {
+            MismatchRecoverySheet()
+        }
+    }
+}
+
+private struct MismatchRecoverySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
+    @State private var restoreMnemonic = ""
+    @State private var wordFields: [String] = Array(repeating: "", count: SeedConstants.maxWordCount)
+    @State private var isWordFieldsReadOnly = false
+    @State private var isImportingSeed = false
+    @State private var isRestoring = false
+    @State private var restoreError: String?
+
+    var body: some View {
+        RestoreSeedSheet(
+            restoreMnemonic: $restoreMnemonic,
+            wordFields: $wordFields,
+            isWordFieldsReadOnly: $isWordFieldsReadOnly,
+            isImportingSeed: $isImportingSeed,
+            isRestoring: $isRestoring,
+            restoreError: $restoreError,
+            onCancel: {
+                dismiss()
+            },
+            onSuccess: {
+                dismiss()
                 appState.phase = .loading
                 Task { await appState.start() }
             }
-            .buttonStyle(.bordered)
-            .padding(.top, 8)
-        }
+        )
     }
 }
 

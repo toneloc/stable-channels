@@ -111,7 +111,13 @@ protocol NodeServiceProtocol {
     var nodeId: String { get }
     var channels: [ChannelDetails] { get }
     var savedMnemonic: String? { get }
-    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
+    func start(
+        network: Network,
+        esploraURL: String,
+        mnemonic: String,
+        lspConfig: LSPConfig,
+        allowCreate: Bool
+    ) async throws
     func stop()
 }
 
@@ -129,24 +135,38 @@ class NodeService: NodeServiceProtocol {
     private(set) var channels: [ChannelDetails] = []
     private(set) var savedMnemonic: String?
     private var eventTask: Task<Void, Never>?
+    private let keychain: any MnemonicStorageProtocol
 
     weak var databaseService: DatabaseService?
 
-    init() {
-        // Pre-load saved mnemonic from disk so it's available immediately,
-        // even before start() completes (avoids race with early UI display)
-        let path = Constants.userDataDir.appendingPathComponent("seed_phrase")
-        if let words = try? String(contentsOfFile: path.path, encoding: .utf8) {
-            let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                savedMnemonic = trimmed
-            }
+    init(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) {
+        self.keychain = keychain
+        do {
+            savedMnemonic = try keychain.loadMnemonic()
+        } catch WalletKeychainError.keyNotFound {
+            savedMnemonic = nil
+        } catch {
+            AuditService.log(
+                "KEYCHAIN_LOAD_FAILED",
+                data: ["error": error.localizedDescription, "where": "NodeService.init"]
+            )
+            savedMnemonic = nil
         }
     }
 
     // MARK: - Lifecycle
 
-    func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig = .default) async throws {
+    /// `allowCreate` gates implicit wallet generation: only the lifecycle-confirmed
+    /// `.newWallet` startup branch may pass true. Every other caller (foreground
+    /// restart, LSP switch, Esplora failover retry) must fail on missing seed state
+    /// rather than mint a fresh identity.
+    func start(
+        network: Network,
+        esploraURL: String,
+        mnemonic: String,
+        lspConfig: LSPConfig = .default,
+        allowCreate: Bool = false
+    ) async throws {
         guard !isRunning else { throw NodeServiceError.alreadyRunning }
         isStarting = true
         defer { isStarting = false }
@@ -233,25 +253,71 @@ class NodeService: NodeServiceProtocol {
             // Explicit restore callers must reset app + LDK state before
             // starting with a replacement seed. NodeService only starts LDK.
             words = mnemonic.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if let saved = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
-                  !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Existing wallet — re-read saved mnemonic
-            words = saved.trimmingCharacters(in: .whitespacesAndNewlines)
-        } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
-            // Truly new wallet — no seed_phrase, no keys_seed
-            Self.wipeWalletData()
-            words = generateEntropyMnemonic(wordCount: nil)
         } else {
-            // Pre-upgrade wallet with only keys_seed, no mnemonic available
-            words = ""
+            do {
+                if let migrated = try MnemonicMigrator.loadOrMigrateMnemonic(keychain: keychain) {
+                    words = migrated
+                } else if !FileManager.default.fileExists(atPath: keySeedPath.path) {
+                    // Wallet generation is double-gated. `allowCreate` limits it to the
+                    // lifecycle-confirmed `.newWallet` branch, and a surviving channel
+                    // database blocks it unconditionally: seedless-with-db is
+                    // `.dbOnlyMismatch`, and wiping the monitors to mint a fresh identity
+                    // here is the historic force-close class. Fail closed instead.
+                    let dbPath = Constants.userDataDir.appendingPathComponent("ldk_node_data.sqlite")
+                    guard allowCreate, !FileManager.default.fileExists(atPath: dbPath.path) else {
+                        AuditService.log("IMPLICIT_WALLET_CREATE_BLOCKED", data: [
+                            "allow_create": "\(allowCreate)",
+                            "db_present": "\(FileManager.default.fileExists(atPath: dbPath.path))"
+                        ])
+                        throw NodeServiceError.walletStateMismatch
+                    }
+                    try Self.wipeWalletData(keychain: keychain)
+                    words = generateEntropyMnemonic(wordCount: nil)
+                } else {
+                    words = ""
+                }
+            } catch {
+                AuditService.log("MIGRATION_OR_LOAD_FAILED", data: ["error": error.localizedDescription])
+                throw error
+            }
         }
 
-        // Save mnemonic to file and derive node entropy (now passed to build()).
+        // Save mnemonic to Keychain and derive node entropy
         let nodeEntropy: NodeEntropy
         if !words.isEmpty {
-            try words.write(toFile: seedPhrasePath.path, atomically: true, encoding: .utf8)
-            self.savedMnemonic = words
-            nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: words, passphrase: nil)
+            // LDKNode's generated binding aborts the process (try!) on an invalid
+            // mnemonic. `words` can come from mutable storage (Keychain, plaintext
+            // file), so a corrupted value must fail closed here, not crash-loop.
+            guard let canonicalWords = BIP39.validatedCanonicalMnemonic(words) else {
+                AuditService.log("SEED_INVALID_BIP39", data: [:])
+                throw NodeServiceError.invalidStoredMnemonic
+            }
+            do {
+                // ROLLBACK INSURANCE is written FIRST: older builds treat "no seed
+                // files" as a brand-new wallet and wipe the channel database before
+                // generating a new identity — the historic force-close class, but
+                // worse, because the monitors are destroyed first. Ordering ahead of
+                // the Keychain store keeps every failure coherent: if this write
+                // fails, nothing has been committed and the next launch retries the
+                // same path cleanly; if the Keychain store below fails, plaintext-only
+                // is the legacy-valid state the migrator already handles. Plaintext
+                // deletion ships in a later release, once no earlier build remains
+                // installable (staged rollout, step 1 of 2).
+                do {
+                    try MnemonicMigrator.syncRollbackCopy(words: canonicalWords, legacyPath: seedPhrasePath)
+                } catch {
+                    AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
+                        "error": error.localizedDescription
+                    ])
+                    throw error
+                }
+                try keychain.storeMnemonic(canonicalWords)
+                self.savedMnemonic = canonicalWords
+                nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
+            } catch {
+                AuditService.log("KEYCHAIN_STORE_FAILED", data: ["error": error.localizedDescription])
+                throw error
+            }
         } else {
             // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
             nodeEntropy = try NodeEntropy.fromSeedPath(seedPath: keySeedPath.path)
@@ -601,7 +667,7 @@ class NodeService: NodeServiceProtocol {
 
     /// Wipe all wallet data files (keys_seed, SQLite + journals, seed_phrase)
     /// so a fresh wallet can be created without descriptor conflicts.
-    static func wipeWalletData() {
+    static func wipeWalletData(keychain: any MnemonicStorageProtocol = WalletKeychainService.shared) throws {
         let dir = Constants.userDataDir
         let filesToDelete = [
             "keys_seed",
@@ -611,8 +677,12 @@ class NodeService: NodeServiceProtocol {
             "ldk_node_data.sqlite-shm"
         ]
         for file in filesToDelete {
-            try? FileManager.default.removeItem(at: dir.appendingPathComponent(file))
+            let path = dir.appendingPathComponent(file)
+            if FileManager.default.fileExists(atPath: path.path) {
+                try FileManager.default.removeItem(at: path)
+            }
         }
+        try keychain.deleteMnemonic()
     }
 }
 
@@ -621,6 +691,8 @@ enum NodeServiceError: LocalizedError {
     case alreadyRunning
     case dataDirLocked
     case staleLightningSync
+    case invalidStoredMnemonic
+    case walletStateMismatch
 
     var errorDescription: String? {
         switch self {
@@ -628,6 +700,8 @@ enum NodeServiceError: LocalizedError {
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
+        case .invalidStoredMnemonic: return "The stored wallet seed failed validation."
+        case .walletStateMismatch: return "Wallet state is inconsistent. Restore with your recovery phrase."
         }
     }
 }
