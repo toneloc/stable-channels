@@ -19,6 +19,9 @@ object StabilizationPolicy {
         ?.let { it - Constants.CLIENT_SAFETY_MARGIN_SATS }?.takeIf { it > 0L }
 
     fun maximumMessage(cents: Long) = String.format(Locale.US, "Maximum additional trade: $%.2f", cents / 100.0)
+
+    fun limitExceededMessage(cents: Long) =
+        maximumMessage(cents) + "\nKeeps a small BTC reserve in the channel."
 }
 
 class TradeValidationException(message: String) : IllegalArgumentException(message)

@@ -11,6 +11,12 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class StabilizationPolicyTest {
+    @Test fun reserveExplanationIsOnlyInOverLimitFeedback() {
+        assertEquals("Maximum additional trade: $1.23", StabilizationPolicy.maximumMessage(123))
+        assertEquals("Maximum additional trade: $1.23\nKeeps a small BTC reserve in the channel.",
+            StabilizationPolicy.limitExceededMessage(123))
+    }
+
     // Mirrored verbatim from tests/fixtures/stabilization-limits.json (Rust and Swift share these).
     @Test fun canonicalVectors() {
         val vectors = listOf(

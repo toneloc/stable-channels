@@ -111,15 +111,10 @@ struct SellView: View {
             Button(String(localized: "button_max", defaultValue: "Max")) {
                 amountStr = String(format: "%.2f", maxSellUSD)
             }
-            Text(String(
-                localized: "stabilization_reserve_explanation",
-                defaultValue: "Keeps a small BTC reserve in the channel."
-            ))
-            .font(.caption).foregroundStyle(.secondary)
-
             if amountUSD > maxSellUSD && amountUSD > 0 {
-                Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
+                Text(StabilizationPolicy.limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)))
                     .font(.caption)
+                    .multilineTextAlignment(.center)
                     .foregroundStyle(.red)
             }
 

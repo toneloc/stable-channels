@@ -136,7 +136,7 @@ object TradeProtocol {
                 sc.backingSats, sc.expectedUSD.amount, quotePrice)
             val limit = if (spendableSats >= feeSats) StabilizationPolicy.clientLimit(spendableSats - feeSats) else null
             if (limit == null || backing > limit || !snapshot.accepts(floor(amountUsd * 100 + 1e-7).toLong())) {
-                throw TradeValidationException(StabilizationPolicy.maximumMessage(snapshot.maxOrderCents()))
+                throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
             }
         }
 

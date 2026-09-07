@@ -1166,6 +1166,14 @@ final class DatabaseServiceTests: XCTestCase {
 
 @MainActor
 final class StabilizationPolicyTests: XCTestCase {
+    func testReserveExplanationIsOnlyInOverLimitFeedback() {
+        let maximum = StabilizationPolicy.maximumMessage(123)
+        let feedback = StabilizationPolicy.limitExceededMessage(123)
+        XCTAssertFalse(maximum.contains("\n"))
+        XCTAssertTrue(feedback.hasPrefix(maximum + "\n"))
+        XCTAssertEqual(TradeValidationError.stabilizationLimit(123).errorDescription, feedback)
+    }
+
     // Mirrored verbatim from tests/fixtures/stabilization-limits.json (Rust and Kotlin share these).
     func testCanonicalVectors() {
         let vectors: [(UInt64, UInt64, UInt64, Double, Double, UInt64)] = [

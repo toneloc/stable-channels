@@ -72,7 +72,7 @@ class TradeService(
         val snapshot = liveSnapshot(sc, price)
             ?: throw TradeValidationException("The live channel balance is unavailable. Retry when the channel is ready.")
         if (newExpectedUsd > sc.expectedUSD.amount && !snapshot.accepts(kotlin.math.floor(amountUsd * 100 + 1e-7).toLong()))
-            throw TradeValidationException(StabilizationPolicy.maximumMessage(snapshot.maxOrderCents()))
+            throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
         val liveSc = sc.copy(stableReceiverBTC = Bitcoin(snapshot.receiverSats))
         val prepared = TradeProtocol.prepare(
             sc = liveSc,

@@ -19,6 +19,8 @@ It does not change on-chain Send Max or Lightning payment amounts.
   preparation use the same validation; no target is silently reduced.
 - Max labels show the **additional gross order amount**, not the resulting total position.
 - Reserve explanation on all clients: "Keeps a small BTC reserve in the channel."
+  Show it only with over-limit input/submission feedback or a drag past the sell endpoint,
+  not as permanent text beneath the amount or on a normal Max selection.
 
 Rust: `src/stabilization.rs`. Android: `StabilizationPolicy.kt`. Swift: the shared
 `NotificationService/Services/TradeProtocol.swift`, already compiled into both targets.
@@ -62,7 +64,7 @@ allocation on both peers. Repeat with a balance change while the confirmation sc
 and with an existing position above the limit. Never use real funds for these checks.
 
 Implementation verification (2026-09-07): Rust library 200 passed (2 ignored), desktop
-219 passed (2 ignored), LSP 160 passed, Android 118 passed, iOS 221 passed. Clippy completed
+220 passed (2 ignored), LSP 160 passed, Android 119 passed, iOS 222 passed. Clippy completed
 with existing repository warnings; the pinned SwiftFormat lint passed. Changed Rust ranges
 were formatted without reformatting unrelated legacy code. The 11 ignored regtest tests and
 the three interactive client flows were not run; local regtest services were unavailable.

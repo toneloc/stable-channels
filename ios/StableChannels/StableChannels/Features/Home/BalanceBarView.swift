@@ -46,6 +46,7 @@ struct BalanceBarView: View {
                 totalUSD > 0 ? barWidth * max(0, maxSellUSD) / totalUSD : 0
             )
             let thumbX = max(0, min(barWidth, baseX + dragOffset))
+            let tooltipWidth = min(atSellLimit ? 280.0 : 125.0, barWidth)
             let visFrac = barWidth > 0 ? thumbX / barWidth : stableFraction
             let h = interactive ? barHeight : 10
 
@@ -91,15 +92,18 @@ struct BalanceBarView: View {
                         .overlay(alignment: .top) {
                             if isPressing {
                                 Text(atSellLimit ? StabilizationPolicy
-                                    .maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)) : "\(usdPct)% USD  \(btcPct)% BTC")
+                                    .limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)) :
+                                    "\(usdPct)% USD  \(btcPct)% BTC")
                                     .font(.caption2.bold())
-                                    .fixedSize()
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: max(0, tooltipWidth - 16))
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .foregroundStyle(.primary)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                    .fixedSize()
-                                    .offset(y: -34)
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                                    .alignmentGuide(.top) { $0[.bottom] + 8 }
+                                    .offset(x: min(max(thumbX, tooltipWidth / 2), barWidth - tooltipWidth / 2) - thumbX)
                                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                             }
                         }
