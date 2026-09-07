@@ -2166,39 +2166,22 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
-                val addressMatchedTxid = _lastReceiveTxid.value?.takeIf {
+                // Only an address match is authoritative enough to persist immediately — it's
+                // proof this specific tx pays our own tracked receive address. LDK's payment list
+                // also knows every inbound on-chain payment's txid regardless of address, but
+                // matching it here by amount+timestamp proximity against a single detected
+                // deposit (no other unresolved rows to disambiguate against, and LDK's list may
+                // not have caught up with a just-detected deposit yet) is a much weaker signal
+                // than resolveMissingReceiveTxids()'s bipartite matcher, which re-evaluates every
+                // unresolved row together on each poll and only commits a pairing when it's
+                // invariant across every optimal assignment. So leave the row's txid null here
+                // when there's no address match — the periodic backfill will resolve it once
+                // LDK's list (and any other pending rows) make the true match unambiguous,
+                // instead of this path locking in a first guess that later data can't correct.
+                val resolvedTxid = _lastReceiveTxid.value?.takeIf {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
                         lastReceiveTxidAddress == receiveAddress
-                }
-                // Address matching only finds deposits to our own tracked receive address —
-                // it misses proceeds landing elsewhere (e.g. a channel-close output), leaving
-                // txid permanently null and confirmations stuck at 0/6. LDK's own payment
-                // list already knows the real txid for every inbound on-chain payment
-                // regardless of address, so fall back to it (mirrors src/user.rs's sweep).
-                // Only consider LDK payments no existing DB row has already claimed: amount is
-                // not a unique key (repeated round-number deposits are ordinary), so without this
-                // filter the same txid could be attached to two rows, or — worse — this fallback
-                // could pick an already-recorded txid, collide on the derived dedup id below, and
-                // silently drop a genuinely new deposit.
-                val resolvedTxid = addressMatchedTxid ?: try {
-                    nodeService.node?.listPayments()
-                        ?.filter {
-                            it.direction == PaymentDirection.INBOUND &&
-                                it.kind is PaymentKind.Onchain &&
-                                it.amountMsat?.toLong() == depositSats * 1000 &&
-                                db?.isTxidRecorded((it.kind as PaymentKind.Onchain).txid) != true &&
-                                kotlin.math.abs(onchainMatchTimestamp(it) - System.currentTimeMillis() / 1000) <= RECEIVE_TXID_MATCH_WINDOW_SECS
-                        }
-                        // If more than one unclaimed candidate matches, guessing could attach the
-                        // wrong (but still plausible) txid to this new row — leave it unresolved;
-                        // resolveMissingReceiveTxids() will retry the backfill once LDK's payment
-                        // list (and other rows' claims) make the match unambiguous.
-                        ?.singleOrNull()
-                        ?.let { (it.kind as PaymentKind.Onchain).txid }
-                } catch (e: Exception) {
-                    Log.w("AppState", "listPayments lookup failed during deposit detection: ${e.message}")
-                    null
                 }
 
                 // Always record the deposit, mirroring iOS. When the websocket and this
@@ -2212,12 +2195,6 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     "onchain_deposit_${java.util.UUID.randomUUID()}"
                 }
-                // When resolvedTxid came from the LDK fallback (not an address match), the
-                // stored address must not be the app's own receive address — this txid may not
-                // actually pay it, and pollPaymentConfirmations()'s address-mismatch check would
-                // otherwise clear a correctly-resolved txid and leave the row stuck. See
-                // updatePaymentTxid's kdoc for the same reasoning applied to the backfill path.
-                val resolvedFromLdkFallback = !resolvedTxid.isNullOrBlank() && resolvedTxid != addressMatchedTxid
                 val rowId = db?.recordPayment(
                     paymentId = dedupId,
                     paymentType = "onchain",
@@ -2227,7 +2204,7 @@ class AppState(private val context: Context) : ViewModel() {
                     btcPrice = price,
                     status = "pending",
                     txid = resolvedTxid,
-                    address = if (resolvedFromLdkFallback) null else receiveAddress
+                    address = receiveAddress
                 )
 
                 if (rowId != null && rowId != -1L) {
