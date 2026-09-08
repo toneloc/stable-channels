@@ -2,6 +2,8 @@ package com.stablechannels.app.ui.trade
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -21,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
+import com.stablechannels.app.services.BuyAmountPolicy
+import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.Constants
@@ -33,7 +37,9 @@ enum class TradeStep { AMOUNT, CONFIRM, DONE }
 @Composable
 fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () -> Unit) {
     var step by remember { mutableStateOf(TradeStep.AMOUNT) }
-    var amountText by remember { mutableStateOf(if (prefillAmountUSD > 0) String.format(Locale.US, "%.2f", prefillAmountUSD) else "") }
+    var amountText by remember {
+        mutableStateOf(if (prefillAmountUSD > 0) String.format(Locale.US, "%.2f", BuyAmountPolicy.maximumUsd(prefillAmountUSD)) else "")
+    }
     var error by remember { mutableStateOf<String?>(null) }
     var isExecuting by remember { mutableStateOf(false) }
     var pendingPaymentId by remember { mutableStateOf<String?>(null) }
@@ -42,7 +48,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     val sc by appState.stableChannel.collectAsState()
     // Trading fails closed while the displayed cache is stale or quarantined.
     val btcPrice by appState.priceService.accountingPrice.collectAsState()
-    val maxBuyUSD = sc.expectedUSD.amount
+    val maxBuyUSD = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
     val feeUSD = amountUSD * Constants.STABLE_CHANNEL_TRADE_FEE_RATE
     val feeLabel = String.format(Locale.US, "Fee (%.0f%%)", Constants.STABLE_CHANNEL_TRADE_FEE_RATE * 100)
@@ -52,6 +58,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
+            .imePadding()
+            .verticalScroll(rememberScrollState())
             .padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -97,7 +105,10 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 ) {
                     Text("How much USD to convert to BTC?", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
-                        onClick = { amountText = String.format(Locale.US, "%.2f", maxBuyUSD) },
+                        onClick = {
+                            amountText = String.format(Locale.US, "%.2f", maxBuyUSD)
+                            error = null
+                        },
                         colors = ButtonDefaults.textButtonColors(
                             containerColor = if (isSystemInDarkTheme()) {
                                 MaterialTheme.colorScheme.surfaceVariant
@@ -123,7 +134,10 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountText,
-                        onValueChange = { amountText = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = {
+                            amountText = it.filter { c -> c.isDigit() || c == '.' }
+                            error = null
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         textStyle = TextStyle(
                             fontSize = 44.sp,
@@ -182,7 +196,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        if (amountUSD <= 0 || amountUSD > maxBuyUSD) {
+                        if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount)) {
                             error = "Enter an amount between $0 and ${maxBuyUSD.usdFormatted()}"
                         } else {
                             error = null
@@ -228,8 +242,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                 if (tradePrice <= 0.0) {
                                     throw Exception("A fresh BTC/USD consensus is required before trading")
                                 }
-                                val result = appState.tradeService?.executeBuy(sc, amountUSD, feeUSD, tradePrice)
-                                    ?: throw Exception("Trade service unavailable")
+                                val service = appState.tradeService ?: throw Exception("Trade service unavailable")
+                                val result = service.executeBuy(appState.stableChannel.value, amountUSD, feeUSD, tradePrice)
                                 val awaitingResult = appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = tradePrice,
@@ -306,8 +320,8 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         style = MaterialTheme.typography.bodyMedium
                     )
                 } else {
-                    CircularProgressIndicator(Modifier.size(48.dp))
-                    Spacer(Modifier.height(8.dp))
+                    CurveProgressIndicator(size = 56.dp)
+                    Spacer(Modifier.height(12.dp))
                     Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(

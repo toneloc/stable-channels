@@ -36,6 +36,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -279,6 +280,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
+                    maxSellUSD = (appState.tradeService?.maxSellCents(sc, appState.priceService.accountingPrice.value) ?: 0L) / 100.0,
                     showBtcFormat = showBTC,
                     modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
@@ -300,9 +302,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(Modifier.width(6.dp))
+                    Spacer(Modifier.width(8.dp))
                     Text(
                         "Syncing...",
                         style = MaterialTheme.typography.bodySmall,
@@ -546,10 +548,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
 @Composable
 fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
-    Box(modifier = modifier.height(56.dp).clip(RoundedCornerShape(12.dp))) {
+    Box(modifier = modifier.defaultMinSize(minHeight = 52.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 52.dp),
+            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
             shape = RoundedCornerShape(12.dp),
             enabled = enabled,
             colors = ButtonDefaults.filledTonalButtonColors(
@@ -626,7 +629,8 @@ private fun PendingRow(text: String, txid: String?, context: android.content.Con
 @Composable
 private fun SheetEdgeToEdgeEffect() {
     val view = LocalView.current
-    DisposableEffect(view) {
+    val isDark = LocalDarkTheme.current
+    DisposableEffect(view, isDark) {
         var context = view.context
         var dialog: android.app.Dialog? = null
         while (context is android.content.ContextWrapper) {
@@ -639,6 +643,9 @@ private fun SheetEdgeToEdgeEffect() {
         val window = dialog?.window
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false)
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.isAppearanceLightStatusBars = !isDark
+            insetsController.isAppearanceLightNavigationBars = !isDark
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
                 @Suppress("DEPRECATION")
                 window.navigationBarColor = android.graphics.Color.TRANSPARENT

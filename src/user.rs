@@ -147,6 +147,13 @@ impl ChartPeriod {
     }
 }
 
+/// Mathematical curve patterns for animated progress indicators (Open/Closed & Liskov Substitution).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CurvePattern {
+    SixPetalSpiral,
+    SpiralSearch,
+}
+
 #[derive(Clone, Debug)]
 pub struct PendingTrade {
     pub action: TradeAction,
@@ -191,6 +198,7 @@ struct IncomingSync {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
+    StabilizationLimit(u64),
     InvalidValues,
     LiveBalanceUnavailable,
     FeeExceedsBalance,
@@ -446,6 +454,7 @@ pub struct UserApp {
     // Balance bar slider: drag to initiate buy/sell trades
     bar_slider_drag_offset: f32,
     bar_slider_dragging: bool,
+    bar_slider_at_sell_limit: bool,
     bar_slider_release_at: Option<std::time::Instant>,
 
     // History tables display toggle: false = USD, true = BTC
@@ -799,6 +808,7 @@ impl UserApp {
             bar_chart_anim: 0.0,
             bar_slider_drag_offset: 0.0,
             bar_slider_dragging: false,
+            bar_slider_at_sell_limit: false,
             bar_slider_release_at: None,
             history_show_btc: false,
             selected_payment: None,
@@ -953,9 +963,9 @@ impl UserApp {
                                 }
                             }
 
-                            if let Some(payment_info) = stable_channels::stable::check_stability(
-                                &node_arc, &mut sc, price,
-                            ) {
+                            if let Some(payment_info) =
+                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            {
                                 // Record sent stability payment as pending (confirmed on PaymentSuccessful)
                                 let amount_usd =
                                     (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
@@ -2149,16 +2159,6 @@ impl UserApp {
         amount_btc: f64,
     ) -> Option<(PaymentId, u64, i64)> {
         let new_expected_usd = stable::normalize_trade_expected_usd(new_expected_usd);
-        // The fee is a direct keysend amount. Account for its whole-sat channel impact before
-        // deriving the wallet's post-settlement allocation.
-        let fee_sats = if trade_price > 0.0 && fee_usd > 0.0 {
-            (fee_usd / trade_price * SATS_IN_BTC as f64) as u64
-        } else {
-            0
-        };
-        let fee_msats = fee_sats.saturating_mul(1000);
-        let amt_msat = fee_msats.max(1);
-
         // Refresh from this wallet's LDK node and derive the allocation this wallet will commit
         // after acceptance. The LSP independently derives its own allocation at its own price.
         let local_allocation = {
@@ -2167,24 +2167,65 @@ impl UserApp {
             if !balances_updated {
                 Err(LocalTradeAllocationError::LiveBalanceUnavailable)
             } else {
-                local_trade_backing_sats(
-                    sc.stable_receiver_btc.sats,
-                    fee_sats,
-                    sc.backing_sats,
-                    sc.expected_usd.0,
-                    new_expected_usd,
-                    trade_price,
-                )
-                .map(|(post_fee_receiver_sats, backing_sats)| {
-                    (
-                        sc.channel_id.to_string(),
-                        format!("{}", sc.user_channel_id),
-                        sc.counterparty,
-                        sc.expected_usd.0,
-                        post_fee_receiver_sats,
-                        backing_sats,
-                    )
-                })
+                let channel = self.node.list_channels().into_iter().find(|ch| {
+                    ch.user_channel_id.0 == sc.user_channel_id && ch.is_channel_ready
+                });
+                let snapshot = channel.map(|ch| stable_channels::stabilization::SellSnapshot {
+                    receiver_sats: (ch.outbound_capacity_msat / 1000)
+                        .saturating_add(ch.unspendable_punishment_reserve.unwrap_or(0)),
+                    spendable_sats: ch.outbound_capacity_msat / 1000,
+                    backing_sats: sc.backing_sats,
+                    expected_usd: sc.expected_usd.0,
+                    price: trade_price,
+                });
+                snapshot
+                    .ok_or(LocalTradeAllocationError::LiveBalanceUnavailable)
+                    .and_then(|snapshot| {
+                        // Derive the fee from the signed target under the same state lock.
+                        let fee_sats = stable_channels::stabilization::trade_fee_sats(
+                            sc.expected_usd.0,
+                            new_expected_usd,
+                            trade_price,
+                        )
+                        .ok_or(LocalTradeAllocationError::InvalidValues)?;
+                        // Trade-entry only. Settlements and accepted syncs are uncapped.
+                        if (trade_action == "sell" || new_expected_usd > sc.expected_usd.0)
+                            && !snapshot.accepts(floor_usd_cents(amount_usd))
+                        {
+                            return Err(LocalTradeAllocationError::StabilizationLimit(
+                                snapshot.max_order_cents(),
+                            ));
+                        }
+                        let (post_fee_receiver_sats, backing_sats) = local_trade_backing_sats(
+                            snapshot.receiver_sats,
+                            fee_sats,
+                            sc.backing_sats,
+                            sc.expected_usd.0,
+                            new_expected_usd,
+                            trade_price,
+                        )?;
+                        // Check the actual prepared target too, not just the quoted order.
+                        if new_expected_usd > sc.expected_usd.0
+                            && snapshot
+                                .spendable_sats
+                                .checked_sub(fee_sats)
+                                .and_then(stable_channels::stabilization::client_backing_limit)
+                                .is_none_or(|limit| backing_sats > limit)
+                        {
+                            return Err(LocalTradeAllocationError::StabilizationLimit(
+                                snapshot.max_order_cents(),
+                            ));
+                        }
+                        Ok((
+                            sc.channel_id.to_string(),
+                            format!("{}", sc.user_channel_id),
+                            sc.counterparty,
+                            sc.expected_usd.0,
+                            post_fee_receiver_sats,
+                            backing_sats,
+                            fee_sats,
+                        ))
+                    })
             }
         };
         let (
@@ -2194,10 +2235,14 @@ impl UserApp {
             old_expected_usd,
             post_fee_receiver_sats,
             backing_sats,
+            fee_sats,
         ) = match local_allocation {
             Ok(allocation) => allocation,
             Err(reason) => {
                 self.trade_error = match reason {
+                    LocalTradeAllocationError::StabilizationLimit(cents) => {
+                        Self::stabilization_limit_message(cents)
+                    }
                     LocalTradeAllocationError::SettlementRequired => {
                         "Settle the current stability adjustment, then retry this trade."
                             .to_string()
@@ -2232,6 +2277,8 @@ impl UserApp {
                 return None;
             }
         };
+
+        let amt_msat = fee_sats.saturating_mul(1000).max(1);
 
         if self
             .db
@@ -2628,20 +2675,20 @@ impl UserApp {
                 sc.stable_receiver_btc.sats.saturating_sub(backing_after),
             )
         };
-        let amount_usd = (price > 0.0)
-            .then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
+        let amount_usd = (price > 0.0).then(|| amount_sats as f64 / SATS_IN_BTC as f64 * price);
         let persist = |backing_sats_before, backing_sats_after, native_sats_after| {
-            self.db.record_signed_stability_payment_and_update_allocation(
-                payment_hash,
-                &payload.settlement_id,
-                amount_msat,
-                amount_usd,
-                (price > 0.0).then_some(price),
-                &user_channel_id,
-                backing_sats_before,
-                backing_sats_after,
-                native_sats_after,
-            )
+            self.db
+                .record_signed_stability_payment_and_update_allocation(
+                    payment_hash,
+                    &payload.settlement_id,
+                    amount_msat,
+                    amount_usd,
+                    (price > 0.0).then_some(price),
+                    &user_channel_id,
+                    backing_sats_before,
+                    backing_sats_after,
+                    native_sats_after,
+                )
         };
         let mut reloaded_expected_usd = None;
         let persisted = match persist(backing_before, backing_after, native_after) {
@@ -2666,15 +2713,13 @@ impl UserApp {
                         return SignedStabilityHandling::Retry;
                     }
                 };
-                let Some(reloaded_backing_after) =
-                    stable::backing_after_lsp_to_user_stability(
-                        durable.backing_sats,
-                        durable.expected_usd,
-                        price,
-                        amount_sats,
-                        live_receiver_sats,
-                    )
-                else {
+                let Some(reloaded_backing_after) = stable::backing_after_lsp_to_user_stability(
+                    durable.backing_sats,
+                    durable.expected_usd,
+                    price,
+                    amount_sats,
+                    live_receiver_sats,
+                ) else {
                     *ack = false;
                     audit_event(
                         "STABILITY_PAYMENT_ALLOCATION_RETRY_DEFERRED",
@@ -2777,8 +2822,8 @@ impl UserApp {
             return;
         }
         let price = self.stable_channel.lock().unwrap().latest_price;
-        let amount_usd = (price > 0.0)
-            .then(|| amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price);
+        let amount_usd =
+            (price > 0.0).then(|| amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * price);
         match self.db.record_payment_and_maybe_update_backing(
             Some(payment_hash),
             "lightning",
@@ -3051,8 +3096,7 @@ impl UserApp {
                     return;
                 }
 
-                let pending =
-                    payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
+                let pending = payment_id.and_then(|pid| self.pending_payments.get(&pid).cloned());
                 let payment_sent_message = pending
                     .as_ref()
                     .map(|p| {
@@ -3080,10 +3124,8 @@ impl UserApp {
                         let before_reconcile = sc.clone();
                         let old_expected_usd = sc.expected_usd.0;
                         let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
-                        sc.native_sats = sc
-                            .stable_receiver_btc
-                            .sats
-                            .saturating_sub(sc.backing_sats);
+                        sc.native_sats =
+                            sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
                         stable::recompute_native(&mut sc);
 
                         let result = self.db.persist_outgoing_reconciliation(
@@ -3099,12 +3141,9 @@ impl UserApp {
                             Some(price),
                         );
                         match result {
-                            Ok(true) => Ok((
-                                true,
-                                usd_deducted,
-                                old_expected_usd,
-                                sc.expected_usd.0,
-                            )),
+                            Ok(true) => {
+                                Ok((true, usd_deducted, old_expected_usd, sc.expected_usd.0))
+                            }
                             Ok(false) => {
                                 *sc = before_reconcile;
                                 Ok((false, None, old_expected_usd, old_expected_usd))
@@ -3171,7 +3210,7 @@ impl UserApp {
                             if let Some(pid) = payment_id {
                                 self.pending_payments.remove(&pid);
                             }
-                        },
+                        }
                         Err(error) => {
                             *ack = false;
                             audit_event(
@@ -3185,7 +3224,7 @@ impl UserApp {
                             self.status_message =
                                 "Stability payment settled but could not be saved; retrying"
                                     .to_string();
-                        },
+                        }
                     }
                 }
 
@@ -3423,10 +3462,7 @@ impl UserApp {
                     // Splice rows were already completed above (exact txid match,
                     // or the legacy latest-row fallback). Everything else with a
                     // known funding txid is a regular channel open.
-                    if !completed_splice
-                        && splice_direction.is_none()
-                        && txid_str != "unknown"
-                    {
+                    if !completed_splice && splice_direction.is_none() && txid_str != "unknown" {
                         let _ = self
                             .db
                             .update_payment_confirmations(&txid_str, 1, "completed");
@@ -3568,8 +3604,7 @@ impl UserApp {
                                     };
                                     let wallet_channel_id =
                                         self.stable_channel.lock().unwrap().channel_id.to_string();
-                                    if amount_msat != 1
-                                        || rejection.channel_id != wallet_channel_id
+                                    if amount_msat != 1 || rejection.channel_id != wallet_channel_id
                                     {
                                         audit_event(
                                             "TRADE_REJECTED_V1_CONTEXT_INVALID",
@@ -3582,7 +3617,11 @@ impl UserApp {
                                         &rejection.trade_payment_id,
                                         &rejection.request_hash,
                                     ) {
-                                        Ok(Some(trade)) if trade.channel_id == rejection.channel_id => trade,
+                                        Ok(Some(trade))
+                                            if trade.channel_id == rejection.channel_id =>
+                                        {
+                                            trade
+                                        }
                                         Ok(_) => {
                                             audit_event(
                                                 "TRADE_REJECTED_V1_UNMATCHED",
@@ -3672,16 +3711,16 @@ impl UserApp {
                                 }
 
                                 let pending_trade = match correlation {
-                                    Some((trade_id, payment_id, request_hash)) => self
-                                        .db
-                                        .get_trade_by_correlation(
+                                    Some((trade_id, payment_id, request_hash)) => {
+                                        self.db.get_trade_by_correlation(
                                             trade_id,
                                             payment_id,
                                             request_hash,
-                                        ),
-                                    None => self
-                                        .db
-                                        .get_pending_trade_by_expected_usd(sync.expected_usd),
+                                        )
+                                    }
+                                    None => {
+                                        self.db.get_pending_trade_by_expected_usd(sync.expected_usd)
+                                    }
                                 };
                                 let pending_trade = match pending_trade {
                                     Ok(trade) => trade,
@@ -3766,7 +3805,9 @@ impl UserApp {
                                             native_sats,
                                             pending_trade.as_ref().map(|trade| trade.id),
                                         )
-                                        .map(|applied| (applied, applied && pending_trade.is_some()))
+                                        .map(|applied| {
+                                            (applied, applied && pending_trade.is_some())
+                                        })
                                 };
                                 match persistence {
                                     Ok((allocation_applied, trade_resolved)) => {
@@ -3834,8 +3875,7 @@ impl UserApp {
                             tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() != [1u8]
                         });
                         let has_legacy_stability_marker = custom_records.iter().any(|tlv| {
-                            tlv.type_num == STABLE_CHANNEL_TLV_TYPE
-                                && tlv.value.as_slice() == [1u8]
+                            tlv.type_num == STABLE_CHANNEL_TLV_TYPE && tlv.value.as_slice() == [1u8]
                         });
                         if has_legacy_stability_marker {
                             audit_event(
@@ -3969,8 +4009,8 @@ impl UserApp {
 
                     // Payment success proves that the fee reached the LSP, not that it accepted the
                     // trade. Keep it pending until the LSP's signed SYNC_V1 arrives.
-                    let mut pending_trade = payment_id
-                        .and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
+                    let mut pending_trade =
+                        payment_id.and_then(|pid| self.pending_trade_payments.get(&pid).cloned());
                     if pending_trade.is_none() {
                         if let Some(pid) = payment_id {
                             if let Some(row) = self
@@ -4055,10 +4095,7 @@ impl UserApp {
                 } => {
                     let mut handled_stability_failure = false;
                     if let Some(pid) = payment_id {
-                        match self
-                            .db
-                            .fail_pending_stability_payment(&format!("{pid}"))
-                        {
+                        match self.db.fail_pending_stability_payment(&format!("{pid}")) {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
                                 if rollback.restored {
@@ -4072,10 +4109,8 @@ impl UserApp {
                                             && sc.backing_sats == after
                                         {
                                             sc.backing_sats = before;
-                                            sc.native_sats = sc
-                                                .stable_receiver_btc
-                                                .sats
-                                                .saturating_sub(before);
+                                            sc.native_sats =
+                                                sc.stable_receiver_btc.sats.saturating_sub(before);
                                             stable::recompute_native(&mut sc);
                                             sc.last_stability_payment = 0;
                                             sc.payment_made = false;
@@ -4169,9 +4204,9 @@ impl UserApp {
                             let pending =
                                 payment_id.and_then(|pid| self.pending_payments.remove(&pid));
                             if let Some(p) = pending {
-                                let _ = self
-                                    .db
-                                    .update_payment_status(p.payment_db_id, "failed", None);
+                                let _ =
+                                    self.db
+                                        .update_payment_status(p.payment_db_id, "failed", None);
                             }
 
                             audit_event(
@@ -4471,9 +4506,8 @@ impl UserApp {
         let price = sc.latest_price;
         if !price.is_finite() || price <= 0.0 {
             drop(sc);
-            pending.retry_after = Some(
-                std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS),
-            );
+            pending.retry_after =
+                Some(std::time::Instant::now() + Duration::from_secs(BALANCE_UPDATE_INTERVAL_SECS));
             self.pending_splice_deduction = Some(pending);
             audit_event(
                 "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE",
@@ -4554,7 +4588,10 @@ impl UserApp {
     fn lookup_funding_output_sats_esplora(txid: &str, vout: u32) -> Option<u64> {
         let url = format!("{}/tx/{}", DEFAULT_CHAIN_URL, txid);
 
-        let response = stable_channels::price_feeds::bounded_agent().get(&url).call().ok()?;
+        let response = stable_channels::price_feeds::bounded_agent()
+            .get(&url)
+            .call()
+            .ok()?;
 
         let json: serde_json::Value = response.into_json().ok()?;
         let vouts = json["vout"].as_array()?;
@@ -4699,6 +4736,126 @@ impl UserApp {
         painter.line_segment([p2, egui::pos2(p2.x, p2.y + head)], stroke);
     }
 
+    /// Pure mathematical point computation on the curve (Single Responsibility Principle).
+    fn calculate_curve_point(
+        pattern: CurvePattern,
+        u: f32,
+        detail_scale: f32,
+        center: egui::Pos2,
+        scale: f32,
+    ) -> egui::Pos2 {
+        let t = u * std::f32::consts::TAU;
+        match pattern {
+            CurvePattern::SixPetalSpiral => {
+                let d = 3.0 + detail_scale * 0.25;
+                let base_x = 5.0 * t.cos() + d * (5.0 * t).cos();
+                let base_y = 5.0 * t.sin() - d * (5.0 * t).sin();
+                let s = (2.2 + detail_scale * 0.45) * 1.85 * scale;
+                egui::pos2(center.x + base_x * s, center.y + base_y * s)
+            }
+            CurvePattern::SpiralSearch => {
+                let angle = t * 4.0;
+                let radius = (8.0 + (1.0 - t.cos()) * (8.5 + detail_scale * 2.4)) * 1.4 * scale;
+                egui::pos2(
+                    center.x + angle.cos() * radius,
+                    center.y + angle.sin() * radius,
+                )
+            }
+        }
+    }
+
+    /// Paint mathematical curve progress indicator on an egui painter (Single Responsibility & Interface Segregation).
+    fn paint_curve_on_painter(
+        painter: &egui::Painter,
+        rect: egui::Rect,
+        pattern: CurvePattern,
+        primary_color: Color32,
+        glow_color: Color32,
+        time: f64,
+    ) {
+        let center = rect.center();
+        let scale = (rect.width().min(rect.height()) / 100.0).max(0.1);
+
+        let pulse_duration = 4.2;
+        let pulse_angle = ((time % pulse_duration) / pulse_duration) as f32 * std::f32::consts::TAU;
+        let detail_scale = 0.52 + (((pulse_angle + 0.55).sin() + 1.0) / 2.0) * 0.48;
+
+        let duration = 4.6;
+        let progress = ((time % duration) / duration) as f32;
+
+        let track_color = primary_color.gamma_multiply(0.14);
+        let track_steps = 96;
+        let mut prev_pt: Option<egui::Pos2> = None;
+        for step in 0..=track_steps {
+            let u = step as f32 / track_steps as f32;
+            let pt = Self::calculate_curve_point(pattern, u, detail_scale, center, scale);
+            if let Some(p0) = prev_pt {
+                painter.line_segment([p0, pt], egui::Stroke::new(1.2 * scale, track_color));
+            }
+            prev_pt = Some(pt);
+        }
+
+        let trail_count = 36;
+        let trail_span = if pattern == CurvePattern::SpiralSearch {
+            0.28
+        } else {
+            0.34
+        };
+
+        for i in (0..trail_count).rev() {
+            let offset_frac = i as f32 / (trail_count - 1) as f32;
+            let mut u = progress - offset_frac * trail_span;
+            if u < 0.0 {
+                u += 1.0;
+            }
+            let pt = Self::calculate_curve_point(pattern, u, detail_scale, center, scale);
+
+            let intensity = (1.0 - offset_frac).powf(0.56);
+            let particle_radius = (1.0 + (1.0 - offset_frac) * 2.8) * scale;
+
+            let t = 1.0 - offset_frac;
+            let r = (glow_color.r() as f32 + (primary_color.r() as f32 - glow_color.r() as f32) * t)
+                as u8;
+            let g = (glow_color.g() as f32 + (primary_color.g() as f32 - glow_color.g() as f32) * t)
+                as u8;
+            let b = (glow_color.b() as f32 + (primary_color.b() as f32 - glow_color.b() as f32) * t)
+                as u8;
+            let alpha = (intensity * 0.85 * 255.0).clamp(0.0, 255.0) as u8;
+
+            let color = egui::Color32::from_rgba_unmultiplied(r, g, b, alpha);
+            painter.circle_filled(pt, particle_radius, color);
+        }
+
+        let head_pt = Self::calculate_curve_point(pattern, progress, detail_scale, center, scale);
+        painter.circle_filled(head_pt, 6.5 * scale, primary_color.gamma_multiply(0.22));
+        painter.circle_filled(head_pt, 4.0 * scale, glow_color.gamma_multiply(0.55));
+        painter.circle_filled(head_pt, 2.2 * scale, egui::Color32::WHITE);
+    }
+
+    /// Animated progress indicator with mathematical curve particle trail (Single Responsibility).
+    fn paint_curve_progress_indicator(
+        ui: &mut egui::Ui,
+        size: egui::Vec2,
+        pattern: CurvePattern,
+        primary_color: Color32,
+        glow_color: Color32,
+    ) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            let time = ui.input(|i| i.time);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+            Self::paint_curve_on_painter(
+                ui.painter(),
+                rect,
+                pattern,
+                primary_color,
+                glow_color,
+                time,
+            );
+        }
+        response
+    }
+
     /// Format BTC with iOS-style spaced digit groups: "0.00 039 094" (2/3/3
     /// digits separated by thin spaces). Matches iOS `btcSpacedFormatted`.
     fn format_btc_spaced(btc: f64) -> String {
@@ -4778,10 +4935,7 @@ impl UserApp {
         if fee_sats == 0 {
             "Expected fee: none".to_string()
         } else {
-            format!(
-                "Expected fee: ~{}",
-                Self::format_sats_as_btc(fee_sats)
-            )
+            format!("Expected fee: ~{}", Self::format_sats_as_btc(fee_sats))
         }
     }
 
@@ -4911,8 +5065,15 @@ impl UserApp {
                 match stable_channels::price_feeds::fetch_kraken_ohlc(&agent, None) {
                     Ok(prices) => {
                         for (date, open, high, low, close, volume) in prices {
-                            let _ = db
-                                .record_daily_price(&date, open, high, low, close, volume, Some("kraken"));
+                            let _ = db.record_daily_price(
+                                &date,
+                                open,
+                                high,
+                                low,
+                                close,
+                                volume,
+                                Some("kraken"),
+                            );
                         }
                     }
                     Err(e) => eprintln!("[Chart] Failed to fetch Kraken OHLC data: {}", e),
@@ -5235,22 +5396,21 @@ impl UserApp {
                         });
 
                         cols[1].vertical_centered(|ui| {
-                            let onchain_btn = egui::Button::new(
-                                egui::RichText::new("Onchain").size(14.0).color(
+                            let onchain_btn =
+                                egui::Button::new(egui::RichText::new("Onchain").size(14.0).color(
                                     if onchain_selected {
                                         Color32::WHITE
                                     } else {
                                         Color32::BLACK
                                     },
-                                ),
-                            )
-                            .fill(if onchain_selected {
-                                theme::PRIMARY
-                            } else {
-                                theme::SELECTED_BG
-                            })
-                            .corner_radius(theme::RADIUS_SM)
-                            .min_size(egui::vec2(130.0, 34.0));
+                                ))
+                                .fill(if onchain_selected {
+                                    theme::PRIMARY
+                                } else {
+                                    theme::SELECTED_BG
+                                })
+                                .corner_radius(theme::RADIUS_SM)
+                                .min_size(egui::vec2(130.0, 34.0));
 
                             if ui.add(onchain_btn).clicked() {
                                 self.fund_tab = FundTab::Onchain;
@@ -5415,7 +5575,13 @@ impl UserApp {
                                     self.show_toast("Copied!", "OK");
                                 }
                             } else {
-                                ui.spinner();
+                                Self::paint_curve_progress_indicator(
+                                    ui,
+                                    egui::vec2(60.0, 34.0),
+                                    CurvePattern::SixPetalSpiral,
+                                    theme::IOS_BLUE,
+                                    theme::IOS_ORANGE,
+                                );
                             }
                         }
                     }
@@ -6010,14 +6176,13 @@ impl UserApp {
             let spendable_onchain_sats = balances.spendable_onchain_balance_sats;
 
             // Get balance info
-            let (btc_price, last_update, expected_usd, backing_sats, receiver_sats) = {
+            let (btc_price, last_update, expected_usd, backing_sats) = {
                 let sc = self.stable_channel.lock().unwrap();
                 (
                     sc.latest_price,
                     sc.timestamp,
                     sc.expected_usd.0,
                     sc.backing_sats,
-                    sc.stable_receiver_btc.sats,
                 )
             };
 
@@ -6062,16 +6227,8 @@ impl UserApp {
                 expected_usd,
                 btc_price,
             );
-            let (_, receiver_native_sats, _) =
-                channel_balance_split(receiver_sats, backing_sats, expected_usd, btc_price);
             let buy_available_usd = floor_usd_cents(stabilized_usd) as f64 / 100.0;
-            let sell_available_usd = max_sell_trade_usd_cents(
-                receiver_sats,
-                receiver_native_sats,
-                backing_sats,
-                expected_usd,
-                btc_price,
-            ) as f64
+            let sell_available_usd = self.maximum_sell_cents(btc_price) as f64
                 / 100.0;
 
             // Header row: "Total Balance" (click to toggle USD↔BTC) + refresh button
@@ -6267,6 +6424,7 @@ impl UserApp {
                     if let Some(p) = response.interact_pointer_pos() {
                         if (p.x - base_x).abs() < thumb_radius * 1.8 {
                             self.bar_slider_dragging = true;
+                            self.bar_slider_at_sell_limit = false;
                             self.bar_slider_drag_offset = 0.0;
                             self.bar_slider_release_at = None;
                         }
@@ -6274,9 +6432,10 @@ impl UserApp {
                 }
 
                 if response.dragged() && self.bar_slider_dragging {
-                    self.bar_slider_drag_offset = (self.bar_slider_drag_offset
-                        + response.drag_delta().x)
-                        .clamp(-max_buy_drag_offset, max_sell_drag_offset);
+                    let proposed_offset = self.bar_slider_drag_offset + response.drag_delta().x;
+                    self.bar_slider_at_sell_limit = proposed_offset > max_sell_drag_offset;
+                    self.bar_slider_drag_offset =
+                        proposed_offset.clamp(-max_buy_drag_offset, max_sell_drag_offset);
                 }
 
                 if response.drag_stopped() && self.bar_slider_dragging {
@@ -6412,17 +6571,25 @@ impl UserApp {
                     let vis_frac = (thumb_x_local / rect.width()).clamp(0.0, 1.0);
                     let usd_pct = (vis_frac * 100.0).round() as i32;
                     let btc_pct = 100 - usd_pct;
-                    let label = format!("{}% USD  {}% BTC", usd_pct, btc_pct);
+                    let label = if self.bar_slider_at_sell_limit {
+                        Self::stabilization_limit_message(floor_usd_cents(sell_available_usd))
+                    } else {
+                        format!("{}% USD  {}% BTC", usd_pct, btc_pct)
+                    };
                     let tooltip_font = egui::FontId::new(12.0, egui::FontFamily::Proportional);
                     let galley =
                         painter.layout_no_wrap(label.clone(), tooltip_font.clone(), Color32::BLACK);
                     let pad = egui::vec2(8.0, 4.0);
                     let bubble_size = galley.size() + pad * 2.0;
                     let bubble_center = egui::pos2(
-                        thumb_x.clamp(
-                            rect.min.x + bubble_size.x / 2.0,
-                            rect.max.x - bubble_size.x / 2.0,
-                        ),
+                        if bubble_size.x >= rect.width() {
+                            rect.center().x
+                        } else {
+                            thumb_x.clamp(
+                                rect.min.x + bubble_size.x / 2.0,
+                                rect.max.x - bubble_size.x / 2.0,
+                            )
+                        },
                         rect.min.y - bubble_size.y / 2.0 - 6.0,
                     );
                     let bubble_rect = egui::Rect::from_center_size(bubble_center, bubble_size);
@@ -7113,6 +7280,28 @@ impl UserApp {
                                 egui::Stroke::new(2.0, color),
                             );
                         }
+                    } else {
+                        let time = ui.input(|i| i.time);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                        let loader_rect = egui::Rect::from_center_size(
+                            rect.center() - egui::vec2(0.0, 10.0),
+                            egui::vec2(44.0, 44.0),
+                        );
+                        Self::paint_curve_on_painter(
+                            painter,
+                            loader_rect,
+                            CurvePattern::SpiralSearch,
+                            theme::IOS_BLUE,
+                            theme::IOS_ORANGE,
+                            time,
+                        );
+                        painter.text(
+                            rect.center() + egui::vec2(0.0, 22.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Collecting price data...",
+                            egui::FontId::proportional(11.0),
+                            Color32::GRAY,
+                        );
                     }
                 } else {
                     let prices: Vec<f64> = self.chart_prices.iter().map(|p| p.close).collect();
@@ -7149,6 +7338,28 @@ impl UserApp {
                                 egui::Stroke::new(2.0, chart_color),
                             );
                         }
+                    } else {
+                        let time = ui.input(|i| i.time);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                        let loader_rect = egui::Rect::from_center_size(
+                            rect.center() - egui::vec2(0.0, 10.0),
+                            egui::vec2(44.0, 44.0),
+                        );
+                        Self::paint_curve_on_painter(
+                            painter,
+                            loader_rect,
+                            CurvePattern::SpiralSearch,
+                            theme::IOS_BLUE,
+                            theme::IOS_ORANGE,
+                            time,
+                        );
+                        painter.text(
+                            rect.center() + egui::vec2(0.0, 22.0),
+                            egui::Align2::CENTER_CENTER,
+                            "Collecting price data...",
+                            egui::FontId::proportional(11.0),
+                            Color32::GRAY,
+                        );
                     }
                 }
 
@@ -7282,11 +7493,25 @@ impl UserApp {
                         );
                     }
                 } else {
+                    let time = ui.input(|i| i.time);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    let loader_rect = egui::Rect::from_center_size(
+                        inner.center() - egui::vec2(0.0, 16.0),
+                        egui::vec2(68.0, 68.0),
+                    );
+                    Self::paint_curve_on_painter(
+                        painter,
+                        loader_rect,
+                        CurvePattern::SpiralSearch,
+                        theme::IOS_BLUE,
+                        theme::IOS_ORANGE,
+                        time,
+                    );
                     painter.text(
-                        inner.center(),
+                        inner.center() + egui::vec2(0.0, 36.0),
                         egui::Align2::CENTER_CENTER,
                         "Collecting price data...",
-                        egui::FontId::proportional(14.0),
+                        egui::FontId::proportional(13.0),
                         Color32::GRAY,
                     );
                 }
@@ -7345,11 +7570,25 @@ impl UserApp {
                         label_color,
                     );
                 } else {
+                    let time = ui.input(|i| i.time);
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                    let loader_rect = egui::Rect::from_center_size(
+                        inner.center() - egui::vec2(0.0, 16.0),
+                        egui::vec2(68.0, 68.0),
+                    );
+                    Self::paint_curve_on_painter(
+                        painter,
+                        loader_rect,
+                        CurvePattern::SpiralSearch,
+                        theme::IOS_BLUE,
+                        theme::IOS_ORANGE,
+                        time,
+                    );
                     painter.text(
-                        inner.center(),
+                        inner.center() + egui::vec2(0.0, 36.0),
                         egui::Align2::CENTER_CENTER,
-                        "No price data available",
-                        egui::FontId::proportional(14.0),
+                        "Collecting price data...",
+                        egui::FontId::proportional(13.0),
                         Color32::GRAY,
                     );
                 }
@@ -9230,10 +9469,12 @@ impl UserApp {
                 ui.vertical_centered(|ui| {
                     if !has_ready_channel {
                         ui.label(
-                            RichText::new("Get your first payment over Lightning to activate your account")
-                                .size(11.0)
-                                .color(theme::MUTED)
-                                .italics(),
+                            RichText::new(
+                                "Get your first payment over Lightning to activate your account",
+                            )
+                            .size(11.0)
+                            .color(theme::MUTED)
+                            .italics(),
                         );
                         ui.add_space(6.0);
                     }
@@ -9866,10 +10107,7 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui
-                .add_enabled(!confirmation_blocked, confirm_btn)
-                .clicked()
-            {
+            if ui.add_enabled(!confirmation_blocked, confirm_btn).clicked() {
                 should_confirm = true;
             }
         });
@@ -9923,6 +10161,32 @@ impl UserApp {
             });
     }
 
+    fn maximum_sell_cents(&self, price: f64) -> u64 {
+        let sc = self.stable_channel.lock().unwrap();
+        self.node
+            .list_channels()
+            .into_iter()
+            .find(|ch| ch.user_channel_id.0 == sc.user_channel_id && ch.is_channel_ready)
+            .map(|ch| {
+                max_sell_trade_usd_cents(
+                    (ch.outbound_capacity_msat / 1000)
+                        .saturating_add(ch.unspendable_punishment_reserve.unwrap_or(0)),
+                    ch.outbound_capacity_msat / 1000,
+                    sc.backing_sats,
+                    sc.expected_usd.0,
+                    price,
+                )
+            })
+            .unwrap_or(0)
+    }
+
+    fn stabilization_limit_message(cents: u64) -> String {
+        format!(
+            "Maximum additional trade: ${:.2}\nKeeps a small BTC reserve in the channel.",
+            cents as f64 / 100.0,
+        )
+    }
+
     fn show_sell_amount_screen(&mut self, ui: &mut egui::Ui) {
         // Header
         ui.label(
@@ -9936,7 +10200,7 @@ impl UserApp {
         // Show the native allocation valued in USD. A price quote changes its value, not which
         // sats belong to it.
         let btc_price = get_fresh_cached_price_no_fetch();
-        let (live_receiver_sats, native_sats, current_backing_sats, current_expected_usd) = {
+        let native_sats = {
             let sc = self.stable_channel.lock().unwrap();
             let (_, native_sats, _) = channel_balance_split(
                 sc.stable_receiver_btc.sats,
@@ -9944,32 +10208,25 @@ impl UserApp {
                 sc.expected_usd.0,
                 btc_price,
             );
-            (
-                sc.stable_receiver_btc.sats,
-                native_sats,
-                sc.backing_sats,
-                sc.expected_usd.0,
-            )
+            native_sats
         };
         // Native BTC can be worth more than the channel's remaining stable-target capacity when
         // the current backing has drifted below its USD target. Show the largest cent-denominated
         // order that passes the same post-fee allocation check used when the order is submitted.
-        let available_btc_usd_cents = max_sell_trade_usd_cents(
-            live_receiver_sats,
-            native_sats,
-            current_backing_sats,
-            current_expected_usd,
-            btc_price,
-        );
+        let available_btc_usd_cents = self.maximum_sell_cents(btc_price);
         let available_btc_usd = available_btc_usd_cents as f64 / 100.0;
         ui.label(
             RichText::new(format!(
-                "Available to convert: {}",
+                "Maximum additional trade: {}",
                 Self::format_price(available_btc_usd)
             ))
             .size(14.0)
             .color(Color32::DARK_GRAY),
         );
+        if ui.button("Max").clicked() {
+            self.trade_amount_input = format!("{:.2}", available_btc_usd);
+            self.trade_error.clear();
+        }
         ui.add_space(20.0);
 
         // Centered USD amount input — iOS-style rounded field
@@ -9985,7 +10242,7 @@ impl UserApp {
                 })
                 .stroke(egui::Stroke::new(0.5, Color32::from_rgb(210, 210, 215)))
                 .show(ui, |ui| {
-                    ui.add(
+                    let amount_response = ui.add(
                         egui::TextEdit::singleline(&mut self.trade_amount_input)
                             .frame(false)
                             .hint_text("0.00")
@@ -9993,6 +10250,9 @@ impl UserApp {
                             .horizontal_align(egui::Align::Center)
                             .desired_width(228.0),
                     );
+                    if amount_response.changed() {
+                        self.trade_error.clear();
+                    }
                 });
 
             // BTC equivalent below input
@@ -10054,10 +10314,7 @@ impl UserApp {
                 if btc_price < 1.0 || !btc_price.is_finite() {
                     self.trade_error = "A fresh BTC/USD consensus is required".to_string();
                 } else if amount_cents > available_btc_usd_cents {
-                    self.trade_error = format!(
-                        "Amount exceeds tradable channel capacity. Maximum is {}.",
-                        Self::format_price(available_btc_usd)
-                    );
+                    self.trade_error = Self::stabilization_limit_message(available_btc_usd_cents);
                 } else {
                     // Calculate trade details
                     let fee_usd = Self::stable_trade_fee(amount);
@@ -10251,10 +10508,7 @@ impl UserApp {
             .fill(theme::IOS_BLUE)
             .corner_radius(theme::RADIUS_PILL)
             .min_size(egui::vec2(280.0, 50.0));
-            if ui
-                .add_enabled(!confirmation_blocked, confirm_btn)
-                .clicked()
-            {
+            if ui.add_enabled(!confirmation_blocked, confirm_btn).clicked() {
                 should_confirm = true;
             }
         });
@@ -10586,8 +10840,7 @@ impl UserApp {
             btc_price,
             amount_usd,
             btc_amount,
-        )
-        {
+        ) {
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10622,6 +10875,16 @@ impl UserApp {
 
         if let Some(err) = Self::quote_moved_error(displayed_btc_price, btc_price) {
             self.trade_error = err;
+            return;
+        }
+
+        let max_cents = self.maximum_sell_cents(btc_price);
+        if !amount_usd.is_finite() || amount_usd <= 0.0 {
+            self.trade_error = "Enter a positive amount".to_string();
+            return;
+        }
+        if floor_usd_cents(amount_usd) > max_cents {
+            self.trade_error = Self::stabilization_limit_message(max_cents);
             return;
         }
 
@@ -10660,8 +10923,7 @@ impl UserApp {
             btc_price,
             amount_usd,
             btc_amount,
-        )
-        {
+        ) {
             self.pending_trade_payments.insert(
                 payment_id,
                 PendingTradePayment {
@@ -10682,46 +10944,59 @@ impl UserApp {
         if !self.show_diagnostics_window {
             return;
         }
-        
+
         let mut is_open = self.show_diagnostics_window;
         let mut do_export = false;
-        
+
         egui::Window::new("Logs & Diagnostics")
             .resizable(false)
             .collapsible(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
                 let icon_badge = |ui: &mut egui::Ui, symbol: &str, color: Color32| {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, color.gamma_multiply(0.12));
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::hover());
+                    ui.painter()
+                        .rect_filled(rect, 4.0, color.gamma_multiply(0.12));
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
                         symbol,
                         egui::FontId::proportional(14.0),
-                        color
+                        color,
                     );
                 };
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(
-                        "Save app logs to a file for debugging and support."
-                    ).size(12.0).color(Color32::DARK_GRAY));
-                    
+                    ui.label(
+                        RichText::new("Save app logs to a file for debugging and support.")
+                            .size(12.0)
+                            .color(Color32::DARK_GRAY),
+                    );
+
                     ui.add_space(12.0);
                     let support_color = Color32::from_rgb(76, 175, 80);
 
                     ui.horizontal(|ui| {
                         icon_badge(ui, "📤", support_color);
                         ui.add_space(8.0);
-                        if ui.add(egui::Button::new(
-                            RichText::new("Download logs").size(14.0).color(support_color),
-                        ).fill(Color32::TRANSPARENT).frame(false)).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("Download logs")
+                                        .size(14.0)
+                                        .color(support_color),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .frame(false),
+                            )
+                            .clicked()
+                        {
                             do_export = true;
                         }
                     });
                 });
             });
-            
+
         self.show_diagnostics_window = is_open;
         if do_export {
             if export_logs_to_zip() {
@@ -11463,8 +11738,7 @@ fn parse_incoming_sync(payload: &serde_json::Value) -> Option<IncomingSync> {
         return None;
     }
     let channel_id = channel_id.to_string();
-    let expected_usd =
-        stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
+    let expected_usd = stable::normalize_trade_expected_usd(payload.get("expected_usd")?.as_f64()?);
     let backing_sats = payload.get("backing_sats")?.as_u64()?;
     let sync_version = payload.get("sync_version")?.as_u64()?;
     if !expected_usd.is_finite()
@@ -11573,8 +11847,7 @@ fn local_trade_backing_sats(
     let post_fee_receiver_sats = live_receiver_sats
         .checked_sub(fee_sats)
         .ok_or(LocalTradeAllocationError::FeeExceedsBalance)?;
-    let receiver_usd =
-        post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
+    let receiver_usd = post_fee_receiver_sats as f64 / SATS_IN_BTC as f64 * current_price;
     if new_expected_usd > receiver_usd {
         return Err(LocalTradeAllocationError::TargetExceedsCapacity);
     }
@@ -11585,18 +11858,20 @@ fn local_trade_backing_sats(
         new_expected_usd,
         current_price,
     )
-    .ok_or(if new_expected_usd == 0.0
-        || trade_reduction_exhausts_backing(
-            current_backing_sats,
-            current_expected_usd,
-            new_expected_usd,
-            current_price,
-        )
-    {
-        LocalTradeAllocationError::SettlementRequired
-    } else {
-        LocalTradeAllocationError::UnsafeAllocation
-    })?;
+    .ok_or(
+        if new_expected_usd == 0.0
+            || trade_reduction_exhausts_backing(
+                current_backing_sats,
+                current_expected_usd,
+                new_expected_usd,
+                current_price,
+            )
+        {
+            LocalTradeAllocationError::SettlementRequired
+        } else {
+            LocalTradeAllocationError::UnsafeAllocation
+        },
+    )?;
     Ok((post_fee_receiver_sats, backing_sats))
 }
 
@@ -11605,48 +11880,19 @@ fn local_trade_backing_sats(
 /// binary search keeps this cheap even for large channels.
 fn max_sell_trade_usd_cents(
     live_receiver_sats: u64,
-    native_sats: u64,
+    spendable_sats: u64,
     current_backing_sats: u64,
     current_expected_usd: f64,
     current_price: f64,
 ) -> u64 {
-    if native_sats == 0
-        || !current_expected_usd.is_finite()
-        || current_expected_usd < 0.0
-        || !current_price.is_finite()
-        || current_price <= 0.0
-    {
-        return 0;
+    stable_channels::stabilization::SellSnapshot {
+        receiver_sats: live_receiver_sats,
+        spendable_sats,
+        backing_sats: current_backing_sats,
+        expected_usd: current_expected_usd,
+        price: current_price,
     }
-
-    let mut low = 0_u64;
-    let mut high = floor_usd_cents(native_sats as f64 / SATS_IN_BTC as f64 * current_price);
-    while low < high {
-        let distance = high - low;
-        let cents = low + distance / 2 + distance % 2;
-        let amount_usd = cents as f64 / 100.0;
-        let fee_usd = amount_usd * STABLE_CHANNEL_TRADE_FEE_RATE;
-        let fee_sats = (fee_usd / current_price * SATS_IN_BTC as f64) as u64;
-        let new_expected_usd = current_expected_usd + amount_usd - fee_usd;
-        let fits_native = sats_for_usd_cents(cents, current_price)
-            .is_some_and(|required_sats| required_sats <= native_sats);
-        let fits_allocation = fits_native
-            && local_trade_backing_sats(
-                live_receiver_sats,
-                fee_sats,
-                current_backing_sats,
-                current_expected_usd,
-                new_expected_usd,
-                current_price,
-            )
-            .is_ok();
-        if fits_allocation {
-            low = cents;
-        } else {
-            high = cents - 1;
-        }
-    }
-    low
+    .max_order_cents()
 }
 
 /// Derive the allocation this wallet will commit for an authenticated sync. The peer's
@@ -11764,9 +12010,9 @@ mod tests {
         btc_amount_to_msat, channel_balance_split, collapse_double_paste, floor_usd_cents,
         local_sync_backing_sats, local_trade_backing_sats, max_sell_trade_usd_cents,
         parse_incoming_sync, parse_trade_rejection, parse_trade_usd_cents,
-        restrict_secret_file_permissions, sats_for_usd_cents,
-        splice_in_overlap_sats, splice_reconcile_action, write_secret_file, IncomingSync,
-        LocalTradeAllocationError, PendingSplice, SpliceReconcileAction, UserApp,
+        restrict_secret_file_permissions, sats_for_usd_cents, splice_in_overlap_sats,
+        splice_reconcile_action, write_secret_file, IncomingSync, LocalTradeAllocationError,
+        PendingSplice, SpliceReconcileAction, UserApp,
     };
     use stable_channels::db::PendingTradeRow;
 
@@ -11799,31 +12045,68 @@ mod tests {
     }
 
     #[test]
-    fn sell_limit_accounts_for_stable_target_drift_and_trade_fee() {
-        // Production-shaped state: the native bucket is worth $7.70, but the backing is worth
-        // about $0.21 less than its $25.407 target. Only $7.50 can become a safe new target.
+    fn sell_limit_feedback_explains_the_reserve() {
         assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_304.40),
-            750,
-        );
-        assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_321.94),
-            751,
-        );
-        assert_eq!(
-            max_sell_trade_usd_cents(51_984, 12_174, 39_810, 25.407, 63_425.91),
-            756,
+            UserApp::stabilization_limit_message(123),
+            "Maximum additional trade: $1.23\nKeeps a small BTC reserve in the channel.",
         );
     }
 
     #[test]
-    fn sell_limit_allows_the_full_native_value_when_the_target_is_fully_backed() {
+    fn sell_limit_accounts_for_stable_target_drift_and_trade_fee() {
+        // Production-shaped drift, additionally constrained by the 99% cap and 50-sat
+        // client margin. The maximum must satisfy both constraints, not just raw native USD.
         assert_eq!(
-            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, 100_000.0),
-            5_000,
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_304.40),
+            734,
         );
         assert_eq!(
-            max_sell_trade_usd_cents(150_000, 50_000, 100_000, 100.0, f64::NAN),
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_321.94),
+            734,
+        );
+        assert_eq!(
+            max_sell_trade_usd_cents(51_984, 51_984, 39_810, 25.407, 63_425.91),
+            736,
+        );
+    }
+
+    #[test]
+    fn sell_maximum_fits_actual_prepared_allocation() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/stabilization-limits.json"))
+                .unwrap();
+        for v in vectors.as_array().unwrap() {
+            let receiver = v["receiver_sats"].as_u64().unwrap();
+            let spendable = v["spendable_sats"].as_u64().unwrap();
+            let backing = v["backing_sats"].as_u64().unwrap();
+            let expected = v["expected_usd"].as_f64().unwrap();
+            let price = v["price"].as_f64().unwrap();
+            let maximum = max_sell_trade_usd_cents(receiver, spendable, backing, expected, price);
+            if maximum == 0 {
+                continue;
+            }
+            let amount = maximum as f64 / 100.0;
+            let target = crate::stable::normalize_trade_expected_usd(
+                expected + (amount - amount * crate::constants::STABLE_CHANNEL_TRADE_FEE_RATE),
+            );
+            let fee =
+                stable_channels::stabilization::trade_fee_sats(expected, target, price).unwrap();
+            let (_, actual_backing) =
+                local_trade_backing_sats(receiver, fee, backing, expected, target, price).unwrap();
+            let limit =
+                stable_channels::stabilization::client_backing_limit(spendable - fee).unwrap();
+            assert!(actual_backing <= limit, "{v}");
+        }
+    }
+
+    #[test]
+    fn sell_limit_preserves_native_reserve_even_when_target_is_fully_backed() {
+        assert_eq!(
+            max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, 100_000.0),
+            4_845,
+        );
+        assert_eq!(
+            max_sell_trade_usd_cents(150_000, 150_000, 100_000, 100.0, f64::NAN),
             0,
         );
     }
@@ -12036,14 +12319,7 @@ mod tests {
             "an authenticated full-exit sync needs no local price",
         );
         assert_eq!(
-            local_sync_backing_sats(
-                &closed,
-                100_000,
-                100_001.0,
-                60.0,
-                59_999,
-                None,
-            ),
+            local_sync_backing_sats(&closed, 100_000, 100_001.0, 60.0, 59_999, None,),
             Ok(0),
             "a full exit with insignificant drift is safe",
         );
@@ -12366,7 +12642,9 @@ mod tests {
     fn closure_reason_structured_variants_and_unknown() {
         use ldk_node::lightning::events::ClosureReason;
 
-        let pe = Some(ClosureReason::ProcessingError { err: "bad htlc".to_string() });
+        let pe = Some(ClosureReason::ProcessingError {
+            err: "bad htlc".to_string(),
+        });
         let v = super::closure_reason_to_json(&pe);
         assert_eq!(v["kind"], "PROCESSING_ERROR");
         assert_eq!(v["err"], "bad htlc");
@@ -12406,7 +12684,10 @@ fn closure_reason_to_json(
         CR::CounterpartyForceClosed { peer_msg } => {
             json!({ "kind": "COUNTERPARTY_FORCE_CLOSED", "peer_msg": peer_msg.to_string() })
         }
-        CR::HolderForceClosed { broadcasted_latest_txn, message } => json!({
+        CR::HolderForceClosed {
+            broadcasted_latest_txn,
+            message,
+        } => json!({
             "kind": "HOLDER_FORCE_CLOSED",
             "broadcasted_latest_txn": broadcasted_latest_txn,
             "message": message,
@@ -12451,8 +12732,8 @@ fn export_logs_to_zip() -> bool {
     let zip_path = out_dir.join("stable_channels_logs.zip");
     if let Ok(file) = std::fs::File::create(&zip_path) {
         let mut zip = zip::ZipWriter::new(file);
-        let options = zip::write::FileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         // ldk-node's default filesystem logger writes to `ldk_node.log`; keep the hyphenated
         // name as a fallback in case a custom logger path is configured.
         for filename in &["audit_log.txt", "ldk_node.log", "ldk-node.log"] {

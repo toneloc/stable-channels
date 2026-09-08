@@ -131,6 +131,7 @@ class TradeDatabaseServiceTest {
             latestPrice = 100_000.0
         )
         val prepared = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = StableChannel(
                 channelId = identifier,
                 userChannelId = "7",
@@ -192,6 +193,7 @@ class TradeDatabaseServiceTest {
         )
 
         val superseded = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = StableChannel(
                 channelId = identifier,
                 userChannelId = "7",
@@ -249,6 +251,7 @@ class TradeDatabaseServiceTest {
 
         // Rejected trade: outcome must surface with the persisted reason code.
         val rejectedTrade = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = StableChannel(
                 channelId = identifier,
                 userChannelId = "7",
@@ -283,6 +286,7 @@ class TradeDatabaseServiceTest {
 
         // Accepted trade: outcome must flip to accepted with no reason code.
         val acceptedTrade = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = StableChannel(
                 channelId = identifier,
                 userChannelId = "7",
@@ -328,6 +332,7 @@ class TradeDatabaseServiceTest {
         val paymentId = "34".repeat(32)
         val service = DatabaseService(context)
         val prepared = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = StableChannel(
                 channelId = channelId,
                 userChannelId = "9",

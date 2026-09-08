@@ -26,11 +26,7 @@ struct SellView: View {
     private var tradePrice: Double { appState.accountingBTCPrice }
 
     private var maxSellUSD: Double {
-        guard tradePrice > 0 else { return 0 }
-        let stableSats = UInt64(appState.stableUSD / tradePrice * Double(Constants.satsInBTC))
-        let nativeSats = appState.lightningBalanceSats > stableSats
-            ? appState.lightningBalanceSats - stableSats : 0
-        return Double(nativeSats) / Double(Constants.satsInBTC) * tradePrice
+        Double(appState.tradeService?.maxSellCents(sc: appState.stableChannel, price: tradePrice) ?? 0) / 100
     }
 
     private var amountUSD: Double {
@@ -110,14 +106,15 @@ struct SellView: View {
                     .foregroundStyle(.secondary)
             }
 
-            let availableStr = String(localized: "available_native_btc", defaultValue: "Available: ") + maxSellUSD
-                .usdFormatted + " in native BTC"
-            Text(availableStr)
+            Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
                 .foregroundStyle(.secondary)
-
+            Button(String(localized: "button_max", defaultValue: "Max")) {
+                amountStr = String(format: "%.2f", maxSellUSD)
+            }
             if amountUSD > maxSellUSD && amountUSD > 0 {
-                Text(String(localized: "error_exceeds_native", defaultValue: "Exceeds available native BTC"))
+                Text(StabilizationPolicy.limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)))
                     .font(.caption)
+                    .multilineTextAlignment(.center)
                     .foregroundStyle(.red)
             }
 
@@ -233,9 +230,8 @@ struct SellView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
-                Image(systemName: "clock.circle.fill")
-                    .font(.system(size: 64))
-                    .foregroundStyle(.orange)
+                CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
+                    .padding(.bottom, 4)
 
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
@@ -246,9 +242,6 @@ struct SellView: View {
                 ) + " BTC for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-
-                ProgressView()
-                    .padding(.top, 4)
 
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Waiting for LSP confirmation..."))
                     .font(.caption)
@@ -291,14 +284,12 @@ struct SellView: View {
             isExecuting = false
             return
         }
-        let totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, price: price).amount
         do {
             guard let result = try appState.tradeService?.executeSell(
                 sc: sc,
                 amountUSD: amountUSD,
                 feeUSD: feeUSD,
-                price: price,
-                maxUSD: totalUSD
+                price: price
             ) else {
                 errorMessage = String(
                     localized: "error_trade_failed",
@@ -325,4 +316,27 @@ struct SellView: View {
         }
         isExecuting = false
     }
+}
+
+#Preview("Sell - Order Pending") {
+    VStack(spacing: 20) {
+        CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
+            .padding(.bottom, 4)
+
+        Text("Order Pending")
+            .font(.title2.bold())
+
+        Text("Converting 0.00500000 BTC for $485.20")
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+
+        Text("Waiting for LSP confirmation...")
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+
+        Button("Done") { }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+    }
+    .padding()
 }

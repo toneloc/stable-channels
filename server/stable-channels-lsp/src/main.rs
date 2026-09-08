@@ -125,10 +125,11 @@ async fn main() -> Result<()> {
     let push_service = crate::push::PushService::new(&push_cfg, &data_dir);
     info!("push service initialized");
 
-    let stable_manager = crate::stable_manager::StableChannelManager::new(
+    let mut stable_manager = crate::stable_manager::StableChannelManager::new(
         Arc::clone(&db_arc),
         data_dir.clone(),
     );
+    stable_manager.enforce_max_stabilization = cfg.enforce_max_stabilization;
 
     let state = AppState {
         ldk_server: Arc::new(ldk_server),

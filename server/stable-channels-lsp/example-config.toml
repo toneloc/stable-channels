@@ -2,6 +2,9 @@
 #
 # Run: cargo run -p stable-channels-lsp -- /path/to/this/file
 
+# Audit-only by default. Enable after the documented client rollout; restart to apply.
+enforce_max_stabilization = false
+
 [node]
 # Where the SC daemon's REST API listens. Clients (GUI, iOS, Android) hit this.
 rest_service_address = "127.0.0.1:3002"
