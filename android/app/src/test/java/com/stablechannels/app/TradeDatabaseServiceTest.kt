@@ -362,6 +362,91 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun correlatedAcceptanceIsInvalidNotRetryWhenChannelHasBeenDeleted() {
+        // Simulates a signed trade-sync arriving for a channel that has since closed:
+        // deleteChannel() removes the row, and this must resolve permanently (INVALID)
+        // rather than RETRY, since a closed channel's row can never reappear and would
+        // otherwise retry forever, blocking every later LDK event behind it.
+        val identifier = "ab".repeat(32)
+        val paymentId = "cd".repeat(32)
+        val tradeId = "ef".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 50.0,
+            backingSats = 55_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0
+        )
+        val prepared = TradeProtocol.prepare(
+            sc = StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(50.0),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 55_000
+            ),
+            spendableSats = 100_000,
+            action = "sell",
+            amountUsd = 10.0,
+            amountBtc = 0.000099,
+            feeUsd = 0.1,
+            newExpectedUsd = 59.9,
+            quotePrice = 100_000.0,
+            tradeId = tradeId
+        )!!
+        val tradeDbId = service.recordPreparedTrade(prepared)
+        service.attachTradePaymentId(tradeDbId, paymentId)
+        service.deleteChannel("7")
+
+        val sync = TradeControlMessage.Sync(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUsd = prepared.newExpectedUsd,
+            backingSats = prepared.newBackingSats,
+            syncVersion = 1,
+            correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash)
+        )
+        assertEquals(
+            TradeControlApplyStatus.INVALID,
+            service.applyCorrelatedTradeAcceptance(sync).status
+        )
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncIsInvalidNotRetryWhenChannelHasBeenDeleted() {
+        val identifier = "ab".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 50.0,
+            backingSats = 55_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0
+        )
+        service.deleteChannel("7")
+
+        val sync = TradeControlMessage.Sync(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUsd = 40.0,
+            backingSats = 40_000,
+            syncVersion = 1,
+            correlation = null
+        )
+        assertEquals(
+            TradeControlApplyStatus.INVALID,
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+        )
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }

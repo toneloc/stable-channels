@@ -693,7 +693,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (!c.moveToFirst()) null else arrayOf<Any>(
                     c.getString(0), c.getLong(1), c.getLong(2), c.getLong(3)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            } // A missing row means the channel has since closed (deleteChannel runs on close) —
+              // that's permanent, not a transient race, so give up rather than retry forever.
+                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (channel[0] as String != sync.channelId) {
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
@@ -824,7 +826,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (!c.moveToFirst()) null else arrayOf<Any>(
                     c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4)
                 )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            } // A missing row means the channel has since closed (deleteChannel runs on close) —
+              // that's permanent, not a transient race, so give up rather than retry forever.
+                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (row[0] as String != sync.channelId) return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val currentVersion = row[4] as Long
             if (sync.syncVersion <= currentVersion) {
@@ -1179,11 +1183,42 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { it.moveToFirst() }
     }
 
-    fun updatePaymentTxid(paymentId: String, txid: String) {
-        val cv = ContentValues().apply {
-            put("txid", txid)
+    /** Only writes if the row is still txid-less and no other row already claims this txid —
+     *  txid is the unique identity for a payment, so a stale/racing caller must never overwrite
+     *  an already-resolved row nor attach the same txid to two rows. Returns whether it wrote.
+     *
+     *  The uniqueness guard is keyed on the row's own primary key (`id`), not `payment_id`:
+     *  `payment_id` can be NULL on other rows (e.g. some channel-close bookkeeping paths), and
+     *  `payment_id != ?` evaluates to NULL/unknown for a NULL `payment_id` — SQLite then excludes
+     *  that row from the `NOT EXISTS` subquery, silently defeating the duplicate-txid check for
+     *  exactly the rows that most need it. `id` is never NULL, so this can't happen. */
+    fun updatePaymentTxid(paymentId: String, txid: String): Boolean {
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val rowId = db.rawQuery(
+                "SELECT id FROM payments WHERE payment_id = ? AND (txid IS NULL OR txid = '') LIMIT 1",
+                arrayOf(paymentId)
+            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+            if (rowId == null) {
+                db.execSQL("ROLLBACK")
+                return false
+            }
+            val cv = ContentValues().apply {
+                put("txid", txid)
+            }
+            val updated = db.update(
+                "payments",
+                cv,
+                "id = ? AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)",
+                arrayOf(rowId.toString(), txid, rowId.toString())
+            )
+            db.execSQL("COMMIT")
+            return updated > 0
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
         }
-        writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
     }
 
     private data class PendingPlaceholder(val id: Long, val amountMsat: Long)

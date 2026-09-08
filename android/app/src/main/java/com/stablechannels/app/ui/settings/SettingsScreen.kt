@@ -69,6 +69,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     showRestore = false
                     restoreMnemonic = ""
                     restoreError = null
+                    appState.resetInMemoryWalletState()
                     appState.refreshBalances()
                 }
             } catch (e: Exception) {

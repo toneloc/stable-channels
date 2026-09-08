@@ -1,6 +1,7 @@
 package com.stablechannels.app
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -79,6 +80,379 @@ class AppState(private val context: Context) : ViewModel() {
         // Covers ordinary quick app-switches without keeping an unserviced cached Android
         // process in control of the node for longer than the common return window.
         private const val QUICK_SWITCH_GRACE_MS = 10_000L
+
+        data class ChannelState(
+            val hasReady: Boolean,
+            val hasAnyChannel: Boolean = false,
+            val isChannelClosing: Boolean = false,
+            val isOpeningChannel: Boolean = false,
+            val isSweeping: Boolean = false
+        )
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            pendingSweep: Long = 0L,
+            channelState: ChannelState
+        ): Long {
+            return when {
+                channelState.isChannelClosing -> onchain
+                channelState.isOpeningChannel -> if (lightning > 0) lightning else onchain
+                channelState.isSweeping -> lightning
+                !channelState.hasReady && !channelState.hasAnyChannel -> onchain + pendingSweep
+                else -> lightning + onchain
+            }
+        }
+
+        fun calculateTotalBalance(
+            lightning: Long,
+            onchain: Long,
+            hasReady: Boolean,
+            isChannelClosing: Boolean = false,
+            isSweeping: Boolean = false,
+            pendingSweep: Long = 0L,
+            isOpeningChannel: Boolean = false,
+            hasAnyChannel: Boolean = false
+        ): Long = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            pendingSweep = pendingSweep,
+            channelState = ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = hasAnyChannel,
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping
+            )
+        )
+
+        fun requiredConfirmationsForType(paymentType: String): Int {
+            return when (paymentType) {
+                "splice_in", "splice_out" -> 1
+                else -> 6
+            }
+        }
+
+        object BalanceCacheKey {
+            const val PREFS_NAME = "balance_cache"
+            const val LIGHTNING = "cached_lightning_sats"
+            const val ONCHAIN = "cached_onchain_sats"
+            const val SPENDABLE = "cached_spendable_sats"
+            const val NATIVE = "cached_native_sats"
+            const val PENDING_AMOUNT = "pending_outbound_onchain_sats"
+            const val PENDING_IS_SEND_ALL = "pending_outbound_is_send_all"
+            const val PENDING_BASELINE = "pending_outbound_baseline_sats"
+            const val PENDING_TIMESTAMP = "pending_outbound_timestamp_secs"
+            const val RECEIVE_ADDRESS = "onchain_receive_address"
+            const val LAST_RECEIVE_TXID = "last_receive_txid"
+            const val LAST_RECEIVE_TXID_ADDRESS = "last_receive_txid_address"
+            const val LAST_CLOSE_TXID = "last_close_txid"
+            const val LAST_CLOSE_TXID_AT = "last_close_txid_at"
+            const val FUNDING_TXID = "funding_txid"
+            const val CLOSING_FUNDING_TXID = "closing_funding_txid"
+            const val CACHED_CHANNEL_ID = "cached_channel_id"
+            const val CACHED_USER_CHANNEL_ID = "cached_user_channel_id"
+            const val CACHED_EXPECTED_USD = "cached_expected_usd"
+            const val PENDING_TXIDS = "pending_outbound_txids"
+
+            fun clearPendingOutbound(context: Context) {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit()
+                    .remove(PENDING_AMOUNT)
+                    .remove(PENDING_IS_SEND_ALL)
+                    .remove(PENDING_BASELINE)
+                    .remove(PENDING_TIMESTAMP)
+                    .remove(PENDING_TXIDS)
+                    .apply()
+            }
+
+            fun clearAll(context: Context) {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit().clear().apply()
+            }
+        }
+
+        /** A single pending broadcast entry pairing a transaction id with its sent amount.
+         * Enables per-transaction resolution so mixed succeeded/failed batches release
+         * only the resolved portion instead of blocking the entire aggregate. */
+        data class TxEntry(val txid: String, val amountSats: Long)
+
+        data class PendingOutboundSend(
+            val isSendAll: Boolean = false,
+            val baselineOnchainSats: Long = 0L,
+            val timestampSecs: Long = System.currentTimeMillis() / 1000L,
+            val entries: List<TxEntry> = emptyList()
+        ) {
+            /** Backward-compatible constructor accepting aggregate amount and flat txid list. */
+            constructor(
+                amountSats: Long,
+                isSendAll: Boolean = false,
+                baselineOnchainSats: Long = 0L,
+                timestampSecs: Long = System.currentTimeMillis() / 1000L,
+                txids: List<String> = emptyList()
+            ) : this(
+                isSendAll = isSendAll,
+                baselineOnchainSats = baselineOnchainSats,
+                timestampSecs = timestampSecs,
+                entries = if (txids.isNotEmpty() && amountSats > 0L) {
+                    val perTx = amountSats / txids.size
+                    val remainder = amountSats % txids.size
+                    txids.mapIndexed { i, tid ->
+                        TxEntry(tid, perTx + if (i.toLong() < remainder) 1L else 0L)
+                    }
+                } else if (amountSats > 0L) {
+                    listOf(TxEntry("", amountSats))
+                } else {
+                    emptyList()
+                }
+            )
+
+            /** Aggregate pending amount across all unresolved entries. */
+            val amountSats: Long get() = entries.sumOf { it.amountSats }
+            /** All pending txids for predicate checks. */
+            val txids: List<String> get() = entries.map { it.txid }
+            /** First broadcast txid, if any. */
+            val txid: String? get() = entries.firstOrNull()?.txid
+
+            companion object {
+                /** Backward-compatible factory: delegates to legacy constructor. */
+                fun fromLegacy(
+                    amountSats: Long,
+                    isSendAll: Boolean,
+                    baselineOnchainSats: Long,
+                    timestampSecs: Long,
+                    txids: List<String>
+                ): PendingOutboundSend = PendingOutboundSend(
+                    amountSats = amountSats,
+                    isSendAll = isSendAll,
+                    baselineOnchainSats = baselineOnchainSats,
+                    timestampSecs = timestampSecs,
+                    txids = txids
+                )
+            }
+        }
+
+        /**
+         * Derives user-facing on-chain and spendable balances by subtracting any pending
+         * outbound send that has not yet been incorporated into LDK/BDK's raw wallet view.
+         */
+        fun calculateEffectiveBalances(
+            rawOnchain: Long,
+            rawSpendable: Long,
+            pending: PendingOutboundSend
+        ): Pair<Long, Long> {
+            if (pending.isSendAll) {
+                return Pair(0L, 0L)
+            }
+            val amount = pending.amountSats
+            if (amount > 0L) {
+                val rawDrop = if (rawOnchain < pending.baselineOnchainSats) {
+                    pending.baselineOnchainSats - rawOnchain
+                } else {
+                    0L
+                }
+                val pendingToDeduct = if (amount > rawDrop) {
+                    amount - rawDrop
+                } else {
+                    0L
+                }
+                val onchain = (rawOnchain - pendingToDeduct).coerceAtLeast(0L)
+                val spendable = (rawSpendable - pendingToDeduct).coerceAtLeast(0L)
+                return Pair(onchain, spendable)
+            }
+            return Pair(rawOnchain, rawSpendable)
+        }
+
+        /**
+         * Resolves pending outbound send state against a fresh raw on-chain balance observation.
+         * Performs per-txid resolution: transactions whose authoritative status is known
+         * (incorporated or failed) are removed individually, allowing partial clearing of
+         * mixed-status batches instead of all-or-nothing.
+         * Fails closed during extended indexer/node outages to prevent re-exposing spent funds.
+         */
+        fun resolvePendingOutboundSend(
+            rawOnchain: Long,
+            pending: PendingOutboundSend,
+            currentTimestampSecs: Long = System.currentTimeMillis() / 1000L,
+            ttlSecs: Long = 600L,
+            isTxIncorporated: ((String) -> Boolean)? = null,
+            isTxFailed: ((String) -> Boolean)? = null,
+            isTxConfirmed: ((String) -> Boolean)? = null
+        ): PendingOutboundSend {
+            val incorporated = isTxIncorporated ?: isTxConfirmed
+            if (pending.amountSats == 0L && !pending.isSendAll) {
+                return pending
+            }
+
+            // 1. Per-txid resolution: remove entries whose txid has a terminal or incorporated status.
+            var unresolvedEntries = pending.entries
+            if (unresolvedEntries.isNotEmpty()) {
+                unresolvedEntries = unresolvedEntries.filter { entry ->
+                    if (entry.txid.isBlank()) return@filter true
+                    // Failed transactions: release the deduction (funds were never spent).
+                    if (isTxFailed != null && isTxFailed(entry.txid)) return@filter false
+                    // Incorporated transactions: wallet already reflects the spend.
+                    if (incorporated != null && incorporated(entry.txid)) return@filter false
+                    true
+                }
+                // If all entries resolved, clear the entire record.
+                if (unresolvedEntries.isEmpty()) {
+                    return PendingOutboundSend()
+                }
+                // If some entries resolved, re-check raw balance drop against the reduced aggregate.
+                if (unresolvedEntries.size < pending.entries.size) {
+                    val resolved = PendingOutboundSend(
+                        isSendAll = pending.isSendAll,
+                        baselineOnchainSats = pending.baselineOnchainSats,
+                        timestampSecs = pending.timestampSecs,
+                        entries = unresolvedEntries
+                    )
+                    return resolveByBalanceDrop(rawOnchain, resolved)
+                }
+            }
+
+            // 2. No per-txid resolution occurred; check raw balance drop.
+            return resolveByBalanceDrop(rawOnchain, pending)
+        }
+
+        /** Checks whether the raw on-chain balance has dropped enough to account for the
+         * remaining pending deduction. Pure helper for resolvePendingOutboundSend. */
+        private fun resolveByBalanceDrop(
+            rawOnchain: Long,
+            pending: PendingOutboundSend
+        ): PendingOutboundSend {
+            if (pending.isSendAll) {
+                if (rawOnchain == 0L) return PendingOutboundSend()
+                return pending
+            }
+            val amount = pending.amountSats
+            if (amount > 0L) {
+                val expectedRemaining = (pending.baselineOnchainSats - amount).coerceAtLeast(0L)
+                if (rawOnchain <= expectedRemaining) return PendingOutboundSend()
+                // Fail closed: retain deduction until authoritative reconciliation.
+                return pending
+            }
+            return pending
+        }
+
+        /**
+         * Pure helper to evaluate if a background wallet sync completion owns the active send generation
+         * and succeeded, preventing older out-of-order syncs from clearing newer pending broadcasts.
+         */
+        fun shouldClearPendingOnSyncCompletion(
+            expectedGeneration: Long,
+            currentGeneration: Long,
+            syncSuccess: Boolean
+        ): Boolean {
+            return syncSuccess && expectedGeneration == currentGeneration
+        }
+
+        /**
+         * Records an immediate outbound send broadcast and returns the updated pending state.
+         * Pure helper ensuring architectural parity with iOS BalanceCalculator.recordBroadcast.
+         */
+        fun recordBroadcast(
+            currentPending: PendingOutboundSend,
+            amountSats: Long,
+            isSendAll: Boolean,
+            currentOnchain: Long,
+            timestampSecs: Long = System.currentTimeMillis() / 1000L,
+            txid: String? = null
+        ): PendingOutboundSend {
+            val baseline = if (currentPending.baselineOnchainSats == 0L) {
+                currentOnchain
+            } else {
+                currentPending.baselineOnchainSats
+            }
+            val sendAmount = if (isSendAll) currentOnchain else amountSats
+            val updatedEntries = currentPending.entries.toMutableList()
+            if (!txid.isNullOrBlank()) {
+                if (updatedEntries.none { it.txid == txid }) {
+                    updatedEntries.add(TxEntry(txid, sendAmount))
+                }
+            } else {
+                // No txid available yet; append an anonymous entry.
+                updatedEntries.add(TxEntry("", sendAmount))
+            }
+
+            return PendingOutboundSend(
+                isSendAll = isSendAll || currentPending.isSendAll,
+                baselineOnchainSats = baseline,
+                timestampSecs = timestampSecs,
+                entries = updatedEntries
+            )
+        }
+
+        /**
+         * Deserializes cached pending outbound send state from SharedPreferences.
+         * Supports per-txid colon-delimited format as well as legacy flat comma-delimited txid lists.
+         */
+        fun loadCachedPendingOutboundSend(prefs: SharedPreferences): PendingOutboundSend {
+            val pendingAmount = prefs.getLong(BalanceCacheKey.PENDING_AMOUNT, 0L)
+            val pendingIsSendAll = prefs.getBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, false)
+            val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
+            val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
+            val pendingTxidsStr = prefs.getString(BalanceCacheKey.PENDING_TXIDS, "") ?: ""
+
+            if (pendingAmount == 0L && !pendingIsSendAll) {
+                return PendingOutboundSend(
+                    isSendAll = false,
+                    baselineOnchainSats = 0L,
+                    timestampSecs = 0L,
+                    entries = emptyList()
+                )
+            }
+
+            val parts = if (pendingTxidsStr.isNotBlank()) {
+                pendingTxidsStr.split(",").filter { it.isNotBlank() }
+            } else {
+                emptyList()
+            }
+            val hasEntryFormat = parts.any { it.contains(":") }
+
+            val entries: List<TxEntry> = if (hasEntryFormat) {
+                parts.mapNotNull { part ->
+                    val components = part.split(":", limit = 2)
+                    if (components.size == 2) {
+                        val amt = components[1].toLongOrNull() ?: return@mapNotNull null
+                        TxEntry(components[0], amt)
+                    } else null
+                }
+            } else {
+                // Legacy path: distribute stored aggregate across txids.
+                if (parts.isNotEmpty() && pendingAmount > 0L) {
+                    val perTx = pendingAmount / parts.size
+                    val remainder = pendingAmount % parts.size
+                    parts.mapIndexed { i, tid ->
+                        TxEntry(tid, perTx + if (i.toLong() < remainder) 1L else 0L)
+                    }
+                } else if (pendingAmount > 0L) {
+                    listOf(TxEntry("", pendingAmount))
+                } else {
+                    emptyList()
+                }
+            }
+
+            return PendingOutboundSend(
+                isSendAll = pendingIsSendAll,
+                baselineOnchainSats = pendingBaseline,
+                timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L),
+                entries = entries
+            )
+        }
+
+        /**
+         * Serializes pending outbound send state to SharedPreferences.
+         */
+        fun persistPendingOutboundSend(editor: SharedPreferences.Editor, pending: PendingOutboundSend) {
+            editor
+                .putLong(BalanceCacheKey.PENDING_AMOUNT, pending.amountSats)
+                .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pending.isSendAll)
+                .putLong(BalanceCacheKey.PENDING_BASELINE, pending.baselineOnchainSats)
+                .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pending.timestampSecs)
+                .putString(
+                    BalanceCacheKey.PENDING_TXIDS,
+                    pending.entries.joinToString(",") { "${it.txid}:${it.amountSats}" }
+                )
+        }
     }
 
     val nodeService = NodeService(context)
@@ -87,6 +461,31 @@ class AppState(private val context: Context) : ViewModel() {
         private set
     var tradeService: TradeService? = null
         private set
+    // Bounds how long a stuck signed trade-sync message can keep retrying before we give up on
+    // it, since NodeService's event queue is strictly sequential and won't process the next LDK
+    // event (e.g. Event.ChannelClosed) until this one is acknowledged. Backed by SharedPreferences
+    // (not just in-memory) because LDK persists an un-acked event and redelivers it after the app
+    // process restarts — which Android can do well before 5 continuous minutes of foreground time
+    // ever accumulate, so an in-memory-only clock would reset every restart and never give up.
+    private val syncRetryTracker = SyncRetryTracker(
+        loadFirstAttempt = { key ->
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .getLong("first_attempt_$key", -1L)
+                .takeIf { it >= 0 }
+        },
+        saveFirstAttempt = { key, ts ->
+            // commit() (synchronous, blocks until written) instead of apply() (async): apply()'s
+            // write can still be pending when Android SIGKILLs the process (background limits,
+            // low memory), which has no graceful-shutdown hook to flush it — losing the very
+            // timestamp this mechanism exists to survive process death for.
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .edit().putLong("first_attempt_$key", ts).commit()
+        },
+        clearFirstAttempt = { key ->
+            context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
+                .edit().remove("first_attempt_$key").commit()
+        }
+    )
     private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
 
     private val _phase = MutableStateFlow(Phase.LOADING)
@@ -133,6 +532,8 @@ class AppState(private val context: Context) : ViewModel() {
     val totalBalanceSats: StateFlow<Long> get() = _totalBalanceSats
     private val _hasReadyChannel = MutableStateFlow(false)
     val hasReadyChannel: StateFlow<Boolean> get() = _hasReadyChannel
+    private val _pendingSweepBalanceSats = MutableStateFlow(0L)
+    val pendingSweepBalanceSats: StateFlow<Long> get() = _pendingSweepBalanceSats
 
     private val _onchainReceiveAddress = MutableStateFlow<String?>(null)
     val onchainReceiveAddress: StateFlow<String?> get() = _onchainReceiveAddress
@@ -146,13 +547,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun setLastCloseTxid(txid: String?) {
         _lastCloseTxid.value = txid
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (txid != null) {
-            editor.putString("last_close_txid", txid)
-            editor.putLong("last_close_txid_at", System.currentTimeMillis())
+            editor.putString(BalanceCacheKey.LAST_CLOSE_TXID, txid)
+            editor.putLong(BalanceCacheKey.LAST_CLOSE_TXID_AT, System.currentTimeMillis())
         } else {
-            editor.remove("last_close_txid")
-            editor.remove("last_close_txid_at")
+            editor.remove(BalanceCacheKey.LAST_CLOSE_TXID)
+            editor.remove(BalanceCacheKey.LAST_CLOSE_TXID_AT)
         }
         editor.apply()
     }
@@ -161,57 +562,71 @@ class AppState(private val context: Context) : ViewModel() {
         _lastReceiveTxid.value = txid
         lastReceiveTxidAddress = address
 
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
         if (txid.isNullOrBlank()) {
-            editor.remove("last_receive_txid")
-            editor.remove("last_receive_txid_address")
+            editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID)
+            editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS)
         } else {
-            editor.putString("last_receive_txid", txid)
+            editor.putString(BalanceCacheKey.LAST_RECEIVE_TXID, txid)
             if (!address.isNullOrBlank()) {
-                editor.putString("last_receive_txid_address", address)
+                editor.putString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, address)
             } else {
-                editor.remove("last_receive_txid_address")
+                editor.remove(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS)
             }
         }
         editor.apply()
     }
 
+    fun resetInMemoryWalletState() {
+        synchronized(pendingLock) {
+            sendGeneration++
+            pendingOutboundSend = PendingOutboundSend()
+        }
+        BalanceCacheKey.clearAll(context)
+    }
 
     private val _spendableOnchainSats = MutableStateFlow(
-        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).getLong("cached_spendable_sats", 0L)
+        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).getLong(BalanceCacheKey.SPENDABLE, 0L)
     )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
+
+    private val pendingLock = Any()
+    private var sendGeneration: Long = 0L
+
+    @Volatile
+    var pendingOutboundSend: PendingOutboundSend = PendingOutboundSend()
+        private set
 
     private val _nativeSats: MutableStateFlow<Long>
     val nativeSats: StateFlow<Long> get() = _nativeSats
 
     init {
-        val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-        val cachedLightning = prefs.getLong("cached_lightning_sats", 0L)
-        val cachedOnchain = prefs.getLong("cached_onchain_sats", 0L)
+        val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+        val cachedLightning = prefs.getLong(BalanceCacheKey.LIGHTNING, 0L)
+        val cachedOnchain = prefs.getLong(BalanceCacheKey.ONCHAIN, 0L)
+        pendingOutboundSend = loadCachedPendingOutboundSend(prefs)
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
-                _nativeSats = MutableStateFlow(prefs.getLong("cached_native_sats", 0L))
-        _onchainReceiveAddress.value = prefs.getString("onchain_receive_address", null)
-        _lastReceiveTxid.value = prefs.getString("last_receive_txid", null)
-        lastReceiveTxidAddress = prefs.getString("last_receive_txid_address", null)
+        _nativeSats = MutableStateFlow(prefs.getLong(BalanceCacheKey.NATIVE, 0L))
+        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)
+        _lastReceiveTxid.value = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID, null)
+        lastReceiveTxidAddress = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, null)
 
-        val closeAt = prefs.getLong("last_close_txid_at", 0L)
+        val closeAt = prefs.getLong(BalanceCacheKey.LAST_CLOSE_TXID_AT, 0L)
         if (System.currentTimeMillis() - closeAt < 7 * 86400 * 1000L) {
-            _lastCloseTxid.value = prefs.getString("last_close_txid", null)
+            _lastCloseTxid.value = prefs.getString(BalanceCacheKey.LAST_CLOSE_TXID, null)
         } else {
             prefs.edit()
-                .remove("last_close_txid")
-                .remove("last_close_txid_at")
+                .remove(BalanceCacheKey.LAST_CLOSE_TXID)
+                .remove(BalanceCacheKey.LAST_CLOSE_TXID_AT)
                 .apply()
         }
 
-
         // Restore cached channel state so UI shows correct slider position immediately
-        val cachedChannelId = prefs.getString("cached_channel_id", null)
-        val cachedUserChannelId = prefs.getString("cached_user_channel_id", null)
-        val cachedExpectedUsd = prefs.getFloat("cached_expected_usd", 0f)
+        val cachedChannelId = prefs.getString(BalanceCacheKey.CACHED_CHANNEL_ID, null)
+        val cachedUserChannelId = prefs.getString(BalanceCacheKey.CACHED_USER_CHANNEL_ID, null)
+        val cachedExpectedUsd = prefs.getFloat(BalanceCacheKey.CACHED_EXPECTED_USD, 0f)
         if (cachedUserChannelId != null) {
             _stableChannel.value = StableChannel.defaultWithLsp(context).copy(
                 channelId = cachedChannelId ?: "",
@@ -282,6 +697,13 @@ class AppState(private val context: Context) : ViewModel() {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
     var pendingSplice: PendingSplice? = null
+    private val _isOpeningChannel = MutableStateFlow(false)
+    val isOpeningChannelFlow: StateFlow<Boolean> = _isOpeningChannel
+    var isOpeningChannel: Boolean
+        get() = _isOpeningChannel.value
+        set(value) {
+            _isOpeningChannel.value = value
+        }
     private val _isChannelClosing = MutableStateFlow(false)
     val isChannelClosingFlow: StateFlow<Boolean> = _isChannelClosing
     var isChannelClosing: Boolean
@@ -316,6 +738,15 @@ class AppState(private val context: Context) : ViewModel() {
             field = value
             context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
                 .putString("funding_txid", value).apply()
+        }
+    // Mirrors fundingTxid: the real output index of the channel's funding transaction, needed
+    // so CloseTxidResolver polls the correct /tx/{txid}/outspend/{vout} endpoint instead of
+    // assuming vout 0 (a funding output isn't always at index 0 — see #264).
+    var fundingVout: Int? = null
+        set(value) {
+            field = value
+            context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
+                .putInt("funding_vout", value ?: -1).apply()
         }
 
     private val _paymentFlash = MutableStateFlow(false)
@@ -428,8 +859,9 @@ class AppState(private val context: Context) : ViewModel() {
                     _isSyncing.value = false
                     // Restore the known funding txid before the first live balance refresh so
                     // an ordinary cold start is not mistaken for a funding transition.
-                    fundingTxid = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-                        .getString("funding_txid", null)
+                    val balanceCachePrefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                    fundingTxid = balanceCachePrefs.getString("funding_txid", null)
+                    fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
                     connectMempoolWebSocket()
@@ -444,9 +876,16 @@ class AppState(private val context: Context) : ViewModel() {
                             if (!dbTxid.isNullOrEmpty()) {
                                 setLastCloseTxid(dbTxid)
                             } else {
-                                // Resume background resolver if it hasn't found the TX yet
+                                // Resume background resolver if it hasn't found the TX yet.
+                                // An unknown vout must NOT default to 0 — that's a real, possibly
+                                // different output of the same funding tx, and CloseTxidResolver
+                                // would accept whatever spent it as the close txid (see #264).
+                                // Leave the row unresolved instead of guessing; it will resolve
+                                // once fundingVout is known (e.g. after refreshBalances() backfills
+                                // it on the next tick, if the channel is still visible to LDK).
                                 val closeFundingTxid = fundingTxid
-                                if (closeFundingTxid != null && databaseService != null) {
+                                val closeVout = fundingVout
+                                if (closeFundingTxid != null && closeVout != null && databaseService != null) {
                                     trackedClosingFundingTxid = closeFundingTxid
                                     mempoolWebSocketService.trackTx(closeFundingTxid)
                                     val resolver = CloseTxidResolver(
@@ -462,10 +901,12 @@ class AppState(private val context: Context) : ViewModel() {
                                         resolver.resolve(
                                             paymentId = pendingCloseId,
                                             fundingTxid = closeFundingTxid,
-                                            vout = 0,
+                                            vout = closeVout,
                                             databaseService = databaseService!!
                                         )
                                     }
+                                } else if (closeFundingTxid != null && closeVout == null) {
+                                    AuditService.log("CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT", mapOf("payment_id" to pendingCloseId))
                                 }
                             }
                         }
@@ -880,6 +1321,7 @@ class AppState(private val context: Context) : ViewModel() {
                 sc.userChannelId = event.userChannelId
                 _stableChannel.value = sc
                 fundingTxid = event.fundingTxo.txid
+                fundingVout = event.fundingTxo.vout.toInt()
                 refreshBalances()
                 AuditService.log("CHANNEL_PENDING", mapOf(
                     "channel_id" to event.channelId,
@@ -1083,8 +1525,17 @@ class AppState(private val context: Context) : ViewModel() {
         isWaitingForPayment = false
         // Check for sync message
         if (handleSyncMessage(customRecords, paymentHash, amountMsat)) {
-            refreshBalances()
-            updateStableBalances()
+            // The sync message itself is already resolved (applied/invalid/duplicate/given-up).
+            // A failure refreshing UI-facing balances afterward must not cause the whole event
+            // to be redelivered — NodeService can't tell "sync failed" from "balance refresh
+            // failed" once it retries the raw event, so that would silently restart a fresh
+            // 5-minute syncRetryTracker window for a message that already gave up.
+            try {
+                refreshBalances()
+                updateStableBalances()
+            } catch (e: Exception) {
+                Log.e("AppState", "Post-sync balance refresh failed", e)
+            }
             return
         }
 
@@ -1168,6 +1619,43 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    // Retries the current LDK event (by throwing RetryableSyncException, which NodeService
+    // catches and re-delivers the same un-acked event) up to syncRetryTracker's time bound.
+    // Past that bound we give up and ack the event instead, so a message that can never commit
+    // (e.g. a stale/unreachable channel row) doesn't block every subsequent LDK event forever —
+    // including Event.ChannelClosed, which is required to resolve a channel-close receive's txid.
+    // A post-apply channel reload can fail because the channel closed. If it's gone from both
+    // the local DB and the node's own live channel list, it will never come back — this sync
+    // message can never be applied, so drop it permanently instead of waiting out the retry
+    // bound. Only fall back to the timed retry when the reload might just be a transient race
+    // (e.g. the local row hasn't caught up with a channel that's still actually open).
+    private fun deferOrDropForMissingChannel(paymentHash: String, reason: String): Boolean {
+        nodeService.refreshChannels()
+        val stillLive = nodeService.channels.any { it.userChannelId == _stableChannel.value.userChannelId }
+        if (!stillLive) {
+            AuditService.log("TRADE_RESULT_CHANNEL_GONE", mapOf("payment_hash" to paymentHash, "reason" to reason))
+            syncRetryTracker.clear(paymentHash)
+            // Note: calling node.removePayment() here was tried and confirmed ineffective —
+            // ldk-node's own replay of an un-acked PaymentClaimable event on restart is driven
+            // by its internal channel-manager/HTLC-claim bookkeeping, not by the payment store
+            // removePayment() clears. The event can still resurface once per restart even after
+            // this drop; each occurrence is now instant (no 5-minute wait) so the residual
+            // impact is negligible. A durable fix for the resurfacing itself would need to land
+            // in ldk-node, not here.
+            return true
+        }
+        return deferSyncOrGiveUp(paymentHash, reason)
+    }
+
+    private fun deferSyncOrGiveUp(paymentHash: String, reason: String): Boolean {
+        if (syncRetryTracker.recordAttemptAndShouldGiveUp(paymentHash)) {
+            AuditService.log("TRADE_RESULT_GIVEN_UP", mapOf("payment_hash" to paymentHash, "reason" to reason))
+            return true
+        }
+        AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash, "reason" to reason))
+        throw RetryableSyncException(reason)
+    }
+
     private fun handleSyncMessage(
         customRecords: List<CustomTlvRecord>,
         paymentHash: String,
@@ -1182,7 +1670,28 @@ class AppState(private val context: Context) : ViewModel() {
             AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
             return true
         }
-        val db = databaseService ?: throw RetryableSyncException("Trade database unavailable")
+        // Bound the ENTIRE remaining processing, not just the anticipated RETRY paths. An
+        // unanticipated exception from the apply calls below (a bug, a transient SQL error,
+        // etc.) must still go through the same bounded give-up accounting as an explicit RETRY —
+        // otherwise it bypasses syncRetryTracker entirely, and NodeService's outer catch retries
+        // the raw event with unbounded backoff forever, blocking every later LDK event forever.
+        return try {
+            processSignedSyncMessage(message, paymentHash, amountMsat)
+        } catch (e: RetryableSyncException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e("AppState", "Unexpected error processing signed sync message", e)
+            deferSyncOrGiveUp(paymentHash, "Unexpected error: ${e.message}")
+        }
+    }
+
+    private fun processSignedSyncMessage(
+        message: TradeControlMessage,
+        paymentHash: String,
+        amountMsat: Long
+    ): Boolean {
+        val db = databaseService
+            ?: return deferSyncOrGiveUp(paymentHash, "Trade database unavailable")
         val result = when (message) {
             is TradeControlMessage.Rejected -> {
                 if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) {
@@ -1201,18 +1710,24 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     val price = priceService.currentAccountingPrice()
                     if (price <= 0.0) {
-                        AuditService.log("SYNC_V1_DEFERRED", mapOf("reason" to "untrusted_price"))
-                        throw RetryableSyncException("Cannot apply SYNC_V1 without a trusted BTC price")
+                        return deferSyncOrGiveUp(paymentHash, "Cannot apply SYNC_V1 without a trusted BTC price")
                     }
                     db.applyUncorrelatedSyncIfNewer(message, price)
                 }
             }
         }
+        // Only clear the retry tracker once we're actually done retrying this payment_hash (i.e.
+        // we won't immediately call deferSyncOrGiveUp again below). Clearing unconditionally here
+        // for DUPLICATE/APPLIED wiped the persisted first-attempt right before the loadChannel
+        // fallback below could re-defer, so a permanently stuck message never accumulated any
+        // retry time at all — each retry looked like a brand-new first attempt.
+        if (result.status == TradeControlApplyStatus.INVALID) {
+            syncRetryTracker.clear(paymentHash)
+        }
         when (result.status) {
             TradeControlApplyStatus.RETRY -> {
                 try { db.markTradeResponseNotCommittable(message) } catch (_: Exception) {}
-                AuditService.log("TRADE_RESULT_DEFERRED", mapOf("payment_hash" to paymentHash))
-                throw RetryableSyncException("Signed trade result could not be committed")
+                return deferSyncOrGiveUp(paymentHash, "Signed trade result could not be committed")
             }
             TradeControlApplyStatus.INVALID -> {
                 AuditService.log("TRADE_RESULT_INVALID", mapOf("payment_hash" to paymentHash))
@@ -1230,7 +1745,8 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: throw RetryableSyncException("Duplicate result channel could not be reloaded")
+                    ?: return deferOrDropForMissingChannel(paymentHash, "Duplicate result channel could not be reloaded")
+                syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
@@ -1253,7 +1769,8 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: throw RetryableSyncException("Applied result channel could not be reloaded")
+                    ?: return deferOrDropForMissingChannel(paymentHash, "Applied result channel could not be reloaded")
+                syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
@@ -1496,6 +2013,7 @@ class AppState(private val context: Context) : ViewModel() {
         isSweeping = true
         spliceTxid = txid
         fundingTxid = txid
+        fundingVout = newFundingTxo.split(":").getOrNull(1)?.toIntOrNull()
         // Prefer the exact in-memory row. After a process restart the LDK event can be replayed;
         // the database then accepts only one recent pending candidate and never a failed row.
         val assignedRowId = databaseService?.assignPendingSpliceTxid(
@@ -1743,7 +2261,10 @@ class AppState(private val context: Context) : ViewModel() {
             val closeFundingTxid = fundingTxid
                 ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                     .getString("closing_funding_txid", null)
-            if (closeFundingTxid != null && databaseService != null) {
+            val closeFundingVout = fundingVout
+                ?: context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                    .getInt("funding_vout", -1).takeIf { it >= 0 }
+            if (closeFundingTxid != null && closeFundingVout != null && databaseService != null) {
                 trackedClosingFundingTxid = closeFundingTxid
                 mempoolWebSocketService.trackTx(closeFundingTxid)
                 // Clear the pref now that we've consumed it
@@ -1762,10 +2283,16 @@ class AppState(private val context: Context) : ViewModel() {
                     resolver.resolve(
                         paymentId = paymentId,
                         fundingTxid = closeFundingTxid,
-                        vout = 0,
+                        vout = closeFundingVout,
                         databaseService = databaseService!!
                     )
                 }
+            } else if (closeFundingTxid != null && closeFundingVout == null) {
+                // Unknown vout must not default to 0 — that could be a different, unrelated
+                // output of the same funding tx, and CloseTxidResolver would accept whatever
+                // spent it as the close txid (this was #264's exact bug). Leave the row
+                // unresolved rather than risk attaching the wrong transaction.
+                AuditService.log("CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT", mapOf("payment_id" to paymentId))
             }
 
             databaseService?.deleteChannel(sc.userChannelId)
@@ -1830,12 +2357,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun requiredConfirmationsForType(paymentType: String): Int {
-        return when (paymentType) {
-            "splice_in", "splice_out" -> 1
-            else -> 6
-        }
-    }
 
     private data class TxConfirmationStatus(
         val confirmed: Boolean,
@@ -1987,6 +2508,10 @@ class AppState(private val context: Context) : ViewModel() {
 
             if (anyUpdated) {
                 _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                try {
+                    nodeService.syncWallets()
+                } catch (_: Exception) {}
+                refreshBalances()
             }
             lastConfirmationPollAtMs = now
         } finally {
@@ -2245,6 +2770,18 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
+                // Only an address match is authoritative enough to persist a txid — it's proof
+                // this specific tx pays our own tracked receive address. Matching by amount and
+                // timestamp proximity against LDK's payment list is not proof of identity (an
+                // unrelated same-amount payment can be the only visible candidate), so — mirroring
+                // iOS's DepositRecorder, which either resolves via a direct address lookup or
+                // leaves the row permanently txid-less — we never guess here. This branch only
+                // runs when there's no pending channel close (that case, the reported #264 bug,
+                // has its own authoritative fix via fundingVout-based CloseTxidResolver above);
+                // an ordinary receive with no tracked address is a rare edge case (e.g. an
+                // LSP-initiated on-chain funding outside the app's own receive flow). If it
+                // happens, the row is left without a txid/confirmation link — there is currently
+                // no way to retroactively recover it, including by generating a new address.
                 val resolvedTxid = _lastReceiveTxid.value?.takeIf {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
@@ -2507,12 +3044,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun prepareChannelCloseTracking(userChannelId: String) {
         setLastCloseTxid(null)
-        val liveTxid = nodeService.channels
+        val liveChannel = nodeService.channels
             .firstOrNull { it.userChannelId == userChannelId || it.isChannelReady }
-            ?.fundingTxo?.txid
+        val liveTxid = liveChannel?.fundingTxo?.txid
 
         if (!liveTxid.isNullOrBlank()) {
             fundingTxid = liveTxid
+            fundingVout = liveChannel.fundingTxo?.vout?.toInt()
             trackedClosingFundingTxid = liveTxid
             mempoolWebSocketService.trackTx(liveTxid)
             context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
@@ -2605,8 +3143,45 @@ class AppState(private val context: Context) : ViewModel() {
         nodeService.refreshChannels()
         val balances = nodeService.balances() ?: return
         val lightning = balances.totalLightningBalanceSats.toLong()
-        val onchain = balances.totalOnchainBalanceSats.toLong()
+        val rawOnchain = balances.totalOnchainBalanceSats.toLong()
+        val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
+
+        // Resolve pending outbound deduction against raw wallet observation
+        val effectivePending = synchronized(pendingLock) {
+            // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
+            // the wallet's raw balance already reflects the spend. Any positive balance delta
+            // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
+            // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+            // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
+            // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
+            // already incorporate the spend when PENDING is reached.
+            val paymentStatusMap by lazy {
+                val map = mutableMapOf<String, PaymentStatus>()
+                nodeService.node?.listPayments()?.forEach { p ->
+                    val kind = p.kind
+                    if (kind is PaymentKind.Onchain) {
+                        map[kind.txid] = p.status
+                    }
+                }
+                map
+            }
+            val incorporatedPredicate: (String) -> Boolean = { tid ->
+                val status = paymentStatusMap[tid]
+                status == PaymentStatus.SUCCEEDED || status == PaymentStatus.PENDING
+            }
+            val failedPredicate: (String) -> Boolean = { tid ->
+                paymentStatusMap[tid] == PaymentStatus.FAILED
+            }
+            pendingOutboundSend = resolvePendingOutboundSend(
+                rawOnchain = rawOnchain,
+                pending = pendingOutboundSend,
+                isTxIncorporated = incorporatedPredicate,
+                isTxFailed = failedPredicate
+            )
+            pendingOutboundSend
+        }
+        val (onchain, spendable) = calculateEffectiveBalances(rawOnchain, rawSpendable, effectivePending)
 
         // Sync fundingTxid directly from the LDK node's channel details
         // to gracefully handle out-of-band splices (e.g. LSP-initiated)
@@ -2617,6 +3192,14 @@ class AppState(private val context: Context) : ViewModel() {
                 val currentTxid = txo.txid
                 if (currentTxid != fundingTxid) {
                     fundingTxid = currentTxid
+                }
+                // Backfill independently of the txid check above: an existing wallet upgrading
+                // to this fix already has fundingTxid cached but never had fundingVout, so its
+                // txid never "changes" and the vout would otherwise stay null forever, forcing
+                // CloseTxidResolver's callers to fall back to an unproven vout=0 guess (#264).
+                val liveVout = txo.vout.toInt()
+                if (fundingVout != liveVout) {
+                    fundingVout = liveVout
                 }
             }
             // Derive the authoritative counterparty from the live channel. For an open channel
@@ -2629,10 +3212,21 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.value = _stableChannel.value.copy(counterparty = liveCounterparty)
             }
         }
+        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+        // These funds are NOT yet in total_onchain_balance_sats
+        var sweepSats = 0L
+        for (pending in balances.pendingBalancesFromChannelClosures) {
+            when (pending) {
+                is PendingSweepBalance.PendingBroadcast -> sweepSats += pending.amountSatoshis.toLong()
+                is PendingSweepBalance.BroadcastAwaitingConfirmation -> sweepSats += pending.amountSatoshis.toLong()
+                else -> {}
+            }
+        }
+        _pendingSweepBalanceSats.value = sweepSats
+
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
-        val spendable = balances.spendableOnchainBalanceSats.toLong()
         _spendableOnchainSats.value = spendable
 
 
@@ -2643,14 +3237,17 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        _totalBalanceSats.value = when {
-            isChannelClosing -> onchain
-            isSweeping -> lightning
-            // No open channel but both balances present: lightning is pending-close claimable
-            // that overlaps with on-chain — avoid double-count
-            !hasReady && lightning > 0 && onchain > 0 -> onchain
-            else -> lightning + onchain
-        }
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = onchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = sweepSats,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
+        )
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet
@@ -2661,12 +3258,81 @@ class AppState(private val context: Context) : ViewModel() {
         _nativeSats.value = native
 
         // Cache for instant display on next launch
-        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-            .putLong("cached_lightning_sats", lightning)
-            .putLong("cached_onchain_sats", onchain)
-            .putLong("cached_spendable_sats", spendable)
-            .putLong("cached_native_sats", native)
-            .apply()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(BalanceCacheKey.LIGHTNING, lightning)
+            .putLong(BalanceCacheKey.ONCHAIN, onchain)
+            .putLong(BalanceCacheKey.SPENDABLE, spendable)
+            .putLong(BalanceCacheKey.NATIVE, native)
+        persistPendingOutboundSend(editor, pendingOutboundSend)
+        editor.apply()
+    }
+
+    fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean, txid: String? = null) {
+        val currentOnchain = _onchainBalanceSats.value
+        val currentSpendable = _spendableOnchainSats.value
+
+        val newOnchain = if (isSendAll) 0L else (currentOnchain - amountSats).coerceAtLeast(0L)
+        val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
+
+        val gen = synchronized(pendingLock) {
+            pendingOutboundSend = recordBroadcast(
+                currentPending = pendingOutboundSend,
+                amountSats = amountSats,
+                isSendAll = isSendAll,
+                currentOnchain = currentOnchain,
+                txid = txid
+            )
+            ++sendGeneration
+        }
+
+        _onchainBalanceSats.value = newOnchain
+        _spendableOnchainSats.value = newSpendable
+
+        val lightning = _lightningBalanceSats.value
+        val hasReady = _hasReadyChannel.value
+        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        _totalBalanceSats.value = calculateTotalBalance(
+            lightning = lightning,
+            onchain = newOnchain,
+            hasReady = hasReady,
+            isChannelClosing = isChannelClosing,
+            isSweeping = isSweeping,
+            pendingSweep = _pendingSweepBalanceSats.value,
+            isOpeningChannel = isOpeningChannel,
+            hasAnyChannel = hasAnyChannel
+        )
+
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+            .putLong(BalanceCacheKey.ONCHAIN, newOnchain)
+            .putLong(BalanceCacheKey.SPENDABLE, newSpendable)
+        persistPendingOutboundSend(editor, pendingOutboundSend)
+        if (!hasReady && !hasAnyChannel) {
+            editor.putLong(BalanceCacheKey.LIGHTNING, 0L)
+        }
+        editor.apply()
+
+        viewModelScope.launch(Dispatchers.IO) {
+            var syncSuccess = false
+            for (attempt in 0..2) {
+                try {
+                    nodeService.syncWallets()
+                    syncSuccess = true
+                    break
+                } catch (_: Exception) {
+                    delay(500L * (attempt + 1))
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (shouldClearPendingOnSyncCompletion(gen, sendGeneration, syncSuccess)) {
+                    synchronized(pendingLock) {
+                        if (gen == sendGeneration) {
+                            pendingOutboundSend = PendingOutboundSend()
+                        }
+                    }
+                }
+                refreshBalances()
+            }
+        }
     }
 
     fun updateStableBalances() {

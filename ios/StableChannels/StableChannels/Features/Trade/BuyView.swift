@@ -284,20 +284,24 @@ struct BuyView: View {
             isExecuting = false
             return
         }
+        // A generic "order failed" belongs only to an actually absent service. A refusal from
+        // the service throws its own TradeValidationError reason and is rendered as-is below,
+        // never re-labeled (issue #272).
+        guard let service = appState.tradeService else {
+            errorMessage = String(
+                localized: "error_trade_service_unavailable",
+                defaultValue: "Trade service unavailable"
+            )
+            isExecuting = false
+            return
+        }
         do {
-            guard let result = try appState.tradeService?.executeBuy(
+            let result = try service.executeBuy(
                 sc: sc,
                 amountUSD: amountUSD,
                 feeUSD: feeUSD,
                 price: price
-            ) else {
-                errorMessage = String(
-                    localized: "error_trade_failed",
-                    defaultValue: "Order failed — check amount and try again"
-                )
-                isExecuting = false
-                return
-            }
+            )
 
             // View cache only; the prepared correlation was persisted before the fee send.
             appState.pendingTradePayments[result.paymentId] = PendingTradePayment(

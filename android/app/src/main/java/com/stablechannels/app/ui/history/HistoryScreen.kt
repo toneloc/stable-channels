@@ -32,9 +32,6 @@ import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 
-private const val REQUIRED_CONFIRMATIONS = 6
-private const val SPLICE_REQUIRED_CONFIRMATIONS = 1
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
@@ -360,10 +357,7 @@ private fun PaymentRecord.historyStatusColor(): Color {
 }
 
 private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
-    return when (paymentType) {
-        "splice_in", "splice_out" -> SPLICE_REQUIRED_CONFIRMATIONS
-        else -> REQUIRED_CONFIRMATIONS
-    }
+    return AppState.requiredConfirmationsForType(paymentType)
 }
 
 @Composable

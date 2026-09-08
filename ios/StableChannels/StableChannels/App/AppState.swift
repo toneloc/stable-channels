@@ -117,40 +117,189 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
-    var spendableOnchainSats: UInt64 = 0
+    private enum BalanceCacheKey {
+        static let lightning = "cached_lightning_sats"
+        static let onchain = "cached_onchain_sats"
+        static let spendable = "cached_spendable_onchain_sats"
+        static let pendingAmount = "pending_outbound_onchain_sats"
+        static let pendingIsSendAll = "pending_outbound_is_send_all"
+        static let pendingBaseline = "pending_outbound_baseline_sats"
+        static let pendingTimestamp = "pending_outbound_timestamp_secs"
+        static let pendingTxids = "pending_outbound_txids"
+    }
+
+    var spendableOnchainSats: UInt64 = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        if let val = ud?.object(forKey: BalanceCacheKey.spendable) as? Int {
+            return UInt64(bitPattern: Int64(val))
+        }
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.onchain) ?? 0))
+    }()
+
+    var pendingSweepBalanceSats: UInt64 = 0
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_lightning_sats") ?? 0))
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.lightning) ?? 0))
     }()
 
     var onchainBalanceSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+        return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.onchain) ?? 0))
     }()
 
     var hasReadyChannel: Bool = false
+
+    var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return AppState.loadCachedPendingOutboundSend(from: ud)
+    }()
+
+    private var sendGeneration: Int64 = 0
 
     /// The active LSP configuration managed by `LSPService`.
     var activeLSP: LSPConfig { lspService.activeLSP }
 
     var totalBalanceSats: UInt64 {
-        if isChannelClosing {
-            return onchainBalanceSats
+        AppState.calculateTotalBalance(
+            lightning: lightningBalanceSats,
+            onchain: onchainBalanceSats,
+            hasReadyChannel: hasReadyChannel,
+            hasAnyChannel: !nodeService.channels.isEmpty,
+            isChannelClosing: isChannelClosing,
+            isOpeningChannel: isOpeningChannel,
+            isSweeping: isSweeping,
+            pendingSweep: pendingSweepBalanceSats
+        )
+    }
+
+    /// Static calculation entry point enabling pure functional testing
+    /// without initializing the full AppState graph.
+    static func calculateTotalBalance(
+        lightning: UInt64,
+        onchain: UInt64,
+        hasReadyChannel: Bool,
+        hasAnyChannel: Bool = false,
+        isChannelClosing: Bool = false,
+        isOpeningChannel: Bool = false,
+        isSweeping: Bool = false,
+        pendingSweep: UInt64 = 0
+    ) -> UInt64 {
+        BalanceCalculator.calculateTotalBalance(
+            lightning: lightning,
+            onchain: onchain,
+            pendingSweep: pendingSweep,
+            channelState: BalanceCalculator.ChannelState(
+                hasReadyChannel: hasReadyChannel,
+                hasAnyChannel: hasAnyChannel,
+                isChannelClosing: isChannelClosing,
+                isOpeningChannel: isOpeningChannel,
+                isSweeping: isSweeping
+            )
+        )
+    }
+
+    static func calculateEffectiveBalances(
+        rawOnchain: UInt64,
+        rawSpendable: UInt64,
+        pending: BalanceCalculator.PendingOutboundSend
+    ) -> (onchain: UInt64, spendable: UInt64) {
+        BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawOnchain,
+            rawSpendable: rawSpendable,
+            pending: pending
+        )
+    }
+
+    static func resolvePendingOutboundSend(
+        rawOnchain: UInt64,
+        pending: BalanceCalculator.PendingOutboundSend
+    ) -> BalanceCalculator.PendingOutboundSend {
+        BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawOnchain,
+            pending: pending
+        )
+    }
+
+    static func recordBroadcast(
+        currentPending: BalanceCalculator.PendingOutboundSend,
+        amountSats: UInt64,
+        isSendAll: Bool,
+        currentOnchain: UInt64
+    ) -> BalanceCalculator.PendingOutboundSend {
+        BalanceCalculator.recordBroadcast(
+            currentPending: currentPending,
+            amountSats: amountSats,
+            isSendAll: isSendAll,
+            currentOnchain: currentOnchain
+        )
+    }
+
+    static func loadCachedPendingOutboundSend(from ud: UserDefaults?) -> BalanceCalculator.PendingOutboundSend {
+        let amount = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingAmount) ?? 0))
+        let isSendAll = ud?.bool(forKey: BalanceCacheKey.pendingIsSendAll) ?? false
+        let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingBaseline) ?? 0))
+        let timestamp = Int64(ud?.integer(forKey: BalanceCacheKey.pendingTimestamp) ?? 0)
+        let txidsStr = ud?.string(forKey: BalanceCacheKey.pendingTxids) ?? ""
+
+        // If no pending amount was cached and it is not send-all, no send is pending.
+        guard amount > 0 || isSendAll else {
+            return BalanceCalculator.PendingOutboundSend()
         }
-        if isOpeningChannel {
-            return lightningBalanceSats > 0 ? lightningBalanceSats : onchainBalanceSats
+
+        // Parse per-txid entries. New format: "txid1:amount1,txid2:amount2".
+        // Legacy format: "txid1,txid2" (no colons). Backward compat: fall back to
+        // distributing the stored aggregate amount across legacy txids.
+        let parts = txidsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        let hasEntryFormat = parts.contains { $0.contains(":") }
+
+        var entries: [BalanceCalculator.TxEntry] = []
+        if hasEntryFormat {
+            for part in parts {
+                let components = part.split(separator: ":", maxSplits: 1).map(String.init)
+                guard components.count == 2, let amt = UInt64(components[1]) else { continue }
+                entries.append(BalanceCalculator.TxEntry(txid: components[0], amountSats: amt))
+            }
+        } else {
+            // Legacy path: distribute stored aggregate across txids.
+            if !parts.isEmpty, amount > 0 {
+                let perTx = amount / UInt64(parts.count)
+                let remainder = amount % UInt64(parts.count)
+                entries = parts.enumerated().map { i, tid in
+                    BalanceCalculator.TxEntry(txid: tid, amountSats: perTx + (UInt64(i) < remainder ? 1 : 0))
+                }
+            } else if amount > 0 {
+                entries = [BalanceCalculator.TxEntry(txid: "", amountSats: amount)]
+            }
         }
-        if isSweeping {
-            return lightningBalanceSats
-        }
-        // If no open channels but both balances exist, lightning balance is
-        // pending-close claimable that overlaps with on-chain — avoid double-count.
-        if !hasReadyChannel && lightningBalanceSats > 0 && onchainBalanceSats > 0 {
-            return onchainBalanceSats
-        }
-        return lightningBalanceSats + onchainBalanceSats
+
+        return BalanceCalculator.PendingOutboundSend(
+            isSendAll: isSendAll,
+            baselineOnchainSats: baseline,
+            timestampSecs: timestamp,
+            entries: entries
+        )
+    }
+
+    private func persistPendingOutboundSend(to ud: UserDefaults?) {
+        // Persist per-txid entries as "txid1:amount1,txid2:amount2".
+        let entriesStr = pendingOutboundSend.entries
+            .map { "\($0.txid):\($0.amountSats)" }
+            .joined(separator: ",")
+        ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: BalanceCacheKey.pendingAmount)
+        ud?.set(pendingOutboundSend.isSendAll, forKey: BalanceCacheKey.pendingIsSendAll)
+        ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: BalanceCacheKey.pendingBaseline)
+        ud?.set(pendingOutboundSend.timestampSecs, forKey: BalanceCacheKey.pendingTimestamp)
+        ud?.set(entriesStr, forKey: BalanceCacheKey.pendingTxids)
+    }
+
+    private func clearPendingOutboundSendCache(from ud: UserDefaults?) {
+        ud?.removeObject(forKey: BalanceCacheKey.pendingAmount)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingIsSendAll)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingBaseline)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingTimestamp)
+        ud?.removeObject(forKey: BalanceCacheKey.pendingTxids)
     }
 
     var totalBalanceUSD: Double {
@@ -283,7 +432,10 @@ class AppState {
         }
         confirmationPollingService = pollingService
         pollingService?.onUpdate = { [weak self] in
-            self?.confirmationUpdateEpoch += 1
+            guard let self else { return }
+            self.confirmationUpdateEpoch += 1
+            self.refreshBalances()
+            self.syncWalletsInBackground()
         }
         if let db = databaseService, let polling = pollingService {
             let spvService = SPVHeaderChainService(
@@ -452,7 +604,7 @@ class AppState {
         }
     }
 
-    private func resetInMemoryWalletState() {
+    func resetInMemoryWalletState() {
         stableChannel = .default
         statusMessage = ""
         paymentFlash = false
@@ -471,6 +623,9 @@ class AppState {
         onchainBalanceSats = 0
         hasReadyChannel = false
         spendableOnchainSats = 0
+        pendingSweepBalanceSats = 0
+        sendGeneration += 1
+        pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
         transactionLinkService.clearCloseTxid()
         transactionLinkService.clearReceiveTxid()
@@ -480,8 +635,10 @@ class AppState {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
         shared?.removeObject(forKey: "node_id")
-        shared?.set(Int64(0), forKey: "cached_lightning_sats")
-        shared?.set(Int64(0), forKey: "cached_onchain_sats")
+        shared?.set(Int64(0), forKey: BalanceCacheKey.lightning)
+        shared?.set(Int64(0), forKey: BalanceCacheKey.onchain)
+        shared?.set(Int64(0), forKey: BalanceCacheKey.spendable)
+        clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
     }
 
@@ -2918,13 +3075,77 @@ class AppState {
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
-        let onchain = balances.totalOnchainBalanceSats
+        let rawOnchain = balances.totalOnchainBalanceSats
+        let rawSpendable = balances.spendableOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
+
+        // Resolve pending outbound deduction against raw wallet observation
+        // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
+        // the wallet's raw balance already reflects the spend. Any positive balance delta
+        // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
+        // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+        // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
+        // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
+        // already incorporate the spend when .pending is reached.
+        var paymentStatusMap: [String: PaymentStatus]?
+        let getPaymentStatus: (String) -> PaymentStatus? = { [weak self] tid in
+            if paymentStatusMap == nil {
+                guard let self, let payments = self.nodeService.node?.listPayments() else { return nil }
+                var map: [String: PaymentStatus] = [:]
+                for p in payments {
+                    if case let .onchain(paymentTxid, _) = p.kind {
+                        map[paymentTxid] = p.status
+                    }
+                }
+                paymentStatusMap = map
+            }
+            return paymentStatusMap?[tid]
+        }
+        let incorporatedPredicate: (String) -> Bool = { tid in
+            guard let status = getPaymentStatus(tid) else { return false }
+            if case .succeeded = status { return true }
+            if case .pending = status { return true }
+            return false
+        }
+        let failedPredicate: (String) -> Bool = { tid in
+            guard let status = getPaymentStatus(tid) else { return false }
+            if case .failed = status { return true }
+            return false
+        }
+        pendingOutboundSend = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: rawOnchain,
+            pending: pendingOutboundSend,
+            isTxIncorporated: incorporatedPredicate,
+            isTxFailed: failedPredicate
+        )
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: rawOnchain,
+            rawSpendable: rawSpendable,
+            pending: pendingOutboundSend
+        )
+        let onchain = effective.onchain
+        let spendable = effective.spendable
+
+        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
+        // These funds are NOT yet in total_onchain_balance_sats
+        // (Desktop src/user.rs lines 5989-6002 parity)
+        var sweepSats: UInt64 = 0
+        for pending in balances.pendingBalancesFromChannelClosures {
+            switch pending {
+            case let .pendingBroadcast(_, amountSatoshis):
+                sweepSats += amountSatoshis
+            case let .broadcastAwaitingConfirmation(_, _, _, amountSatoshis):
+                sweepSats += amountSatoshis
+            default:
+                break
+            }
+        }
+        pendingSweepBalanceSats = sweepSats
 
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
-        spendableOnchainSats = balances.spendableOnchainBalanceSats
+        spendableOnchainSats = spendable
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {
@@ -2933,8 +3154,72 @@ class AppState {
 
         // Cache for instant display on next launch
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        ud?.set(Int64(bitPattern: lightning), forKey: "cached_lightning_sats")
-        ud?.set(Int64(bitPattern: onchain), forKey: "cached_onchain_sats")
+        ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
+        ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
+        ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
+        persistPendingOutboundSend(to: ud)
+    }
+
+    /// Deducts sent on-chain amount immediately from cached and in-memory balances
+    /// so the UI updates with zero lag, then triggers wallet sync in the background.
+    func onchainSendBroadcasted(amountSats: UInt64, isSendAll: Bool, txid: String? = nil) {
+        let currentOnchain = onchainBalanceSats
+        let currentSpendable = spendableOnchainSats
+
+        // Immediately update UI balances with exact incremental deduction,
+        // avoiding compounded subtraction if multiple sends occur before sync finishes.
+        if isSendAll {
+            onchainBalanceSats = 0
+            spendableOnchainSats = 0
+        } else {
+            onchainBalanceSats = currentOnchain >= amountSats ? currentOnchain - amountSats : 0
+            spendableOnchainSats = currentSpendable >= amountSats ? currentSpendable - amountSats : 0
+        }
+
+        pendingOutboundSend = BalanceCalculator.recordBroadcast(
+            currentPending: pendingOutboundSend,
+            amountSats: amountSats,
+            isSendAll: isSendAll,
+            currentOnchain: currentOnchain,
+            txid: txid
+        )
+
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        ud?.set(Int64(bitPattern: onchainBalanceSats), forKey: BalanceCacheKey.onchain)
+        ud?.set(Int64(bitPattern: spendableOnchainSats), forKey: BalanceCacheKey.spendable)
+        persistPendingOutboundSend(to: ud)
+
+        sendGeneration += 1
+        let currentGen = sendGeneration
+        syncWalletsInBackground(expectedGeneration: currentGen)
+    }
+
+    /// Synchronizes wallets off the main actor and refreshes balances upon completion.
+    /// If expectedGeneration is provided, the pending outbound send is only cleared if
+    /// no subsequent sends have been broadcast while the sync was in-flight.
+    private func syncWalletsInBackground(expectedGeneration: Int64? = nil) {
+        let nodeService = self.nodeService
+        Task { @MainActor in
+            var syncSuccess = false
+            for attempt in 0 ..< 3 {
+                let success = await Task.detached(priority: .utility) {
+                    (try? nodeService.syncWallets()) != nil
+                }.value
+                if success {
+                    syncSuccess = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+            }
+            if let expected = expectedGeneration, BalanceCalculator.shouldClearPendingOnSyncCompletion(
+                expectedGeneration: expected,
+                currentGeneration: self.sendGeneration,
+                syncSuccess: syncSuccess
+            ) {
+                self.pendingOutboundSend = BalanceCalculator.PendingOutboundSend(timestampSecs: 0)
+            }
+            self.refreshBalances()
+        }
     }
 
     /// Update the StableChannel struct from current LDK channel data + price.

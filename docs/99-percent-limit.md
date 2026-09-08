@@ -68,3 +68,10 @@ Implementation verification (2026-09-07): Rust library 200 passed (2 ignored), d
 with existing repository warnings; the pinned SwiftFormat lint passed. Changed Rust ranges
 were formatted without reformatting unrelated legacy code. The 11 ignored regtest tests and
 the three interactive client flows were not run; local regtest services were unavailable.
+
+Android USD -> BTC Max follow-up (2026-09-07): the Max button, label, slider prefill,
+and validation now use a decimal-rounded-down whole-cent balance. Editing the amount or
+pressing Max clears previous errors. USD -> BTC still has no 99% cap, and final submission
+rechecks the latest USD balance. All 128 Android unit tests passed, including nine new
+regressions for fractional-cent balances, exact-cent boundaries, invalid inputs, changed
+balances, and full exits with the existing settlement guard. No device UI flow was run.
