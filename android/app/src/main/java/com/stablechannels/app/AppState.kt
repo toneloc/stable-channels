@@ -1,6 +1,7 @@
 package com.stablechannels.app
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -211,27 +212,20 @@ class AppState(private val context: Context) : ViewModel() {
             val txid: String? get() = entries.firstOrNull()?.txid
 
             companion object {
-                /** Backward-compatible constructor: distributes aggregate across flat txids. */
+                /** Backward-compatible factory: delegates to legacy constructor. */
                 fun fromLegacy(
                     amountSats: Long,
                     isSendAll: Boolean,
                     baselineOnchainSats: Long,
                     timestampSecs: Long,
                     txids: List<String>
-                ): PendingOutboundSend {
-                    val entries = if (txids.isNotEmpty() && amountSats > 0L) {
-                        val perTx = amountSats / txids.size
-                        val remainder = amountSats % txids.size
-                        txids.mapIndexed { i, tid ->
-                            TxEntry(tid, perTx + if (i < remainder) 1L else 0L)
-                        }
-                    } else if (amountSats > 0L) {
-                        listOf(TxEntry("", amountSats))
-                    } else {
-                        emptyList()
-                    }
-                    return PendingOutboundSend(isSendAll, baselineOnchainSats, timestampSecs, entries)
-                }
+                ): PendingOutboundSend = PendingOutboundSend(
+                    amountSats = amountSats,
+                    isSendAll = isSendAll,
+                    baselineOnchainSats = baselineOnchainSats,
+                    timestampSecs = timestampSecs,
+                    txids = txids
+                )
             }
         }
 
@@ -348,6 +342,115 @@ class AppState(private val context: Context) : ViewModel() {
             syncSuccess: Boolean
         ): Boolean {
             return syncSuccess && expectedGeneration == currentGeneration
+        }
+
+        /**
+         * Records an immediate outbound send broadcast and returns the updated pending state.
+         * Pure helper ensuring architectural parity with iOS BalanceCalculator.recordBroadcast.
+         */
+        fun recordBroadcast(
+            currentPending: PendingOutboundSend,
+            amountSats: Long,
+            isSendAll: Boolean,
+            currentOnchain: Long,
+            timestampSecs: Long = System.currentTimeMillis() / 1000L,
+            txid: String? = null
+        ): PendingOutboundSend {
+            val baseline = if (currentPending.baselineOnchainSats == 0L) {
+                currentOnchain
+            } else {
+                currentPending.baselineOnchainSats
+            }
+            val sendAmount = if (isSendAll) currentOnchain else amountSats
+            val updatedEntries = currentPending.entries.toMutableList()
+            if (!txid.isNullOrBlank()) {
+                if (updatedEntries.none { it.txid == txid }) {
+                    updatedEntries.add(TxEntry(txid, sendAmount))
+                }
+            } else {
+                // No txid available yet; append an anonymous entry.
+                updatedEntries.add(TxEntry("", sendAmount))
+            }
+
+            return PendingOutboundSend(
+                isSendAll = isSendAll || currentPending.isSendAll,
+                baselineOnchainSats = baseline,
+                timestampSecs = timestampSecs,
+                entries = updatedEntries
+            )
+        }
+
+        /**
+         * Deserializes cached pending outbound send state from SharedPreferences.
+         * Supports per-txid colon-delimited format as well as legacy flat comma-delimited txid lists.
+         */
+        fun loadCachedPendingOutboundSend(prefs: SharedPreferences): PendingOutboundSend {
+            val pendingAmount = prefs.getLong(BalanceCacheKey.PENDING_AMOUNT, 0L)
+            val pendingIsSendAll = prefs.getBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, false)
+            val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
+            val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
+            val pendingTxidsStr = prefs.getString(BalanceCacheKey.PENDING_TXIDS, "") ?: ""
+
+            if (pendingAmount == 0L && !pendingIsSendAll) {
+                return PendingOutboundSend(
+                    isSendAll = false,
+                    baselineOnchainSats = 0L,
+                    timestampSecs = 0L,
+                    entries = emptyList()
+                )
+            }
+
+            val parts = if (pendingTxidsStr.isNotBlank()) {
+                pendingTxidsStr.split(",").filter { it.isNotBlank() }
+            } else {
+                emptyList()
+            }
+            val hasEntryFormat = parts.any { it.contains(":") }
+
+            val entries: List<TxEntry> = if (hasEntryFormat) {
+                parts.mapNotNull { part ->
+                    val components = part.split(":", limit = 2)
+                    if (components.size == 2) {
+                        val amt = components[1].toLongOrNull() ?: return@mapNotNull null
+                        TxEntry(components[0], amt)
+                    } else null
+                }
+            } else {
+                // Legacy path: distribute stored aggregate across txids.
+                if (parts.isNotEmpty() && pendingAmount > 0L) {
+                    val perTx = pendingAmount / parts.size
+                    val remainder = pendingAmount % parts.size
+                    parts.mapIndexed { i, tid ->
+                        TxEntry(tid, perTx + if (i.toLong() < remainder) 1L else 0L)
+                    }
+                } else if (pendingAmount > 0L) {
+                    listOf(TxEntry("", pendingAmount))
+                } else {
+                    emptyList()
+                }
+            }
+
+            return PendingOutboundSend(
+                isSendAll = pendingIsSendAll,
+                baselineOnchainSats = pendingBaseline,
+                timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L),
+                entries = entries
+            )
+        }
+
+        /**
+         * Serializes pending outbound send state to SharedPreferences.
+         */
+        fun persistPendingOutboundSend(editor: SharedPreferences.Editor, pending: PendingOutboundSend) {
+            editor
+                .putLong(BalanceCacheKey.PENDING_AMOUNT, pending.amountSats)
+                .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pending.isSendAll)
+                .putLong(BalanceCacheKey.PENDING_BASELINE, pending.baselineOnchainSats)
+                .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pending.timestampSecs)
+                .putString(
+                    BalanceCacheKey.PENDING_TXIDS,
+                    pending.entries.joinToString(",") { "${it.txid}:${it.amountSats}" }
+                )
         }
     }
 
@@ -475,47 +578,7 @@ class AppState(private val context: Context) : ViewModel() {
         val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong(BalanceCacheKey.LIGHTNING, 0L)
         val cachedOnchain = prefs.getLong(BalanceCacheKey.ONCHAIN, 0L)
-        val pendingAmount = prefs.getLong(BalanceCacheKey.PENDING_AMOUNT, 0L)
-        val pendingIsSendAll = prefs.getBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, false)
-        val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
-        val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
-        val pendingTxidsStr = prefs.getString(BalanceCacheKey.PENDING_TXIDS, "") ?: ""
-
-        // If no pending amount was cached and it is not send-all, no send is pending.
-        val parts = if (pendingTxidsStr.isNotBlank()) pendingTxidsStr.split(",").filter { it.isNotBlank() } else emptyList()
-        val hasEntryFormat = parts.any { it.contains(":") }
-
-        val entries: List<TxEntry> = if (pendingAmount == 0L && !pendingIsSendAll) {
-            emptyList()
-        } else if (hasEntryFormat) {
-            parts.mapNotNull { part ->
-                val components = part.split(":", limit = 2)
-                if (components.size == 2) {
-                    val amt = components[1].toLongOrNull() ?: return@mapNotNull null
-                    TxEntry(components[0], amt)
-                } else null
-            }
-        } else {
-            // Legacy path: distribute stored aggregate across txids.
-            if (parts.isNotEmpty() && pendingAmount > 0L) {
-                val perTx = pendingAmount / parts.size
-                val remainder = pendingAmount % parts.size
-                parts.mapIndexed { i, tid ->
-                    TxEntry(tid, perTx + if (i < remainder) 1L else 0L)
-                }
-            } else if (pendingAmount > 0L) {
-                listOf(TxEntry("", pendingAmount))
-            } else {
-                emptyList()
-            }
-        }
-
-        pendingOutboundSend = PendingOutboundSend(
-            isSendAll = pendingIsSendAll,
-            baselineOnchainSats = pendingBaseline,
-            timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L),
-            entries = entries
-        )
+        pendingOutboundSend = loadCachedPendingOutboundSend(prefs)
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
@@ -2941,6 +3004,9 @@ class AppState(private val context: Context) : ViewModel() {
             // the wallet's raw balance already reflects the spend. Any positive balance delta
             // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
             // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+            // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
+            // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
+            // already incorporate the spend when PENDING is reached.
             val incorporatedPredicate: (String) -> Boolean = { tid ->
                 nodeService.node?.listPayments()?.any { p ->
                     val kind = p.kind
@@ -3031,17 +3097,13 @@ class AppState(private val context: Context) : ViewModel() {
         _nativeSats.value = native
 
         // Cache for instant display on next launch
-        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putLong(BalanceCacheKey.LIGHTNING, lightning)
             .putLong(BalanceCacheKey.ONCHAIN, onchain)
             .putLong(BalanceCacheKey.SPENDABLE, spendable)
             .putLong(BalanceCacheKey.NATIVE, native)
-            .putLong(BalanceCacheKey.PENDING_AMOUNT, pendingOutboundSend.amountSats)
-            .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
-            .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
-            .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
-            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.entries.joinToString(",") { "${it.txid}:${it.amountSats}" })
-            .apply()
+        persistPendingOutboundSend(editor, pendingOutboundSend)
+        editor.apply()
     }
 
     fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean, txid: String? = null) {
@@ -3052,27 +3114,12 @@ class AppState(private val context: Context) : ViewModel() {
         val newSpendable = if (isSendAll) 0L else (currentSpendable - amountSats).coerceAtLeast(0L)
 
         val gen = synchronized(pendingLock) {
-            val newBaseline = if (pendingOutboundSend.baselineOnchainSats == 0L) {
-                currentOnchain
-            } else {
-                pendingOutboundSend.baselineOnchainSats
-            }
-            val sendAmount = if (isSendAll) currentOnchain else amountSats
-            val updatedEntries = pendingOutboundSend.entries.toMutableList()
-            if (!txid.isNullOrBlank()) {
-                if (updatedEntries.none { it.txid == txid }) {
-                    updatedEntries.add(TxEntry(txid, sendAmount))
-                }
-            } else {
-                // No txid available yet; append an anonymous entry.
-                updatedEntries.add(TxEntry("", sendAmount))
-            }
-
-            pendingOutboundSend = PendingOutboundSend(
-                isSendAll = isSendAll || pendingOutboundSend.isSendAll,
-                baselineOnchainSats = newBaseline,
-                timestampSecs = System.currentTimeMillis() / 1000L,
-                entries = updatedEntries
+            pendingOutboundSend = recordBroadcast(
+                currentPending = pendingOutboundSend,
+                amountSats = amountSats,
+                isSendAll = isSendAll,
+                currentOnchain = currentOnchain,
+                txid = txid
             )
             ++sendGeneration
         }
@@ -3097,11 +3144,7 @@ class AppState(private val context: Context) : ViewModel() {
         val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
             .putLong(BalanceCacheKey.ONCHAIN, newOnchain)
             .putLong(BalanceCacheKey.SPENDABLE, newSpendable)
-            .putLong(BalanceCacheKey.PENDING_AMOUNT, pendingOutboundSend.amountSats)
-            .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
-            .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
-            .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
-            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.entries.joinToString(",") { "${it.txid}:${it.amountSats}" })
+        persistPendingOutboundSend(editor, pendingOutboundSend)
         if (!hasReady && !hasAnyChannel) {
             editor.putLong(BalanceCacheKey.LIGHTNING, 0L)
         }

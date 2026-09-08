@@ -1952,9 +1952,20 @@ impl UserApp {
                                         // 2. Immediate sync attempts exhausted. Retain pending deduction!
                                         // A network, indexer, or node-sync failure does not undo the broadcast.
                                         // Fail closed and poll until wallet sync succeeds or the payment fails.
-                                        // Bounded to 60 iterations (~5 minutes) to prevent unbounded thread leaks.
-                                        for _ in 0..60 {
-                                            std::thread::sleep(std::time::Duration::from_secs(5));
+                                        // Initial burst: poll every 5s for the first 60 attempts (~5 mins).
+                                        // If outage persists beyond 5 minutes, adaptively back off to polling every 60s
+                                        // so we don't spin heavily (opus-5), while never abandoning reconciliation
+                                        // which would leave desktop balance permanently understated (gpt-6-astra P1).
+                                        let mut attempt: u32 = 0;
+                                        loop {
+                                            let delay = if attempt < 60 {
+                                                std::time::Duration::from_secs(5)
+                                            } else {
+                                                std::time::Duration::from_secs(60)
+                                            };
+                                            std::thread::sleep(delay);
+                                            attempt = attempt.saturating_add(1);
+
                                             let terminal_failed = node_clone.list_payments().iter().any(|p| {
                                                 if let PaymentKind::Onchain { ref txid, .. } = p.kind {
                                                     txid.to_string() == txid_clone && p.status == PaymentStatus::Failed
@@ -12917,6 +12928,32 @@ mod tests {
         });
         h2.join().unwrap();
         assert_eq!(multi_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_pending_outbound_prolonged_outage_recovery() {
+        // Simulates recovery after extended outage (past 60 iterations):
+        // Deduction remains active during outage, but is cleared when sync eventually recovers.
+        let atomic_pending = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        atomic_pending.fetch_add(30_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 30_000);
+
+        let atomic_clone = std::sync::Arc::clone(&atomic_pending);
+        let handle = std::thread::spawn(move || {
+            let mut sync_attempts = 0;
+            loop {
+                sync_attempts += 1;
+                // Simulate 65 failed sync attempts during outage, then success on attempt 66
+                let sync_ok = sync_attempts > 65;
+                if super::should_clear_pending_outbound(sync_ok, None) {
+                    let cur = atomic_clone.load(std::sync::atomic::Ordering::Relaxed);
+                    atomic_clone.fetch_sub(30_000_u64.min(cur), std::sync::atomic::Ordering::Relaxed);
+                    return;
+                }
+            }
+        });
+        handle.join().unwrap();
+        assert_eq!(atomic_pending.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
     #[test]

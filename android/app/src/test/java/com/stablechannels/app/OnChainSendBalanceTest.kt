@@ -687,5 +687,217 @@ class OnChainSendBalanceTest {
         assertEquals("legacy_tx2", legacy.entries[1].txid)
         assertEquals(25_000L, legacy.entries[1].amountSats)
     }
+
+    @Test
+    fun `recordBroadcast accumulates entries idempotently and maintains sticky sendAll`() {
+        var pending = AppState.Companion.PendingOutboundSend()
+
+        // 1. Initial send records entry and sets baseline
+        pending = AppState.Companion.recordBroadcast(
+            currentPending = pending,
+            amountSats = 20_000L,
+            isSendAll = false,
+            currentOnchain = 100_000L,
+            txid = "tx1"
+        )
+        assertEquals(20_000L, pending.amountSats)
+        assertEquals(100_000L, pending.baselineOnchainSats)
+        assertEquals(1, pending.entries.size)
+        assertEquals("tx1", pending.entries[0].txid)
+        assertFalse(pending.isSendAll)
+
+        // 2. Second send appends distinct entry, baseline remains unchanged
+        pending = AppState.Companion.recordBroadcast(
+            currentPending = pending,
+            amountSats = 30_000L,
+            isSendAll = false,
+            currentOnchain = 80_000L,
+            txid = "tx2"
+        )
+        assertEquals(50_000L, pending.amountSats)
+        assertEquals(100_000L, pending.baselineOnchainSats)
+        assertEquals(2, pending.entries.size)
+        assertEquals("tx2", pending.entries[1].txid)
+
+        // 3. Repeated broadcast with same txid is idempotent
+        pending = AppState.Companion.recordBroadcast(
+            currentPending = pending,
+            amountSats = 30_000L,
+            isSendAll = false,
+            currentOnchain = 80_000L,
+            txid = "tx2"
+        )
+        assertEquals(50_000L, pending.amountSats)
+        assertEquals(2, pending.entries.size)
+
+        // 4. Send all sets isSendAll and records send amount
+        var sendAllPending = AppState.Companion.recordBroadcast(
+            currentPending = AppState.Companion.PendingOutboundSend(),
+            amountSats = 0L,
+            isSendAll = true,
+            currentOnchain = 100_000L,
+            txid = "tx_all"
+        )
+        assertTrue(sendAllPending.isSendAll)
+        assertEquals(100_000L, sendAllPending.amountSats)
+
+        // 5. Subsequent send preserves sticky isSendAll
+        sendAllPending = AppState.Companion.recordBroadcast(
+            currentPending = sendAllPending,
+            amountSats = 10_000L,
+            isSendAll = false,
+            currentOnchain = 0L,
+            txid = "tx_after"
+        )
+        assertTrue(sendAllPending.isSendAll)
+
+        // 6. Anonymous entry when txid is null
+        val anon = AppState.Companion.recordBroadcast(
+            currentPending = AppState.Companion.PendingOutboundSend(),
+            amountSats = 15_000L,
+            isSendAll = false,
+            currentOnchain = 50_000L,
+            txid = null
+        )
+        assertEquals(1, anon.entries.size)
+        assertEquals("", anon.entries[0].txid)
+        assertEquals(15_000L, anon.entries[0].amountSats)
+    }
+
+    @Test
+    fun `cached pending outbound send roundtrips across formats`() {
+        val fakePrefs = FakeSharedPreferences()
+        val editor = fakePrefs.edit()
+
+        // 1. New colon format roundtrip
+        val original = AppState.Companion.PendingOutboundSend(
+            isSendAll = false,
+            baselineOnchainSats = 80_000L,
+            timestampSecs = 1_700_000_000L,
+            entries = listOf(
+                AppState.Companion.TxEntry("tx_a", 25_000L),
+                AppState.Companion.TxEntry("tx_b", 35_000L)
+            )
+        )
+        AppState.Companion.persistPendingOutboundSend(editor, original)
+        editor.apply()
+
+        val loaded = AppState.Companion.loadCachedPendingOutboundSend(fakePrefs)
+        assertEquals(original.isSendAll, loaded.isSendAll)
+        assertEquals(original.baselineOnchainSats, loaded.baselineOnchainSats)
+        assertEquals(original.timestampSecs, loaded.timestampSecs)
+        assertEquals(original.amountSats, loaded.amountSats)
+        assertEquals(2, loaded.entries.size)
+        assertEquals("tx_a", loaded.entries[0].txid)
+        assertEquals(25_000L, loaded.entries[0].amountSats)
+        assertEquals("tx_b", loaded.entries[1].txid)
+        assertEquals(35_000L, loaded.entries[1].amountSats)
+
+        // 2. Anonymous entry roundtrip
+        val anonOriginal = AppState.Companion.PendingOutboundSend(
+            isSendAll = false,
+            baselineOnchainSats = 50_000L,
+            timestampSecs = 1_700_000_000L,
+            entries = listOf(AppState.Companion.TxEntry("", 50_000L))
+        )
+        AppState.Companion.persistPendingOutboundSend(editor, anonOriginal)
+        editor.apply()
+        val loadedAnon = AppState.Companion.loadCachedPendingOutboundSend(fakePrefs)
+        assertEquals(1, loadedAnon.entries.size)
+        assertEquals("", loadedAnon.entries[0].txid)
+        assertEquals(50_000L, loadedAnon.entries[0].amountSats)
+
+        // 3. Legacy comma-delimited fallback without colons
+        fakePrefs.clear()
+        editor.putLong(AppState.Companion.BalanceCacheKey.PENDING_AMOUNT, 40_000L)
+        editor.putBoolean(AppState.Companion.BalanceCacheKey.PENDING_IS_SEND_ALL, false)
+        editor.putLong(AppState.Companion.BalanceCacheKey.PENDING_BASELINE, 100_000L)
+        editor.putLong(AppState.Companion.BalanceCacheKey.PENDING_TIMESTAMP, 1_700_000_000L)
+        editor.putString(AppState.Companion.BalanceCacheKey.PENDING_TXIDS, "leg1,leg2")
+        editor.apply()
+
+        val loadedLegacy = AppState.Companion.loadCachedPendingOutboundSend(fakePrefs)
+        assertEquals(40_000L, loadedLegacy.amountSats)
+        assertEquals(2, loadedLegacy.entries.size)
+        assertEquals("leg1", loadedLegacy.entries[0].txid)
+        assertEquals(20_000L, loadedLegacy.entries[0].amountSats)
+        assertEquals("leg2", loadedLegacy.entries[1].txid)
+        assertEquals(20_000L, loadedLegacy.entries[1].amountSats)
+
+        // 4. Zero pending amount when not send-all yields empty entries
+        fakePrefs.clear()
+        editor.putLong(AppState.Companion.BalanceCacheKey.PENDING_AMOUNT, 0L)
+        editor.putBoolean(AppState.Companion.BalanceCacheKey.PENDING_IS_SEND_ALL, false)
+        editor.putString(AppState.Companion.BalanceCacheKey.PENDING_TXIDS, "stale_tx")
+        editor.apply()
+        val loadedZero = AppState.Companion.loadCachedPendingOutboundSend(fakePrefs)
+        assertEquals(0L, loadedZero.amountSats)
+        assertTrue(loadedZero.entries.isEmpty())
+    }
+
+    private class FakeSharedPreferences : android.content.SharedPreferences {
+        private val data = mutableMapOf<String, Any>()
+
+        fun clear() {
+            data.clear()
+        }
+
+        override fun getAll(): Map<String, *> = data
+        override fun getString(key: String, defValue: String?): String? = data[key] as? String ?: defValue
+        override fun getStringSet(key: String, defValues: Set<String>?): Set<String>? = null
+        override fun getInt(key: String, defValue: Int): Int = (data[key] as? Number)?.toInt() ?: defValue
+        override fun getLong(key: String, defValue: Long): Long = (data[key] as? Number)?.toLong() ?: defValue
+        override fun getFloat(key: String, defValue: Float): Float = (data[key] as? Number)?.toFloat() ?: defValue
+        override fun getBoolean(key: String, defValue: Boolean): Boolean = (data[key] as? Boolean) ?: defValue
+        override fun contains(key: String): Boolean = data.containsKey(key)
+        override fun edit(): android.content.SharedPreferences.Editor = FakeEditor(data)
+        override fun registerOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+        override fun unregisterOnSharedPreferenceChangeListener(listener: android.content.SharedPreferences.OnSharedPreferenceChangeListener?) {}
+
+        private class FakeEditor(private val data: MutableMap<String, Any>) : android.content.SharedPreferences.Editor {
+            private val temp = mutableMapOf<String, Any>()
+            private val removals = mutableSetOf<String>()
+            private var clearRequested = false
+
+            override fun putString(key: String, value: String?): android.content.SharedPreferences.Editor {
+                if (value != null) temp[key] = value else removals.add(key)
+                return this
+            }
+            override fun putStringSet(key: String, values: Set<String>?): android.content.SharedPreferences.Editor = this
+            override fun putInt(key: String, value: Int): android.content.SharedPreferences.Editor {
+                temp[key] = value
+                return this
+            }
+            override fun putLong(key: String, value: Long): android.content.SharedPreferences.Editor {
+                temp[key] = value
+                return this
+            }
+            override fun putFloat(key: String, value: Float): android.content.SharedPreferences.Editor {
+                temp[key] = value
+                return this
+            }
+            override fun putBoolean(key: String, value: Boolean): android.content.SharedPreferences.Editor {
+                temp[key] = value
+                return this
+            }
+            override fun remove(key: String): android.content.SharedPreferences.Editor {
+                removals.add(key)
+                return this
+            }
+            override fun clear(): android.content.SharedPreferences.Editor {
+                clearRequested = true
+                return this
+            }
+            override fun commit(): Boolean {
+                apply()
+                return true
+            }
+            override fun apply() {
+                if (clearRequested) data.clear()
+                removals.forEach { data.remove(it) }
+                data.putAll(temp)
+            }
+        }
+    }
 }
 

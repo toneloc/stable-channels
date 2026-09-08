@@ -3063,6 +3063,9 @@ class AppState {
         // the wallet's raw balance already reflects the spend. Any positive balance delta
         // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
         // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+        // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
+        // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
+        // already incorporate the spend when .pending is reached.
         let incorporatedPredicate: (String) -> Bool = { [weak self] tid in
             guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
             return payments.contains { p in
