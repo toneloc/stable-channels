@@ -36,9 +36,12 @@ final class TradeService {
         amountUSD: Double,
         feeUSD: Double,
         price: Double
-    ) throws -> TradeExecutionResult? {
-        guard amountUSD.isFinite, amountUSD > 0, amountUSD <= sc.expectedUSD.amount, price.isFinite,
-              price > 0 else { throw TradeValidationError.invalidAmount }
+    ) throws -> TradeExecutionResult {
+        guard price.isFinite, price > 0 else { throw TradeValidationError.invalidPrice }
+        guard amountUSD.isFinite, amountUSD > 0 else { throw TradeValidationError.invalidAmount }
+        guard amountUSD <= sc.expectedUSD.amount else {
+            throw TradeValidationError.exceedsStableBalance
+        }
         let netAmount = amountUSD - feeUSD
         return try preparePersistAndSend(
             sc: sc,
@@ -56,9 +59,9 @@ final class TradeService {
         amountUSD: Double,
         feeUSD: Double,
         price: Double
-    ) throws -> TradeExecutionResult? {
-        guard amountUSD.isFinite, amountUSD > 0, price.isFinite,
-              price > 0 else { throw TradeValidationError.invalidAmount }
+    ) throws -> TradeExecutionResult {
+        guard price.isFinite, price > 0 else { throw TradeValidationError.invalidPrice }
+        guard amountUSD.isFinite, amountUSD > 0 else { throw TradeValidationError.invalidAmount }
         let netAmount = amountUSD - feeUSD
         return try preparePersistAndSend(
             sc: sc,
@@ -79,15 +82,19 @@ final class TradeService {
         feeUSD: Double,
         newExpectedUSD: Double,
         price: Double
-    ) throws -> TradeExecutionResult? {
-        guard let snapshot = liveSnapshot(sc: sc, price: price) else { throw TradeValidationError.unavailable }
+    ) throws -> TradeExecutionResult {
+        guard let snapshot = liveSnapshot(sc: sc, price: price) else {
+            throw TradeValidationError.channelNotReady
+        }
         if newExpectedUSD > sc.expectedUSD.amount {
             guard amountUSD * 100 < Double(Int64.max),
                   snapshot.accepts(UInt64((amountUSD * 100 + 1e-7).rounded(.down))) else {
                 throw TradeValidationError.stabilizationLimit(snapshot.maxOrderCents())
             }
         }
-        guard let prepared = TradeProtocol.prepare(
+        // A refused preparation is terminal for this attempt and nothing has been sent yet,
+        // so the reason reaches the caller unchanged instead of collapsing into one string.
+        let prepared = try TradeProtocol.prepareOrFailure(
             channelId: sc.channelId,
             userChannelId: sc.userChannelId,
             currentExpectedUSD: sc.expectedUSD.amount,
@@ -100,7 +107,7 @@ final class TradeService {
             feeUSD: feeUSD,
             newExpectedUSD: newExpectedUSD,
             quotePrice: price
-        ) else { throw TradeValidationError.unsafeAllocation }
+        ).get()
 
         // Persist the exact signed payload and local allocation before the fee can leave.
         let tradeDbId = try databaseService.channelRepo.recordPreparedTrade(prepared)
