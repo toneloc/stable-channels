@@ -1,0 +1,68 @@
+# Step 24 — Aux: splice-in confirmation badge counts to 1, not 6
+# A pending splice-in must show "0/1 confirmed" (splices need 1 conf under the confirmation policy) and complete after one block — never sit at "0/6 confirmed" while the tx is confirmed on chain.
+#
+# Validates issue #276 (iOS splice-ins stuck at 0/6) and guards PR #267's
+# ConfirmationPolicy (splice = 1 conf; plain onchain = 6). On a build with the
+# bug, the flow fails at the 0/1 assertion (badge reads 0/6) or at the
+# Confirmed assertion (stuck counting to 6 after 1 block).
+#
+# Run RIGHT AFTER 01, in place of 05 — it performs 05's deposit + sweep and
+# adds the History badge checks (a wallet that already ran 05 has nothing
+# left to sweep).
+appId: com.stablechannels.app
+tags: [android, ios, onchain, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+
+# Deposit onchain and confirm it (flow 05's first half).
+- tapOn: "Receive"
+- tapOn: "Onchain"
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "bcrt1.*"
+- runScript:
+    file: helpers/send_onchain.js
+- runScript:
+    file: helpers/mine_blocks.js
+- tapOn: "(Back|Receive)"
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Sweep to the channel (splice-in) and wait for broadcast.
+- extendedWaitUntil:
+    visible: "(Swap|Move)"
+    timeout: 240000
+- tapOn: "(Swap|Move)"
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
+
+# The pending splice-in row must count toward 1 confirmation, not 6.
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Splice In.*"
+    timeout: 30000
+- assertVisible: "0/1 confirmed"
+- assertNotVisible: "0/6 confirmed"       # issue #276's exact symptom
+
+# One block is all a splice needs: the row completes and the pending state clears.
+- runScript:
+    file: helpers/mine_blocks.js
+    env:
+      MINE_BLOCKS: "1"
+- extendedWaitUntil:
+    visible: "Confirmed"
+    timeout: 240000
+- tapOn: "Home"
+- extendedWaitUntil:
+    notVisible: "Move pending.*"
+    timeout: 60000
