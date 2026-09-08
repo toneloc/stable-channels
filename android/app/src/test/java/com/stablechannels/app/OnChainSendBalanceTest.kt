@@ -578,4 +578,114 @@ class OnChainSendBalanceTest {
         assertEquals(100_000L, effOnchain)
         assertEquals(95_000L, effSpendable)
     }
+
+    @Test
+    fun `mixed succeeded and failed batch partial release releases only resolved amount`() {
+        // Two sends aggregated: tx_fail (30k) and tx_success (20k). Total = 50k.
+        val pending = AppState.Companion.PendingOutboundSend(
+            isSendAll = false,
+            baselineOnchainSats = 100_000L,
+            timestampSecs = 1_000_000L,
+            entries = listOf(
+                AppState.Companion.TxEntry("tx_fail", 30_000L),
+                AppState.Companion.TxEntry("tx_success", 20_000L)
+            )
+        )
+        assertEquals(50_000L, pending.amountSats)
+        assertEquals(listOf("tx_fail", "tx_success"), pending.txids)
+
+        // Case 1: tx_fail fails; tx_success is not yet incorporated.
+        // The failed 30k must be released, retaining only 20k for tx_success.
+        val partialFail = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pending,
+            isTxIncorporated = { false },
+            isTxFailed = { it == "tx_fail" }
+        )
+        assertEquals(20_000L, partialFail.amountSats)
+        assertEquals(1, partialFail.entries.size)
+        assertEquals("tx_success", partialFail.entries.first().txid)
+
+        val (effOnchainFail, effSpendableFail) = AppState.calculateEffectiveBalances(
+            rawOnchain = 100_000L,
+            rawSpendable = 95_000L,
+            pending = partialFail
+        )
+        assertEquals(80_000L, effOnchainFail)
+        assertEquals(75_000L, effSpendableFail)
+
+        // Case 2: tx_success is incorporated; tx_fail is still pending.
+        val partialSuccess = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pending,
+            isTxIncorporated = { it == "tx_success" },
+            isTxFailed = { false }
+        )
+        assertEquals(30_000L, partialSuccess.amountSats)
+        assertEquals(1, partialSuccess.entries.size)
+        assertEquals("tx_fail", partialSuccess.entries.first().txid)
+
+        // Case 3: Both resolve (one failed, one incorporated). Entire record clears.
+        val bothResolved = AppState.resolvePendingOutboundSend(
+            rawOnchain = 100_000L,
+            pending = pending,
+            isTxIncorporated = { it == "tx_success" },
+            isTxFailed = { it == "tx_fail" }
+        )
+        assertEquals(0L, bothResolved.amountSats)
+        assertTrue(bothResolved.entries.isEmpty())
+    }
+
+    @Test
+    fun `relaunch with concurrent deposit clears on incorporation`() {
+        // gpt-6-astra P1 scenario:
+        // App was killed before sync, restored on relaunch from cache.
+        // During relaunch, an incoming deposit raised raw onchain to 120_000 (baseline was 100_000).
+        // Since rawOnchain > baseline, rawDrop is 0.
+        // The broadcast tx ("tx_mempool") is tracked in LDK with PENDING status (not SUCCEEDED).
+        val pending = AppState.Companion.PendingOutboundSend(
+            isSendAll = false,
+            baselineOnchainSats = 100_000L,
+            timestampSecs = 1_000_000L,
+            entries = listOf(
+                AppState.Companion.TxEntry("tx_mempool", 50_000L)
+            )
+        )
+
+        // Under new policy, isTxIncorporated returns true for PENDING or SUCCEEDED status.
+        val resolved = AppState.resolvePendingOutboundSend(
+            rawOnchain = 120_000L,
+            pending = pending,
+            isTxIncorporated = { it == "tx_mempool" },
+            isTxFailed = { false }
+        )
+        assertEquals(0L, resolved.amountSats)
+
+        // Effective balance immediately displays full deposit without stuck deduction.
+        val (effOnchain, effSpendable) = AppState.calculateEffectiveBalances(
+            rawOnchain = 120_000L,
+            rawSpendable = 115_000L,
+            pending = resolved
+        )
+        assertEquals(120_000L, effOnchain)
+        assertEquals(115_000L, effSpendable)
+    }
+
+    @Test
+    fun `per txid entry from legacy deserialization distributes aggregate`() {
+        val legacy = AppState.Companion.PendingOutboundSend.fromLegacy(
+            amountSats = 50_000L,
+            isSendAll = false,
+            baselineOnchainSats = 100_000L,
+            timestampSecs = 1_000_000L,
+            txids = listOf("legacy_tx1", "legacy_tx2")
+        )
+        assertEquals(50_000L, legacy.amountSats)
+        assertEquals(2, legacy.entries.size)
+        assertEquals("legacy_tx1", legacy.entries[0].txid)
+        assertEquals(25_000L, legacy.entries[0].amountSats)
+        assertEquals("legacy_tx2", legacy.entries[1].txid)
+        assertEquals(25_000L, legacy.entries[1].amountSats)
+    }
 }
+

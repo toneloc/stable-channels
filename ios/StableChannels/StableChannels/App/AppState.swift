@@ -227,22 +227,56 @@ class AppState {
         let baseline = UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.pendingBaseline) ?? 0))
         let timestamp = Int64(ud?.integer(forKey: BalanceCacheKey.pendingTimestamp) ?? 0)
         let txidsStr = ud?.string(forKey: BalanceCacheKey.pendingTxids) ?? ""
-        let txids = txidsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+
+        // If no pending amount was cached and it is not send-all, no send is pending.
+        guard amount > 0 || isSendAll else {
+            return BalanceCalculator.PendingOutboundSend()
+        }
+
+        // Parse per-txid entries. New format: "txid1:amount1,txid2:amount2".
+        // Legacy format: "txid1,txid2" (no colons). Backward compat: fall back to
+        // distributing the stored aggregate amount across legacy txids.
+        let parts = txidsStr.split(separator: ",").map(String.init).filter { !$0.isEmpty }
+        let hasEntryFormat = parts.contains { $0.contains(":") }
+
+        var entries: [BalanceCalculator.TxEntry] = []
+        if hasEntryFormat {
+            for part in parts {
+                let components = part.split(separator: ":", maxSplits: 1).map(String.init)
+                guard components.count == 2, let amt = UInt64(components[1]) else { continue }
+                entries.append(BalanceCalculator.TxEntry(txid: components[0], amountSats: amt))
+            }
+        } else {
+            // Legacy path: distribute stored aggregate across txids.
+            if !parts.isEmpty, amount > 0 {
+                let perTx = amount / UInt64(parts.count)
+                let remainder = amount % UInt64(parts.count)
+                entries = parts.enumerated().map { i, tid in
+                    BalanceCalculator.TxEntry(txid: tid, amountSats: perTx + (UInt64(i) < remainder ? 1 : 0))
+                }
+            } else if amount > 0 {
+                entries = [BalanceCalculator.TxEntry(txid: "", amountSats: amount)]
+            }
+        }
+
         return BalanceCalculator.PendingOutboundSend(
-            amountSats: amount,
             isSendAll: isSendAll,
             baselineOnchainSats: baseline,
             timestampSecs: timestamp,
-            txids: txids
+            entries: entries
         )
     }
 
     private func persistPendingOutboundSend(to ud: UserDefaults?) {
+        // Persist per-txid entries as "txid1:amount1,txid2:amount2".
+        let entriesStr = pendingOutboundSend.entries
+            .map { "\($0.txid):\($0.amountSats)" }
+            .joined(separator: ",")
         ud?.set(Int64(bitPattern: pendingOutboundSend.amountSats), forKey: BalanceCacheKey.pendingAmount)
         ud?.set(pendingOutboundSend.isSendAll, forKey: BalanceCacheKey.pendingIsSendAll)
         ud?.set(Int64(bitPattern: pendingOutboundSend.baselineOnchainSats), forKey: BalanceCacheKey.pendingBaseline)
         ud?.set(pendingOutboundSend.timestampSecs, forKey: BalanceCacheKey.pendingTimestamp)
-        ud?.set(pendingOutboundSend.txids.joined(separator: ","), forKey: BalanceCacheKey.pendingTxids)
+        ud?.set(entriesStr, forKey: BalanceCacheKey.pendingTxids)
     }
 
     private func clearPendingOutboundSendCache(from ud: UserDefaults?) {
@@ -3025,11 +3059,16 @@ class AppState {
         let lightning = balances.totalLightningBalanceSats
 
         // Resolve pending outbound deduction against raw wallet observation
-        let confirmedPredicate: (String) -> Bool = { [weak self] tid in
+        // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
+        // the wallet's raw balance already reflects the spend. Any positive balance delta
+        // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
+        // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+        let incorporatedPredicate: (String) -> Bool = { [weak self] tid in
             guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
             return payments.contains { p in
-                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid, case .succeeded = p.status {
-                    return true
+                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid {
+                    if case .succeeded = p.status { return true }
+                    if case .pending = p.status { return true }
                 }
                 return false
             }
@@ -3046,7 +3085,7 @@ class AppState {
         pendingOutboundSend = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: rawOnchain,
             pending: pendingOutboundSend,
-            isTxConfirmed: confirmedPredicate,
+            isTxIncorporated: incorporatedPredicate,
             isTxFailed: failedPredicate
         )
         let effective = BalanceCalculator.calculateEffectiveBalances(

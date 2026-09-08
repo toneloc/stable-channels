@@ -1952,7 +1952,8 @@ impl UserApp {
                                         // 2. Immediate sync attempts exhausted. Retain pending deduction!
                                         // A network, indexer, or node-sync failure does not undo the broadcast.
                                         // Fail closed and poll until wallet sync succeeds or the payment fails.
-                                        loop {
+                                        // Bounded to 60 iterations (~5 minutes) to prevent unbounded thread leaks.
+                                        for _ in 0..60 {
                                             std::thread::sleep(std::time::Duration::from_secs(5));
                                             let terminal_failed = node_clone.list_payments().iter().any(|p| {
                                                 if let PaymentKind::Onchain { ref txid, .. } = p.kind {

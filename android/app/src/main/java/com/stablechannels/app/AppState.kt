@@ -168,14 +168,71 @@ class AppState(private val context: Context) : ViewModel() {
             }
         }
 
+        /** A single pending broadcast entry pairing a transaction id with its sent amount.
+         * Enables per-transaction resolution so mixed succeeded/failed batches release
+         * only the resolved portion instead of blocking the entire aggregate. */
+        data class TxEntry(val txid: String, val amountSats: Long)
+
         data class PendingOutboundSend(
-            val amountSats: Long = 0L,
             val isSendAll: Boolean = false,
             val baselineOnchainSats: Long = 0L,
             val timestampSecs: Long = System.currentTimeMillis() / 1000L,
-            val txids: List<String> = emptyList()
+            val entries: List<TxEntry> = emptyList()
         ) {
-            val txid: String? get() = txids.firstOrNull()
+            /** Backward-compatible constructor accepting aggregate amount and flat txid list. */
+            constructor(
+                amountSats: Long,
+                isSendAll: Boolean = false,
+                baselineOnchainSats: Long = 0L,
+                timestampSecs: Long = System.currentTimeMillis() / 1000L,
+                txids: List<String> = emptyList()
+            ) : this(
+                isSendAll = isSendAll,
+                baselineOnchainSats = baselineOnchainSats,
+                timestampSecs = timestampSecs,
+                entries = if (txids.isNotEmpty() && amountSats > 0L) {
+                    val perTx = amountSats / txids.size
+                    val remainder = amountSats % txids.size
+                    txids.mapIndexed { i, tid ->
+                        TxEntry(tid, perTx + if (i.toLong() < remainder) 1L else 0L)
+                    }
+                } else if (amountSats > 0L) {
+                    listOf(TxEntry("", amountSats))
+                } else {
+                    emptyList()
+                }
+            )
+
+            /** Aggregate pending amount across all unresolved entries. */
+            val amountSats: Long get() = entries.sumOf { it.amountSats }
+            /** All pending txids for predicate checks. */
+            val txids: List<String> get() = entries.map { it.txid }
+            /** First broadcast txid, if any. */
+            val txid: String? get() = entries.firstOrNull()?.txid
+
+            companion object {
+                /** Backward-compatible constructor: distributes aggregate across flat txids. */
+                fun fromLegacy(
+                    amountSats: Long,
+                    isSendAll: Boolean,
+                    baselineOnchainSats: Long,
+                    timestampSecs: Long,
+                    txids: List<String>
+                ): PendingOutboundSend {
+                    val entries = if (txids.isNotEmpty() && amountSats > 0L) {
+                        val perTx = amountSats / txids.size
+                        val remainder = amountSats % txids.size
+                        txids.mapIndexed { i, tid ->
+                            TxEntry(tid, perTx + if (i < remainder) 1L else 0L)
+                        }
+                    } else if (amountSats > 0L) {
+                        listOf(TxEntry("", amountSats))
+                    } else {
+                        emptyList()
+                    }
+                    return PendingOutboundSend(isSendAll, baselineOnchainSats, timestampSecs, entries)
+                }
+            }
         }
 
         /**
@@ -190,14 +247,15 @@ class AppState(private val context: Context) : ViewModel() {
             if (pending.isSendAll) {
                 return Pair(0L, 0L)
             }
-            if (pending.amountSats > 0L) {
+            val amount = pending.amountSats
+            if (amount > 0L) {
                 val rawDrop = if (rawOnchain < pending.baselineOnchainSats) {
                     pending.baselineOnchainSats - rawOnchain
                 } else {
                     0L
                 }
-                val pendingToDeduct = if (pending.amountSats > rawDrop) {
-                    pending.amountSats - rawDrop
+                val pendingToDeduct = if (amount > rawDrop) {
+                    amount - rawDrop
                 } else {
                     0L
                 }
@@ -210,51 +268,71 @@ class AppState(private val context: Context) : ViewModel() {
 
         /**
          * Resolves pending outbound send state against a fresh raw on-chain balance observation.
-         * Once the raw balance proves the spend has been incorporated (e.g. raw balance has dropped
-         * to 0/below baseline for send-all, or dropped by at least the send amount), pending state clears.
-         * If the balance has not dropped (e.g. masked by an incoming deposit), authoritative transaction
-         * reconciliation (via isTxConfirmed or isTxFailed) resolves the state without re-exposing spent funds.
-         * If indexer/node sync is degraded beyond TTL, it fails closed by retaining the deduction.
+         * Performs per-txid resolution: transactions whose authoritative status is known
+         * (incorporated or failed) are removed individually, allowing partial clearing of
+         * mixed-status batches instead of all-or-nothing.
+         * Fails closed during extended indexer/node outages to prevent re-exposing spent funds.
          */
         fun resolvePendingOutboundSend(
             rawOnchain: Long,
             pending: PendingOutboundSend,
             currentTimestampSecs: Long = System.currentTimeMillis() / 1000L,
             ttlSecs: Long = 600L,
-            isTxConfirmed: ((String) -> Boolean)? = null,
-            isTxFailed: ((String) -> Boolean)? = null
+            isTxIncorporated: ((String) -> Boolean)? = null,
+            isTxFailed: ((String) -> Boolean)? = null,
+            isTxConfirmed: ((String) -> Boolean)? = null
         ): PendingOutboundSend {
+            val incorporated = isTxIncorporated ?: isTxConfirmed
             if (pending.amountSats == 0L && !pending.isSendAll) {
                 return pending
             }
 
-            // 1. Authoritative transaction status check:
-            // If all pending broadcast transactions failed and were rejected, safely release the deduction.
-            if (isTxFailed != null && pending.txids.isNotEmpty() && pending.txids.all { isTxFailed(it) }) {
-                return PendingOutboundSend()
-            }
-
-            // 2. Authoritative confirmation check:
-            // If all pending broadcast txids are confirmed, then even if an incoming deposit
-            // masked the raw balance drop, we know the spend was incorporated into the wallet.
-            if (isTxConfirmed != null && pending.txids.isNotEmpty() && pending.txids.all { isTxConfirmed(it) }) {
-                return PendingOutboundSend()
-            }
-
-            // 3. Raw balance drop check:
-            if (pending.isSendAll) {
-                if (rawOnchain == 0L) {
+            // 1. Per-txid resolution: remove entries whose txid has a terminal or incorporated status.
+            var unresolvedEntries = pending.entries
+            if (unresolvedEntries.isNotEmpty()) {
+                unresolvedEntries = unresolvedEntries.filter { entry ->
+                    if (entry.txid.isBlank()) return@filter true
+                    // Failed transactions: release the deduction (funds were never spent).
+                    if (isTxFailed != null && isTxFailed(entry.txid)) return@filter false
+                    // Incorporated transactions: wallet already reflects the spend.
+                    if (incorporated != null && incorporated(entry.txid)) return@filter false
+                    true
+                }
+                // If all entries resolved, clear the entire record.
+                if (unresolvedEntries.isEmpty()) {
                     return PendingOutboundSend()
                 }
+                // If some entries resolved, re-check raw balance drop against the reduced aggregate.
+                if (unresolvedEntries.size < pending.entries.size) {
+                    val resolved = PendingOutboundSend(
+                        isSendAll = pending.isSendAll,
+                        baselineOnchainSats = pending.baselineOnchainSats,
+                        timestampSecs = pending.timestampSecs,
+                        entries = unresolvedEntries
+                    )
+                    return resolveByBalanceDrop(rawOnchain, resolved)
+                }
+            }
+
+            // 2. No per-txid resolution occurred; check raw balance drop.
+            return resolveByBalanceDrop(rawOnchain, pending)
+        }
+
+        /** Checks whether the raw on-chain balance has dropped enough to account for the
+         * remaining pending deduction. Pure helper for resolvePendingOutboundSend. */
+        private fun resolveByBalanceDrop(
+            rawOnchain: Long,
+            pending: PendingOutboundSend
+        ): PendingOutboundSend {
+            if (pending.isSendAll) {
+                if (rawOnchain == 0L) return PendingOutboundSend()
                 return pending
             }
-            if (pending.amountSats > 0L) {
-                val expectedRemaining = (pending.baselineOnchainSats - pending.amountSats).coerceAtLeast(0L)
-                if (rawOnchain <= expectedRemaining) {
-                    return PendingOutboundSend()
-                }
-                // When balance hasn't dropped and authoritative checks haven't completed,
-                // fail closed even if beyond TTL to never re-expose spent broadcast funds.
+            val amount = pending.amountSats
+            if (amount > 0L) {
+                val expectedRemaining = (pending.baselineOnchainSats - amount).coerceAtLeast(0L)
+                if (rawOnchain <= expectedRemaining) return PendingOutboundSend()
+                // Fail closed: retain deduction until authoritative reconciliation.
                 return pending
             }
             return pending
@@ -402,13 +480,41 @@ class AppState(private val context: Context) : ViewModel() {
         val pendingBaseline = prefs.getLong(BalanceCacheKey.PENDING_BASELINE, 0L)
         val pendingTimestamp = prefs.getLong(BalanceCacheKey.PENDING_TIMESTAMP, 0L)
         val pendingTxidsStr = prefs.getString(BalanceCacheKey.PENDING_TXIDS, "") ?: ""
-        val pendingTxids = if (pendingTxidsStr.isNotBlank()) pendingTxidsStr.split(",").filter { it.isNotBlank() } else emptyList()
+
+        // If no pending amount was cached and it is not send-all, no send is pending.
+        val parts = if (pendingTxidsStr.isNotBlank()) pendingTxidsStr.split(",").filter { it.isNotBlank() } else emptyList()
+        val hasEntryFormat = parts.any { it.contains(":") }
+
+        val entries: List<TxEntry> = if (pendingAmount == 0L && !pendingIsSendAll) {
+            emptyList()
+        } else if (hasEntryFormat) {
+            parts.mapNotNull { part ->
+                val components = part.split(":", limit = 2)
+                if (components.size == 2) {
+                    val amt = components[1].toLongOrNull() ?: return@mapNotNull null
+                    TxEntry(components[0], amt)
+                } else null
+            }
+        } else {
+            // Legacy path: distribute stored aggregate across txids.
+            if (parts.isNotEmpty() && pendingAmount > 0L) {
+                val perTx = pendingAmount / parts.size
+                val remainder = pendingAmount % parts.size
+                parts.mapIndexed { i, tid ->
+                    TxEntry(tid, perTx + if (i < remainder) 1L else 0L)
+                }
+            } else if (pendingAmount > 0L) {
+                listOf(TxEntry("", pendingAmount))
+            } else {
+                emptyList()
+            }
+        }
+
         pendingOutboundSend = PendingOutboundSend(
-            amountSats = pendingAmount,
             isSendAll = pendingIsSendAll,
             baselineOnchainSats = pendingBaseline,
             timestampSecs = if (pendingTimestamp > 0L) pendingTimestamp else (System.currentTimeMillis() / 1000L),
-            txids = pendingTxids
+            entries = entries
         )
         _lightningBalanceSats = MutableStateFlow(cachedLightning)
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
@@ -2831,10 +2937,15 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Resolve pending outbound deduction against raw wallet observation
         val effectivePending = synchronized(pendingLock) {
-            val confirmedPredicate: (String) -> Boolean = { tid ->
+            // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
+            // the wallet's raw balance already reflects the spend. Any positive balance delta
+            // is a genuine incoming deposit, not a masked deduction. This fixes the relaunch+deposit
+            // scenario where the old "succeeded-only" check left funds stuck until 6 confirmations.
+            val incorporatedPredicate: (String) -> Boolean = { tid ->
                 nodeService.node?.listPayments()?.any { p ->
                     val kind = p.kind
-                    kind is PaymentKind.Onchain && kind.txid == tid && p.status == PaymentStatus.SUCCEEDED
+                    kind is PaymentKind.Onchain && kind.txid == tid &&
+                        (p.status == PaymentStatus.SUCCEEDED || p.status == PaymentStatus.PENDING)
                 } ?: false
             }
             val failedPredicate: (String) -> Boolean = { tid ->
@@ -2846,7 +2957,7 @@ class AppState(private val context: Context) : ViewModel() {
             pendingOutboundSend = resolvePendingOutboundSend(
                 rawOnchain = rawOnchain,
                 pending = pendingOutboundSend,
-                isTxConfirmed = confirmedPredicate,
+                isTxIncorporated = incorporatedPredicate,
                 isTxFailed = failedPredicate
             )
             pendingOutboundSend
@@ -2929,7 +3040,7 @@ class AppState(private val context: Context) : ViewModel() {
             .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
             .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
             .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
-            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.txids.joinToString(","))
+            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.entries.joinToString(",") { "${it.txid}:${it.amountSats}" })
             .apply()
     }
 
@@ -2946,30 +3057,23 @@ class AppState(private val context: Context) : ViewModel() {
             } else {
                 pendingOutboundSend.baselineOnchainSats
             }
-            val currentTxids = pendingOutboundSend.txids
-            val updatedTxids = if (!txid.isNullOrBlank() && !currentTxids.contains(txid)) {
-                currentTxids + txid
+            val sendAmount = if (isSendAll) currentOnchain else amountSats
+            val updatedEntries = pendingOutboundSend.entries.toMutableList()
+            if (!txid.isNullOrBlank()) {
+                if (updatedEntries.none { it.txid == txid }) {
+                    updatedEntries.add(TxEntry(txid, sendAmount))
+                }
             } else {
-                currentTxids
+                // No txid available yet; append an anonymous entry.
+                updatedEntries.add(TxEntry("", sendAmount))
             }
 
-            pendingOutboundSend = if (isSendAll) {
-                PendingOutboundSend(
-                    amountSats = pendingOutboundSend.amountSats + currentOnchain,
-                    isSendAll = true,
-                    baselineOnchainSats = newBaseline,
-                    timestampSecs = System.currentTimeMillis() / 1000L,
-                    txids = updatedTxids
-                )
-            } else {
-                PendingOutboundSend(
-                    amountSats = pendingOutboundSend.amountSats + amountSats,
-                    isSendAll = false,
-                    baselineOnchainSats = newBaseline,
-                    timestampSecs = System.currentTimeMillis() / 1000L,
-                    txids = updatedTxids
-                )
-            }
+            pendingOutboundSend = PendingOutboundSend(
+                isSendAll = isSendAll || pendingOutboundSend.isSendAll,
+                baselineOnchainSats = newBaseline,
+                timestampSecs = System.currentTimeMillis() / 1000L,
+                entries = updatedEntries
+            )
             ++sendGeneration
         }
 
@@ -2997,7 +3101,7 @@ class AppState(private val context: Context) : ViewModel() {
             .putBoolean(BalanceCacheKey.PENDING_IS_SEND_ALL, pendingOutboundSend.isSendAll)
             .putLong(BalanceCacheKey.PENDING_BASELINE, pendingOutboundSend.baselineOnchainSats)
             .putLong(BalanceCacheKey.PENDING_TIMESTAMP, pendingOutboundSend.timestampSecs)
-            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.txids.joinToString(","))
+            .putString(BalanceCacheKey.PENDING_TXIDS, pendingOutboundSend.entries.joinToString(",") { "${it.txid}:${it.amountSats}" })
         if (!hasReady && !hasAnyChannel) {
             editor.putLong(BalanceCacheKey.LIGHTNING, 0L)
         }

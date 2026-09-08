@@ -9,6 +9,8 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         ud?.removeObject(forKey: "pending_outbound_onchain_sats")
         ud?.removeObject(forKey: "pending_outbound_is_send_all")
         ud?.removeObject(forKey: "pending_outbound_baseline_sats")
+        ud?.removeObject(forKey: "pending_outbound_timestamp")
+        ud?.removeObject(forKey: "pending_outbound_txids")
         ud?.removeObject(forKey: "cached_onchain_sats")
         ud?.removeObject(forKey: "cached_spendable_onchain_sats")
         ud?.removeObject(forKey: "cached_lightning_sats")
@@ -19,6 +21,8 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         ud?.removeObject(forKey: "pending_outbound_onchain_sats")
         ud?.removeObject(forKey: "pending_outbound_is_send_all")
         ud?.removeObject(forKey: "pending_outbound_baseline_sats")
+        ud?.removeObject(forKey: "pending_outbound_timestamp")
+        ud?.removeObject(forKey: "pending_outbound_txids")
         ud?.removeObject(forKey: "cached_onchain_sats")
         ud?.removeObject(forKey: "cached_spendable_onchain_sats")
         ud?.removeObject(forKey: "cached_lightning_sats")
@@ -781,5 +785,166 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
             expirySecs: 600
         )
         XCTAssertEqual(resolved.amountSats, 0)
+    }
+
+    // MARK: - Review Fix Tests (Issue #267)
+
+    func testMixedSucceededFailedBatchPartialRelease() {
+        // Two sends aggregated: tx_fail (30k) and tx_success (20k). Total = 50k.
+        let pending = BalanceCalculator.PendingOutboundSend(
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            timestampSecs: 1_000_000,
+            entries: [
+                BalanceCalculator.TxEntry(txid: "tx_fail", amountSats: 30_000),
+                BalanceCalculator.TxEntry(txid: "tx_success", amountSats: 20_000)
+            ]
+        )
+        XCTAssertEqual(pending.amountSats, 50_000)
+        XCTAssertEqual(pending.txids, ["tx_fail", "tx_success"])
+
+        // Case 1: tx_fail fails; tx_success is not yet incorporated.
+        // The failed 30k must be released, retaining only 20k for tx_success.
+        let partialFail = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            isTxIncorporated: { _ in false },
+            isTxFailed: { $0 == "tx_fail" }
+        )
+        XCTAssertEqual(partialFail.amountSats, 20_000)
+        XCTAssertEqual(partialFail.entries.count, 1)
+        XCTAssertEqual(partialFail.entries.first?.txid, "tx_success")
+
+        let effPartialFail = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 100_000,
+            rawSpendable: 95_000,
+            pending: partialFail
+        )
+        XCTAssertEqual(effPartialFail.onchain, 80_000)
+        XCTAssertEqual(effPartialFail.spendable, 75_000)
+
+        // Case 2: tx_success is incorporated; tx_fail is still pending.
+        // The incorporated 20k is removed, retaining only 30k for tx_fail.
+        let partialSuccess = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            isTxIncorporated: { $0 == "tx_success" },
+            isTxFailed: { _ in false }
+        )
+        XCTAssertEqual(partialSuccess.amountSats, 30_000)
+        XCTAssertEqual(partialSuccess.entries.count, 1)
+        XCTAssertEqual(partialSuccess.entries.first?.txid, "tx_fail")
+
+        // Case 3: Both resolve (one failed, one incorporated). Entire record clears.
+        let bothResolved = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 100_000,
+            pending: pending,
+            isTxIncorporated: { $0 == "tx_success" },
+            isTxFailed: { $0 == "tx_fail" }
+        )
+        XCTAssertEqual(bothResolved.amountSats, 0)
+        XCTAssertTrue(bothResolved.entries.isEmpty)
+    }
+
+    func testRelaunchWithConcurrentDepositClearsOnIncorporation() {
+        // gpt-6-astra P1 scenario:
+        // App was killed before sync, restored on relaunch from cache.
+        // During relaunch, an incoming deposit raised raw onchain to 120_000 (baseline was 100_000).
+        // Since rawOnchain > baseline, rawDrop is 0.
+        // The broadcast tx ("tx_mempool") is tracked in LDK with .pending status (not .succeeded).
+        let pending = BalanceCalculator.PendingOutboundSend(
+            isSendAll: false,
+            baselineOnchainSats: 100_000,
+            timestampSecs: 1_000_000,
+            entries: [
+                BalanceCalculator.TxEntry(txid: "tx_mempool", amountSats: 50_000)
+            ]
+        )
+
+        // Under new policy, isTxIncorporated returns true for .pending status.
+        let resolved = BalanceCalculator.resolvePendingOutboundSend(
+            rawOnchain: 120_000,
+            pending: pending,
+            isTxIncorporated: { $0 == "tx_mempool" },
+            isTxFailed: { _ in false }
+        )
+        XCTAssertEqual(resolved.amountSats, 0)
+
+        // Effective balance immediately displays full deposit without stuck deduction.
+        let effective = BalanceCalculator.calculateEffectiveBalances(
+            rawOnchain: 120_000,
+            rawSpendable: 115_000,
+            pending: resolved
+        )
+        XCTAssertEqual(effective.onchain, 120_000)
+        XCTAssertEqual(effective.spendable, 115_000)
+    }
+
+    func testPerTxidEntryRecordBroadcastAccumulation() {
+        var pending = BalanceCalculator.PendingOutboundSend()
+
+        // First broadcast: 30,000 sats with txid "tx_alpha"
+        pending = BalanceCalculator.recordBroadcast(
+            currentPending: pending,
+            amountSats: 30_000,
+            isSendAll: false,
+            currentOnchain: 100_000,
+            txid: "tx_alpha"
+        )
+        XCTAssertEqual(pending.entries.count, 1)
+        XCTAssertEqual(pending.entries[0], BalanceCalculator.TxEntry(txid: "tx_alpha", amountSats: 30_000))
+        XCTAssertEqual(pending.amountSats, 30_000)
+        XCTAssertEqual(pending.txids, ["tx_alpha"])
+
+        // Second broadcast: 20,000 sats with txid "tx_beta"
+        pending = BalanceCalculator.recordBroadcast(
+            currentPending: pending,
+            amountSats: 20_000,
+            isSendAll: false,
+            currentOnchain: 70_000,
+            txid: "tx_beta"
+        )
+        XCTAssertEqual(pending.entries.count, 2)
+        XCTAssertEqual(pending.entries[0], BalanceCalculator.TxEntry(txid: "tx_alpha", amountSats: 30_000))
+        XCTAssertEqual(pending.entries[1], BalanceCalculator.TxEntry(txid: "tx_beta", amountSats: 20_000))
+        XCTAssertEqual(pending.amountSats, 50_000)
+        XCTAssertEqual(pending.txids, ["tx_alpha", "tx_beta"])
+    }
+
+    func testBackwardCompatibilityCachedPendingDeserialization() {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+
+        // 1. Test legacy format (flat txids without amount colons)
+        ud?.set(Int64(50_000), forKey: "pending_outbound_onchain_sats")
+        ud?.set(false, forKey: "pending_outbound_is_send_all")
+        ud?.set(Int64(100_000), forKey: "pending_outbound_baseline_sats")
+        ud?.set(Int64(1_000_000), forKey: "pending_outbound_timestamp")
+        ud?.set("legacy_tx1,legacy_tx2", forKey: "pending_outbound_txids")
+
+        let legacyLoaded = AppState.loadCachedPendingOutboundSend(from: ud)
+        XCTAssertEqual(legacyLoaded.amountSats, 50_000)
+        XCTAssertEqual(legacyLoaded.entries.count, 2)
+        XCTAssertEqual(legacyLoaded.entries[0].txid, "legacy_tx1")
+        XCTAssertEqual(legacyLoaded.entries[0].amountSats, 25_000)
+        XCTAssertEqual(legacyLoaded.entries[1].txid, "legacy_tx2")
+        XCTAssertEqual(legacyLoaded.entries[1].amountSats, 25_000)
+
+        // 2. Test new format (txid:amount pairs)
+        ud?.set(Int64(50_000), forKey: "pending_outbound_onchain_sats")
+        ud?.set("new_tx1:30000,new_tx2:20000", forKey: "pending_outbound_txids")
+        let newLoaded = AppState.loadCachedPendingOutboundSend(from: ud)
+        XCTAssertEqual(newLoaded.amountSats, 50_000)
+        XCTAssertEqual(newLoaded.entries.count, 2)
+        XCTAssertEqual(newLoaded.entries[0].txid, "new_tx1")
+        XCTAssertEqual(newLoaded.entries[0].amountSats, 30_000)
+        XCTAssertEqual(newLoaded.entries[1].txid, "new_tx2")
+        XCTAssertEqual(newLoaded.entries[1].amountSats, 20_000)
+
+        // Clean up test values
+        ud?.removeObject(forKey: "pending_outbound_onchain_sats")
+        ud?.removeObject(forKey: "pending_outbound_is_send_all")
+        ud?.removeObject(forKey: "pending_outbound_baseline_sats")
+        ud?.removeObject(forKey: "pending_outbound_timestamp")
+        ud?.removeObject(forKey: "pending_outbound_txids")
     }
 }

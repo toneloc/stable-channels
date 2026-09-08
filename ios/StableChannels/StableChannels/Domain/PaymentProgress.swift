@@ -113,27 +113,56 @@ enum BalanceCalculator {
         return lightning + onchain
     }
 
+    /// A single pending broadcast entry pairing a transaction id with its sent amount.
+    /// Enables per-transaction resolution so mixed succeeded/failed batches release
+    /// only the resolved portion instead of blocking the entire aggregate.
+    struct TxEntry: Equatable, Sendable {
+        let txid: String
+        let amountSats: UInt64
+    }
+
     struct PendingOutboundSend: Equatable, Sendable {
-        var amountSats: UInt64
         var isSendAll: Bool
         var baselineOnchainSats: UInt64
         var timestampSecs: Int64
-        var txids: [String]
+        var entries: [TxEntry]
 
-        var txid: String? { txids.first }
+        /// Aggregate pending amount across all unresolved entries.
+        var amountSats: UInt64 { entries.reduce(0) { $0 + $1.amountSats } }
+
+        /// All pending txids for predicate checks.
+        var txids: [String] { entries.map(\.txid) }
+
+        /// First broadcast txid, if any.
+        var txid: String? { entries.first?.txid }
 
         init(
             amountSats: UInt64 = 0,
             isSendAll: Bool = false,
             baselineOnchainSats: UInt64 = 0,
             timestampSecs: Int64 = Int64(Date().timeIntervalSince1970),
-            txids: [String] = []
+            txids: [String] = [],
+            entries: [TxEntry]? = nil
         ) {
-            self.amountSats = amountSats
             self.isSendAll = isSendAll
             self.baselineOnchainSats = baselineOnchainSats
             self.timestampSecs = timestampSecs
-            self.txids = txids
+            // If explicit entries are provided, use them; otherwise derive from legacy fields.
+            if let entries {
+                self.entries = entries
+            } else if !txids.isEmpty, amountSats > 0 {
+                // Backward compatibility: distribute aggregate evenly across txids.
+                let perTx = amountSats / UInt64(txids.count)
+                let remainder = amountSats % UInt64(txids.count)
+                self.entries = txids.enumerated().map { i, tid in
+                    TxEntry(txid: tid, amountSats: perTx + (UInt64(i) < remainder ? 1 : 0))
+                }
+            } else if amountSats > 0 {
+                // No txid yet (pre-broadcast state or legacy record without txid tracking).
+                self.entries = [TxEntry(txid: "", amountSats: amountSats)]
+            } else {
+                self.entries = []
+            }
         }
     }
 
@@ -149,27 +178,22 @@ enum BalanceCalculator {
         txid: String? = nil
     ) -> PendingOutboundSend {
         let baseline = currentPending.baselineOnchainSats == 0 ? currentOnchain : currentPending.baselineOnchainSats
-        var updatedTxids = currentPending.txids
-        if let txid, !txid.isEmpty, !updatedTxids.contains(txid) {
-            updatedTxids.append(txid)
-        }
-        if isSendAll {
-            return PendingOutboundSend(
-                amountSats: currentPending.amountSats + currentOnchain,
-                isSendAll: true,
-                baselineOnchainSats: baseline,
-                timestampSecs: timestampSecs,
-                txids: updatedTxids
-            )
+        var updatedEntries = currentPending.entries
+        let sendAmount = isSendAll ? currentOnchain : amountSats
+        if let txid, !txid.isEmpty {
+            if !updatedEntries.contains(where: { $0.txid == txid }) {
+                updatedEntries.append(TxEntry(txid: txid, amountSats: sendAmount))
+            }
         } else {
-            return PendingOutboundSend(
-                amountSats: currentPending.amountSats + amountSats,
-                isSendAll: false,
-                baselineOnchainSats: baseline,
-                timestampSecs: timestampSecs,
-                txids: updatedTxids
-            )
+            // No txid available yet; append an anonymous entry.
+            updatedEntries.append(TxEntry(txid: "", amountSats: sendAmount))
         }
+        return PendingOutboundSend(
+            isSendAll: isSendAll || currentPending.isSendAll,
+            baselineOnchainSats: baseline,
+            timestampSecs: timestampSecs,
+            entries: updatedEntries
+        )
     }
 
     /// Derives user-facing on-chain and spendable balances by subtracting any pending
@@ -184,9 +208,10 @@ enum BalanceCalculator {
         if pending.isSendAll {
             return (0, 0)
         }
-        if pending.amountSats > 0 {
+        let amount = pending.amountSats
+        if amount > 0 {
             let rawDrop = (rawOnchain < pending.baselineOnchainSats) ? (pending.baselineOnchainSats - rawOnchain) : 0
-            let pendingToDeduct = pending.amountSats > rawDrop ? (pending.amountSats - rawDrop) : 0
+            let pendingToDeduct = amount > rawDrop ? (amount - rawDrop) : 0
             let onchain = rawOnchain >= pendingToDeduct ? rawOnchain - pendingToDeduct : 0
             let spendable = rawSpendable >= pendingToDeduct ? rawSpendable - pendingToDeduct : 0
             return (onchain, spendable)
@@ -195,46 +220,78 @@ enum BalanceCalculator {
     }
 
     /// Resolves pending outbound send state against a fresh raw on-chain balance observation.
-    /// Once the raw balance proves the spend has been incorporated, or authoritative transaction
-    /// status confirms incorporation / failure, pending state clears.
+    /// Performs per-txid resolution: transactions whose authoritative status is known
+    /// (incorporated or failed) are removed individually, allowing partial clearing of
+    /// mixed-status batches instead of all-or-nothing.
     /// Fails closed during extended indexer/node outages to prevent re-exposing spent funds.
     static func resolvePendingOutboundSend(
         rawOnchain: UInt64,
         pending: PendingOutboundSend,
         currentTimeSecs _: Int64 = Int64(Date().timeIntervalSince1970),
         expirySecs _: Int64 = defaultPendingExpirySecs,
-        isTxConfirmed: ((String) -> Bool)? = nil,
-        isTxFailed: ((String) -> Bool)? = nil
+        isTxIncorporated: ((String) -> Bool)? = nil,
+        isTxFailed: ((String) -> Bool)? = nil,
+        isTxConfirmed: ((String) -> Bool)? = nil
     ) -> PendingOutboundSend {
         guard pending.amountSats > 0 || pending.isSendAll else {
             return pending
         }
 
-        // 1. Authoritative transaction failure check:
-        if let isTxFailed, !pending.txids.isEmpty, pending.txids.allSatisfy({ isTxFailed($0) }) {
-            return PendingOutboundSend(timestampSecs: 0)
+        let incorporated = isTxIncorporated ?? isTxConfirmed
+
+        // 1. Per-txid resolution: remove entries whose txid has a terminal or incorporated status.
+        var unresolvedEntries = pending.entries
+        if !unresolvedEntries.isEmpty {
+            unresolvedEntries = unresolvedEntries.filter { entry in
+                guard !entry.txid.isEmpty else { return true }
+                // Failed transactions: release the deduction (funds were never spent).
+                if let isTxFailed, isTxFailed(entry.txid) { return false }
+                // Incorporated transactions: wallet already reflects the spend.
+                if let incorporated, incorporated(entry.txid) { return false }
+                return true
+            }
+            // If all entries resolved, clear the entire record.
+            if unresolvedEntries.isEmpty {
+                return PendingOutboundSend(timestampSecs: 0)
+            }
+            // If some entries resolved, check if we can return a reduced pending record.
+            if unresolvedEntries.count < pending.entries.count {
+                let resolved = PendingOutboundSend(
+                    isSendAll: pending.isSendAll,
+                    baselineOnchainSats: pending.baselineOnchainSats,
+                    timestampSecs: pending.timestampSecs,
+                    entries: unresolvedEntries
+                )
+                // Re-check raw balance drop against the reduced aggregate.
+                return resolveByBalanceDrop(rawOnchain: rawOnchain, pending: resolved)
+            }
         }
 
-        // 2. Authoritative transaction confirmation check:
-        if let isTxConfirmed, !pending.txids.isEmpty, pending.txids.allSatisfy({ isTxConfirmed($0) }) {
-            return PendingOutboundSend(timestampSecs: 0)
-        }
+        // 2. No per-txid resolution occurred; check raw balance drop.
+        return resolveByBalanceDrop(rawOnchain: rawOnchain, pending: pending)
+    }
 
-        // 3. Raw balance drop check:
+    /// Checks whether the raw on-chain balance has dropped enough to account for the
+    /// remaining pending deduction. Pure helper for resolvePendingOutboundSend.
+    private static func resolveByBalanceDrop(
+        rawOnchain: UInt64,
+        pending: PendingOutboundSend
+    ) -> PendingOutboundSend {
         if pending.isSendAll {
             if rawOnchain == 0 {
                 return PendingOutboundSend(timestampSecs: 0)
             }
             return pending
         }
-        if pending.amountSats > 0 {
-            let expectedRemaining = pending.baselineOnchainSats >= pending.amountSats
-                ? pending.baselineOnchainSats - pending.amountSats
+        let amount = pending.amountSats
+        if amount > 0 {
+            let expectedRemaining = pending.baselineOnchainSats >= amount
+                ? pending.baselineOnchainSats - amount
                 : 0
             if rawOnchain <= expectedRemaining {
                 return PendingOutboundSend(timestampSecs: 0)
             }
-            // Fail closed beyond expiry: retain deduction until authoritative reconciliation
+            // Fail closed: retain deduction until authoritative reconciliation.
             return pending
         }
         return pending
