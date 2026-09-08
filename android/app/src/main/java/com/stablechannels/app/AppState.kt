@@ -1538,7 +1538,10 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val price = priceService.currentPrice.value
-        val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
+        val signedRecord = customRecords.firstOrNull {
+            it.typeNum == Constants.SIGNED_STABILITY_TLV_TYPE.toULong()
+        }
+        var isStabilityPayment = false
         val hasStableControlMessage = customRecords.any {
             it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
                 !it.value.contentEquals(byteArrayOf(1))
@@ -1552,11 +1555,12 @@ class AppState(private val context: Context) : ViewModel() {
             ))
             return
         }
-        val paymentType = if (isStabilityPayment) "stability" else "lightning"
         var sc0 = _stableChannel.value
         // Always use paymentHash as fallback so dedup check runs even when paymentId is null.
         val effectiveId = paymentId ?: paymentHash
-        if (isStabilityPayment && sc0.userChannelId.isEmpty()) {
+        if (signedRecord != null &&
+            (sc0.userChannelId.isEmpty() || sc0.channelId.isEmpty())
+        ) {
             // Inline discovery from the node's channel list (mirrors StabilityService.updateBalances)
             // before giving up on the backing update.
             nodeService.refreshChannels()
@@ -1573,6 +1577,47 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             }
         }
+        // A valid signed STABILITY_PAYMENT_V1 record is the only stability classifier —
+        // the legacy [0x01] marker is gone (#270); without one this is ordinary Lightning.
+        var settlementId: String? = null
+        if (signedRecord != null) {
+            if (sc0.channelId.isEmpty() || sc0.userChannelId.isEmpty()) {
+                // Discovery above could not recover local state. This is a retryable local
+                // condition, not a bad envelope: demoting it to a Lightning receipt would dedupe
+                // the payment id and make the backing credit unrecoverable. Nack instead.
+                AuditService.log("STABILITY_PAYMENT_STATE_UNAVAILABLE", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "payment_hash" to paymentHash,
+                    "amount_msat" to amountMsat
+                ))
+                throw Exception(
+                    "Channel state unavailable for signed settlement — not acknowledging, will retry"
+                )
+            }
+            when (val validation = StabilityPaymentProtocol.validateInbound(
+                signedRecord.value,
+                sc0.counterparty,
+                sc0.channelId,
+                amountMsat
+            ) { msg, sig, pk -> nodeService.verifySignature(msg, sig, pk) }) {
+                is SignedSettlementValidation.Valid -> {
+                    isStabilityPayment = true
+                    settlementId = validation.payment.settlementId
+                }
+                is SignedSettlementValidation.Invalid -> {
+                    // An invalid signed record must not credit backing — record the keysend as
+                    // an ordinary Lightning receipt instead (mirrors desktop user.rs).
+                    AuditService.log("STABILITY_PAYMENT_INVALID", mapOf(
+                        "payment_id" to (paymentId ?: ""),
+                        "payment_hash" to paymentHash,
+                        "amount_msat" to amountMsat,
+                        "reason" to validation.reason
+                    ))
+                    isStabilityPayment = false
+                }
+            }
+        }
+        val paymentType = if (isStabilityPayment) "stability" else "lightning"
         val userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null
         if (isStabilityPayment && userChannelId == null) {
             throw Exception("Stability payment received but userChannelId is empty — cannot update backing, not acknowledging")
@@ -1587,7 +1632,8 @@ class AppState(private val context: Context) : ViewModel() {
                 amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
                 btcPrice = price, counterparty = sc0.counterparty,
                 userChannelId = userChannelId,
-                backingDeltaSats = backingDelta
+                backingDeltaSats = backingDelta,
+                settlementId = settlementId
             ) ?: throw Exception("DB service unavailable")
         }
         val persistence = try {
@@ -1599,6 +1645,12 @@ class AppState(private val context: Context) : ViewModel() {
             AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
             saveChannelToDB()
             record()
+        }
+        if (settlementId != null && !persistence.isNewPayment) {
+            AuditService.log("STABILITY_PAYMENT_REPLAY_IGNORED", mapOf(
+                "settlement_id" to settlementId,
+                "payment_hash" to paymentHash
+            ))
         }
         refreshBalances()
         updateStableBalances()
@@ -2541,7 +2593,9 @@ class AppState(private val context: Context) : ViewModel() {
             val now = System.currentTimeMillis() / 1000
             if (now - sc.lastStabilityPayment < Constants.STABILITY_PAYMENT_COOLDOWN_SECS.toLong()) return
 
-            val amountMsat = USD(abs(result.dollarsFromPar)).toMsats(price)
+            // Stable allocations are sat-denominated — floor to whole sats so the signed
+            // amount matches the keysend exactly (mirrors src/stable.rs).
+            val amountMsat = (USD(abs(result.dollarsFromPar)).toMsats(price) / 1000L) * 1000L
             if (amountMsat == 0L) return
 
             // Chain-freshness gate (see #243): never pay on a stale chain tip, and check
@@ -2570,14 +2624,25 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             val paymentId = try {
-                // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
-                // this as a settlement (operator GUI) and runs reconcile_incoming_stability
-                // immediately, matching every other sender. See issue #161.
-                nodeService.sendStabilityPayment(
-                    amountMsat,
-                    sc.counterparty,
-                    listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1)))
+                // Attach only the signed STABILITY_PAYMENT_V1 envelope — the legacy
+                // STABLE_CHANNEL_TLV [0x01] marker is gone (#270). If the envelope can't
+                // be built, release the claim and skip the payment entirely.
+                val signedEnvelope = StabilityPaymentProtocol.buildSignedEnvelope(
+                    channelId = sc.channelId,
+                    amountMsat = amountMsat,
+                    expectedUsd = sc.expectedUSD.amount,
+                    sign = { payload -> nodeService.signMessage(payload) }
                 )
+                if (signedEnvelope == null) {
+                    try { databaseService?.clearPendingSend() } catch (_: Exception) {}
+                    AuditService.log("STABILITY_SKIP", mapOf("reason" to "envelope_build_failed"))
+                    return
+                }
+                val records = listOf(CustomTlvRecord(
+                    Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
+                    signedEnvelope.toByteArray(Charsets.UTF_8)
+                ))
+                nodeService.sendStabilityPayment(amountMsat, sc.counterparty, records)
             } catch (e: NodeService.StaleLightningSyncException) {
                 // The wrapper's send-boundary gate fired (sync went stale after the precheck
                 // above). Send never happened — release the claim and retry next tick.

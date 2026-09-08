@@ -60,7 +60,36 @@ final class LSPToUserHandler: PaymentHandler {
                     break
                 }
 
-                let isStability = StableControlParser.isStabilityPayment(customRecords)
+                // Only a valid signed settlement record makes this a stability payment
+                // (issue #270): invalid or replayed records are acked and ignored, and
+                // payments without one are ordinary Lightning receipts.
+                var settlementId: String?
+                let isStability: Bool
+                switch StableControlParser.signedSettlementStatus(
+                    node: node,
+                    db: db,
+                    customRecords: customRecords,
+                    amountMsat: amountMsat
+                ) {
+                case .valid(let id):
+                    isStability = true
+                    settlementId = id
+                case .invalid(let reason):
+                    // The sats arrived regardless, so record a Lightning receipt, not backing.
+                    NSLog("[NSE] invalid signed stability settlement, recording as lightning: \(reason)")
+                    isStability = false
+                case .duplicate(let id):
+                    NSLog("[NSE] ignoring replayed signed stability settlement: \(id)")
+                    try? node.eventHandled()
+                    continue eventLoop
+                case .stateUnavailable:
+                    // Do not ack: the sats arrived but local channel state is unreadable, so
+                    // recording now would dedupe the payment id and lose the backing credit.
+                    NSLog("[NSE] channel state unavailable for signed settlement, deferring to foreground")
+                    break eventLoop
+                case .none:
+                    isStability = false
+                }
                 if isStability {
                     let amountSats = amountMsat / 1000
                     switch db.recordPayment(
@@ -71,7 +100,8 @@ final class LSPToUserHandler: PaymentHandler {
                         amountUSD: self.calculateUSD(amountSats, price: price),
                         btcPrice: price,
                         backingDeltaSats: Int64(amountSats),
-                        userChannelId: db.activeUserChannelId()
+                        userChannelId: db.activeUserChannelId(),
+                        settlementId: settlementId
                     ) {
                     case .inserted, .duplicate:
                         try? node.eventHandled()
@@ -91,7 +121,8 @@ final class LSPToUserHandler: PaymentHandler {
                         amountUSD: self.calculateUSD(amountMsat / 1000, price: price),
                         btcPrice: price,
                         backingDeltaSats: nil,
-                        userChannelId: nil
+                        userChannelId: nil,
+                        settlementId: nil
                     )
                     switch result {
                     case .inserted, .duplicate:
