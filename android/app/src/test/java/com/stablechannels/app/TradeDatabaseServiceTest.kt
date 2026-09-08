@@ -389,6 +389,7 @@ class TradeDatabaseServiceTest {
                 stableReceiverBTC = Bitcoin(100_000),
                 backingSats = 55_000
             ),
+            spendableSats = 100_000,
             action = "sell",
             amountUsd = 10.0,
             amountBtc = 0.000099,
