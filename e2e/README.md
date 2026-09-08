@@ -196,6 +196,7 @@ is in `aux-tests-pr-analysis.md`, and the copy/mechanism research in
 | `22_trade_refusal_copy` | local refusals collapsing into "Trade service unavailable" | #274 #275 | android, ios |
 | `23_onchain_confirmation_policy` | onchain deposits completing before 6 confirmations | #267 | android, ios |
 | `24_splicein_confirmation_badge` | splice-in badge stuck at 0/6 instead of counting to 1 (issue #276) | #267 | android, ios |
+| `25_spliceout_usd_overflow` | overflow splice-out failing to debit USD (issue #277) | — | android, ios |
 
 Aux flows substitute into, or append to, a lifecycle:
 
@@ -212,6 +213,8 @@ make android FLOWS="01_onboard_lightning 21_stabilization_cap"
 make android FLOWS="01_onboard_lightning 22_trade_refusal_copy 23_onchain_confirmation_policy"
 # 24 replaces 05 (deposit + sweep + badge checks; issue #276 repro — run on iOS too):
 make ios FLOWS="01_onboard_lightning 24_splicein_confirmation_badge"
+# 25 needs 01+02's split position (stable + small native) at the $100k base price:
+make ios FLOWS="01_onboard_lightning 02_btc_to_usd 25_spliceout_usd_overflow"
 # 20 is opt-in like 11: reveal the ACTIVE seed via 10, keep the channel open,
 # then run the guard flow directly through maestro with the seed:
 maestro test -e RESTORE_SEED="word1 ... word12" flows/20_restore_guard.yaml

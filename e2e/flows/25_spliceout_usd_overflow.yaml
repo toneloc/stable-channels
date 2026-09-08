@@ -1,0 +1,112 @@
+# Step 25 — Aux: overflow splice-out debits the USD balance
+# An onchain send larger than the native BTC balance drains BTC first and debits the remainder from stabilized USD — the USD balance must actually decrease, on the LSP's books AND on screen.
+#
+# Validates issue #277 (iOS: splice-outs not decreasing USD). Run RIGHT AFTER
+# 01 + 02 at the canonical $100,000 price:
+#   Android position: $75.31 stable + ~$8.93 native · iOS: $74.22 + ~$10.03.
+# Sending $15 onchain overflows native by ~$5-6.1, so home must land in the
+# $67-$69.99 band afterwards. A build with the bug keeps USD in the $70s
+# (band assert fails); an over-deduction lands below $67 (also fails).
+# The LSP-side audit assert separates a books bug from a display bug.
+appId: com.stablechannels.app
+tags: [android, ios, onchain, send, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+
+# Known pre-state from flow 02 (platform amounts differ; both are $7x.xx).
+- assertVisible: "\\$7[45]\\.\\d\\d"
+
+# Mark the audit-log position before sending.
+- runScript:
+    script: |
+      output.markIso = new Date().toISOString();
+
+# Onchain send $15 — flow 07's proven selector dance.
+- runScript:
+    file: helpers/create_address.js
+- tapOn: "Send"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.address}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Amount \\(USD\\)"
+          timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Onchain Address"
+          timeout: 20000
+- tapOn: "0.00"
+- inputText: "15"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Splice-out initiated"
+          timeout: 60000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Payment sent.*"
+          timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Let the splice broadcast, then confirm it.
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Move confirmed"
+    timeout: 180000
+
+# Books: the LSP must have deducted the overflow (~$5-6.1, wide band for fees).
+- runScript:
+    file: helpers/assert_lsp_splice_out_deducted.js
+    env:
+      MARK_ISO: ${output.markIso}
+      MIN_DEDUCTED_USD: "3.5"
+      MAX_DEDUCTED_USD: "8"
+
+# Screen: home USD must land in the post-overflow band — not stay in the $70s.
+- tapOn: "Home"
+- extendedWaitUntil:
+    visible: "\\$6[7-9]\\.\\d\\d"
+    timeout: 120000
+- assertNotVisible: "\\$7[45]\\.\\d\\d"
