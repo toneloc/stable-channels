@@ -8,6 +8,41 @@ import java.security.SecureRandom
 import kotlin.math.abs
 import kotlin.math.floor
 
+/**
+ * Why a trade could not be prepared locally. Distinct from a [TradeControlMessage.Rejected]
+ * reason code: these are decided on this device, before anything is signed or sent, so no fee
+ * has been spent and there is nothing to reconcile with the LSP.
+ *
+ * Issue #272: these refusals all returned a bare `null` and shared one caller-supplied string.
+ * The stabilization limit already reports itself precisely via [StabilizationPolicy]; this gives
+ * the remaining ones the same treatment instead of describing every one of them as a settlement
+ * problem.
+ */
+enum class TradeFailure {
+    INVALID_CHANNEL,
+    INVALID_AMOUNT,
+    FEE_UNAVAILABLE,
+    FEE_EXCEEDS_BALANCE,
+    ALLOCATION_UNAVAILABLE;
+
+    /** Fixed local copy: what happened, and where the user can act, what to do about it. */
+    fun userMessage(): String = when (this) {
+        INVALID_CHANNEL -> "This channel is not ready to trade yet."
+        INVALID_AMOUNT -> "Enter a valid amount and try again."
+        FEE_UNAVAILABLE -> "The trade fee could not be calculated. Refresh the price and try again."
+        FEE_EXCEEDS_BALANCE -> "Your balance cannot cover this trade and its fee. Reduce the amount."
+        ALLOCATION_UNAVAILABLE ->
+            "This trade cannot preserve the current channel allocation safely. " +
+                "Settle the stability adjustment and retry."
+    }
+}
+
+/** The outcome of [TradeProtocol.prepareOrFailure]: a ready trade, or why there isn't one. */
+sealed interface TradePreparation {
+    data class Success(val trade: PreparedTrade) : TradePreparation
+    data class Failure(val reason: TradeFailure) : TradePreparation
+}
+
 data class TradeCorrelation(
     val tradeId: String,
     val tradePaymentId: String,
@@ -100,6 +135,7 @@ object TradeProtocol {
         return (feeSats.toLong() * 1000L).coerceAtLeast(1L)
     }
 
+    /** Nullable form, for callers that only need to know whether a trade could be built. */
     fun prepare(
         sc: StableChannel,
         spendableSats: Long,
@@ -111,24 +147,49 @@ object TradeProtocol {
         quotePrice: Double,
         now: Long = System.currentTimeMillis() / 1000L,
         tradeId: String = randomIdentifier()
-    ): PreparedTrade? {
+    ): PreparedTrade? = (
+        prepareOrFailure(
+            sc, spendableSats, action, amountUsd, amountBtc, feeUsd, newExpectedUsd,
+            quotePrice, now, tradeId
+        ) as? TradePreparation.Success
+        )?.trade
+
+    /**
+     * Builds a trade, or names the check that refused it. The stabilization cap still throws
+     * [TradeValidationException] directly: it is the one refusal that already carries a computed
+     * maximum in its message, and that number cannot be reconstructed from an enum.
+     */
+    fun prepareOrFailure(
+        sc: StableChannel,
+        spendableSats: Long,
+        action: String,
+        amountUsd: Double,
+        amountBtc: Double,
+        feeUsd: Double,
+        newExpectedUsd: Double,
+        quotePrice: Double,
+        now: Long = System.currentTimeMillis() / 1000L,
+        tradeId: String = randomIdentifier()
+    ): TradePreparation {
         val normalizedExpected = normalizeExpectedUsd(newExpectedUsd)
         if (!isCanonicalIdentifier(sc.channelId) || sc.userChannelId.isBlank() ||
-            !isCanonicalIdentifier(tradeId) || !amountUsd.isFinite() || amountUsd <= 0.0 ||
+            !isCanonicalIdentifier(tradeId)
+        ) return TradePreparation.Failure(TradeFailure.INVALID_CHANNEL)
+        if (!amountUsd.isFinite() || amountUsd <= 0.0 ||
             !amountBtc.isFinite() || amountBtc < 0.0 || !feeUsd.isFinite() || feeUsd < 0.0
-        ) return null
+        ) return TradePreparation.Failure(TradeFailure.INVALID_AMOUNT)
         val feeMsat = expectedTradeFeeMsat(sc.expectedUSD.amount, normalizedExpected, quotePrice)
-            ?: return null
+            ?: return TradePreparation.Failure(TradeFailure.FEE_UNAVAILABLE)
         val feeSats = feeMsat / 1000L
         val postFeeReceiver = sc.stableReceiverBTC.sats - feeSats
-        if (postFeeReceiver < 0L) return null
+        if (postFeeReceiver < 0L) return TradePreparation.Failure(TradeFailure.FEE_EXCEEDS_BALANCE)
         val backing = tradeBackingAfterDelta(
             receiverSats = postFeeReceiver,
             currentBackingSats = sc.backingSats,
             currentExpectedUsd = sc.expectedUSD.amount,
             newExpectedUsd = normalizedExpected,
             price = quotePrice
-        ) ?: return null
+        ) ?: return TradePreparation.Failure(TradeFailure.ALLOCATION_UNAVAILABLE)
 
         // Trade-entry only. Accepted syncs and settlements may legitimately exceed this cap.
         if (action == "sell" || normalizedExpected > sc.expectedUSD.amount) {
@@ -149,7 +210,8 @@ object TradeProtocol {
             put("quote_price", quotePrice)
             put("ts", now)
         }.toString()
-        return PreparedTrade(
+        return TradePreparation.Success(
+            PreparedTrade(
             channelId = sc.channelId,
             userChannelId = sc.userChannelId,
             tradeId = tradeId,
@@ -166,6 +228,7 @@ object TradeProtocol {
             quotePrice = quotePrice,
             createdAt = now,
             expiresAt = now + RESULT_TIMEOUT_SECS
+            )
         )
     }
 
