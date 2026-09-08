@@ -16,11 +16,13 @@ struct BalanceBarView: View {
     let nativeSats: UInt64
     let totalSats: UInt64
     let btcPrice: Double
+    var maxSellUSD: Double = 0
     var onDragStarted: (() -> Void)?
     var onTradeRequest: ((TradeDirection, Double) -> Void)?
 
     @State private var dragOffset: CGFloat = 0
     @State private var isPressing = false
+    @State private var atSellLimit = false
     @State private var pulseScale: CGFloat = 1.0
 
     private let thumbDiameter: CGFloat = 28
@@ -39,7 +41,12 @@ struct BalanceBarView: View {
         GeometryReader { geo in
             let barWidth = geo.size.width
             let baseX = barWidth * stableFraction
+            let maxSellOffset = min(
+                max(0, barWidth - baseX),
+                totalUSD > 0 ? barWidth * max(0, maxSellUSD) / totalUSD : 0
+            )
             let thumbX = max(0, min(barWidth, baseX + dragOffset))
+            let tooltipWidth = min(atSellLimit ? 280.0 : 125.0, barWidth)
             let visFrac = barWidth > 0 ? thumbX / barWidth : stableFraction
             let h = interactive ? barHeight : 10
 
@@ -84,15 +91,19 @@ struct BalanceBarView: View {
                         .scaleEffect(isPressing ? 1.15 : pulseScale)
                         .overlay(alignment: .top) {
                             if isPressing {
-                                Text("\(usdPct)% USD  \(btcPct)% BTC")
+                                Text(atSellLimit ? StabilizationPolicy
+                                    .limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)) :
+                                    "\(usdPct)% USD  \(btcPct)% BTC")
                                     .font(.caption2.bold())
-                                    .fixedSize()
+                                    .multilineTextAlignment(.center)
+                                    .frame(width: max(0, tooltipWidth - 16))
+                                    .fixedSize(horizontal: false, vertical: true)
                                     .foregroundStyle(.primary)
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                    .fixedSize()
-                                    .offset(y: -34)
+                                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+                                    .alignmentGuide(.top) { $0[.bottom] + 8 }
+                                    .offset(x: min(max(thumbX, tooltipWidth / 2), barWidth - tooltipWidth / 2) - thumbX)
                                     .transition(.opacity.combined(with: .scale(scale: 0.8)))
                             }
                         }
@@ -114,12 +125,14 @@ struct BalanceBarView: View {
                         if !isPressing {
                             guard abs(value.startLocation.x - baseX) < thumbDiameter * 1.5 else { return }
                             isPressing = true
+                            atSellLimit = false
                             onDragStarted?()
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         }
                         guard isPressing else { return }
                         let translation = value.location.x - value.startLocation.x
-                        dragOffset = max(-baseX, min(barWidth - baseX, translation))
+                        atSellLimit = translation > maxSellOffset
+                        dragOffset = max(-baseX, min(maxSellOffset, translation))
                     }
                     .onEnded { _ in
                         guard isPressing else {
@@ -138,7 +151,7 @@ struct BalanceBarView: View {
                         let direction: TradeDirection = dragOffset > 0 ? .sell : .buy
                         let clamped = direction == .buy
                             ? min(tradeUSD, stableUSD)
-                            : min(tradeUSD, nativeUSD)
+                            : min(tradeUSD, maxSellUSD)
                         onTradeRequest?(direction, clamped)
                         // Hold thumb at dragged position, then snap back after sheet appears
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {

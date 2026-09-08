@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.CurrencyBitcoin
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.Icon
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.launch
@@ -52,6 +53,7 @@ fun BalanceBar(
     nativeSats: Long,
     totalSats: Long,
     btcPrice: Double,
+    maxSellUSD: Double = 0.0,
     showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
@@ -70,6 +72,7 @@ fun BalanceBar(
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
     var hasTriggeredHaptic by remember { mutableStateOf(false) }
+    var atSellLimit by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val view = LocalView.current
@@ -81,6 +84,8 @@ fun BalanceBar(
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
 
     val baseXPx = barWidthPx * stableFraction
+    val maxSellOffset = minOf((barWidthPx * maxSellUSD.coerceAtLeast(0.0) / totalUSD).toFloat(),
+        (barWidthPx - baseXPx).coerceAtLeast(0f))
     val thumbXPx = (baseXPx + dragOffsetPx).coerceIn(0f, barWidthPx)
     val visFrac = if (barWidthPx > 0) thumbXPx / barWidthPx else stableFraction
     val usdPct = (visFrac * 100).roundToInt()
@@ -111,12 +116,13 @@ fun BalanceBar(
                 .onSizeChanged { barWidthPx = it.width.toFloat() }
                 .then(
                     if (interactive) {
-                        Modifier.pointerInput(stableFraction) {
+                        Modifier.pointerInput(stableFraction, maxSellUSD) {
                             detectDragGestures(
                                 onDragStart = { offset ->
                                     if (abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f) {
                                         isDragging = true
                                         hasTriggeredHaptic = false
+                                        atSellLimit = false
                                         scope.launch { dragOffset.snapTo(0f) }
                                         onDragStarted?.invoke()
                                     }
@@ -124,8 +130,9 @@ fun BalanceBar(
                                 onDrag = { change, dragAmount ->
                                     if (isDragging) {
                                         change.consume()
-                                        val newOffset = (dragOffset.value + dragAmount.x)
-                                            .coerceIn(-baseXPx, barWidthPx - baseXPx)
+                                        val proposedOffset = dragOffset.value + dragAmount.x
+                                        atSellLimit = proposedOffset > maxSellOffset
+                                        val newOffset = proposedOffset.coerceIn(-baseXPx, maxSellOffset)
                                         scope.launch { dragOffset.snapTo(newOffset) }
 
                                         // Haptic tick when drag first crosses $1.00 threshold
@@ -162,7 +169,7 @@ fun BalanceBar(
                                     val clamped = if (direction == TradeDirection.BUY)
                                         min(tradeUSD, stableUSD)
                                     else
-                                        min(tradeUSD, nativeUSD)
+                                        min(tradeUSD, maxSellUSD)
                                     onTradeRequest?.invoke(direction, clamped)
                                     // Hold position, then animate back (400ms ease-out)
                                     scope.launch {
@@ -229,20 +236,22 @@ fun BalanceBar(
                 // Percentage label while dragging
                 if (isDragging) {
                     val barWidthDp = with(density) { barWidthPx.toDp() }
-                    val labelWidth = 105.dp
+                    val labelWidth = minOf(if (atSellLimit) 260.dp else 105.dp, barWidthDp)
                     val labelX = (thumbOffsetDp - (labelWidth / 2) + (thumbDiameter / 2))
                         .coerceIn(0.dp, maxOf(0.dp, barWidthDp - labelWidth))
 
                     val xPx = with(density) { labelX.roundToPx() }
-                    val yPx = with(density) { (-40).dp.roundToPx() }
+                    // Anchor the bubble above the thumb regardless of wrapped text/font size.
+                    val yPx = with(density) { -(thumbDiameter + 8.dp).roundToPx() }
 
                     Popup(
-                        alignment = Alignment.TopStart,
+                        alignment = Alignment.BottomStart,
                         offset = IntOffset(xPx, yPx),
                         properties = PopupProperties(clippingEnabled = false)
                     ) {
                         Box(
                             modifier = Modifier
+                                .widthIn(max = labelWidth)
                                 .background(
                                     MaterialTheme.colorScheme.surfaceVariant,
                                     RoundedCornerShape(12.dp)
@@ -250,7 +259,7 @@ fun BalanceBar(
                                 .padding(horizontal = 8.dp, vertical = 6.dp)
                         ) {
                             Text(
-                                "$usdPct% USD  $btcPct% BTC",
+                                if (atSellLimit) StabilizationPolicy.limitExceededMessage((maxSellUSD * 100 + 1e-7).toLong()) else "$usdPct% USD  $btcPct% BTC",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold
                             )

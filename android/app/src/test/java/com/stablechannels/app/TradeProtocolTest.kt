@@ -3,6 +3,7 @@ package com.stablechannels.app
 import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
+import com.stablechannels.app.services.BuyAmountPolicy
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
 import org.json.JSONObject
@@ -49,6 +50,7 @@ class TradeProtocolTest {
             backingSats = 55_000
         )
         val prepared = TradeProtocol.prepare(
+            spendableSats = 100_000,
             sc = sc,
             action = "sell",
             amountUsd = 10.0,
@@ -71,6 +73,53 @@ class TradeProtocolTest {
         assertEquals(99_000L, prepared.feeMsat)
         assertEquals(64, prepared.requestHash.length)
         assertTrue(prepared.newBackingSats <= 100_000L - prepared.feeMsat / 1000L)
+    }
+
+    @Test
+    fun flooredBuyMaximumStillExitsFractionalCentBalance() {
+        val sc = StableChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = USD(81.026),
+            stableReceiverBTC = Bitcoin(100_000),
+            backingSats = 81_026
+        )
+        val amount = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
+        val prepared = TradeProtocol.prepare(
+            sc = sc,
+            spendableSats = 100_000,
+            action = "buy",
+            amountUsd = amount,
+            amountBtc = (amount - amount * 0.01) / 100_000.0,
+            feeUsd = amount * 0.01,
+            newExpectedUsd = sc.expectedUSD.amount - amount,
+            quotePrice = 100_000.0
+        )
+        assertNotNull(prepared)
+        assertEquals(0.0, prepared!!.newExpectedUsd, 0.0)
+        assertEquals(0L, prepared.newBackingSats)
+    }
+
+    @Test
+    fun flooredBuyMaximumDoesNotBypassFullExitDriftCheck() {
+        val sc = StableChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = USD(81.026),
+            stableReceiverBTC = Bitcoin(100_000),
+            backingSats = 90_000
+        )
+        val amount = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
+        assertNull(TradeProtocol.prepare(
+            sc = sc,
+            spendableSats = 100_000,
+            action = "buy",
+            amountUsd = amount,
+            amountBtc = (amount - amount * 0.01) / 100_000.0,
+            feeUsd = amount * 0.01,
+            newExpectedUsd = sc.expectedUSD.amount - amount,
+            quotePrice = 100_000.0
+        ))
     }
 
     @Test

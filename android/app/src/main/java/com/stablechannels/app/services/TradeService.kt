@@ -5,7 +5,7 @@ import com.stablechannels.app.util.Constants
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.CustomTlvRecord
 import kotlin.math.max
-import kotlin.math.min
+import com.stablechannels.app.models.Bitcoin
 
 data class TradeResult(
     val paymentId: String,
@@ -18,13 +18,24 @@ class TradeService(
     private val nodeService: NodeService,
     private val databaseService: DatabaseService
 ) {
+    private fun liveSnapshot(sc: StableChannel, price: Double): StabilizationSnapshot? {
+        val channel = nodeService.node?.listChannels()?.firstOrNull { it.userChannelId == sc.userChannelId && it.isChannelReady }
+            ?: return null
+        val capacity = (channel.outboundCapacityMsat / 1000u).toLong()
+        return StabilizationSnapshot(capacity + (channel.unspendablePunishmentReserve?.toLong() ?: 0L),
+            capacity, sc.backingSats, sc.expectedUSD.amount, price)
+    }
+
+    fun maxSellCents(sc: StableChannel, price: Double): Long = liveSnapshot(sc, price)?.maxOrderCents() ?: 0L
+
     fun executeBuy(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
         price: Double
-    ): TradeResult? {
-        if (amountUSD <= 0 || amountUSD > sc.expectedUSD.amount || price <= 0) return null
+    ): TradeResult {
+        if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount) || !price.isFinite() || price <= 0)
+            throw TradeValidationException("Enter a positive amount within your stabilized USD balance and use a fresh quote")
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
         val btcAmount = netAmount / price
@@ -37,12 +48,12 @@ class TradeService(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
-        price: Double,
-        maxUSD: Double
-    ): TradeResult? {
-        if (amountUSD <= 0 || price <= 0) return null
+        price: Double
+    ): TradeResult {
+        if (!amountUSD.isFinite() || amountUSD <= 0 || !price.isFinite() || price <= 0)
+            throw TradeValidationException("Enter a positive amount and use a fresh BTC/USD quote")
         val netAmount = amountUSD - feeUSD
-        val newExpectedUSD = min(sc.expectedUSD.amount + netAmount, maxUSD)
+        val newExpectedUSD = sc.expectedUSD.amount + netAmount
         val btcAmount = netAmount / price
         return preparePersistAndSend(
             sc, "sell", amountUSD, btcAmount, feeUSD, newExpectedUSD, price
@@ -57,16 +68,22 @@ class TradeService(
         feeUsd: Double,
         newExpectedUsd: Double,
         price: Double
-    ): TradeResult? {
+    ): TradeResult {
+        val snapshot = liveSnapshot(sc, price)
+            ?: throw TradeValidationException("The live channel balance is unavailable. Retry when the channel is ready.")
+        if (newExpectedUsd > sc.expectedUSD.amount && !snapshot.accepts(kotlin.math.floor(amountUsd * 100 + 1e-7).toLong()))
+            throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
+        val liveSc = sc.copy(stableReceiverBTC = Bitcoin(snapshot.receiverSats))
         val prepared = TradeProtocol.prepare(
-            sc = sc,
+            sc = liveSc,
+            spendableSats = snapshot.spendableSats,
             action = action,
             amountUsd = amountUsd,
             amountBtc = amountBtc,
             feeUsd = feeUsd,
             newExpectedUsd = newExpectedUsd,
             quotePrice = price
-        ) ?: return null
+        ) ?: throw TradeValidationException("This trade cannot preserve the current channel allocation safely. Settle the stability adjustment and retry.")
 
         // This row is the recovery authority. It must exist before the non-refundable fee send.
         val tradeDbId = databaseService.recordPreparedTrade(prepared)

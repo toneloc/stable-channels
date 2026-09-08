@@ -3,6 +3,106 @@ import CoreFoundation
 import Foundation
 import Security
 
+// This file belongs to BOTH the app and notification extension targets. Trade-entry only:
+// never enforce this policy in accepted-result reconciliation or stability settlements.
+enum StabilizationPolicy {
+    static let maxStableAllocationPercent: UInt64 = 99
+    static let clientSafetyMarginSats: UInt64 = 50
+
+    static func backingCap(_ postFeeSpendable: UInt64) -> UInt64? {
+        return (postFeeSpendable / 100) * maxStableAllocationPercent
+            + ((postFeeSpendable % 100) * maxStableAllocationPercent) / 100
+    }
+
+    static func clientLimit(_ postFeeSpendable: UInt64) -> UInt64? {
+        guard let cap = backingCap(postFeeSpendable), cap > clientSafetyMarginSats else { return nil }
+        return cap - clientSafetyMarginSats
+    }
+
+    static func maximumMessage(_ cents: UInt64) -> String {
+        String(
+            format: String(localized: "maximum_additional_trade", defaultValue: "Maximum additional trade: $%.2f"),
+            Double(cents) / 100
+        )
+    }
+
+    static func limitExceededMessage(_ cents: UInt64) -> String {
+        let explanation = String(localized: "stabilization_reserve_explanation",
+                                 defaultValue: "Keeps a small BTC reserve in the channel.")
+        return maximumMessage(cents) + "\n" + explanation
+    }
+}
+
+enum TradeValidationError: LocalizedError {
+    case invalidAmount, unavailable, unsafeAllocation, stabilizationLimit(UInt64)
+    var errorDescription: String? {
+        switch self {
+        case .invalidAmount: return "Enter a positive amount within your balance and use a fresh BTC/USD quote"
+        case .unavailable: return "The live channel balance is unavailable. Retry when the channel is ready."
+        case .unsafeAllocation: return "This trade cannot preserve the current channel allocation safely. Settle the stability adjustment and retry."
+        case .stabilizationLimit(let cents): return StabilizationPolicy.limitExceededMessage(cents)
+        }
+    }
+}
+
+struct StabilizationSnapshot {
+    let receiverSats: UInt64
+    let spendableSats: UInt64
+    let backingSats: UInt64
+    let expectedUSD: Double
+    let price: Double
+
+    func accepts(_ orderCents: UInt64) -> Bool {
+        fits(orderCents, searching: false)
+    }
+
+    private func fits(_ orderCents: UInt64, searching: Bool) -> Bool {
+        guard orderCents > 0, price.isFinite, price > 0, expectedUSD.isFinite, expectedUSD >= 0 else { return false }
+        let amount = Double(orderCents) / 100
+        let required = (amount / price * 100_000_000).rounded(.up)
+        let native = receiverSats >= backingSats ? receiverSats - backingSats : 0
+        guard required.isFinite, required <= Double(native) else { return false }
+        let target = TradeProtocol.normalizeExpectedUSD(expectedUSD + (amount - amount * TradeProtocol.feeRate))
+        guard target >= expectedUSD, searching || target > expectedUSD,
+              let feeMsat = TradeProtocol.expectedTradeFeeMsat(
+                  oldExpectedUSD: expectedUSD,
+                  newExpectedUSD: target,
+                  quotePrice: price
+              ) else { return false }
+        let fee = feeMsat / 1000
+        guard fee <= receiverSats, fee <= spendableSats,
+              let limit = StabilizationPolicy.clientLimit(spendableSats - fee),
+              target <= Double(receiverSats - fee) / 100_000_000 * price else { return false }
+        // Ignore the lower no-op bound only during the upper-bound search.
+        if searching, backingSats == 0,
+           (target / price * 100_000_000).rounded(.down) == (expectedUSD / price * 100_000_000)
+           .rounded(.down) { return true }
+        guard let backing = TradeProtocol.tradeBackingAfterDelta(
+            receiverSats: receiverSats - fee,
+            currentBackingSats: backingSats,
+            currentExpectedUSD: expectedUSD,
+            newExpectedUSD: target,
+            price: price
+        ) else { return false }
+        return backing <= limit
+    }
+
+    func maxOrderCents() -> UInt64 {
+        guard price.isFinite, price > 0, expectedUSD.isFinite, expectedUSD >= 0 else { return 0 }
+        let native = receiverSats >= backingSats ? receiverSats - backingSats : 0
+        let cents = (Double(native) / 100_000_000 * price * 100).rounded(.down)
+        guard cents.isFinite, cents >= 1, cents < Double(Int64.max) else { return 0 }
+        var low: UInt64 = 0
+        var high = UInt64(cents)
+        while low < high {
+            let distance = high - low
+            let mid = low + distance / 2 + distance % 2
+            if fits(mid, searching: true) { low = mid } else { high = mid - 1 }
+        }
+        return low > 0 && accepts(low) ? low : 0
+    }
+}
+
 struct TradeCorrelation: Equatable {
     let tradeId: String
     let tradePaymentId: String
@@ -54,7 +154,7 @@ enum TradeProtocol {
     static let resultTimeoutSecs: UInt64 = 15 * 60
     static let responseRetryWindowSecs: UInt64 = 14 * 24 * 60 * 60
     private static let satsInBTC = 100_000_000.0
-    private static let feeRate = 0.01
+    static let feeRate = 0.01
     private static let stabilityThresholdUSD = 0.25
     private static let stabilityThresholdPercent = 0.1
     private static let rejectionReasons: Set<String> = [
@@ -95,6 +195,7 @@ enum TradeProtocol {
         currentExpectedUSD: Double,
         currentBackingSats: UInt64,
         receiverSats: UInt64,
+        spendableSats: UInt64,
         action: String,
         amountUSD: Double,
         amountBTC: Double,
@@ -123,6 +224,17 @@ enum TradeProtocol {
             newExpectedUSD: normalizedExpected,
             price: quotePrice
         ) else { return nil }
+
+        // Preparation is the last pure guard before persistence/payment, not a settlement rule.
+        if action == "sell" || normalizedExpected > currentExpectedUSD {
+            let snapshot = StabilizationSnapshot(receiverSats: receiverSats, spendableSats: spendableSats,
+                                                 backingSats: currentBackingSats, expectedUSD: currentExpectedUSD,
+                                                 price: quotePrice)
+            guard feeSats <= spendableSats,
+                  let limit = StabilizationPolicy.clientLimit(spendableSats - feeSats), backing <= limit,
+                  amountUSD * 100 < Double(Int64.max),
+                  snapshot.accepts(UInt64((amountUSD * 100 + 1e-7).rounded(.down))) else { return nil }
+        }
 
         let object: [String: Any] = [
             "type": "TRADE_V1",

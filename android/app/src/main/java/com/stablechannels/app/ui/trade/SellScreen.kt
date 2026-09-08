@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
-import com.stablechannels.app.models.USD
+import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
@@ -44,9 +44,9 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
     // Trading fails closed while the displayed cache is stale or quarantined.
     val btcPrice by appState.priceService.accountingPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
-    val stableSats = if (btcPrice > 0) (sc.expectedUSD.amount / btcPrice * Constants.SATS_IN_BTC).toLong() else 0L
-    val nativeSatsDisplay = if (lightningSats > stableSats) lightningSats - stableSats else 0L
-    val maxSellUSD = if (btcPrice > 0) (nativeSatsDisplay.toDouble() / Constants.SATS_IN_BTC) * btcPrice else 0.0
+    val maxSellUSD = remember(sc, btcPrice, lightningSats, appState.tradeService) {
+        (appState.tradeService?.maxSellCents(sc, btcPrice) ?: 0L) / 100.0
+    }
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
     val feeUSD = amountUSD * Constants.STABLE_CHANNEL_TRADE_FEE_RATE
     val feeLabel = String.format(Locale.US, "Fee (%.0f%%)", Constants.STABLE_CHANNEL_TRADE_FEE_RATE * 100)
@@ -103,7 +103,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 ) {
                     Text("How much BTC to convert to USD?", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     TextButton(
-                        onClick = { amountText = String.format(Locale.US, "%.2f", maxSellUSD) },
+                        onClick = {
+                            amountText = String.format(Locale.US, "%.2f", maxSellUSD)
+                            error = null
+                        },
                         colors = ButtonDefaults.textButtonColors(
                             containerColor = if (isSystemInDarkTheme()) {
                                 MaterialTheme.colorScheme.surfaceVariant
@@ -129,7 +132,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountText,
-                        onValueChange = { amountText = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = {
+                            amountText = it.filter { c -> c.isDigit() || c == '.' }
+                            error = null
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         textStyle = TextStyle(
                             fontSize = 44.sp,
@@ -169,7 +175,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 }
 
                 Spacer(Modifier.height(8.dp))
-                Text("Max: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Maximum additional trade: ${maxSellUSD.usdFormatted()}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))
@@ -188,8 +194,10 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 Spacer(Modifier.height(16.dp))
                 Button(
                     onClick = {
-                        if (amountUSD <= 0 || amountUSD > maxSellUSD + 0.01) {
-                            error = "Enter an amount between $0 and ${maxSellUSD.usdFormatted()}"
+                        if (!amountUSD.isFinite() || amountUSD <= 0) {
+                            error = "Enter a positive amount"
+                        } else if (amountUSD > maxSellUSD) {
+                            error = StabilizationPolicy.limitExceededMessage((maxSellUSD * 100 + 1e-7).toLong())
                         } else {
                             error = null
                             step = TradeStep.CONFIRM
@@ -234,9 +242,9 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                                 if (tradePrice <= 0.0) {
                                     throw Exception("A fresh BTC/USD consensus is required before trading")
                                 }
-                                val totalUSD = USD.fromBitcoin(sc.stableReceiverBTC, tradePrice).amount
-                                val result = appState.tradeService?.executeSell(sc, amountUSD, feeUSD, tradePrice, totalUSD)
-                                    ?: throw Exception("Trade service unavailable")
+                                val service = appState.tradeService ?: throw Exception("Trade service unavailable")
+                                val liveSc = appState.stableChannel.value
+                                val result = service.executeSell(liveSc, amountUSD, feeUSD, tradePrice)
                                 val awaitingResult = appState.addPendingTradePayment(result.paymentId, PendingTradePayment(
                                     newExpectedUSD = result.newExpectedUSD,
                                     price = tradePrice,
