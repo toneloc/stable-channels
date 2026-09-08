@@ -86,14 +86,20 @@ env:
     text: "Done"
     optional: true
 
-# Let the splice broadcast, then confirm it.
+# Let the splice broadcast, then confirm it. The redesigned home has no
+# splice-out capsule; the broadcast signal is the History badge (1 conf).
+- tapOn: "History"
+- tapOn: "Payments"
 - extendedWaitUntil:
-    visible: "Move pending.*"
+    visible: "Splice Out.*"
+    timeout: 60000
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
     timeout: 60000
 - runScript:
     file: helpers/mine_blocks.js
 - extendedWaitUntil:
-    visible: "Move confirmed"
+    notVisible: "0/1 confirmed"
     timeout: 180000
 
 # Books: the LSP must have deducted the overflow (~$5-6.1, wide band for fees).

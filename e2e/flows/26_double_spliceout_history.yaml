@@ -63,14 +63,20 @@ env:
 - tapOn:
     text: "Done"
     optional: true
+- tapOn: "History"
+- tapOn: "Payments"
 - extendedWaitUntil:
-    visible: "Move pending.*"
+    visible: "Splice Out.*"
+    timeout: 60000
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
     timeout: 60000
 - runScript:
     file: helpers/mine_blocks.js
 - extendedWaitUntil:
-    visible: "Move confirmed"
+    notVisible: "0/1 confirmed"
     timeout: 180000
+- tapOn: "Home"
 
 # ---- Splice-out #2: $7, only after #1 fully confirmed ----
 - runScript:
@@ -118,14 +124,20 @@ env:
 - tapOn:
     text: "Done"
     optional: true
+- tapOn: "History"
+- tapOn: "Payments"
 - extendedWaitUntil:
-    visible: "Move pending.*"
+    visible: "Splice Out.*"
+    timeout: 60000
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
     timeout: 60000
 - runScript:
     file: helpers/mine_blocks.js
 - extendedWaitUntil:
-    visible: "Move confirmed"
+    notVisible: "0/1 confirmed"
     timeout: 180000
+- tapOn: "Home"
 
 # ---- History must hold BOTH rows ----
 - tapOn: "History"

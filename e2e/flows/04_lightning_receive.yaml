@@ -38,8 +38,14 @@ env:
     visible: "Receive"
     timeout: 30000
 
-# Exercise the Home payment-alert shortcut into Payment Detail.
-- tapOn: "Payment received.*"
+# The redesigned home (post-#256/#257) has no payment-alert capsule; verify the
+# recorded payment through History -> Payment Detail instead.
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "(\\+)?\\$10\\.00"
+    timeout: 30000
+- tapOn: "(\\+)?\\$10\\.00"
 - extendedWaitUntil:
     visible: "Payment Details?"
     timeout: 30000
@@ -47,10 +53,5 @@ env:
 - assertVisible: "Lightning"
 - assertVisible: "\\$10\\.00"
 - tapOn: "Done"
-- runFlow:
-    when:
-      platform: iOS
-    commands:
-      - assertVisible: "History"
-      - tapOn: "Home"
+- tapOn: "Home"
 - assertVisible: "Receive"

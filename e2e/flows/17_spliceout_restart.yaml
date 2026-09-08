@@ -79,9 +79,16 @@ env:
     optional: true
 
 # Wait for the broadcast signal so the kill lands mid-splice (and, on iOS,
-# after the spliceNegotiated event that writes the DB row).
+# after the spliceNegotiated event that writes the DB row). The redesigned
+# home (post-#256/#257) has no splice-out capsule — the signal is the History
+# row's confirmation badge (splice = 1 conf, PR #267).
+- tapOn: "History"
+- tapOn: "Payments"
 - extendedWaitUntil:
-    visible: "Move pending.*"
+    visible: "Splice Out.*"
+    timeout: 60000
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
     timeout: 60000
 - runScript:
     file: helpers/wait_secs.js
@@ -89,26 +96,25 @@ env:
       SECS: "8"
 
 # Kill mid-splice. On relaunch the pending splice must be reloaded from the DB
-# and resume its confirmation monitor — this reappearing is the core assertion.
+# and still count toward confirmation — this reappearing is the core assertion.
 - stopApp
 - launchApp
-- extendedWaitUntil:
-    visible: "Move pending.*"
-    timeout: 90000
-
-# Only now mine: the RESUMED monitor (not the original one) must observe the
-# confirmation and complete the payment.
-- runScript:
-    file: helpers/mine_blocks.js
-- extendedWaitUntil:
-    visible: "Move confirmed"
-    timeout: 180000
-
-# History must show the completed splice-out, not a failed or duplicate row.
 - tapOn: "History"
 - tapOn: "Payments"
 - extendedWaitUntil:
-    visible: "Splice Out.*"
-    timeout: 30000
+    visible: "0/1 confirmed"
+    timeout: 90000
+
+# Only now mine: the RESUMED monitor (not the original one) must observe the
+# confirmation. The badge was positively observed above, so its disappearance
+# IS confirmation.
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    notVisible: "0/1 confirmed"
+    timeout: 180000
+
+# History must show the completed splice-out, not a failed or duplicate row.
+- assertVisible: "Splice Out.*"
 - assertVisible: "Confirmed"
 - tapOn: "Home"
