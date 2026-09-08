@@ -146,22 +146,26 @@ final class PaymentRepository {
     }
 
     func paymentsNeedingConfirmation() throws -> [PaymentRecord] {
-        let required = ConfirmationPolicy.requiredConfirmations
+        let defaultRequired = ConfirmationPolicy.defaultRequiredConfirmations
+        let spliceRequired = ConfirmationPolicy.spliceRequiredConfirmations
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
         FROM payments
         WHERE txid IS NOT NULL
         AND txid != ''
-        AND payment_type IN ('onchain', 'splice_in', 'splice_out', 'channel_close')
         AND status != 'failed'
-        AND (confirmations IS NULL OR confirmations < ?)
+        AND (
+            (payment_type IN ('splice_in', 'splice_out') AND (confirmations IS NULL OR confirmations < ?))
+            OR
+            (payment_type IN ('onchain', 'channel_close') AND (confirmations IS NULL OR confirmations < ?))
+        )
         ORDER BY created_at DESC
         LIMIT 50
         """
         let rows = try rawSQL.query(
             sql,
-            params: [.integer(Int64(required))]
+            params: [.integer(Int64(spliceRequired)), .integer(Int64(defaultRequired))]
         )
         return rows.map { row in
             paymentRecord(from: row)
@@ -179,15 +183,30 @@ final class PaymentRepository {
         return paymentRecord(from: row)
     }
 
-    func updateConfirmations(paymentId: Int64, txBlockHeight: UInt32, currentBlockHeight: UInt32) throws {
-        let required = ConfirmationPolicy.requiredConfirmations
-        let rawConfs = max(Int(currentBlockHeight) - Int(txBlockHeight) + 1, 0)
-        let confs = min(rawConfs, required)
-        let status = confs >= required ? "completed" : "pending"
+    func updateConfirmations(
+        paymentId: Int64,
+        paymentType: String? = nil,
+        txBlockHeight: UInt32,
+        currentBlockHeight: UInt32,
+        calculator: ConfirmationCalculating = ConfirmationCalculator()
+    ) throws {
+        let type: String
+        if let paymentType {
+            type = paymentType
+        } else {
+            type = try getPayment(byId: paymentId)?.paymentType ?? "onchain"
+        }
+        let required = ConfirmationPolicy.requiredConfirmations(for: type)
+        let progress = calculator.progress(
+            for: txBlockHeight,
+            currentBlockHeight: currentBlockHeight,
+            required: required
+        )
+        let status = progress.isComplete ? "completed" : "pending"
         try rawSQL.execute(
             "UPDATE payments SET confirmations = ?, tx_block_height = ?, status = ? WHERE id = ?",
             params: [
-                .integer(Int64(confs)),
+                .integer(Int64(progress.display)),
                 .integer(Int64(txBlockHeight)),
                 .text(status),
                 .integer(paymentId)

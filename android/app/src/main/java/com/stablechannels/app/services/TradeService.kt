@@ -34,8 +34,12 @@ class TradeService(
         feeUSD: Double,
         price: Double
     ): TradeResult {
-        if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount) || !price.isFinite() || price <= 0)
-            throw TradeValidationException("Enter a positive amount within your stabilized USD balance and use a fresh quote")
+        if (!price.isFinite() || price <= 0)
+            throw TradeValidationException("A fresh BTC/USD quote is required before trading.")
+        if (!amountUSD.isFinite() || amountUSD <= 0)
+            throw TradeValidationException(TradeFailure.INVALID_AMOUNT.userMessage())
+        if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount))
+            throw TradeValidationException("That is more than your stabilized balance. Reduce the amount.")
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
         val btcAmount = netAmount / price
@@ -50,8 +54,10 @@ class TradeService(
         feeUSD: Double,
         price: Double
     ): TradeResult {
-        if (!amountUSD.isFinite() || amountUSD <= 0 || !price.isFinite() || price <= 0)
-            throw TradeValidationException("Enter a positive amount and use a fresh BTC/USD quote")
+        if (!price.isFinite() || price <= 0)
+            throw TradeValidationException("A fresh BTC/USD quote is required before trading.")
+        if (!amountUSD.isFinite() || amountUSD <= 0)
+            throw TradeValidationException(TradeFailure.INVALID_AMOUNT.userMessage())
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = sc.expectedUSD.amount + netAmount
         val btcAmount = netAmount / price
@@ -74,16 +80,25 @@ class TradeService(
         if (newExpectedUsd > sc.expectedUSD.amount && !snapshot.accepts(kotlin.math.floor(amountUsd * 100 + 1e-7).toLong()))
             throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
         val liveSc = sc.copy(stableReceiverBTC = Bitcoin(snapshot.receiverSats))
-        val prepared = TradeProtocol.prepare(
-            sc = liveSc,
-            spendableSats = snapshot.spendableSats,
-            action = action,
-            amountUsd = amountUsd,
-            amountBtc = amountBtc,
-            feeUsd = feeUsd,
-            newExpectedUsd = newExpectedUsd,
-            quotePrice = price
-        ) ?: throw TradeValidationException("This trade cannot preserve the current channel allocation safely. Settle the stability adjustment and retry.")
+        // Only one of prepare()'s refusals is an allocation problem. Reporting a malformed
+        // channel or an unaffordable fee as "settle the stability adjustment" sends the user
+        // somewhere that cannot help them (issue #272).
+        val prepared = when (
+            val preparation = TradeProtocol.prepareOrFailure(
+                sc = liveSc,
+                spendableSats = snapshot.spendableSats,
+                action = action,
+                amountUsd = amountUsd,
+                amountBtc = amountBtc,
+                feeUsd = feeUsd,
+                newExpectedUsd = newExpectedUsd,
+                quotePrice = price
+            )
+        ) {
+            is TradePreparation.Success -> preparation.trade
+            is TradePreparation.Failure ->
+                throw TradeValidationException(preparation.reason.userMessage())
+        }
 
         // This row is the recovery authority. It must exist before the non-refundable fee send.
         val tradeDbId = databaseService.recordPreparedTrade(prepared)
