@@ -3066,24 +3066,30 @@ class AppState {
         // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
         // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
         // already incorporate the spend when .pending is reached.
-        let incorporatedPredicate: (String) -> Bool = { [weak self] tid in
-            guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
-            return payments.contains { p in
-                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid {
-                    if case .succeeded = p.status { return true }
-                    if case .pending = p.status { return true }
+        var paymentStatusMap: [String: PaymentStatus]?
+        let getPaymentStatus: (String) -> PaymentStatus? = { [weak self] tid in
+            if paymentStatusMap == nil {
+                guard let self, let payments = self.nodeService.node?.listPayments() else { return nil }
+                var map: [String: PaymentStatus] = [:]
+                for p in payments {
+                    if case let .onchain(paymentTxid, _) = p.kind {
+                        map[paymentTxid] = p.status
+                    }
                 }
-                return false
+                paymentStatusMap = map
             }
+            return paymentStatusMap?[tid]
         }
-        let failedPredicate: (String) -> Bool = { [weak self] tid in
-            guard let self, let payments = self.nodeService.node?.listPayments() else { return false }
-            return payments.contains { p in
-                if case let .onchain(paymentTxid, _) = p.kind, paymentTxid == tid, case .failed = p.status {
-                    return true
-                }
-                return false
-            }
+        let incorporatedPredicate: (String) -> Bool = { tid in
+            guard let status = getPaymentStatus(tid) else { return false }
+            if case .succeeded = status { return true }
+            if case .pending = status { return true }
+            return false
+        }
+        let failedPredicate: (String) -> Bool = { tid in
+            guard let status = getPaymentStatus(tid) else { return false }
+            if case .failed = status { return true }
+            return false
         }
         pendingOutboundSend = BalanceCalculator.resolvePendingOutboundSend(
             rawOnchain: rawOnchain,

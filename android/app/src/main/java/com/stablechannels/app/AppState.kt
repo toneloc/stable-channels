@@ -3007,18 +3007,22 @@ class AppState(private val context: Context) : ViewModel() {
             // Invariant note: ldk-node creates Onchain payment rows strictly from wallet events
             // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
             // already incorporate the spend when PENDING is reached.
-            val incorporatedPredicate: (String) -> Boolean = { tid ->
-                nodeService.node?.listPayments()?.any { p ->
+            val paymentStatusMap by lazy {
+                val map = mutableMapOf<String, PaymentStatus>()
+                nodeService.node?.listPayments()?.forEach { p ->
                     val kind = p.kind
-                    kind is PaymentKind.Onchain && kind.txid == tid &&
-                        (p.status == PaymentStatus.SUCCEEDED || p.status == PaymentStatus.PENDING)
-                } ?: false
+                    if (kind is PaymentKind.Onchain) {
+                        map[kind.txid] = p.status
+                    }
+                }
+                map
+            }
+            val incorporatedPredicate: (String) -> Boolean = { tid ->
+                val status = paymentStatusMap[tid]
+                status == PaymentStatus.SUCCEEDED || status == PaymentStatus.PENDING
             }
             val failedPredicate: (String) -> Boolean = { tid ->
-                nodeService.node?.listPayments()?.any { p ->
-                    val kind = p.kind
-                    kind is PaymentKind.Onchain && kind.txid == tid && p.status == PaymentStatus.FAILED
-                } ?: false
+                paymentStatusMap[tid] == PaymentStatus.FAILED
             }
             pendingOutboundSend = resolvePendingOutboundSend(
                 rawOnchain = rawOnchain,
