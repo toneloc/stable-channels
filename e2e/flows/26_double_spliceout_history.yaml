@@ -1,0 +1,138 @@
+# Step 26 — Aux: back-to-back splice-outs both appear in history
+# Two sequential onchain sends ($5 then $7, each splice-out confirmed before the next) must produce two distinct history rows — the second must not vanish.
+#
+# Replicates issue #278 (iOS: second consecutive splice-out missing from
+# payment history). Distinct amounts make the rows distinguishable: on a
+# build with the bug the $7 row's assertion fails. Run RIGHT AFTER 01
+# (fresh $85 in-channel; both sends splice out of the channel).
+appId: com.stablechannels.app
+tags: [android, ios, onchain, send, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 30000
+
+# ---- Splice-out #1: $5 ----
+- runScript:
+    file: helpers/create_address.js
+- tapOn: "Send"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.address}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Amount \\(USD\\)"
+          timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Onchain Address"
+          timeout: 20000
+- tapOn: "0.00"
+- inputText: "5"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- extendedWaitUntil:
+    visible: "(Splice-out initiated|Payment sent.*)"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Move confirmed"
+    timeout: 180000
+
+# ---- Splice-out #2: $7, only after #1 fully confirmed ----
+- runScript:
+    file: helpers/create_address.js
+- tapOn: "Send"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.address}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Amount \\(USD\\)"
+          timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Onchain Address"
+          timeout: 20000
+- tapOn: "0.00"
+- inputText: "7"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- extendedWaitUntil:
+    visible: "(Splice-out initiated|Payment sent.*)"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    visible: "Move confirmed"
+    timeout: 180000
+
+# ---- History must hold BOTH rows ----
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Splice Out.*"
+    timeout: 30000
+- assertVisible: "-?\\$5\\.00"
+- assertVisible: "-?\\$7\\.00"        # issue #278: this is the row that vanishes
+- tapOn: "Home"
