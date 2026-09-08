@@ -193,6 +193,8 @@ is in `aux-tests-pr-analysis.md`, and the copy/mechanism research in
 | `19_chain_failover` | startup hard-fails when primary Esplora is down | #242 | android, ios |
 | `20_restore_guard` | restore-over-live-channel force-close (opt-in) | #174 | android, ios |
 | `21_stabilization_cap` | over-cap sell slipping through / Max landing above the 99% limit | #273 | android, ios |
+| `22_trade_refusal_copy` | local refusals collapsing into "Trade service unavailable" | #274 #275 | android, ios |
+| `23_onchain_confirmation_policy` | onchain deposits completing before 6 confirmations | #267 | android, ios |
 
 Aux flows substitute into, or append to, a lifecycle:
 
@@ -205,6 +207,8 @@ make android FLOWS="01_onboard_lightning 02_btc_to_usd 03_usd_stability 04_light
 make android FLOWS="01_onboard_lightning 18_quick_switch_liveness 19_chain_failover"
 # 21 runs right after 01 (needs the untraded $85 position):
 make android FLOWS="01_onboard_lightning 21_stabilization_cap"
+# 22 and 23 also run right after 01 (22 needs $0 USD; 23 needs the fresh wallet):
+make android FLOWS="01_onboard_lightning 22_trade_refusal_copy 23_onchain_confirmation_policy"
 # 20 is opt-in like 11: reveal the ACTIVE seed via 10, keep the channel open,
 # then run the guard flow directly through maestro with the seed:
 maestro test -e RESTORE_SEED="word1 ... word12" flows/20_restore_guard.yaml
