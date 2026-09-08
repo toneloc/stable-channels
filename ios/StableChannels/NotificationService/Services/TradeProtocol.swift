@@ -33,13 +33,33 @@ enum StabilizationPolicy {
     }
 }
 
-enum TradeValidationError: LocalizedError {
-    case invalidAmount, unavailable, unsafeAllocation, stabilizationLimit(UInt64)
+/// Why a trade could not be prepared or executed on this device. Distinct from a signed
+/// TRADE_REJECTED_V1 reason code: these are decided locally, before anything is signed or
+/// sent, so no fee has been spent and there is nothing to reconcile with the LSP.
+///
+/// Every local refusal must map to one of these. Collapsing them into a bare `nil` is what
+/// let a failed local check surface as one generic order-failure message (issue #272).
+/// The taxonomy and copy mirror Android's `TradeFailure`.
+enum TradeValidationError: LocalizedError, Equatable {
+    case invalidAmount
+    case invalidPrice
+    case exceedsStableBalance
+    case channelNotReady
+    case feeUnavailable
+    case feeExceedsBalance
+    case allocationUnavailable
+    case stabilizationLimit(UInt64)
+
+    /// Fixed local copy. Says what happened and, where the user can act, what to do about it.
     var errorDescription: String? {
         switch self {
-        case .invalidAmount: return "Enter a positive amount within your balance and use a fresh BTC/USD quote"
-        case .unavailable: return "The live channel balance is unavailable. Retry when the channel is ready."
-        case .unsafeAllocation: return "This trade cannot preserve the current channel allocation safely. Settle the stability adjustment and retry."
+        case .invalidAmount: return "Enter a valid amount and try again."
+        case .invalidPrice: return "A fresh BTC/USD consensus is required before trading."
+        case .exceedsStableBalance: return "That is more than your stabilized balance. Reduce the amount."
+        case .channelNotReady: return "This channel is not ready to trade yet."
+        case .feeUnavailable: return "The trade fee could not be calculated. Refresh the price and try again."
+        case .feeExceedsBalance: return "Your balance cannot cover this trade and its fee. Reduce the amount."
+        case .allocationUnavailable: return "That is more than this channel can convert right now. Reduce the amount."
         case .stabilizationLimit(let cents): return StabilizationPolicy.limitExceededMessage(cents)
         }
     }
@@ -189,6 +209,7 @@ enum TradeProtocol {
         return max(UInt64(feeSats.rounded(.towardZero)) * 1000, 1)
     }
 
+    /// Nullable form, kept for callers that only care whether a trade could be built.
     static func prepare(
         channelId: String,
         userChannelId: String,
@@ -205,17 +226,55 @@ enum TradeProtocol {
         now: UInt64 = UInt64(Date().timeIntervalSince1970),
         tradeId: String = randomIdentifier()
     ) -> PreparedMobileTrade? {
+        try? prepareOrFailure(
+            channelId: channelId,
+            userChannelId: userChannelId,
+            currentExpectedUSD: currentExpectedUSD,
+            currentBackingSats: currentBackingSats,
+            receiverSats: receiverSats,
+            spendableSats: spendableSats,
+            action: action,
+            amountUSD: amountUSD,
+            amountBTC: amountBTC,
+            feeUSD: feeUSD,
+            newExpectedUSD: newExpectedUSD,
+            quotePrice: quotePrice,
+            now: now,
+            tradeId: tradeId
+        ).get()
+    }
+
+    /// Builds a trade, or reports which local check refused it.
+    static func prepareOrFailure(
+        channelId: String,
+        userChannelId: String,
+        currentExpectedUSD: Double,
+        currentBackingSats: UInt64,
+        receiverSats: UInt64,
+        spendableSats: UInt64,
+        action: String,
+        amountUSD: Double,
+        amountBTC: Double,
+        feeUSD: Double,
+        newExpectedUSD: Double,
+        quotePrice: Double,
+        now: UInt64 = UInt64(Date().timeIntervalSince1970),
+        tradeId: String = randomIdentifier()
+    ) -> Result<PreparedMobileTrade, TradeValidationError> {
         let normalizedExpected = normalizeExpectedUSD(newExpectedUSD)
         guard isCanonicalIdentifier(channelId), !userChannelId.isEmpty,
-              isCanonicalIdentifier(tradeId), amountUSD.isFinite, amountUSD > 0,
-              amountBTC.isFinite, amountBTC >= 0, feeUSD.isFinite, feeUSD >= 0,
-              let feeMsat = expectedTradeFeeMsat(
-                  oldExpectedUSD: currentExpectedUSD,
-                  newExpectedUSD: normalizedExpected,
-                  quotePrice: quotePrice
-              ) else { return nil }
+              isCanonicalIdentifier(tradeId) else { return .failure(.channelNotReady) }
+        guard amountUSD.isFinite, amountUSD > 0,
+              amountBTC.isFinite, amountBTC >= 0, feeUSD.isFinite, feeUSD >= 0 else {
+            return .failure(.invalidAmount)
+        }
+        guard let feeMsat = expectedTradeFeeMsat(
+            oldExpectedUSD: currentExpectedUSD,
+            newExpectedUSD: normalizedExpected,
+            quotePrice: quotePrice
+        ) else { return .failure(.feeUnavailable) }
         let feeSats = feeMsat / 1000
-        guard feeSats <= receiverSats else { return nil }
+        guard feeSats <= receiverSats else { return .failure(.feeExceedsBalance) }
         let postFeeReceiver = receiverSats - feeSats
         guard let backing = tradeBackingAfterDelta(
             receiverSats: postFeeReceiver,
@@ -223,17 +282,19 @@ enum TradeProtocol {
             currentExpectedUSD: currentExpectedUSD,
             newExpectedUSD: normalizedExpected,
             price: quotePrice
-        ) else { return nil }
+        ) else { return .failure(.allocationUnavailable) }
 
         // Preparation is the last pure guard before persistence/payment, not a settlement rule.
         if action == "sell" || normalizedExpected > currentExpectedUSD {
             let snapshot = StabilizationSnapshot(receiverSats: receiverSats, spendableSats: spendableSats,
                                                  backingSats: currentBackingSats, expectedUSD: currentExpectedUSD,
                                                  price: quotePrice)
-            guard feeSats <= spendableSats,
-                  let limit = StabilizationPolicy.clientLimit(spendableSats - feeSats), backing <= limit,
+            guard feeSats <= spendableSats else { return .failure(.feeExceedsBalance) }
+            guard let limit = StabilizationPolicy.clientLimit(spendableSats - feeSats), backing <= limit,
                   amountUSD * 100 < Double(Int64.max),
-                  snapshot.accepts(UInt64((amountUSD * 100 + 1e-7).rounded(.down))) else { return nil }
+                  snapshot.accepts(UInt64((amountUSD * 100 + 1e-7).rounded(.down))) else {
+                return .failure(.stabilizationLimit(snapshot.maxOrderCents()))
+            }
         }
 
         let object: [String: Any] = [
@@ -245,13 +306,17 @@ enum TradeProtocol {
             "quote_price": quotePrice,
             "ts": now
         ]
+        // Unreachable once the identifiers and amounts above are validated; keep the amount
+        // reason rather than inventing an internal one the user could never act on.
         guard JSONSerialization.isValidJSONObject(object),
               let payloadData = try? JSONSerialization.data(
                   withJSONObject: object,
                   options: [.sortedKeys, .withoutEscapingSlashes]
               ),
-              let payload = String(data: payloadData, encoding: .utf8) else { return nil }
-        return PreparedMobileTrade(
+              let payload = String(data: payloadData, encoding: .utf8) else {
+            return .failure(.invalidAmount)
+        }
+        return .success(PreparedMobileTrade(
             channelId: channelId,
             userChannelId: userChannelId,
             tradeId: tradeId,
@@ -268,7 +333,7 @@ enum TradeProtocol {
             quotePrice: quotePrice,
             createdAt: now,
             expiresAt: now + resultTimeoutSecs
-        )
+        ))
     }
 
     static func tradeBackingAfterDelta(

@@ -263,11 +263,17 @@ pub fn should_clear_pending_outbound(
     }
 }
 
+/// Why a trade could not be prepared or sent by this wallet. Distinct from a signed
+/// TRADE_REJECTED_V1 reason code: these are decided locally, before anything is signed or
+/// sent, so no fee has been spent and there is nothing to reconcile with the LSP. Every
+/// local refusal must carry its own variant so it surfaces with its own message instead of
+/// collapsing into a generic failure (issue #272); the taxonomy mirrors the mobile apps'.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LocalTradeAllocationError {
     StabilizationLimit(u64),
     InvalidValues,
     LiveBalanceUnavailable,
+    FeeUnavailable,
     FeeExceedsBalance,
     TargetExceedsCapacity,
     SettlementRequired,
@@ -2338,7 +2344,7 @@ impl UserApp {
                             new_expected_usd,
                             trade_price,
                         )
-                        .ok_or(LocalTradeAllocationError::InvalidValues)?;
+                        .ok_or(LocalTradeAllocationError::FeeUnavailable)?;
                         // Trade-entry only. Settlements and accepted syncs are uncapped.
                         if (trade_action == "sell" || new_expected_usd > sc.expected_usd.0)
                             && !snapshot.accepts(floor_usd_cents(amount_usd))
@@ -2398,18 +2404,22 @@ impl UserApp {
                         "Settle the current stability adjustment, then retry this trade."
                             .to_string()
                     }
+                    LocalTradeAllocationError::FeeUnavailable => {
+                        "The trade fee could not be calculated. Refresh the price and try again."
+                            .to_string()
+                    }
                     LocalTradeAllocationError::FeeExceedsBalance => {
-                        "The trade fee exceeds the live channel balance.".to_string()
+                        "Your balance cannot cover this trade and its fee. Reduce the amount."
+                            .to_string()
                     }
                     LocalTradeAllocationError::TargetExceedsCapacity => {
                         "The trade target exceeds the wallet's local channel capacity.".to_string()
                     }
                     LocalTradeAllocationError::InvalidValues => {
-                        "A trusted local price is required before trading.".to_string()
+                        "A fresh BTC/USD consensus is required before trading.".to_string()
                     }
                     LocalTradeAllocationError::LiveBalanceUnavailable => {
-                        "The live channel balance is unavailable. Retry when the channel is ready."
-                            .to_string()
+                        "This channel is not ready to trade yet.".to_string()
                     }
                     LocalTradeAllocationError::UnsafeAllocation => {
                         "This trade cannot preserve the current stability allocation safely."
@@ -10981,6 +10991,14 @@ impl UserApp {
             return;
         }
 
+        // A zero or malformed amount previously slipped past the exceeds-balance check below
+        // (0 > expected is false) and went on to prepare a no-op trade. Refuse it by name,
+        // like the mobile apps do (issue #272).
+        if !amount_usd.is_finite() || amount_usd <= 0.0 {
+            self.trade_error = "Enter a valid amount and try again.".to_string();
+            return;
+        }
+
         // Buying BTC means reducing the stabilized USD amount
         // Subtract full amount (fee comes out of the trade)
         let remaining_usd = (current_expected_usd - amount_usd).max(0.0);
@@ -10991,7 +11009,8 @@ impl UserApp {
         };
 
         if floor_usd_cents(amount_usd) > floor_usd_cents(current_expected_usd) {
-            self.trade_error = "Amount exceeds available USD".to_string();
+            self.trade_error =
+                "That is more than your stabilized balance. Reduce the amount.".to_string();
             return;
         }
 
@@ -11047,7 +11066,7 @@ impl UserApp {
 
         let max_cents = self.maximum_sell_cents(btc_price);
         if !amount_usd.is_finite() || amount_usd <= 0.0 {
-            self.trade_error = "Enter a positive amount".to_string();
+            self.trade_error = "Enter a valid amount and try again.".to_string();
             return;
         }
         if floor_usd_cents(amount_usd) > max_cents {
