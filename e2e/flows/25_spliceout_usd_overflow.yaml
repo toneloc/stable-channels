@@ -23,10 +23,10 @@ env:
 # Known pre-state from flow 02 (platform amounts differ; both are $7x.xx).
 - assertVisible: "\\$7[45]\\.\\d\\d"
 
-# Mark the audit-log position before sending.
+# Mark the audit-log position before sending. (Must be a helper file — this
+# Maestro version rejects inline `script:` blocks.)
 - runScript:
-    script: |
-      output.markIso = new Date().toISOString();
+    file: helpers/mark_time.js
 
 # Onchain send $15 — flow 07's proven selector dance.
 - runScript:

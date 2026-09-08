@@ -27,6 +27,16 @@ tags: [android, ios, trade]
       platform: iOS
     file: helpers/drag_btc_to_usd_ios.yaml
 
+# The drags aim at layout-dependent coordinates; since #256 removed the home
+# header the bar sits higher and the gesture can miss entirely. The gestures
+# stay (demo value), but the sheet is opened via the button when they miss,
+# and BOTH platforms type their canonical amount below — downstream flows
+# (03/16/25) depend on these exact numbers.
+- runFlow:
+    when:
+      notVisible: "How much BTC to convert to USD\\?"
+    commands:
+      - tapOn: "BTC → USD"
 - assertVisible: "How much BTC to convert to USD\\?"
 
 # The drag's landing pixel prefills a layout-dependent amount (observed $73.34
@@ -45,6 +55,15 @@ tags: [android, ios, trade]
       - tapOn: "\\$?0\\.00"
       - inputText: "76.07"
       - hideKeyboard
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Cancel"
+      - tapOn: "BTC → USD"
+      - assertVisible: "How much BTC to convert to USD\\?"
+      - tapOn: "\\$?0\\.00"
+      - inputText: "74.97"
 
 - tapOn: "Continue"
 

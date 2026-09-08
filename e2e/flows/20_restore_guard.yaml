@@ -13,11 +13,9 @@ env:
 ---
 - launchApp:
     stopApp: false
+# Seed must be the ACTIVE wallet's (reveal via 10_backup_keys).
 - runScript:
-    script: |
-      if (!RESTORE_SEED || RESTORE_SEED.trim().split(/\s+/).length < 12) {
-        throw new Error('RESTORE_SEED must be the ACTIVE wallet seed (reveal via 10_backup_keys)');
-      }
+    file: helpers/require_restore_seed.js
 
 - tapOn: "Settings"
 - runFlow:
