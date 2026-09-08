@@ -113,6 +113,7 @@ protocol NodeServiceProtocol {
     var savedMnemonic: String? { get }
     func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
     func stop()
+    func syncWallets() throws
 }
 
 @Observable
@@ -576,6 +577,11 @@ class NodeService: NodeServiceProtocol {
     func sendAllOnchain(address: String) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
         return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: nil)
+    }
+
+    func syncWallets() throws {
+        guard let node else { throw NodeServiceError.notRunning }
+        try node.syncWallets()
     }
 
     // MARK: - Balances

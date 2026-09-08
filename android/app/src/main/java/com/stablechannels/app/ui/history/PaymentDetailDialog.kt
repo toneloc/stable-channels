@@ -20,9 +20,8 @@ import com.stablechannels.app.util.Constants
 import androidx.compose.ui.platform.LocalContext
 import android.content.Intent
 import android.net.Uri
+import com.stablechannels.app.AppState
 
-private const val REQUIRED_CONFIRMATIONS = 6
-private const val SPLICE_REQUIRED_CONFIRMATIONS = 1
 private val TXID_REGEX = Regex("^[0-9a-fA-F]{64}$")
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -201,10 +200,7 @@ private fun PaymentRecord.detailStatusLabel(): String {
 }
 
 private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
-    return when (paymentType) {
-        "splice_in", "splice_out" -> SPLICE_REQUIRED_CONFIRMATIONS
-        else -> REQUIRED_CONFIRMATIONS
-    }
+    return AppState.requiredConfirmationsForType(paymentType)
 }
 
 private fun PaymentRecord.explorerTxid(): String? {
