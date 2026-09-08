@@ -1125,6 +1125,29 @@ class AppState(private val context: Context) : ViewModel() {
     // Past that bound we give up and ack the event instead, so a message that can never commit
     // (e.g. a stale/unreachable channel row) doesn't block every subsequent LDK event forever —
     // including Event.ChannelClosed, which is required to resolve a channel-close receive's txid.
+    // A post-apply channel reload can fail because the channel closed. If it's gone from both
+    // the local DB and the node's own live channel list, it will never come back — this sync
+    // message can never be applied, so drop it permanently instead of waiting out the retry
+    // bound. Only fall back to the timed retry when the reload might just be a transient race
+    // (e.g. the local row hasn't caught up with a channel that's still actually open).
+    private fun deferOrDropForMissingChannel(paymentHash: String, reason: String): Boolean {
+        nodeService.refreshChannels()
+        val stillLive = nodeService.channels.any { it.userChannelId == _stableChannel.value.userChannelId }
+        if (!stillLive) {
+            AuditService.log("TRADE_RESULT_CHANNEL_GONE", mapOf("payment_hash" to paymentHash, "reason" to reason))
+            syncRetryTracker.clear(paymentHash)
+            // Note: calling node.removePayment() here was tried and confirmed ineffective —
+            // ldk-node's own replay of an un-acked PaymentClaimable event on restart is driven
+            // by its internal channel-manager/HTLC-claim bookkeeping, not by the payment store
+            // removePayment() clears. The event can still resurface once per restart even after
+            // this drop; each occurrence is now instant (no 5-minute wait) so the residual
+            // impact is negligible. A durable fix for the resurfacing itself would need to land
+            // in ldk-node, not here.
+            return true
+        }
+        return deferSyncOrGiveUp(paymentHash, reason)
+    }
+
     private fun deferSyncOrGiveUp(paymentHash: String, reason: String): Boolean {
         if (syncRetryTracker.recordAttemptAndShouldGiveUp(paymentHash)) {
             AuditService.log("TRADE_RESULT_GIVEN_UP", mapOf("payment_hash" to paymentHash, "reason" to reason))
@@ -1223,7 +1246,7 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: return deferSyncOrGiveUp(paymentHash, "Duplicate result channel could not be reloaded")
+                    ?: return deferOrDropForMissingChannel(paymentHash, "Duplicate result channel could not be reloaded")
                 syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
@@ -1247,7 +1270,7 @@ class AppState(private val context: Context) : ViewModel() {
                     )
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
-                    ?: return deferSyncOrGiveUp(paymentHash, "Applied result channel could not be reloaded")
+                    ?: return deferOrDropForMissingChannel(paymentHash, "Applied result channel could not be reloaded")
                 syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
