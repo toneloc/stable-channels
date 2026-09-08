@@ -80,12 +80,16 @@ class AppState(private val context: Context) : ViewModel() {
                 .takeIf { it >= 0 }
         },
         saveFirstAttempt = { key, ts ->
+            // commit() (synchronous, blocks until written) instead of apply() (async): apply()'s
+            // write can still be pending when Android SIGKILLs the process (background limits,
+            // low memory), which has no graceful-shutdown hook to flush it — losing the very
+            // timestamp this mechanism exists to survive process death for.
             context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
-                .edit().putLong("first_attempt_$key", ts).apply()
+                .edit().putLong("first_attempt_$key", ts).commit()
         },
         clearFirstAttempt = { key ->
             context.getSharedPreferences("sync_retry_tracker", Context.MODE_PRIVATE)
-                .edit().remove("first_attempt_$key").apply()
+                .edit().remove("first_attempt_$key").commit()
         }
     )
     private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
@@ -1190,7 +1194,12 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             }
         }
-        if (result.status != TradeControlApplyStatus.RETRY) {
+        // Only clear the retry tracker once we're actually done retrying this payment_hash (i.e.
+        // we won't immediately call deferSyncOrGiveUp again below). Clearing unconditionally here
+        // for DUPLICATE/APPLIED wiped the persisted first-attempt right before the loadChannel
+        // fallback below could re-defer, so a permanently stuck message never accumulated any
+        // retry time at all — each retry looked like a brand-new first attempt.
+        if (result.status == TradeControlApplyStatus.INVALID) {
             syncRetryTracker.clear(paymentHash)
         }
         when (result.status) {
@@ -1215,6 +1224,7 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferSyncOrGiveUp(paymentHash, "Duplicate result channel could not be reloaded")
+                syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
@@ -1238,6 +1248,7 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferSyncOrGiveUp(paymentHash, "Applied result channel could not be reloaded")
+                syncRetryTracker.clear(paymentHash)
                 val updated = _stableChannel.value.copy(
                     channelId = channel.channelId,
                     expectedUSD = USD(channel.expectedUSD),
