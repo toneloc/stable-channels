@@ -1768,7 +1768,7 @@ impl UserApp {
             .unwrap_or_else(|| input.clone());
         let clean_trimmed = clean_input.trim();
         let onchain_candidate = if clean_trimmed.len() >= 10
-            && clean_trimmed[..10].eq_ignore_ascii_case("bitcoin://")
+            && clean_trimmed.get(..10).is_some_and(|p| p.eq_ignore_ascii_case("bitcoin://"))
         {
             let without_prefix = &clean_trimmed[10..];
             without_prefix
@@ -1776,7 +1776,7 @@ impl UserApp {
                 .next()
                 .unwrap_or(without_prefix)
                 .trim()
-        } else if clean_trimmed.len() >= 8 && clean_trimmed[..8].eq_ignore_ascii_case("bitcoin:") {
+        } else if clean_trimmed.len() >= 8 && clean_trimmed.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("bitcoin:")) {
             let without_prefix = &clean_trimmed[8..];
             without_prefix
                 .split('?')
@@ -1788,10 +1788,10 @@ impl UserApp {
         };
 
         let is_bech32 = (onchain_candidate.len() >= 3
-            && (onchain_candidate[..3].eq_ignore_ascii_case("bc1")
-                || onchain_candidate[..3].eq_ignore_ascii_case("tb1")))
+            && (onchain_candidate.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("bc1"))
+                || onchain_candidate.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("tb1"))))
             || (onchain_candidate.len() >= 5
-                && onchain_candidate[..5].eq_ignore_ascii_case("bcrt1"));
+                && onchain_candidate.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("bcrt1")));
         let is_base58 = onchain_candidate.starts_with('1')
             || onchain_candidate.starts_with('3')
             || onchain_candidate.starts_with('2')

@@ -183,7 +183,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             OutlinedTextField(
                 value = address,
-                onValueChange = { address = QRCodeUtils.stripUriPrefix(it) },
+                onValueChange = { address = it },
                 label = { Text("Bitcoin Address") },
                 keyboardOptions = KeyboardOptions(
                     capitalization = KeyboardCapitalization.None,

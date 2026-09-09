@@ -58,8 +58,8 @@ pub struct MempoolWs {
 fn normalize_address_for_tracking(raw: &str) -> String {
     let trimmed = raw.trim();
     let is_bech32 = (trimmed.len() >= 3
-        && (trimmed[..3].eq_ignore_ascii_case("bc1") || trimmed[..3].eq_ignore_ascii_case("tb1")))
-        || (trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("bcrt1"));
+        && (trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("bc1")) || trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("tb1"))))
+        || (trimmed.len() >= 5 && trimmed.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("bcrt1")));
     if is_bech32 && trimmed.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
         trimmed.to_ascii_lowercase()
     } else {
