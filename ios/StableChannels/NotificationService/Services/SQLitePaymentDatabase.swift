@@ -16,6 +16,12 @@ final class SQLitePaymentDatabase: PaymentDatabase {
     created_at INTEGER NOT NULL
     )
     """
+    private static let seenSettlementsTableSQL = """
+    CREATE TABLE IF NOT EXISTS seen_stability_settlements (
+    settlement_id TEXT PRIMARY KEY,
+    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+    )
+    """
 
     init(dbPath: String) {
         self.dbPath = dbPath
@@ -60,10 +66,15 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         amountUSD: Double,
         btcPrice: Double,
         backingDeltaSats: Int64?,
-        userChannelId: String?
+        userChannelId: String?,
+        settlementId: String?
     ) -> PaymentInsertResult {
         guard let db = openDB() else { return .failed }
         defer { sqlite3_close(db) }
+
+        if settlementId != nil {
+            _ = sqlite3_exec(db, Self.seenSettlementsTableSQL, nil, nil, nil)
+        }
 
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return .failed }
 
@@ -84,6 +95,29 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                     return .duplicate
                 }
                 sqlite3_finalize(checkStmt)
+            }
+        }
+
+        // Replay guard inside the transaction that credits backing, so a crash can never leave
+        // backing credited with the settlement id still replayable.
+        if let sid = settlementId {
+            var seenStmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db,
+                "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ?",
+                -1,
+                &seenStmt,
+                nil
+            ) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            bindText(seenStmt, 1, sid)
+            let alreadySeen = sqlite3_step(seenStmt) == SQLITE_ROW
+            sqlite3_finalize(seenStmt)
+            if alreadySeen {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .duplicate
             }
         }
 
@@ -128,6 +162,23 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed
+        }
+
+        // Burn the settlement id in the same transaction that credits backing.
+        if let sid = settlementId {
+            var seenInsert: OpaquePointer?
+            let seenSQL = "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)"
+            guard sqlite3_prepare_v2(db, seenSQL, -1, &seenInsert, nil) == SQLITE_OK else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
+            bindText(seenInsert, 1, sid)
+            let burned = sqlite3_step(seenInsert) == SQLITE_DONE
+            sqlite3_finalize(seenInsert)
+            guard burned else {
+                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                return .failed
+            }
         }
 
         // Update backing if needed
@@ -197,7 +248,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
         var stmt: OpaquePointer?
         let sql = """
-        SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats, user_channel_id
+        SELECT expected_usd, stable_sats, receiver_sats, latest_price, native_sats, user_channel_id, channel_id
         FROM channels
         WHERE user_channel_id IS NOT NULL AND user_channel_id != ''
         ORDER BY updated_at DESC, channel_id DESC
@@ -214,7 +265,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             nativeSats: UInt64(sqlite3_column_int64(stmt, 4)),
             receiverSats: UInt64(sqlite3_column_int64(stmt, 2)),
             latestPrice: sqlite3_column_double(stmt, 3),
-            userChannelId: sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
+            userChannelId: sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? "",
+            channelId: sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
         )
     }
 
@@ -698,7 +750,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             amountUSD: amountUSD,
             btcPrice: pending.btcPrice,
             backingDeltaSats: -Int64(pending.amountMsat / 1000),
-            userChannelId: activeUserChannelId()
+            userChannelId: activeUserChannelId(),
+            settlementId: nil
         )
 
         switch result {
@@ -729,5 +782,26 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             SQLITE_TRANSIENT
         )
         return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    // MARK: - Seen Settlement IDs (STABILITY_PAYMENT_V1 replay protection)
+
+    func isSettlementSeen(settlementId: String) -> Bool {
+        guard let db = openDB(write: false) else { return false }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        let sql = "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ?"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(
+            stmt,
+            1,
+            (settlementId as NSString).utf8String,
+            -1,
+            SQLITE_TRANSIENT
+        )
+        return sqlite3_step(stmt) == SQLITE_ROW
     }
 }

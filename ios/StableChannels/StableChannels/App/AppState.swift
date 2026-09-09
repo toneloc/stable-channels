@@ -9,6 +9,16 @@ private enum SyncMessageHandlingResult {
     case retry
 }
 
+private enum IncomingSettlementResult {
+    case valid(settlementId: String)
+    /// Validation failed but the sats arrived: record a Lightning receipt, not backing.
+    case invalid
+    /// Already applied — dropping it is what keeps backing from being credited twice.
+    case replayed
+    /// Local channel state is unreadable, which says nothing about the peer's envelope.
+    case stateUnavailable
+}
+
 @MainActor
 @Observable
 class AppState {
@@ -1579,6 +1589,8 @@ class AppState {
             break
         }
 
+        // Senders still attach the legacy [1] marker beside the signed record, so counting it as
+        // control traffic here would drop real settlements before they are ever validated.
         let hasStableControlTLV = customRecords.contains {
             $0.typeNum == Constants.stableChannelTLVType && $0.value != Data([1])
         }
@@ -1595,6 +1607,32 @@ class AppState {
             return
         }
 
+        // Only a valid signed STABILITY_PAYMENT_V1 record (issue #270) makes this a
+        // stability settlement; invalid or replayed records ignore the payment
+        // entirely. Payments without one are ordinary Lightning receipts.
+        var isStabilityPayment = false
+        var incomingSettlementId: String?
+        if customRecords.contains(where: { $0.typeNum == Constants.signedStabilityTLVType }) {
+            switch validateIncomingStabilitySettlement(
+                customRecords: customRecords,
+                amountMsat: amountMsat,
+                paymentHash: paymentHashStr
+            ) {
+            case .valid(let settlementId):
+                isStabilityPayment = true
+                incomingSettlementId = settlementId
+            case .invalid:
+                isStabilityPayment = false
+            case .replayed:
+                return
+            case .stateUnavailable:
+                // Veto the ack: the sats arrived but local channel state is unreadable, so
+                // recording now would dedupe the payment id and lose the backing credit.
+                ackToken?.shouldAck = false
+                return
+            }
+        }
+
         // Normal payment received
         AuditService.log("PAYMENT_RECEIVED", data: [
             "amount_msat": "\(amountMsat)",
@@ -1604,8 +1642,6 @@ class AppState {
 
         let price = stableChannel.latestPrice
         let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
-        let isStabilityPayment = customRecords
-            .contains { $0.typeNum == Constants.stableChannelTLVType && $0.value == Data([1]) }
         let paymentType = isStabilityPayment ? "stability" : "lightning"
         let backingDelta: Int64? = isStabilityPayment ? Int64(amountMsat / 1000) : nil
 
@@ -1625,7 +1661,8 @@ class AppState {
                 btcPrice: price > 0 ? price : nil,
                 status: "completed",
                 userChannelId: isStabilityPayment ? self.stableChannel.userChannelId : nil,
-                backingDeltaSats: backingDelta
+                backingDeltaSats: backingDelta,
+                settlementId: incomingSettlementId
             )
         }
         let persistence: PaymentPersistenceResult
@@ -1650,6 +1687,7 @@ class AppState {
             return
         }
 
+        // The settlement id was burned in the same transaction that credited backing.
         refreshBalances()
         updateStableBalances()
         if isStabilityPayment {
@@ -1680,6 +1718,59 @@ class AppState {
         paymentFlash = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             self?.paymentFlash = false
+        }
+    }
+
+    /// Validate a signed STABILITY_PAYMENT_V1 record bound to this payment: signature by
+    /// the channel counterparty, lsp_to_user direction, amount and channel binding, and
+    /// freshness. A replayed settlement_id is refused so a settlement never applies twice.
+    /// Anything that fails validation downgrades to an ordinary Lightning receipt.
+    private func validateIncomingStabilitySettlement(
+        customRecords: [CustomTlvRecord],
+        amountMsat: UInt64,
+        paymentHash: String
+    ) -> IncomingSettlementResult {
+        guard let record = customRecords.first(where: { $0.typeNum == Constants.signedStabilityTLVType }) else {
+            return .invalid
+        }
+        // Missing local channel state is a retryable local condition, not a bad envelope.
+        // Demoting it would dedupe the payment id and lose the backing credit for good.
+        guard !stableChannel.channelId.isEmpty else {
+            AuditService.log("STABILITY_PAYMENT_STATE_UNAVAILABLE", data: [
+                "payment_hash": paymentHash,
+                "amount_msat": "\(amountMsat)"
+            ])
+            return .stateUnavailable
+        }
+        switch TradeProtocol.parseSignedStabilitySettlement(
+            data: record.value,
+            expectedDirection: TradeProtocol.stabilityDirectionLspToUser,
+            expectedChannelId: stableChannel.channelId,
+            actualAmountMsat: amountMsat,
+            expectedCounterparty: stableChannel.counterparty,
+            verifySignature: { [weak self] msg, sig, pubkey in
+                self?.nodeService.verifySignature(message: msg, signature: sig, pubkey: pubkey) ?? false
+            }
+        ) {
+        case .valid(let settlement):
+            let seen = databaseService?.paymentRepo.isSettlementSeen(
+                settlementId: settlement.settlementId
+            ) ?? false
+            guard !seen else {
+                AuditService.log("STABILITY_SETTLEMENT_REPLAY_IGNORED", data: [
+                    "settlement_id": settlement.settlementId,
+                    "payment_hash": paymentHash
+                ])
+                return .replayed
+            }
+            return .valid(settlementId: settlement.settlementId)
+        case .invalid(let reason):
+            AuditService.log("STABILITY_PAYMENT_INVALID", data: [
+                "payment_hash": paymentHash,
+                "amount_msat": "\(amountMsat)",
+                "reason": reason
+            ])
+            return .invalid
         }
     }
 
@@ -2506,7 +2597,9 @@ class AppState {
         let now = Int64(Date().timeIntervalSince1970)
         guard now - stableChannel.lastStabilityPayment >= Int64(Constants.stabilityPaymentCooldownSecs) else { return }
 
-        let amountMsat = USD(amount: abs(result.dollarsFromPar)).toMsats(price: price)
+        // The signed settlement requires whole sats: floor to a sat boundary so the
+        // signed amount_msat equals the keysend amount exactly.
+        let amountMsat = USD(amount: abs(result.dollarsFromPar)).toMsats(price: price) / 1000 * 1000
         guard amountMsat > 0 else { return }
 
         guard let databaseService else { return }
@@ -2535,13 +2628,28 @@ class AppState {
         // Send stability payment
         let paymentId: PaymentId
         do {
-            // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
-            // this as a settlement (operator GUI) and runs reconcile_incoming_stability
-            // immediately, matching every other sender. See issue #161.
+            // Signed-only (issue #270): attach only the signed STABILITY_PAYMENT_V1
+            // envelope on 13377333 — the legacy [1] marker is gone. If the envelope
+            // cannot be built, skip the payment entirely; the next tick retries.
+            guard let envelope = TradeProtocol.buildSignedStabilitySettlement(
+                channelId: stableChannel.channelId,
+                amountMsat: amountMsat,
+                direction: TradeProtocol.stabilityDirectionUserToLsp,
+                expectedUSD: stableChannel.expectedUSD.amount,
+                sign: { message in try nodeService.signMessage(message) }
+            ) else {
+                databaseService.stabilityRepo.clearPendingSend()
+                AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                    "reason": "settlement_envelope_failed",
+                    "channel_id": stableChannel.channelId,
+                    "amount_msat": "\(amountMsat)"
+                ])
+                return
+            }
             paymentId = try nodeService.sendStabilityPayment(
                 amountMsat: amountMsat,
                 to: stableChannel.counterparty,
-                tlvs: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))]
+                tlvs: [CustomTlvRecord(typeNum: Constants.signedStabilityTLVType, value: envelope)]
             )
         } catch NodeServiceError.staleLightningSync {
             // The wrapper's send-boundary gate fired (sync went stale after the precheck

@@ -1062,10 +1062,7 @@ pub fn check_stability(
             return None;
         }
     };
-    let marker = ldk_node::CustomTlvRecord {
-        type_num: crate::constants::STABLE_CHANNEL_TLV_TYPE,
-        value: vec![1u8],
-    };
+    // Signed record only: the unauthenticated [1] marker is no longer sent by any client.
     let signed_record = ldk_node::CustomTlvRecord {
         type_num: crate::constants::SIGNED_STABILITY_TLV_TYPE,
         value: signed_envelope.into_bytes(),
@@ -1074,7 +1071,7 @@ pub fn check_stability(
         amt,
         sc.counterparty,
         None,
-        vec![marker, signed_record],
+        vec![signed_record],
     ) {
         Ok(payment_id) => {
             sc.payment_made = true;

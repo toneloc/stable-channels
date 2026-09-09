@@ -157,6 +157,106 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(replay.backingSats, 0)
     }
 
+    func testSettlementIdIsBurnedInTheSameTransactionAsBacking() throws {
+        try service.channelRepo.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 100,
+            backingSats: 1_000,
+            note: nil
+        )
+
+        let settlementId = String(repeating: "a1", count: 32)
+        XCTAssertFalse(service.paymentRepo.isSettlementSeen(settlementId: settlementId))
+
+        let applied = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100,
+            settlementId: settlementId
+        )
+        XCTAssertTrue(applied.isNewPayment)
+        XCTAssertEqual(applied.backingSats, 1_100)
+        // The commit that credited backing also burned the id — no separate write needed.
+        XCTAssertTrue(service.paymentRepo.isSettlementSeen(settlementId: settlementId))
+
+        // A replay under a fresh payment_id is refused by the settlement guard, not the dedup.
+        let replay = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-2",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 100_000,
+            amountUSD: 1,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 100,
+            settlementId: settlementId
+        )
+        XCTAssertFalse(replay.isNewPayment)
+        XCTAssertEqual(replay.backingSats, 1_100)
+
+        let stored = try XCTUnwrap(service.channelRepo.loadChannel(userChannelId: "user-channel-1"))
+        XCTAssertEqual(stored.backingSats, 1_100)
+        XCTAssertNil(service.paymentRepo.payment(paymentId: "payment-2"))
+    }
+
+    func testDemotingASettlementToLightningMakesTheBackingCreditUnrecoverable() throws {
+        // Regression for the receive-side classification bug: when local channel state was
+        // unreadable, receivers recorded the settlement as an ordinary Lightning receipt. This
+        // pins WHY that is unsafe — the payment_id is now taken, so the later retry that does
+        // have channel state dedups and the backing credit is lost for good. Receivers must
+        // leave the event unacked instead of demoting it.
+        try service.channelRepo.saveChannel(
+            channelId: "channel-1",
+            userChannelId: "user-channel-1",
+            expectedUSD: 100,
+            backingSats: 1_000,
+            note: nil
+        )
+        let settlementId = String(repeating: "b2", count: 32)
+
+        // The demotion: same payment id, recorded as lightning with no backing delta.
+        let demoted = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "lightning",
+            direction: "received",
+            amountMsat: 25_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            status: "completed",
+            userChannelId: nil,
+            backingDeltaSats: nil
+        )
+        XCTAssertTrue(demoted.isNewPayment)
+
+        // The retry, now with channel state available, cannot repair it: the payment id dedups.
+        let retry = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "payment-1",
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 25_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            status: "completed",
+            userChannelId: "user-channel-1",
+            backingDeltaSats: 25,
+            settlementId: settlementId
+        )
+        XCTAssertFalse(retry.isNewPayment)
+
+        let stored = try XCTUnwrap(service.channelRepo.loadChannel(userChannelId: "user-channel-1"))
+        XCTAssertEqual(stored.backingSats, 1_000)
+        XCTAssertFalse(service.paymentRepo.isSettlementSeen(settlementId: settlementId))
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "payment-1")?.paymentType, "lightning")
+    }
+
     func testBackingUpdateWithMissingChannelRowThrowsDedicatedError() throws {
         XCTAssertThrowsError(
             try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(

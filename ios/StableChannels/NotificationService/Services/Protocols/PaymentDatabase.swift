@@ -11,7 +11,8 @@ protocol PaymentDatabase {
         amountUSD: Double,
         btcPrice: Double,
         backingDeltaSats: Int64?,
-        userChannelId: String?
+        userChannelId: String?,
+        settlementId: String?
     ) -> PaymentInsertResult
 
     func paymentExists(paymentId: String) -> Bool
@@ -26,6 +27,7 @@ protocol PaymentDatabase {
     func loadPendingSend() -> PendingOutgoingStabilityPayment?
     func clearPendingSend()
     func reconcilePendingOutgoingPayment(node: LDKNode.Node) -> Bool
+    func isSettlementSeen(settlementId: String) -> Bool
 }
 
 enum StableControlDatabaseResult {
@@ -59,4 +61,5 @@ struct ChannelState {
     let receiverSats: UInt64
     let latestPrice: Double
     let userChannelId: String
+    let channelId: String
 }

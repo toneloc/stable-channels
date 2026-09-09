@@ -148,6 +148,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         """)
 
         createPendingStabilitySendTable(db)
+        createStabilitySettlementsTable(db)
 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
@@ -189,6 +190,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // IF NOT EXISTS so either process (main app or background service) can create it,
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
+        createStabilitySettlementsTable(db)
         createTradeIndexes(db)
     }
 
@@ -200,6 +202,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 amount_msat INTEGER NOT NULL,
                 price REAL NOT NULL,
                 created_at INTEGER NOT NULL
+            )
+        """)
+    }
+
+    /** Applied inbound STABILITY_PAYMENT_V1 settlement ids — replay guard so a signed
+     *  settlement can never credit backing twice, even under a re-sent keysend. */
+    private fun createStabilitySettlementsTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                created_at INTEGER DEFAULT (strftime('%s','now'))
             )
         """)
     }
@@ -920,7 +933,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         btcPrice: Double? = null,
         counterparty: String? = null,
         userChannelId: String? = null,
-        backingDeltaSats: Long? = null
+        backingDeltaSats: Long? = null,
+        settlementId: String? = null
     ): PaymentPersistenceResult {
         val db = writableDatabase
         // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT, preventing
@@ -944,6 +958,26 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     return PaymentPersistenceResult(false, backing)
                 }
             }
+            // Replay guard: an already-applied settlement id never credits backing again.
+            if (settlementId != null) {
+                val cursor = db.rawQuery(
+                    "SELECT settlement_id FROM stability_settlements WHERE settlement_id = ?",
+                    arrayOf(settlementId)
+                )
+                val seen = cursor.use { it.moveToFirst() }
+                if (seen) {
+                    val backing = if (backingDeltaSats != null) {
+                        val ucid = userChannelId
+                            ?: throw IllegalStateException("userChannelId required for backing update")
+                        readBackingSats(db, ucid)
+                            ?: throw MissingChannelRowException(ucid)
+                    } else {
+                        null
+                    }
+                    db.execSQL("ROLLBACK")
+                    return PaymentPersistenceResult(false, backing)
+                }
+            }
             val cv = ContentValues().apply {
                 put("payment_id", paymentId)
                 put("payment_type", paymentType)
@@ -955,6 +989,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 put("status", "completed")
             }
             db.insertOrThrow("payments", null, cv)
+            if (settlementId != null) {
+                db.execSQL(
+                    "INSERT INTO stability_settlements (settlement_id) VALUES (?)",
+                    arrayOf(settlementId)
+                )
+            }
             var resultingBacking: Long? = null
             if (backingDeltaSats != null) {
                 val ucid = userChannelId

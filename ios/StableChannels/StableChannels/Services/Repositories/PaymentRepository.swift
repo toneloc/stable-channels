@@ -235,6 +235,20 @@ final class PaymentRepository {
         )
     }
 
+    // MARK: - Seen Settlement IDs (STABILITY_PAYMENT_V1 replay protection)
+
+    func isSettlementSeen(settlementId: String) -> Bool {
+        do {
+            let rows = try rawSQL.query(
+                "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ? LIMIT 1",
+                params: [.text(settlementId)]
+            )
+            return !rows.isEmpty
+        } catch {
+            return false
+        }
+    }
+
     func recordPaymentAndMaybeUpdateBacking(
         paymentId: String?,
         paymentType: String,
@@ -244,7 +258,8 @@ final class PaymentRepository {
         btcPrice: Double?,
         status: String,
         userChannelId: String?,
-        backingDeltaSats: Int64?
+        backingDeltaSats: Int64?,
+        settlementId: String? = nil
     ) throws -> PaymentPersistenceResult {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
             if let pid = paymentId, !pid.isEmpty {
@@ -253,6 +268,21 @@ final class PaymentRepository {
                     params: [.text(pid)]
                 )
                 if !existing.isEmpty {
+                    let backing = try authoritativeBacking(
+                        userChannelId: userChannelId,
+                        required: backingDeltaSats != nil
+                    )
+                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
+                }
+            }
+            // Replay guard inside the transaction that credits backing, so a crash can never leave
+            // backing credited with the settlement id still replayable.
+            if let sid = settlementId {
+                let seen = try rawSQL.query(
+                    "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ? LIMIT 1",
+                    params: [.text(sid)]
+                )
+                if !seen.isEmpty {
                     let backing = try authoritativeBacking(
                         userChannelId: userChannelId,
                         required: backingDeltaSats != nil
@@ -271,6 +301,12 @@ final class PaymentRepository {
                     .text(status)
                 ]
             )
+            if let sid = settlementId {
+                try rawSQL.execute(
+                    "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)",
+                    params: [.text(sid)]
+                )
+            }
             var resultingBacking: UInt64?
             if let delta = backingDeltaSats {
                 guard let ucid = userChannelId, !ucid.isEmpty else {

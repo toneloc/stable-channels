@@ -8,8 +8,11 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
+import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.services.SignedSettlementValidation
+import com.stablechannels.app.services.StabilityPaymentProtocol
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
@@ -64,11 +67,55 @@ class StabilityProcessingService : Service() {
         .callTimeout(Constants.PRICE_FETCH_TIMEOUT_SECS, TimeUnit.SECONDS)
         .build()
 
-    private fun isStabilityMarker(records: List<CustomTlvRecord>): Boolean =
-        records.any {
-            it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
-                it.value.contentEquals(byteArrayOf(1))
+    private data class InboundClassification(
+        val isStability: Boolean,
+        val settlementId: String?,
+        /// Local channel state was unreadable, which says nothing about the peer's envelope.
+        val stateUnavailable: Boolean = false
+    )
+
+    /** A payment is a stability settlement only with a valid signed STABILITY_PAYMENT_V1
+     *  record on TLV 13377333 — the legacy [0x01] marker is gone (#270), so anything
+     *  without a signed record is ordinary Lightning. An invalid signed record must not
+     *  credit backing either, so it also falls through as Lightning (mirrors desktop user.rs).
+     *  Unreadable local channel state is NOT an invalid envelope: it is reported separately so
+     *  the caller can leave the event unacked instead of demoting a real settlement. */
+    private fun classifyInboundPayment(
+        node: Node,
+        records: List<CustomTlvRecord>,
+        amountMsat: Long
+    ): InboundClassification {
+        val signedRecord = records.firstOrNull {
+            it.typeNum == Constants.SIGNED_STABILITY_TLV_TYPE.toULong()
+        } ?: return InboundClassification(false, null)
+        val channelId = loadChannelStateFromDB()?.channelId.orEmpty()
+        if (channelId.isEmpty()) {
+            // Retryable local condition: recording now would dedupe the payment id and make
+            // the backing credit unrecoverable once the channel row is readable again.
+            Log.w(TAG, "Channel state unavailable for signed stability record — deferring")
+            AuditService.log("STABILITY_PAYMENT_STATE_UNAVAILABLE", mapOf(
+                "amount_msat" to amountMsat
+            ))
+            return InboundClassification(false, null, stateUnavailable = true)
         }
+        return when (val validation = StabilityPaymentProtocol.validateInbound(
+            signedRecord.value,
+            LspPreferencesManager.getLspPubkey(this),
+            channelId,
+            amountMsat
+        ) { msg, sig, pk -> node.verifySignature(msg.map { it.toUByte() }, sig, pk) }) {
+            is SignedSettlementValidation.Valid ->
+                InboundClassification(true, validation.payment.settlementId)
+            is SignedSettlementValidation.Invalid -> {
+                Log.w(TAG, "Invalid signed stability record (${validation.reason}) — recording as lightning")
+                AuditService.log("STABILITY_PAYMENT_INVALID", mapOf(
+                    "amount_msat" to amountMsat,
+                    "reason" to validation.reason
+                ))
+                InboundClassification(false, null)
+            }
+        }
+    }
 
     private fun hasStableControlMessage(records: List<CustomTlvRecord>): Boolean =
         records.any {
@@ -167,6 +214,9 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Processing stability: direction=$direction")
 
         val dataDir = Constants.userDataDir(this)
+        // AuditService is a process-wide singleton with no path until set, so audit calls from
+        // this service would silently no-op without it.
+        AuditService.setLogPath(File(dataDir, "audit_log.txt").absolutePath)
         val keySeedFile = File(dataDir, "keys_seed")
         val seedPhraseFile = File(dataDir, "seed_phrase")
         if (!keySeedFile.exists() && !seedPhraseFile.exists()) {
@@ -289,7 +339,13 @@ class StabilityProcessingService : Service() {
                             Log.d(TAG, "Ignored sub-sat incoming event")
                             continue
                         }
-                        val isStabilityPayment = isStabilityMarker(event.customRecords)
+                        val inbound = classifyInboundPayment(node, event.customRecords, event.amountMsat.toLong())
+                        if (inbound.stateUnavailable) {
+                            throw BackingUpdateFailed(
+                                "Channel state unavailable for signed settlement — not acknowledging, foreground will heal"
+                            )
+                        }
+                        val isStabilityPayment = inbound.isStability
                         val paymentId = event.paymentId ?: event.paymentHash
                         if (price <= 0) price = fetchMedianPrice()
                         if (isStabilityPayment) {
@@ -297,7 +353,8 @@ class StabilityProcessingService : Service() {
                             val result = recordPaymentAtomicInDB(
                                 dbPath, paymentId, "stability", "received",
                                 event.amountMsat.toLong(), price, amountSats,
-                                userChannelId = activeUserChannelId()
+                                userChannelId = activeUserChannelId(),
+                                settlementId = inbound.settlementId
                             )
                             when (result) {
                                 InsertResult.INSERTED, InsertResult.DUPLICATE -> {
@@ -357,10 +414,12 @@ class StabilityProcessingService : Service() {
         amountMsat: Long,
         btcPrice: Double,
         backingDeltaSats: Long?,
-        userChannelId: String? = null
+        userChannelId: String? = null,
+        settlementId: String? = null
     ): InsertResult {
         return try {
             val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
+            ensureSettlementTable(db)
             // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT.
             db.execSQL("BEGIN IMMEDIATE")
             try {
@@ -374,11 +433,31 @@ class StabilityProcessingService : Service() {
                         return InsertResult.DUPLICATE
                     }
                 }
+                if (settlementId != null) {
+                    // Replay guard: an already-applied settlement id never credits backing again.
+                    val cursor = db.rawQuery(
+                        "SELECT settlement_id FROM stability_settlements WHERE settlement_id = ?",
+                        arrayOf(settlementId)
+                    )
+                    val seen = cursor.use { it.moveToFirst() }
+                    if (seen) {
+                        Log.d(TAG, "recordPaymentAtomicInDB: settlement $settlementId already applied, skipping")
+                        db.execSQL("ROLLBACK")
+                        db.close()
+                        return InsertResult.DUPLICATE
+                    }
+                }
                 val amountUsd = if (btcPrice > 0) (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * btcPrice else 0.0
                 db.execSQL(
                     "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')",
                     arrayOf<Any?>(paymentId, paymentType, direction, amountMsat, amountUsd, btcPrice)
                 )
+                if (settlementId != null) {
+                    db.execSQL(
+                        "INSERT INTO stability_settlements (settlement_id) VALUES (?)",
+                        arrayOf(settlementId)
+                    )
+                }
                 if (backingDeltaSats != null) {
                     // Target the backing UPDATE by the explicit user_channel_id — never by recency —
                     // so a push-triggered payment can't credit/debit the wrong channel row.
@@ -465,13 +544,20 @@ class StabilityProcessingService : Service() {
                         val pid = event.paymentId ?: event.paymentHash
                         // Classify by TLV like handleLspToUser — a stability payment must credit
                         // backing, not be misfiled as a plain lightning receive.
-                        val isStabilityPayment = isStabilityMarker(event.customRecords)
+                        val inbound = classifyInboundPayment(node, event.customRecords, event.amountMsat.toLong())
+                        if (inbound.stateUnavailable) {
+                            throw BackingUpdateFailed(
+                                "Channel state unavailable for signed settlement — not acknowledging, foreground will heal"
+                            )
+                        }
+                        val isStabilityPayment = inbound.isStability
                         val result = if (isStabilityPayment) {
                             val amountSats = event.amountMsat.toLong() / 1000
                             recordPaymentAtomicInDB(
                                 dbPath, pid, "stability", "received",
                                 event.amountMsat.toLong(), price, amountSats,
-                                userChannelId = activeUserChannelId()
+                                userChannelId = activeUserChannelId(),
+                                settlementId = inbound.settlementId
                             )
                         } else {
                             recordPaymentAtomicInDB(dbPath, pid, "lightning", "received", event.amountMsat.toLong(), price, null)
@@ -575,7 +661,9 @@ class StabilityProcessingService : Service() {
             return
         }
 
-        val amountMsat = Math.floor(dollarsFromPar / price * Constants.SATS_IN_BTC * 1000).toLong()
+        // Stable allocations are sat-denominated — floor to whole sats so the signed amount
+        // matches the keysend exactly (mirrors src/stable.rs).
+        val amountMsat = Math.floor(dollarsFromPar / price * Constants.SATS_IN_BTC * 1000).toLong() / 1000L * 1000L
         if (amountMsat <= 0) return
 
         Log.d(TAG, "Sending stability payment: $amountMsat msat ($$dollarsFromPar)")
@@ -629,12 +717,29 @@ class StabilityProcessingService : Service() {
 
         val paymentIdString: String
         try {
-            val tlv = CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1))
+            // Attach only the signed STABILITY_PAYMENT_V1 envelope bound to this exact
+            // amount and channel — the legacy [0x01] marker is gone (#270). If the
+            // envelope can't be built, release the claim and skip the payment entirely.
+            val signedEnvelope = StabilityPaymentProtocol.buildSignedEnvelope(
+                channelId = channelState.channelId,
+                amountMsat = amountMsat,
+                expectedUsd = channelState.expectedUsd,
+                sign = { payload -> node.signMessage(payload.map { it.toUByte() }) }
+            )
+            if (signedEnvelope == null) {
+                try { clearPendingSendInDB(dbPath) } catch (_: Exception) {}
+                Log.w(TAG, "Could not build signed stability envelope — skipping payment")
+                return
+            }
+            val records = listOf(CustomTlvRecord(
+                Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
+                signedEnvelope.toByteArray(Charsets.UTF_8)
+            ))
             val paymentId = node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat.toULong(),
                 LspPreferencesManager.getLspPubkey(this),
                 null,
-                listOf(tlv)
+                records
             )
             paymentIdString = paymentId.toString()
         } catch (e: Exception) {
@@ -790,6 +895,17 @@ class StabilityProcessingService : Service() {
         """)
     }
 
+    /** Applied inbound STABILITY_PAYMENT_V1 settlement ids (replay guard). Same schema as
+     *  DatabaseService.createStabilitySettlementsTable — IF NOT EXISTS for either process. */
+    private fun ensureSettlementTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                created_at INTEGER DEFAULT (strftime('%s','now'))
+            )
+        """)
+    }
+
     /** Atomic check-and-set: returns false when a marker already exists (claim denied).
      *  BEGIN IMMEDIATE holds the write lock across the SELECT + INSERT. */
     private fun claimPendingSendInDB(dbPath: String, amountMsat: Long, price: Double): Boolean {
@@ -870,7 +986,8 @@ class StabilityProcessingService : Service() {
         val nativeSats: Long,
         val backingSats: Long,
         val latestPrice: Double,
-        val userChannelId: String
+        val userChannelId: String,
+        val channelId: String
     )
 
     private fun loadChannelStateFromDB(): ChannelState? {
@@ -882,7 +999,7 @@ class StabilityProcessingService : Service() {
             val cursor = db.rawQuery(
                 // Pick the single active channel deterministically. The user_channel_id it returns is
                 // the stable key every backing UPDATE targets by — the write never re-selects by recency.
-                "SELECT expected_usd, receiver_sats, latest_price, stable_sats, user_channel_id FROM channels WHERE user_channel_id IS NOT NULL AND user_channel_id != '' ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
+                "SELECT expected_usd, receiver_sats, latest_price, stable_sats, user_channel_id, channel_id FROM channels WHERE user_channel_id IS NOT NULL AND user_channel_id != '' ORDER BY updated_at DESC, channel_id DESC LIMIT 1",
                 null
             )
             val result = cursor.use {
@@ -893,7 +1010,8 @@ class StabilityProcessingService : Service() {
                         nativeSats = 0,  // not in DB schema, computed at runtime
                         backingSats = it.getLong(3),
                         latestPrice = it.getDouble(2),
-                        userChannelId = it.getString(4)
+                        userChannelId = it.getString(4),
+                        channelId = it.getString(5)
                     )
                 } else null
             }

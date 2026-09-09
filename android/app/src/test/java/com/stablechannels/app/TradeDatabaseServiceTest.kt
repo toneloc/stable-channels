@@ -447,6 +447,56 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun demotingASettlementToLightningMakesTheBackingCreditUnrecoverable() {
+        // Regression for the receive-side classification bug: when local channel state was
+        // unreadable, receivers recorded the settlement as an ordinary Lightning receipt. This
+        // pins WHY that is unsafe — the payment_id is now taken, so the later retry that does
+        // have channel state dedups and the backing credit is lost for good. Receivers must
+        // leave the event unacked instead of demoting it.
+        val identifier = "ab".repeat(32)
+        val settlementId = "cd".repeat(32)
+        val paymentId = "ef".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 50.0,
+            backingSats = 55_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0
+        )
+
+        // The demotion: same payment id, recorded as lightning with no backing delta.
+        val demoted = service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = paymentId,
+            paymentType = "lightning",
+            direction = "received",
+            amountMsat = 25_000
+        )
+        assertTrue(demoted.isNewPayment)
+        assertEquals(55_000L, service.loadChannel("7")?.backingSats)
+
+        // The retry, now with channel state available, cannot repair it: the payment id dedups.
+        val retry = service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = paymentId,
+            paymentType = "stability",
+            direction = "received",
+            amountMsat = 25_000,
+            userChannelId = "7",
+            backingDeltaSats = 25,
+            settlementId = settlementId
+        )
+        assertFalse(retry.isNewPayment)
+        assertEquals(55_000L, service.loadChannel("7")?.backingSats)
+        assertEquals(
+            "lightning",
+            service.getRecentPayments().first { it.paymentId == paymentId }.paymentType
+        )
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
