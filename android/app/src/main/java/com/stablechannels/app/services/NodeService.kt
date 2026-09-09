@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.StabilityFreshness
 import org.lightningdevkit.ldknode.*
 import java.io.File
@@ -228,7 +229,7 @@ class NodeService(private val context: Context) {
 
     fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) {
         val n = node ?: throw NodeServiceError()
-        n.spliceOut(userChannelId, counterpartyNodeId, address, amountSats.toULong())
+        n.spliceOut(userChannelId, counterpartyNodeId, QRCodeUtils.normalizeAddress(address), amountSats.toULong())
     }
 
     fun sendPayment(invoice: Bolt11Invoice): String {
@@ -312,17 +313,17 @@ class NodeService(private val context: Context) {
 
     fun newOnchainAddress(): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().newAddress()
+        return QRCodeUtils.normalizeAddress(n.onchainPayment().newAddress())
     }
 
     fun sendOnchain(address: String, amountSats: Long): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().sendToAddress(address, amountSats.toULong(), null)
+        return n.onchainPayment().sendToAddress(QRCodeUtils.normalizeAddress(address), amountSats.toULong(), null)
     }
 
     fun sendAllOnchain(address: String): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().sendAllToAddress(address, false, null)
+        return n.onchainPayment().sendAllToAddress(QRCodeUtils.normalizeAddress(address), false, null)
     }
 
     fun syncWallets() {

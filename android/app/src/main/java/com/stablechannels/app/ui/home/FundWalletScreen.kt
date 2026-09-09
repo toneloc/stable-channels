@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.stablechannels.app.AppState
+import com.stablechannels.app.util.QRCodeUtils
 
 @Composable
 fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
@@ -35,8 +36,10 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
 
     LaunchedEffect(Unit) {
         try {
-            address = appState.nodeService.newOnchainAddress()
-            appState.setOnchainReceiveAddress(address)
+            val raw = appState.nodeService.newOnchainAddress()
+            val normalized = QRCodeUtils.normalizeAddress(raw)
+            address = normalized
+            appState.setOnchainReceiveAddress(normalized)
         } catch (_: Exception) {}
     }
 
@@ -89,7 +92,8 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
 
         val addr = address
         if (addr != null) {
-            val qrBitmap = remember(addr) { generateQRCode(addr.uppercase()) }
+            val bitcoinUri = remember(addr) { QRCodeUtils.generateBitcoinUri(addr) }
+            val qrBitmap = remember(bitcoinUri) { generateQRCode(bitcoinUri) }
             if (qrBitmap != null) {
                 Image(
                     bitmap = qrBitmap.asImageBitmap(),

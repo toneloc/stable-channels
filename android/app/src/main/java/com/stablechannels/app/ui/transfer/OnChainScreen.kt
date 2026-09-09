@@ -19,8 +19,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import com.stablechannels.app.AppState
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -183,6 +185,10 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 value = address,
                 onValueChange = { address = it },
                 label = { Text("Bitcoin Address") },
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false
+                ),
                 modifier = Modifier.fillMaxWidth()
             )
             Spacer(Modifier.height(16.dp))
@@ -288,7 +294,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     error = null
                     scope.launch(Dispatchers.IO) {
                         try {
-                            val addr = address.trim()
+                            val addr = QRCodeUtils.normalizeAddress(QRCodeUtils.stripUriPrefix(address))
                             val price = btcPrice
                             if (sendAll) {
                                 val txid = appState.nodeService.sendAllOnchain(addr)
