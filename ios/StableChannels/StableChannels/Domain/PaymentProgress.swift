@@ -65,7 +65,12 @@ private let onchainPaymentTypes: Set<String> = ["onchain", "splice_in", "splice_
 
 extension PaymentRecord {
     var shouldShowConfirmationProgress: Bool {
+        // Only rows with a live progress signal get the counting badge; a
+        // failed or expired splice must fall through to the status label
+        // ("Failed") instead of showing "0/N confirmed" forever. Mirrors
+        // Android's HistoryScreen.shouldShowConfirmationProgress().
         onchainPaymentTypes.contains(paymentType)
+            && (status == "pending" || Int(confirmations) > 0)
     }
 
     var isOnchainConfirmed: Bool {
