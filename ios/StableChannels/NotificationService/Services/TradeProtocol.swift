@@ -541,6 +541,22 @@ enum StabilitySettlementValidation: Equatable {
 }
 
 extension TradeProtocol {
+    /// Resolve authentication from the channel being accounted for, never from the default
+    /// LSP or a different channel. Readiness is irrelevant for an already received payment.
+    static func settlementCounterparty(
+        channelId: String,
+        userChannelId: String,
+        channels: [(channelId: String, userChannelId: String, counterparty: String)]
+    ) -> String? {
+        guard !channelId.isEmpty, !userChannelId.isEmpty else { return nil }
+        let matching = channels.filter {
+            $0.channelId == channelId && $0.userChannelId == userChannelId
+        }
+        guard matching.count == 1, let peer = matching.first?.counterparty,
+              !peer.isEmpty else { return nil }
+        return peer
+    }
+
     static let stabilitySettlementMessageType = "STABILITY_PAYMENT_V1"
     static let stabilityDirectionUserToLsp = "user_to_lsp"
     static let stabilityDirectionLspToUser = "lsp_to_user"

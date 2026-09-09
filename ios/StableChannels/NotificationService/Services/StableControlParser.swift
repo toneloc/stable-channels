@@ -77,15 +77,23 @@ enum StableControlParser {
         // Missing local channel state is a retryable local condition, not a bad envelope.
         // Demoting it to a Lightning receipt would dedupe the payment id and make the
         // backing credit unrecoverable once the channel row comes back.
-        guard let channelId = db.readChannelState()?.channelId, !channelId.isEmpty else {
+        guard let state = db.readChannelState(),
+              let counterparty = TradeProtocol.settlementCounterparty(
+                  channelId: state.channelId,
+                  userChannelId: state.userChannelId,
+                  channels: node.listChannels().map {
+                      (channelId: $0.channelId, userChannelId: $0.userChannelId,
+                       counterparty: $0.counterpartyNodeId)
+                  }
+              ) else {
             return .stateUnavailable
         }
         switch TradeProtocol.parseSignedStabilitySettlement(
             data: record.value,
             expectedDirection: TradeProtocol.stabilityDirectionLspToUser,
-            expectedChannelId: channelId,
+            expectedChannelId: state.channelId,
             actualAmountMsat: amountMsat,
-            expectedCounterparty: Constants.lspPubkey,
+            expectedCounterparty: counterparty,
             verifySignature: { msg, signature, publicKey in
                 node.verifySignature(msg: msg, sig: signature, pkey: publicKey)
             }

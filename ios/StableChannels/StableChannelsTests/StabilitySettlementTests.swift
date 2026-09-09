@@ -87,6 +87,50 @@ final class StabilitySettlementTests: XCTestCase {
         XCTAssertEqual(settlement.expiresAt, now + ttl)
     }
 
+    func testBackgroundSettlementUsesMatchingCustomCounterparty() throws {
+        let customPeer = "custom-lsp"
+        let peer = try XCTUnwrap(TradeProtocol.settlementCounterparty(
+            channelId: channelId,
+            userChannelId: "our-channel",
+            channels: [
+                ("another-channel", "another-user-channel", "default-lsp"),
+                (channelId, "our-channel", customPeer)
+            ]
+        ))
+        let result = TradeProtocol.parseSignedStabilitySettlement(
+            data: makeEnvelope(),
+            expectedDirection: TradeProtocol.stabilityDirectionLspToUser,
+            expectedChannelId: channelId,
+            actualAmountMsat: 25_000,
+            expectedCounterparty: peer,
+            now: now,
+            verifySignature: { _, signature, key in signature == "sig" && key == customPeer }
+        )
+        guard case .valid = result else {
+            return XCTFail("A custom-LSP settlement must reach backing accounting")
+        }
+    }
+
+    func testUnresolvedSettlementIdentityHasNoDefaultPeerFallback() {
+        let channels = [(channelId: channelId, userChannelId: "our-channel", counterparty: "custom-lsp")]
+        for ids in [("", "our-channel"), (channelId, ""),
+                    ("stale-channel", "our-channel"), (channelId, "wrong-user-channel")] {
+            XCTAssertNil(TradeProtocol.settlementCounterparty(
+                channelId: ids.0, userChannelId: ids.1, channels: channels
+            ))
+        }
+        XCTAssertNil(TradeProtocol.settlementCounterparty(
+            channelId: channelId, userChannelId: "our-channel", channels: []
+        ))
+        XCTAssertNil(TradeProtocol.settlementCounterparty(
+            channelId: channelId, userChannelId: "our-channel", channels: channels + channels
+        ))
+        XCTAssertNil(TradeProtocol.settlementCounterparty(
+            channelId: channelId, userChannelId: "our-channel",
+            channels: [(channelId, "our-channel", "")]
+        ))
+    }
+
     func testBuildRejectsNonWholeSatAmounts() {
         XCTAssertNil(TradeProtocol.buildSignedStabilitySettlement(
             channelId: channelId, amountMsat: 1_500,
