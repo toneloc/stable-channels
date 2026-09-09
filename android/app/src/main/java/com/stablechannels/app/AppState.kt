@@ -16,6 +16,7 @@ import com.stablechannels.app.services.websocket.MempoolWebSocketService
 import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
@@ -608,7 +609,7 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
         _nativeSats = MutableStateFlow(prefs.getLong(BalanceCacheKey.NATIVE, 0L))
-        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)
+        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)?.let { QRCodeUtils.normalizeAddress(it) }
         _lastReceiveTxid.value = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID, null)
         lastReceiveTxidAddress = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, null)
 
@@ -2408,7 +2409,8 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
         val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty() || address.isBlank()) return null
+        val targetAddress = QRCodeUtils.normalizeAddress(address)
+        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
 
         val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
         for (baseUrl in urls) {
@@ -2423,7 +2425,8 @@ class AppState(private val context: Context) : ViewModel() {
                     val vouts = txJson.optJSONArray("vout") ?: return@use
                     for (i in 0 until vouts.length()) {
                         val vout = vouts.optJSONObject(i) ?: continue
-                        if (vout.optString("scriptpubkey_address", "") == address) {
+                        val voutAddress = QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
+                        if (voutAddress == targetAddress) {
                             return true
                         }
                     }
@@ -3000,38 +3003,39 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun setOnchainReceiveAddress(address: String?) {
+        val normalized = address?.let { QRCodeUtils.normalizeAddress(it) }
         val oldAddress = _onchainReceiveAddress.value
-        _onchainReceiveAddress.value = address
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-        if (address == null) {
-            editor.remove("onchain_receive_address")
+        _onchainReceiveAddress.value = normalized
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+        if (normalized == null) {
+            editor.remove(BalanceCacheKey.RECEIVE_ADDRESS)
         } else {
-            editor.putString("onchain_receive_address", address)
+            editor.putString(BalanceCacheKey.RECEIVE_ADDRESS, normalized)
         }
         editor.apply()
 
-        if (!oldAddress.isNullOrBlank() && oldAddress != address) {
+        if (!oldAddress.isNullOrBlank() && oldAddress != normalized) {
             mempoolWebSocketService.untrackAddress(oldAddress)
         }
 
-        if (!address.isNullOrBlank() && oldAddress != address) {
+        if (!normalized.isNullOrBlank() && oldAddress != normalized) {
             // New receive request: drop stale txid from previous address/session.
             setLastReceiveTxid(null, null)
         }
 
-        if (address == null) {
+        if (normalized == null) {
             return
         }
 
-        mempoolWebSocketService.trackAddress(address)
+        mempoolWebSocketService.trackAddress(normalized)
         
         // Start polling for this address to be hit
         viewModelScope.launch {
             val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
-            val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
+            val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(normalized, esploraUrl)
             if (txid != null) {
-                setLastReceiveTxid(txid, address)
-                databaseService?.reconcileResolvedReceiveTxid(txid, address)
+                setLastReceiveTxid(txid, normalized)
+                databaseService?.reconcileResolvedReceiveTxid(txid, normalized)
             }
         }
     }

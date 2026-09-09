@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -162,7 +163,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         when {
             lower.startsWith("lnbc") || lower.startsWith("lntb") || lower.startsWith("lnts") -> InputType.BOLT11
             lower.startsWith("lno") -> InputType.BOLT12
-            lower.startsWith("bc1") || lower.startsWith("1") || lower.startsWith("3") || lower.startsWith("tb1") -> InputType.ONCHAIN
+            lower.startsWith("bc1") || lower.startsWith("tb1") || lower.startsWith("bcrt1") || lower.startsWith("1") || lower.startsWith("3") -> InputType.ONCHAIN
             else -> InputType.UNKNOWN
         }
     }
@@ -501,7 +502,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 label = { Text("To") },
                 placeholder = { Text("Invoice or onchain address") },
                 modifier = Modifier.fillMaxWidth(),
-                minLines = 2
+                minLines = 2,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    autoCorrectEnabled = false
+                )
             )
 
             // Color-coded input type indicator (Task 7.5)
@@ -660,7 +665,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         withContext(Dispatchers.IO) {
                             try {
                                 appState.ensureLSPConnected()
-                                val trimmed = input.trim()
+                                val trimmed = QRCodeUtils.stripUriPrefix(input)
                                 val price = btcPrice
                                 when (inputType) {
                                     InputType.BOLT11 -> {
