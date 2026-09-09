@@ -55,6 +55,18 @@ pub struct MempoolWs {
     cmd_tx: Sender<Cmd>,
 }
 
+fn normalize_address_for_tracking(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let is_bech32 = (trimmed.len() >= 3
+        && (trimmed[..3].eq_ignore_ascii_case("bc1") || trimmed[..3].eq_ignore_ascii_case("tb1")))
+        || (trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("bcrt1"));
+    if is_bech32 && trimmed.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl MempoolWs {
     /// Spawn the websocket thread. It stays idle (no connection) until the first
     /// tracked address arrives, and reconnects with growing backoff on failures.
@@ -65,16 +77,16 @@ impl MempoolWs {
     }
 
     pub fn track_address(&self, address: &str) {
-        let normalized = address.trim();
+        let normalized = normalize_address_for_tracking(address);
         if !normalized.is_empty() {
-            let _ = self.cmd_tx.send(Cmd::Track(normalized.to_string()));
+            let _ = self.cmd_tx.send(Cmd::Track(normalized));
         }
     }
 
     pub fn untrack_address(&self, address: &str) {
-        let normalized = address.trim();
+        let normalized = normalize_address_for_tracking(address);
         if !normalized.is_empty() {
-            let _ = self.cmd_tx.send(Cmd::Untrack(normalized.to_string()));
+            let _ = self.cmd_tx.send(Cmd::Untrack(normalized));
         }
     }
 

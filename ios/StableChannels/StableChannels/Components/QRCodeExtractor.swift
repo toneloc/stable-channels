@@ -42,8 +42,22 @@ enum QRCodeExtractor {
         return ctx.makeImage() ?? original
     }
 
+    /// Normalizes a Bitcoin address according to BIP-173 / BIP-350 specifications.
+    /// Native SegWit and Taproot (bc1, tb1, bcrt1) addresses are converted to lowercase.
+    /// Base58 addresses (1, 3, 2, m, n) retain their exact case.
+    static func normalizeAddress(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains(where: \.isUppercase) else { return trimmed }
+
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("bc1") || lower.hasPrefix("tb1") || lower.hasPrefix("bcrt1") {
+            return lower
+        }
+        return trimmed
+    }
+
     static func sanitizeAddress(_ raw: String) -> String {
-        sanitizePaymentURI(raw, scheme: "bitcoin:")
+        normalizeAddress(sanitizePaymentURI(raw, scheme: "bitcoin:"))
     }
 
     static func sanitizeLightningInput(_ raw: String) -> String {
@@ -52,12 +66,17 @@ enum QRCodeExtractor {
 
     /// Strips both `lightning:` and `bitcoin:` URI schemes (case-insensitive prefix).
     static func sanitizePaymentInput(_ raw: String) -> String {
-        sanitizeLightningInput(sanitizeAddress(raw))
+        normalizeAddress(sanitizeLightningInput(sanitizePaymentURI(raw, scheme: "bitcoin:")))
     }
 
     private static func sanitizePaymentURI(_ raw: String, scheme: String) -> String {
-        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.range(of: scheme, options: [.caseInsensitive, .anchored]) != nil {
+        var s = raw.components(separatedBy: .newlines)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if s.range(of: "\(scheme)//", options: [.caseInsensitive, .anchored]) != nil {
+            s.removeFirst(scheme.count + 2)
+        } else if s.range(of: scheme, options: [.caseInsensitive, .anchored]) != nil {
             s.removeFirst(scheme.count)
         }
         if let q = s.firstIndex(of: "?") {
