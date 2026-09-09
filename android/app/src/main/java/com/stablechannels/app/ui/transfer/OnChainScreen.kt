@@ -20,7 +20,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.platform.LocalContext
+import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AppAccessPreferencesManager
+import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.satsFormatted
@@ -41,6 +45,8 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
     var feeRateSatVb by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val activity = context.findActivity()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
     // Amount derivation and send enablement track the trusted accounting price, so an untrusted
     // oracle state is visible (blank sats, disabled button) before tapping — iOS parity.
@@ -292,59 +298,80 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 onClick = {
                     isSending = true
                     error = null
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            val addr = QRCodeUtils.normalizeAddress(QRCodeUtils.stripUriPrefix(address))
-                            val price = btcPrice
-                            if (sendAll) {
-                                val txid = appState.nodeService.sendAllOnchain(addr)
-                                val sendSats = onchainSats
-                                appState.onchainSendBroadcasted(sendSats, isSendAll = true, txid = txid)
-                                appState.databaseService?.recordPayment(
-                                    paymentId = txid, paymentType = "onchain", direction = "sent",
-                                    amountMsat = sendSats * 1000,
-                                    amountUSD = if (price > 0) (sendSats.toDouble() / Constants.SATS_IN_BTC) * price else null,
-                                    btcPrice = if (price > 0) price else null,
-                                    txid = txid, address = addr
-                                )
-                                result = "All funds sent successfully."
-                                successTxid = txid
-                            } else {
-                                val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
-                                // Money movement converts USD at the trusted accounting price,
-                                // never the raw display price (iOS parity). The same captured
-                                // price is recorded so history reflects the rate actually used.
-                                val accountingPrice = appState.priceService.currentAccountingPrice()
-                                val sats = accountingSatsFromUSD(usd, accountingPrice)
-                                    ?: throw Exception("A trusted BTC/USD price is required")
-                                if (hasChannel) {
-                                    if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
-                                    val sc = appState.stableChannel.value
-                                    appState.beginSpliceOut(sats, addr, accountingPrice)
-                                    try {
-                                        appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
-                                    } catch (e: Exception) {
-                                        appState.cancelPendingSpliceStart()
-                                        throw e
-                                    }
-                                    result = "Splice-out initiated for ${sats.satsFormatted()} sats."
-                                    successTxid = null
-                                } else {
-                                    val txid = appState.nodeService.sendOnchain(addr, sats)
-                                    appState.onchainSendBroadcasted(sats, isSendAll = false, txid = txid)
+                    scope.launch {
+                        // Auth gate: gated by the Payment Confirmation toggle, same as
+                        // SendScreen's on-chain path (matches iOS: one toggle governs
+                        // both on-chain and Lightning sends). This screen previously had
+                        // no gate at all, letting withdrawals and splice-outs bypass
+                        // biometric confirmation entirely regardless of the toggle.
+                        val requiresAuth = AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain = true)
+                        if (requiresAuth) {
+                            if (activity == null) {
+                                error = "Authentication required to send"
+                                isSending = false
+                                return@launch
+                            }
+                            val authResult = BiometricService.authenticate(activity, "Confirm onchain withdrawal")
+                            if (authResult != BiometricService.AuthResult.SUCCESS) {
+                                error = "Authentication required to send"
+                                isSending = false
+                                return@launch
+                            }
+                        }
+                        withContext(Dispatchers.IO) {
+                            try {
+                                val addr = QRCodeUtils.normalizeAddress(QRCodeUtils.stripUriPrefix(address))
+                                val price = btcPrice
+                                if (sendAll) {
+                                    val txid = appState.nodeService.sendAllOnchain(addr)
+                                    val sendSats = onchainSats
+                                    appState.onchainSendBroadcasted(sendSats, isSendAll = true, txid = txid)
                                     appState.databaseService?.recordPayment(
                                         paymentId = txid, paymentType = "onchain", direction = "sent",
-                                        amountMsat = sats * 1000,
-                                        amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
-                                        btcPrice = accountingPrice,
+                                        amountMsat = sendSats * 1000,
+                                        amountUSD = if (price > 0) (sendSats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                        btcPrice = if (price > 0) price else null,
                                         txid = txid, address = addr
                                     )
-                                    result = "Sent successfully."
+                                    result = "All funds sent successfully."
                                     successTxid = txid
+                                } else {
+                                    val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
+                                    // Money movement converts USD at the trusted accounting price,
+                                    // never the raw display price (iOS parity). The same captured
+                                    // price is recorded so history reflects the rate actually used.
+                                    val accountingPrice = appState.priceService.currentAccountingPrice()
+                                    val sats = accountingSatsFromUSD(usd, accountingPrice)
+                                        ?: throw Exception("A trusted BTC/USD price is required")
+                                    if (hasChannel) {
+                                        if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
+                                        val sc = appState.stableChannel.value
+                                        appState.beginSpliceOut(sats, addr, accountingPrice)
+                                        try {
+                                            appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
+                                        } catch (e: Exception) {
+                                            appState.cancelPendingSpliceStart()
+                                            throw e
+                                        }
+                                        result = "Splice-out initiated for ${sats.satsFormatted()} sats."
+                                        successTxid = null
+                                    } else {
+                                        val txid = appState.nodeService.sendOnchain(addr, sats)
+                                        appState.onchainSendBroadcasted(sats, isSendAll = false, txid = txid)
+                                        appState.databaseService?.recordPayment(
+                                            paymentId = txid, paymentType = "onchain", direction = "sent",
+                                            amountMsat = sats * 1000,
+                                            amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                            btcPrice = accountingPrice,
+                                            txid = txid, address = addr
+                                        )
+                                        result = "Sent successfully."
+                                        successTxid = txid
+                                    }
                                 }
+                            } catch (e: Exception) {
+                                error = e.message ?: "Send failed"
                             }
-                        } catch (e: Exception) {
-                            error = e.message ?: "Send failed"
                         }
                         isSending = false
                     }

@@ -822,8 +822,10 @@ private fun InputTypeIndicator(inputType: InputType) {
 /**
  * Walks up the Context wrapper chain to find the hosting FragmentActivity.
  * Works even inside ModalBottomSheet where LocalContext is a ContextThemeWrapper.
+ * Internal (not private) so other send screens, e.g. OnChainScreen, can reuse it for
+ * their own biometric auth gate instead of duplicating this walk.
  */
-private fun android.content.Context.findActivity(): FragmentActivity? {
+internal fun android.content.Context.findActivity(): FragmentActivity? {
     var ctx = this
     while (ctx is ContextWrapper) {
         if (ctx is FragmentActivity) return ctx

@@ -25,11 +25,15 @@ class AppAccessPreferencesTest {
     // ---------------------------------------------------------------------------
 
     @Test
-    fun `on-chain sends always require auth regardless of context`() {
-        // shouldRequireAuth with isOnChain=true should always return true
-        // We test the static logic here (context-free version)
-        assertTrue(shouldRequireAuthPure(isOnChain = true, paymentConfirmationEnabled = false))
+    fun `on-chain sends require auth when payment confirmation enabled`() {
+        // Matches iOS: a single Payment Confirmation toggle governs both send types,
+        // with no hardcoded exception for on-chain.
         assertTrue(shouldRequireAuthPure(isOnChain = true, paymentConfirmationEnabled = true))
+    }
+
+    @Test
+    fun `on-chain sends do not require auth when payment confirmation disabled`() {
+        assertFalse(shouldRequireAuthPure(isOnChain = true, paymentConfirmationEnabled = false))
     }
 
     @Test
@@ -107,7 +111,6 @@ class AppAccessPreferencesTest {
      * without requiring an Android Context, for unit test verification.
      */
     private fun shouldRequireAuthPure(isOnChain: Boolean, paymentConfirmationEnabled: Boolean): Boolean {
-        if (isOnChain) return true
         return paymentConfirmationEnabled
     }
 }
