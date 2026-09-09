@@ -2243,35 +2243,16 @@ class AppState {
         let txidStr = "\(newFundingTxo.txid)"
         spliceTxid = txidStr
 
-        if let splice = pendingSplice {
-            pendingSplice = nil
-            if splice.direction == "in" {
-                // Auto-sweep splice_in was already recorded — update with txid
-                try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
-            } else {
-                let price = stableChannel.latestPrice
-                let amountMsat = splice.amountSats * 1000
-                let amountUSD: Double? = price > 0 ? Double(splice.amountSats) / 100_000_000.0 * price : nil
-                _ = try? databaseService?.paymentRepo.recordPayment(
-                    paymentId: txidStr,
-                    paymentType: "splice_out",
-                    direction: "sent",
-                    amountMsat: amountMsat,
-                    amountUSD: amountUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending",
-                    txid: txidStr,
-                    address: splice.address
-                )
-            }
-        } else {
-            // pendingSplice is in-memory and lost across relaunch. If this event
-            // is a restart replay, the latest NULL-txid splice row is this
-            // splice's initiation row — stamp it so ChannelReady can complete it
-            // and the no-txid expiry can't mark it failed.
-            try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
-        }
+        // Both splice directions persist their initiation row (status='pending',
+        // txid NULL) before the native call (beginSpliceOut / sweepToChannel), so
+        // this event only stamps the negotiated txid onto that row. This also
+        // covers a restart replay: pendingSplice is in-memory and lost across
+        // relaunch, but the latest pending NULL-txid splice row is this splice's
+        // initiation row — stamping it lets ChannelReady complete it and keeps
+        // the no-txid expiry from sweeping it to 'expired' (and if the sweep
+        // already ran, stamping recovers the expired row back to 'pending').
+        pendingSplice = nil
+        try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
 
         refreshBalances()
         updateStableBalances()
@@ -2287,6 +2268,40 @@ class AppState {
                 userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
             )
         }
+        guard let db = databaseService else {
+            throw NSError(
+                domain: "",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "Payment history is unavailable — splice not started"]
+            )
+        }
+        // Persist before the native call so the operation survives a process
+        // restart: on mainnet spliceNegotiated can arrive minutes after the
+        // user taps send, and without a durable row the splice would vanish
+        // from history (and from Stable USD accounting) if the app died first.
+        // The txid is stamped onto this row by handleSplicePending.
+        let price = accountingBTCPrice
+        let amountUSD: Double? = price > 0
+            ? Double(amountSats) / Double(Constants.satsInBTC) * price
+            : nil
+        let recorded = (try? db.paymentRepo.recordPayment(
+            paymentId: nil,
+            paymentType: "splice_out",
+            direction: "sent",
+            amountMsat: amountSats * 1000,
+            amountUSD: amountUSD,
+            btcPrice: price > 0 ? price : nil,
+            counterparty: nil,
+            status: "pending",
+            address: address
+        )) ?? false
+        guard recorded else {
+            throw NSError(
+                domain: "",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "Could not save pending splice — splice not started"]
+            )
+        }
         isSweeping = true
         pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
         statusMessage = "Move pending..."
@@ -2295,6 +2310,12 @@ class AppState {
     func cancelPendingSpliceStart() {
         guard spliceTxid == nil else { return }
         isSweeping = false
+        // The initiation row was persisted before the native call; the native
+        // call failed, so mark that (NULL-txid) row failed. Failed rows are
+        // terminal — setPendingSpliceTxid will never stamp or resurrect them.
+        if pendingSplice != nil {
+            databaseService?.spliceRepo.failLatestPendingSplice()
+        }
         pendingSplice = nil
         statusMessage = ""
     }
@@ -2901,25 +2922,33 @@ class AppState {
                 ? Double(sweepAmount) / Double(Constants.satsInBTC) * price
                 : nil
 
+            // Persist before the native call so spliceNegotiated always has a
+            // row to stamp with the txid, even if the event is delivered before
+            // spliceInWithAll returns (and so the operation survives a restart).
+            let recorded = (try? databaseService?.paymentRepo.recordPayment(
+                paymentId: nil,
+                paymentType: "splice_in",
+                direction: "received",
+                amountMsat: sweepAmount * 1000,
+                amountUSD: amountUSD,
+                btcPrice: price > 0 ? price : nil,
+                counterparty: nil,
+                status: "pending"
+            )) ?? false
+            guard recorded else {
+                statusMessage = "Could not save pending move — move not started"
+                isSweeping = false
+                return
+            }
+            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
+
             do {
                 try nodeService.spliceInWithAll(
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId
                 )
                 sweepOnchainStart = balances.totalOnchainBalanceSats
-                pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
                 statusMessage = "Moving all onchain funds to channel..."
-
-                _ = try? databaseService?.paymentRepo.recordPayment(
-                    paymentId: nil,
-                    paymentType: "splice_in",
-                    direction: "received",
-                    amountMsat: sweepAmount * 1000,
-                    amountUSD: amountUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending"
-                )
 
                 AuditService.log("SWEEP_TO_CHANNEL", data: [
                     "amount_sats": "\(sweepAmount)",
@@ -2932,6 +2961,8 @@ class AppState {
                     "error": error.localizedDescription
                 ])
                 isSweeping = false
+                pendingSplice = nil
+                databaseService?.spliceRepo.failLatestPendingSplice()
             }
         }
     }
