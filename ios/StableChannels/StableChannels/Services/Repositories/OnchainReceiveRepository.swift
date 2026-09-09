@@ -59,13 +59,27 @@ final class OnchainReceiveRepository {
                 UPDATE onchain_receive_txids
                 SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
                 WHERE id = ? AND status = 'pending'
+                  AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ?)
+                  AND NOT EXISTS (SELECT 1 FROM onchain_receive_txids WHERE txid = ?)
                 """,
-                params: [.text(txid), .integer(id)]
+                params: [.text(txid), .integer(id), .text(txid), .text(txid)]
             )
             return rawSQL.changes > 0
         } catch {
             return false
         }
+    }
+
+    /// Throw on read failure: an unavailable history must never look like an empty history.
+    func recordedReceiveTxids() throws -> Set<String> {
+        let rows = try rawSQL.query(
+            """
+            SELECT txid FROM payments WHERE txid IS NOT NULL
+            UNION SELECT txid FROM onchain_receive_txids WHERE txid IS NOT NULL
+            """,
+            params: []
+        )
+        return Set(rows.map { $0.string(0) })
     }
 
     func fetchPendingOnchainReceiveRows() -> [PendingOnchainPayment] {

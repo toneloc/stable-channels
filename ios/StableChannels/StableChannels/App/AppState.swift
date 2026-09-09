@@ -2194,8 +2194,12 @@ class AppState {
            let row = db.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
             if let wsPayment = db.paymentRepo.payment(txid: txid) {
                 if wsPayment.amountMsat == UInt64(row.amountMsat) {
-                    // WebSocket beat us to it, this fallback placeholder is a duplicate.
-                    db.paymentRepo.deletePayment(paymentId: row.paymentId)
+                    // Equal amounts do not prove identity. If another writer recorded this
+                    // txid after resolution, retain the placeholder rather than erase a deposit.
+                    AuditService.log("ONCHAIN_RECEIVE_RES_AMBIGUOUS", data: [
+                        "resolution_id": "\(resolutionId)",
+                        "txid": txid
+                    ])
                 } else {
                     // Mismatched amount! This placeholder belongs to a different deposit.
                     // Leave it intact to prevent erasing it from history.
