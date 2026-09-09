@@ -206,6 +206,12 @@ struct PaymentRowView: View {
         if payment.shouldShowConfirmationProgress {
             return payment.confirmationProgress.label
         }
+        // 'expired' is a DB-level state (splice initiation swept by the
+        // no-txid timeout, still recoverable by a late negotiation); to the
+        // user it is indistinguishable from a failed splice.
+        if payment.status == "expired" {
+            return "failed".capitalized
+        }
         return payment.status.capitalized
     }
 
@@ -223,7 +229,7 @@ struct PaymentRowView: View {
         switch payment.status {
         case "completed": return .green
         case "pending": return .orange
-        case "failed": return .red
+        case "failed", "expired": return .red
         default: return .secondary
         }
     }

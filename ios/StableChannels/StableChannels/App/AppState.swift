@@ -2249,7 +2249,8 @@ class AppState {
         // covers a restart replay: pendingSplice is in-memory and lost across
         // relaunch, but the latest pending NULL-txid splice row is this splice's
         // initiation row — stamping it lets ChannelReady complete it and keeps
-        // the no-txid expiry from marking it failed.
+        // the no-txid expiry from sweeping it to 'expired' (and if the sweep
+        // already ran, stamping recovers the expired row back to 'pending').
         pendingSplice = nil
         try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
 
