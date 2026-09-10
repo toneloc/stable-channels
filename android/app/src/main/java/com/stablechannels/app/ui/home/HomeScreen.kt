@@ -700,7 +700,10 @@ private fun PendingRow(
 ) {
     // A real confirmation count gives concrete progress ("2/6 confirmations") instead of
     // a static hourglass that never changes for up to an hour on a fresh onchain deposit.
-    val progress = if (confirmations != null && requiredConfirmations != null && requiredConfirmations > 0) {
+    // Only show progress once a txid is known — before that the confirmation tracker has
+    // nothing to count yet, and an empty ring next to "0/6" would read as stalled rather
+    // than as not-yet-detected.
+    val progress = if (txid != null && confirmations != null && requiredConfirmations != null && requiredConfirmations > 0) {
         (confirmations.toFloat() / requiredConfirmations.toFloat()).coerceIn(0f, 1f)
     } else null
 
@@ -722,13 +725,15 @@ private fun PendingRow(
         Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                if (amountSats != null) "$text ${amountSats.btcSpacedFormatted()} BTC" else text,
+                text,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            val amountPrefix = if (amountSats != null) "${amountSats.btcSpacedFormatted()} BTC \u00b7 " else ""
             val caption = when {
-                progress != null -> "$confirmations/$requiredConfirmations confirmations"
-                txid == null -> "pending confirmation"
+                progress != null -> "$amountPrefix$confirmations/$requiredConfirmations confirmations"
+                txid == null -> "${amountPrefix}pending confirmation"
+                amountSats != null -> amountPrefix.removeSuffix(" \u00b7 ")
                 else -> null
             }
             if (caption != null) {
