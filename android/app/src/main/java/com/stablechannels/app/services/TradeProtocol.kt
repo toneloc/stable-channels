@@ -5,6 +5,8 @@ import com.stablechannels.app.util.Constants
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import kotlin.math.abs
 import kotlin.math.floor
 
@@ -87,6 +89,7 @@ data class PreparedTrade(
 )
 
 object TradeProtocol {
+    const val MAX_CONTROL_TLV_BYTES = 8 * 1024
     const val RESULT_CONTROL_AMOUNT_MSAT = 1L
     const val RESULT_TIMEOUT_SECS = 15L * 60L
     const val RESPONSE_RETRY_WINDOW_SECS = 14L * 24L * 60L * 60L
@@ -281,18 +284,23 @@ object TradeProtocol {
         expectedCounterparty: String,
         verifySignature: (ByteArray, String, String) -> Boolean
     ): TradeControlMessage? {
+        if (data.size > MAX_CONTROL_TLV_BYTES) return null
         return try {
-            val envelope = JSONObject(String(data, Charsets.UTF_8))
-            val payloadStr = envelope.getString("payload")
-            val signature = envelope.getString("signature")
-            val payloadBytes = payloadStr.toByteArray(Charsets.UTF_8)
-            if (!verifySignature(payloadBytes, signature, expectedCounterparty)) return null
+            val raw = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(data)).toString()
+            val envelope = JSONObject(raw)
+            val payloadStr = envelope.opt("payload") as? String ?: return null
+            val signature = envelope.opt("signature") as? String ?: return null
             val payload = JSONObject(payloadStr)
-            when (payload.optString("type")) {
+            val message = when (payload.optString("type")) {
                 Constants.SYNC_MESSAGE_TYPE -> parseSync(payload)
                 Constants.TRADE_REJECTED_MESSAGE_TYPE -> parseRejection(payload)
                 else -> null
-            }
+            } ?: return null
+            if (!verifySignature(payloadStr.toByteArray(Charsets.UTF_8), signature, expectedCounterparty)) return null
+            message
         } catch (_: Exception) {
             null
         }

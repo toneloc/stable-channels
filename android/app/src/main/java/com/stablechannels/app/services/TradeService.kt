@@ -4,6 +4,7 @@ import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.util.Constants
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.CustomTlvRecord
+import org.lightningdevkit.ldknode.NodeException
 import kotlin.math.max
 import com.stablechannels.app.models.Bitcoin
 
@@ -116,6 +117,12 @@ class TradeService(
                 listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelope))
             )
         } catch (error: Exception) {
+            // LDK can fail to persist its payment row after starting the keysend. Leave
+            // our prepared row recoverable and keep the next trade blocked until resolved.
+            if (error is NodeException.PersistenceFailed) {
+                AuditService.log("TRADE_SEND_OUTCOME_UNKNOWN", mapOf("trade_id" to prepared.tradeId))
+                throw TradeValidationException("The trade may have been sent, but its status could not be saved. Keep the wallet connected and check History. Do not place the order again.")
+            }
             databaseService.markTradeSendFailed(tradeDbId)
             throw error
         }

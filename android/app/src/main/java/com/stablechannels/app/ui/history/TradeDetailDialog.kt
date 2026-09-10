@@ -17,6 +17,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.TradeOutcome
 import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.shortString
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -95,7 +96,16 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     DetailRow("Fee", trade.feeUSD.usdFormatted())
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("Status", trade.status.replaceFirstChar { it.uppercase() })
+                    DetailRow("Status", when (trade.status) {
+                        "send_failed" -> "Failed"
+                        "fee_paid" -> "Awaiting provider result"
+                        "uncertain" -> "Result delayed"
+                        else -> trade.status.replaceFirstChar { it.uppercase() }
+                    })
+                    TradeOutcome.fromStored(trade.status, trade.reasonCode)?.takeIf { !it.accepted }?.let {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                        Text(it.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
+                    }
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
                     DetailRow("Date", trade.date.shortString())
                     trade.paymentId?.let { pid ->

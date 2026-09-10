@@ -514,12 +514,38 @@ class AppState(private val context: Context) : ViewModel() {
     private val _statusMessage = MutableStateFlow("")
     val statusMessage: StateFlow<String> = _statusMessage
 
-    // Track last payment result for SendScreen UI updates
-    private val _lastPaymentResult = MutableStateFlow<String?>(null)
-    val lastPaymentResult: StateFlow<String?> = _lastPaymentResult
+    private val _paymentOutcomes = MutableStateFlow<Map<String, PaymentOutcome>>(emptyMap())
+    val paymentOutcomes: StateFlow<Map<String, PaymentOutcome>> = _paymentOutcomes
 
-    fun clearLastPaymentResult() {
-        _lastPaymentResult.value = null
+    /** Background consumers may have acknowledged the event; LDK retains terminal status. */
+    fun refreshPaymentOutcome(paymentId: String, attemptStartedAtNanos: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (_paymentOutcomes.value[paymentId]?.belongsToAttempt(attemptStartedAtNanos) == true) return@launch
+            val status = try { nodeService.node?.payment(paymentId)?.status } catch (_: Exception) { null }
+            val outcome = when (status) {
+                PaymentStatus.SUCCEEDED -> PaymentOutcome(true, "Payment confirmed")
+                PaymentStatus.FAILED -> PaymentOutcome(false, "Payment failed: ${WalletErrorMessages.paymentFailure(null)}")
+                else -> return@launch
+            }
+            // Never replace a more specific event reason that arrived during the lookup.
+            _paymentOutcomes.update { outcomes ->
+                if (outcomes[paymentId]?.belongsToAttempt(attemptStartedAtNanos) == true) outcomes
+                else outcomes + (paymentId to outcome)
+            }
+        }
+    }
+
+    fun recordOutgoingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double) {
+        val db = databaseService ?: throw IllegalStateException("Payment sent; history is unavailable. Check its status before retrying.")
+        db.recordPendingLightningPayment(paymentId, paymentType, amountMsat, price)
+        // A terminal event may beat the history insert. Read the node after writing pending;
+        // any later event will update the now-existing row through the normal event handler.
+        val payment = nodeService.node?.payment(paymentId)
+        when (payment?.status) {
+            PaymentStatus.SUCCEEDED -> db.updatePaymentStatus(paymentId, "completed", payment.feePaidMsat?.toLong() ?: 0)
+            PaymentStatus.FAILED -> db.updatePaymentStatus(paymentId, "failed")
+            else -> {}
+        }
     }
 
     private val _lightningBalanceSats: MutableStateFlow<Long>
@@ -662,10 +688,7 @@ class AppState(private val context: Context) : ViewModel() {
     private val _pendingTradePayments = MutableStateFlow<Map<String, PendingTradePayment>>(emptyMap())
     val pendingTradePayments: StateFlow<Map<String, PendingTradePayment>> = _pendingTradePayments
 
-    /** Terminal result of a correlated trade, keyed by its fee payment id. Only a signed
-     *  acceptance or rejection lands here — the trade sheets read this instead of inferring
-     *  success from absence in the pending map (a rejection also clears pending). */
-    data class TradeOutcome(val accepted: Boolean, val message: String)
+    /** Signed results and definitive fee failures, keyed by the trade's fee payment id. */
     private val _tradeOutcomes = MutableStateFlow<Map<String, TradeOutcome>>(emptyMap())
     val tradeOutcomes: StateFlow<Map<String, TradeOutcome>> = _tradeOutcomes
 
@@ -679,15 +702,10 @@ class AppState(private val context: Context) : ViewModel() {
             val terminal = try {
                 databaseService?.terminalTradeOutcome(paymentId)
             } catch (_: Exception) { null } ?: return@launch
-            val (accepted, reason) = terminal
             // update {} — this runs on an IO thread while the handler path writes from
             // the event loop, and a read-modify-write on .value could drop an entry.
             _tradeOutcomes.update { outcomes ->
-                outcomes + (paymentId to if (accepted) {
-                    TradeOutcome(true, "")
-                } else {
-                    TradeOutcome(false, TradeProtocol.rejectionMessage(reason ?: "internal_failure"))
-                })
+                outcomes + (paymentId to terminal)
             }
             _pendingTradePayments.update { it - paymentId }
         }
@@ -1378,54 +1396,36 @@ class AppState(private val context: Context) : ViewModel() {
             }
             is Event.PaymentFailed -> {
                 val pid = event.paymentId
-                if (pid != null) {
-                    // If this is the in-flight stability send, release the marker — the send
-                    // failed so there is no debit, and future sends must not stay blocked.
-                    val pendingSend = try { databaseService?.loadPendingSend() } catch (_: Exception) { null }
-                    if (pendingSend != null && pendingSend.paymentId == pid) {
-                        databaseService?.clearPendingSend()
-                        AuditService.log("STABILITY_PAYMENT_FAILED", mapOf(
-                            "payment_id" to pid,
-                            "error" to "payment_failed_event_cleared_pending_send"
-                        ))
+                val recorded = pid?.let {
+                    val db = databaseService ?: throw IllegalStateException("Trade database unavailable")
+                    PaymentFailureRecorder.record(db, it, event.reason?.name) {
+                        nodeService.node?.payment(it)?.takeIf { payment ->
+                            payment.kind is PaymentKind.Spontaneous && payment.direction == PaymentDirection.OUTBOUND
+                        }?.amountMsat?.toLong()
                     }
                 }
-                val curPending = _pendingTradePayments.value
-                var failedTrade = pid?.let(curPending::get)
-                if (pid != null && failedTrade == null) {
-                    val amountMsat = try {
-                        nodeService.node?.payment(pid)?.amountMsat?.toLong()
-                    } catch (_: Exception) {
-                        null
+                when {
+                    recorded?.isTrade == true -> recorded.tradeOutcome?.let { outcome ->
+                        _pendingTradePayments.update { it - pid!! }
+                        _tradeOutcomes.update { it + (pid!! to outcome) }
+                        if (outcome.sendFailed) _statusMessage.value = outcome.message
                     }
-                    if (amountMsat != null) {
-                        failedTrade = try {
-                            databaseService?.failUnattachedPreparedTrade(pid, amountMsat)
-                        } catch (_: Exception) {
-                            null
-                        }
+                    recorded?.isStability == true -> {
+                        _statusMessage.value = "Stability payment failed. The wallet will retry when ready."
+                    }
+                    else -> {
+                        val message = "Payment failed: ${WalletErrorMessages.paymentFailure(event.reason)}"
+                        _statusMessage.value = message
+                        if (pid != null) _paymentOutcomes.update { it + (pid to PaymentOutcome(false, message)) }
                     }
                 }
-                if (pid != null && failedTrade != null) {
-                    val ptp = failedTrade
-                    _pendingTradePayments.value = curPending - pid
-                    databaseService?.markTradeSendFailed(ptp.tradeDbId)
-                    val verb = if (ptp.action == "buy") "Buy" else "Sell"
-                    _statusMessage.value = "$verb trade failed"
-                    AuditService.log("TRADE_PAYMENT_FAILED", mapOf("payment_id" to pid))
-                } else {
-                    if (pid != null) {
-                        databaseService?.updatePaymentStatus(pid, "failed")
-                    }
-                    val reason = event.reason?.toString() ?: "unknown"
-                    _statusMessage.value = "Payment failed: $reason"
-                    _lastPaymentResult.value = "Payment failed: $reason"
-                    AuditService.log("PAYMENT_FAILED", mapOf(
-                        "payment_id" to (pid ?: ""),
-                        "payment_hash" to (event.paymentHash ?: ""),
-                        "reason" to reason
-                    ))
-                }
+                AuditService.log("PAYMENT_FAILED", mapOf(
+                    "payment_id" to (pid ?: ""),
+                    "payment_hash" to (event.paymentHash ?: ""),
+                    "reason" to (event.reason?.name ?: "unknown"),
+                    "is_trade" to (recorded?.isTrade == true),
+                    "is_stability" to (recorded?.isStability == true)
+                ))
             }
             is Event.SpliceNegotiated -> {
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
@@ -1712,8 +1712,12 @@ class AppState(private val context: Context) : ViewModel() {
         amountMsat: Long
     ): Boolean {
         val tlv = customRecords.find { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() } ?: return false
-        val data = tlv.value.map { it.toByte() }.toByteArray()
+        val data = tlv.value
         if (data.contentEquals(byteArrayOf(1))) return false
+        if (amountMsat != TradeProtocol.RESULT_CONTROL_AMOUNT_MSAT) {
+            AuditService.log("TRADE_RESULT_AMOUNT_INVALID", mapOf("payment_hash" to paymentHash, "amount_msat" to amountMsat))
+            return true
+        }
         val message = TradeProtocol.parseSignedControl(data, _stableChannel.value.counterparty) { msg, sig, pk ->
             nodeService.verifySignature(msg, sig, pk)
         } ?: run {
@@ -1785,14 +1789,14 @@ class AppState(private val context: Context) : ViewModel() {
             }
             TradeControlApplyStatus.DUPLICATE -> {
                 result.paymentId?.let { paymentId ->
-                    _pendingTradePayments.value = _pendingTradePayments.value - paymentId
-                    _tradeOutcomes.value = _tradeOutcomes.value + (
-                        paymentId to if (message is TradeControlMessage.Rejected) {
-                            TradeOutcome(false, TradeProtocol.rejectionMessage(message.reasonCode))
-                        } else {
-                            TradeOutcome(true, "")
-                        }
-                    )
+                    db.terminalTradeOutcome(paymentId)?.let { outcome ->
+                        _pendingTradePayments.update { it - paymentId }
+                        _tradeOutcomes.update { it + (paymentId to outcome) }
+                    }
+                }
+                if (message is TradeControlMessage.Rejected) {
+                    syncRetryTracker.clear(paymentHash)
+                    return true
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferOrDropForMissingChannel(paymentHash, "Duplicate result channel could not be reloaded")
@@ -1809,14 +1813,17 @@ class AppState(private val context: Context) : ViewModel() {
             }
             TradeControlApplyStatus.APPLIED -> {
                 result.paymentId?.let { paymentId ->
-                    _pendingTradePayments.value = _pendingTradePayments.value - paymentId
-                    _tradeOutcomes.value = _tradeOutcomes.value + (
-                        paymentId to if (message is TradeControlMessage.Rejected) {
-                            TradeOutcome(false, TradeProtocol.rejectionMessage(message.reasonCode))
-                        } else {
-                            TradeOutcome(true, "")
-                        }
-                    )
+                    db.terminalTradeOutcome(paymentId)?.let { outcome ->
+                        _pendingTradePayments.update { it - paymentId }
+                        _tradeOutcomes.update { it + (paymentId to outcome) }
+                    }
+                }
+                if (message is TradeControlMessage.Rejected) {
+                    syncRetryTracker.clear(paymentHash)
+                    _statusMessage.value = TradeProtocol.rejectionMessage(message.reasonCode)
+                    AuditService.log("TRADE_REJECTED_BY_LSP", mapOf("payment_id" to message.correlation.tradePaymentId,
+                        "reason_code" to message.reasonCode))
+                    return true
                 }
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferOrDropForMissingChannel(paymentHash, "Applied result channel could not be reloaded")
@@ -1839,9 +1846,7 @@ class AppState(private val context: Context) : ViewModel() {
                     "allocation_diverged" to divergence,
                     "allocation_applied" to result.allocationApplied
                 ))
-                if (message is TradeControlMessage.Rejected) {
-                    _statusMessage.value = TradeProtocol.rejectionMessage(message.reasonCode)
-                } else if (result.paymentId != null) {
+                if (result.paymentId != null) {
                     val verb = if (result.action == "buy") "Buy" else "Sell"
                     _statusMessage.value = "$verb confirmed"
                     triggerPaymentFlash()
@@ -1864,6 +1869,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
         if (!unresolved) {
             _pendingTradePayments.value = _pendingTradePayments.value - paymentId
+            refreshTradeOutcome(paymentId)
         }
         return unresolved
     }
@@ -1970,7 +1976,7 @@ class AppState(private val context: Context) : ViewModel() {
         val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
         val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
         _statusMessage.value = successMsg
-        _lastPaymentResult.value = successMsg
+        if (paymentId != null) _paymentOutcomes.update { it + (paymentId to PaymentOutcome(true, successMsg)) }
     }
 
     private fun handleStabilityPaymentSuccessful(paymentId: String?, feePaidMsat: Long?): Boolean {
@@ -2007,7 +2013,6 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 saveChannelToDB(preserveBacking = true)
                 _statusMessage.value = "Payment confirmed; syncing stability payment"
-                _lastPaymentResult.value = _statusMessage.value
                 return true
             }
 
@@ -2019,12 +2024,10 @@ class AppState(private val context: Context) : ViewModel() {
                     refreshBalances()
                     updateStableBalances()
                     _statusMessage.value = "Payment confirmed"
-                    _lastPaymentResult.value = "Payment confirmed"
                 } else {
                     FCMService.flagPendingPayment(context)
                     saveChannelToDB(preserveBacking = true)
                     _statusMessage.value = "Payment confirmed; syncing stability payment"
-                    _lastPaymentResult.value = _statusMessage.value
                 }
                 return true
             }
@@ -2035,7 +2038,6 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 saveChannelToDB(preserveBacking = true)
                 _statusMessage.value = "Payment confirmed; syncing stability payment"
-                _lastPaymentResult.value = _statusMessage.value
                 return true
             }
         }
@@ -2049,7 +2051,6 @@ class AppState(private val context: Context) : ViewModel() {
         updateStableBalances()
         saveChannelToDB(preserveBacking = true)
         _statusMessage.value = "Payment confirmed"
-        _lastPaymentResult.value = "Payment confirmed"
         return true
     }
 
@@ -2404,7 +2405,7 @@ class AppState(private val context: Context) : ViewModel() {
             } catch (_: Exception) {
                 _pendingTradePayments.value
             }
-            _statusMessage.value = "Trade result delayed; it will still be accepted when received"
+            _statusMessage.value = "Trade result delayed; waiting for the provider's decision. Do not place the order again."
             AuditService.log("TRADE_RESULT_UNCERTAIN", mapOf(
                 "reason" to "no_response",
                 "count" to changed
