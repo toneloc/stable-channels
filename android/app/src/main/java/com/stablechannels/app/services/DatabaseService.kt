@@ -966,6 +966,24 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    fun getPendingOutgoingLightningPaymentIds(limit: Int = 100): List<String> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT payment_id FROM payments
+            WHERE payment_id IS NOT NULL AND payment_id != ''
+              AND payment_type IN ('lightning', 'bolt12')
+              AND direction = 'sent' AND status = 'pending'
+            ORDER BY created_at ASC LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            buildList {
+                while (c.moveToNext()) add(c.getString(0))
+            }
+        }
+    }
+
     /** Insert a payment and atomically update channel backing sats in one SQLite transaction.
      *  Returns whether the payment was new and the authoritative backing value, when applicable. */
     fun recordPaymentAndMaybeUpdateBacking(

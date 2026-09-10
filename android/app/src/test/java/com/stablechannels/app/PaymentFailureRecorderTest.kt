@@ -95,6 +95,35 @@ class PaymentFailureRecorderTest {
     }
 
     @Test
+    fun backgroundSuccessRepairsPendingHistoryAndSurvivesRelaunch() {
+        db.recordPendingLightningPayment(paymentId, "lightning", 50_000L, 100_000.0)
+        assertEquals(listOf(paymentId), db.getPendingOutgoingLightningPaymentIds())
+
+        val repaired = LightningPaymentRecovery.reconcilePending(db) { id ->
+            assertEquals(paymentId, id)
+            LightningPaymentResolution(succeeded = true, feeMsat = 1_234L)
+        }
+        assertEquals(1, repaired)
+        assertEquals("completed", db.getRecentPayments().single().status)
+        assertEquals(1_234L, db.getRecentPayments().single().feeMsat)
+
+        db.close()
+        db = DatabaseService(context)
+        assertEquals("completed", db.getRecentPayments().single().status)
+        assertEquals(1_234L, db.getRecentPayments().single().feeMsat)
+        assertTrue(db.getPendingOutgoingLightningPaymentIds().isEmpty())
+    }
+
+    @Test
+    fun backgroundTradeFeeSuccessMarksTheDurableTradeFeePaid() {
+        val row = db.recordPreparedTrade(prepare())
+        db.attachTradePaymentId(row, paymentId)
+
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, paymentId, 250L))
+        assertEquals("fee_paid", db.unresolvedTradePayments()[paymentId]!!.status)
+    }
+
+    @Test
     fun failedFeeIsTerminalEvenBeforeUiRegistrationAndSurvivesRestart() {
         val row = db.recordPreparedTrade(prepare())
         db.attachTradePaymentId(row, paymentId)

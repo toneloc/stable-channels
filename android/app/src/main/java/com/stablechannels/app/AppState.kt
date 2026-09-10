@@ -548,6 +548,27 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Repair outbound Lightning rows for events acknowledged while the app was backgrounded. */
+    private fun reconcilePendingLightningPayments() {
+        val db = databaseService ?: return
+        val repaired = LightningPaymentRecovery.reconcilePending(db) { paymentId ->
+            try {
+                nodeService.node?.payment(paymentId)?.let { payment ->
+                    when (payment.status) {
+                        PaymentStatus.SUCCEEDED -> LightningPaymentResolution(true, payment.feePaidMsat?.toLong() ?: 0L)
+                        PaymentStatus.FAILED -> LightningPaymentResolution(false)
+                        else -> null
+                    }
+                }
+            } catch (_: Exception) {
+                null
+            }
+        }
+        if (repaired > 0) {
+            AuditService.log("PENDING_LIGHTNING_RECONCILED", mapOf("count" to repaired))
+        }
+    }
+
     private val _lightningBalanceSats: MutableStateFlow<Long>
     val lightningBalanceSats: StateFlow<Long> get() = _lightningBalanceSats
 
@@ -873,6 +894,7 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
+                    reconcilePendingLightningPayments()
                     // Restore the known funding txid before the first live balance refresh so
                     // an ordinary cold start is not mistaken for a funding transition.
                     val balanceCachePrefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
@@ -948,6 +970,7 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeService.start(Network.BITCOIN, chainUrl, null)
                     resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
+                    reconcilePendingLightningPayments()
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
                     connectMempoolWebSocket()
@@ -971,6 +994,7 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
                 resetNodeStartRetryState()
                 _phase.value = Phase.WALLET
+                reconcilePendingLightningPayments()
                 refreshBalances()
                 pollPaymentConfirmations(force = true)
                 connectMempoolWebSocket()
@@ -1108,6 +1132,7 @@ class AppState(private val context: Context) : ViewModel() {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()
                 ensureLSPConnected()
+                reconcilePendingLightningPayments()
                 refreshBalances()
                 pollPaymentConfirmations(force = true)
                 connectMempoolWebSocket()
@@ -1129,6 +1154,7 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeStartRetryJob = null
                 _phase.value = Phase.WALLET
                 refreshBalances()
+                reconcilePendingLightningPayments()
                 pollPaymentConfirmations(force = true)
                 connectMempoolWebSocket()
                 updateStableBalances()

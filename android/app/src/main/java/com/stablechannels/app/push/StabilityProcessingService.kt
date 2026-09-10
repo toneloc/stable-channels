@@ -10,6 +10,7 @@ import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.LdkNodeOwner
+import com.stablechannels.app.services.LightningPaymentRecovery
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
@@ -61,6 +62,21 @@ class StabilityProcessingService : Service() {
                 "reason" to (event.reason?.name ?: "unknown"), "source" to "background"))
         } catch (e: Exception) {
             throw BackingUpdateFailed("Cannot persist failed payment: ${e.message}")
+        } finally {
+            db.close()
+        }
+    }
+
+    /** Persist successful outbound payments before acknowledging the LDK event. */
+    private fun persistPaymentSuccess(event: Event.PaymentSuccessful) {
+        val db = DatabaseService(this)
+        try {
+            LightningPaymentRecovery.recordSuccess(db, event.paymentId, event.feePaidMsat?.toLong())
+            AuditService.log("PAYMENT_SUCCESSFUL", mapOf(
+                "payment_id" to event.paymentId,
+                "fee_msat" to (event.feePaidMsat?.toLong() ?: 0L),
+                "source" to "background"
+            ))
         } finally {
             db.close()
         }
@@ -412,6 +428,10 @@ class StabilityProcessingService : Service() {
                         persistPaymentFailure(node, event)
                         node.eventHandled()
                     }
+                    is Event.PaymentSuccessful -> {
+                        persistPaymentSuccess(event)
+                        node.eventHandled()
+                    }
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {
@@ -607,6 +627,10 @@ class StabilityProcessingService : Service() {
                     }
                     is Event.PaymentFailed -> {
                         persistPaymentFailure(node, event)
+                        node.eventHandled()
+                    }
+                    is Event.PaymentSuccessful -> {
+                        persistPaymentSuccess(event)
                         node.eventHandled()
                     }
                     else -> node.eventHandled()
