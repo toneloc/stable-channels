@@ -2629,6 +2629,12 @@ class AppState {
             monitoredSpliceTxid = nil
             spliceConfirmationTask = nil
             statusMessage = "Move confirmed"
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                if self?.statusMessage == "Move confirmed" {
+                    self?.statusMessage = ""
+                }
+            }
         } else {
             AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", data: ["txid": txid])
         }
