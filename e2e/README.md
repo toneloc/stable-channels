@@ -198,6 +198,7 @@ is in `aux-tests-pr-analysis.md`, and the copy/mechanism research in
 | `24_splicein_confirmation_badge` | splice-in badge stuck at 0/6 instead of counting to 1 (issue #276) | #267 | android, ios |
 | `25_spliceout_usd_overflow` | overflow splice-out failing to debit USD (issue #277) | — | android, ios |
 | `26_double_spliceout_history` | second consecutive splice-out missing from history (issue #278) | — | android, ios |
+| `28_overflow_send_books` | overflow-send books desync → phantom settlement + dead trading (issue #296; RED until fixed) | — | android, ios |
 
 Aux flows substitute into, or append to, a lifecycle:
 
@@ -218,6 +219,8 @@ make ios FLOWS="01_onboard_lightning 24_splicein_confirmation_badge"
 make ios FLOWS="01_onboard_lightning 02_btc_to_usd 25_spliceout_usd_overflow"
 # 26 runs right after 01 (two sequential $5/$7 splice-outs; issue #278 repro):
 make ios FLOWS="01_onboard_lightning 26_double_spliceout_history"
+# 28 runs after 01+02 (issue #296 repro — EXPECTED TO FAIL until the fix lands):
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 28_overflow_send_books"
 # 20 is opt-in like 11: reveal the ACTIVE seed via 10, keep the channel open,
 # then run the guard flow directly through maestro with the seed:
 maestro test -e RESTORE_SEED="word1 ... word12" flows/20_restore_guard.yaml
