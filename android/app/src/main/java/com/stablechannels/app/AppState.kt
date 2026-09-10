@@ -2234,6 +2234,17 @@ class AppState(private val context: Context) : ViewModel() {
             monitoredSpliceTxid = null
             spliceConfirmationJob = null
             _statusMessage.value = "Move confirmed"
+            // Unlike "Move pending confirmation" (which the user can dismiss by tapping, or
+            // which naturally gets replaced by a later status), "Move confirmed" is terminal —
+            // nothing else ever overwrites or clears it, so without this it would sit in the
+            // status capsule forever. Auto-clear it a few seconds later, but only if some other
+            // event hasn't already replaced it with a newer message in the meantime.
+            viewModelScope.launch {
+                delay(4_000)
+                if (_statusMessage.value == "Move confirmed") {
+                    _statusMessage.value = ""
+                }
+            }
         } else {
             AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", mapOf("txid" to txid))
         }
