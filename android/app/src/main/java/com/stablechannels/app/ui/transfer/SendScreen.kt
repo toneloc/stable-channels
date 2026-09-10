@@ -483,12 +483,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (!isSending) {
-                Button(
-                    onClick = onDismiss
-                ) {
-                    Text("Done")
-                }
+            // Done stays visible while sending: the outcome is durable and lands in History.
+            Button(
+                onClick = onDismiss
+            ) {
+                Text("Done")
             }
         } else {
             // Loading indicator during photo QR extraction
