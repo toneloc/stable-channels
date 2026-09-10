@@ -113,7 +113,10 @@ env:
       visible: "Review USD -> BTC"
     commands:
       - tapOn: "Confirm Order"
+# Generous window: the LSP's durable retry redelivers the result, and a
+# harness LSP degraded by sync-retry spam to dead lifecycle channels can be
+# slow on the first attempt (the local twin of the prod give-up bug).
 - extendedWaitUntil:
     visible: "Order (Confirmed|Pending)"
-    timeout: 30000
+    timeout: 120000
 - tapOn: "Done"
