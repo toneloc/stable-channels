@@ -1939,12 +1939,24 @@ class AppState(private val context: Context) : ViewModel() {
 
         if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
 
+        // Ordinary (non-trade, non-stability) outgoing payment. Mirrors iOS's
+        // handlePaymentSuccessful exactly: reconcileOutgoing() reduces expectedUSD and
+        // backingSats together when this send dipped into the stable backing, and that
+        // reduction is persisted with a full saveChannelToDB() (not preserveBacking) —
+        // otherwise the on-screen Stable USD never reflects the send and the balances stop
+        // adding up to the total. The original bug (#296) wasn't calling reconcileOutgoing()
+        // here — it was calling saveChannelToDB(preserveBacking = true) afterward, which only
+        // ever writes expectedUSD and silently dropped the matching backingSats reduction,
+        // permanently desyncing the two. Fixing the persistence, not removing the reconcile,
+        // is what keeps this consistent with iOS.
         refreshBalances()
         updateStableBalances()
         val price = priceService.currentPrice.value
+        val oldExpected = _stableChannel.value.expectedUSD.amount
         val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
         val reconciled = result.first
-        if (result.second != null) {
+        val usdDeducted = result.second
+        if (usdDeducted != null) {
             reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
         }
         _stableChannel.value = reconciled
@@ -1966,7 +1978,20 @@ class AppState(private val context: Context) : ViewModel() {
                 Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
             }
         }
-        saveChannelToDB(preserveBacking = true)
+        // Full save (no preserveBacking) so both expectedUSD and backingSats are persisted
+        // together, matching iOS. This is the one call site where reconcileOutgoing()'s
+        // output is safe to persist in full: it's the foreground, user-initiated send path,
+        // not a background/replay path racing StabilityProcessingService's locked writes.
+        saveChannelToDB()
+        if (usdDeducted != null) {
+            AuditService.log("OUTGOING_STABLE_DEDUCTED", mapOf(
+                "payment_id" to (paymentId ?: ""),
+                "usd_deducted" to usdDeducted,
+                "old_expected_usd" to oldExpected,
+                "new_expected_usd" to reconciled.expectedUSD.amount,
+                "btc_price" to price
+            ))
+        }
         val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
         val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
         _statusMessage.value = successMsg
