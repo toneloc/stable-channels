@@ -591,6 +591,14 @@ class AppState(private val context: Context) : ViewModel() {
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
 
     private val pendingLock = Any()
+
+    /** Serializes "commit a stable-books mutation, then publish the row to _stableChannel"
+     *  across every path that changes expected_usd/stable_sats in-process: the stability
+     *  timer, the pending-send replay, incoming settlements and ordinary-send reconciles.
+     *  Without it, path A can commit+publish between path B's commit and B's publish, and B's
+     *  publish (built from B's own transaction result or an earlier snapshot) then overwrites
+     *  A's newer books in memory — which is what the stability check reads (#299 review). */
+    private val booksLock = Any()
     private var sendGeneration: Long = 0L
 
     @Volatile
@@ -1636,15 +1644,25 @@ class AppState(private val context: Context) : ViewModel() {
                 settlementId = settlementId
             ) ?: throw Exception("DB service unavailable")
         }
-        val persistence = try {
-            record()
-        } catch (e: MissingChannelRowException) {
-            // The channels row vanished (e.g. DB recreated) — rebuild it from in-memory state
-            // via the full save, then retry once. If it still fails, rethrow to nack.
-            Log.w("AppState", "Channel row missing during payment persist — recreating and retrying: ${e.message}")
-            AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
-            saveChannelToDB()
-            record()
+        val persistence = synchronized(booksLock) {
+            val p = try {
+                record()
+            } catch (e: MissingChannelRowException) {
+                // The channels row vanished (e.g. DB recreated) — rebuild it from in-memory state
+                // via the full save, then retry once. If it still fails, rethrow to nack.
+                Log.w("AppState", "Channel row missing during payment persist — recreating and retrying: ${e.message}")
+                AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
+                saveChannelToDB()
+                record()
+            }
+            if (isStabilityPayment) {
+                p.backingSats ?: throw Exception("DB did not return backing after stability payment")
+                // Publish the credited backing from the row, under booksLock, for the same reason
+                // as the outgoing paths: an absolute taken from this transaction can overwrite a
+                // newer value another path committed and published in the meantime.
+                publishBooksFromDB()
+            }
+            p
         }
         if (settlementId != null && !persistence.isNewPayment) {
             AuditService.log("STABILITY_PAYMENT_REPLAY_IGNORED", mapOf(
@@ -1654,11 +1672,6 @@ class AppState(private val context: Context) : ViewModel() {
         }
         refreshBalances()
         updateStableBalances()
-        if (isStabilityPayment) {
-            val backing = persistence.backingSats
-                ?: throw Exception("DB did not return backing after stability payment")
-            _stableChannel.value = _stableChannel.value.copy(backingSats = backing)
-        }
         val sc = StabilityService.reconcileIncoming(_stableChannel.value)
         _stableChannel.value = sc
         saveChannelToDB(preserveBacking = isStabilityPayment)
@@ -1965,53 +1978,58 @@ class AppState(private val context: Context) : ViewModel() {
         // stableReceiverBTC is refreshed from live channel state just above, not from the
         // racy in-memory backingSats copy — safe to use directly as the reconcile input.
         val receiverSats = _stableChannel.value.stableReceiverBTC.sats
-        val reconcileResult = if (userChannelId.isEmpty()) null else try {
-            databaseService?.reconcileOutgoingBacking(
-                channelId = channelId,
-                userChannelId = userChannelId,
-                note = note,
-                receiverSats = receiverSats,
-                latestPrice = latestPrice,
-                price = price
-            )
-        } catch (e: MissingChannelRowException) {
-            // Structural: there is no row to reconcile against and a retry can't create one.
-            // Treat as nothing-to-reconcile, but leave a trace in the audit log.
-            AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
-                "payment_id" to (paymentId ?: ""),
-                "reason" to "missing_channel_row",
-                "user_channel_id" to userChannelId
-            ))
-            null
-        } catch (e: Exception) {
-            // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
-            // transaction rolled back, so the deduction has NOT been recorded — rethrow so the
-            // event loop leaves this PaymentSuccessful un-acked and LDK redelivers it with
-            // backoff. reconcileOutgoingBacking() is idempotent on retry because it measures
-            // overflow against live channel state. Swallowing the error here acked the payment
-            // with the books still wrong (#299 review, P2).
-            AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
-                "payment_id" to (paymentId ?: ""),
-                "error" to (e.message ?: e.javaClass.simpleName),
-                "will_retry" to true
-            ))
-            throw e
-        }
-        if (reconcileResult != null) {
-            // Refresh in-memory state from the DB's current, authoritative row instead of
-            // trusting reconcileResult's values directly: reconcileOutgoingBacking()'s
-            // transaction may have already committed some time ago by the time this line runs,
-            // and the stability timer (a concurrent coroutine) could have committed and
-            // published its own newer backing update in between. loadChannelFromDB() re-reads
-            // fresh, so this can never clobber a concurrent writer's already-applied change —
-            // the same pattern onForegroundResume() already relies on for this exact reason.
-            loadChannelFromDB()
-            _stableChannel.update { it.copy(lastStabilityPayment = System.currentTimeMillis() / 1000) }
-            // reconcileOutgoingBacking() wrote directly to the DB, bypassing saveChannelToDB()
-            // — so the SharedPreferences launch cache (used to seed Stable USD before the DB is
-            // open on next launch) needs its own explicit refresh here too, or it keeps showing
-            // the pre-send, too-high figure until loadChannelFromDB() runs during DB init.
-            cacheBalanceForLaunch()
+        // The transaction that mutates the books and the in-memory publish of its result run
+        // under booksLock, and the publish re-reads the row rather than trusting the
+        // transaction's return value. Every other path that mutates expected_usd/stable_sats
+        // takes the same lock, so none of them can commit-and-publish between this commit and
+        // this publish — the interleaving that let an older absolute backing overwrite a newer
+        // one in memory and trigger a phantom stability payment (#299 review).
+        val reconcileResult = synchronized(booksLock) {
+            val result = if (userChannelId.isEmpty()) null else try {
+                databaseService?.reconcileOutgoingBacking(
+                    channelId = channelId,
+                    userChannelId = userChannelId,
+                    note = note,
+                    receiverSats = receiverSats,
+                    latestPrice = latestPrice,
+                    price = price
+                )
+            } catch (e: MissingChannelRowException) {
+                // Structural: there is no row to reconcile against and a retry can't create one.
+                // Treat as nothing-to-reconcile, but leave a trace in the audit log.
+                AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "reason" to "missing_channel_row",
+                    "user_channel_id" to userChannelId
+                ))
+                null
+            } catch (e: Exception) {
+                // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
+                // transaction rolled back, so the deduction has NOT been recorded — rethrow so
+                // the event loop leaves this PaymentSuccessful un-acked and LDK redelivers it
+                // with backoff. reconcileOutgoingBacking() is idempotent on retry because it
+                // measures overflow against live channel state. Swallowing the error here acked
+                // the payment with the books still wrong (#299 review, P2).
+                AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "error" to (e.message ?: e.javaClass.simpleName),
+                    "will_retry" to true
+                ))
+                throw e
+            }
+            if (result != null) {
+                // receiverSats above is live post-send channel state, so native is safe to
+                // recompute against it here.
+                publishBooksFromDB(
+                    lastStabilityPayment = System.currentTimeMillis() / 1000,
+                    recomputeNative = true
+                )
+                // reconcileOutgoingBacking() bypasses saveChannelToDB(), the usual writer of the
+                // SharedPreferences launch cache — refresh it so the next cold start doesn't
+                // briefly show the pre-send Stable USD.
+                cacheBalanceForLaunch()
+            }
+            result
         }
         var displayVal: String? = null
         if (paymentId != null) {
@@ -2769,28 +2787,30 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             try {
-                val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-                    paymentId = paymentIdString,
-                    paymentType = "stability",
-                    direction = "sent",
-                    amountMsat = amountMsat,
-                    amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price,
-                    counterparty = sc.counterparty,
-                    userChannelId = sc.userChannelId,
-                    backingDeltaSats = -(amountMsat / 1000)
-                ) ?: throw IllegalStateException("DB service unavailable")
-                val backing = persistence.backingSats
-                    ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
-                // Patch only the fields this tick owns, against the *current* in-memory value —
-                // not the `sc` snapshot captured at the top of the tick. A concurrent ordinary
-                // send (handlePaymentSuccessful) may have reconciled expectedUSD/backing since
-                // then; republishing `sc` clobbered that in memory, and the old
-                // saveChannelToDB(preserveBacking = true) here then wrote the stale expected_usd
-                // back to the DB, undoing the send's committed reconcile (#299 review, P1).
-                // The debit itself is already durable via recordPaymentAndMaybeUpdateBacking(),
-                // and lastStabilityPayment is not a DB column, so no save is needed here.
-                _stableChannel.update { it.copy(lastStabilityPayment = now, backingSats = backing) }
+                synchronized(booksLock) {
+                    val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
+                        paymentId = paymentIdString,
+                        paymentType = "stability",
+                        direction = "sent",
+                        amountMsat = amountMsat,
+                        amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
+                        btcPrice = price,
+                        counterparty = sc.counterparty,
+                        userChannelId = sc.userChannelId,
+                        backingDeltaSats = -(amountMsat / 1000)
+                    ) ?: throw IllegalStateException("DB service unavailable")
+                    persistence.backingSats
+                        ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
+                    // Publish from the row — not from persistence.backingSats and not from the
+                    // tick-top `sc` snapshot. An ordinary send can reconcile (commit + publish)
+                    // at any point; republishing `sc` clobbered its expectedUSD, and publishing
+                    // the transaction-returned absolute backing clobbered its newer backing,
+                    // leaving in-memory books off-par and the next tick paying for nothing
+                    // (#299 review). Under booksLock the read-and-publish can't interleave with
+                    // another path's commit-and-publish. The debit is already durable and
+                    // lastStabilityPayment isn't a column, so no save is needed here.
+                    publishBooksFromDB(lastStabilityPayment = now)
+                }
                 databaseService?.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
             } catch (e: Exception) {
@@ -2876,21 +2896,25 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         return try {
-            val persistence = db.recordPaymentAndMaybeUpdateBacking(
-                paymentId = pendingPaymentId,
-                paymentType = "stability",
-                direction = "sent",
-                amountMsat = pending.amountMsat,
-                amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.price,
-                btcPrice = pending.price,
-                counterparty = sc.counterparty,
-                userChannelId = sc.userChannelId,
-                backingDeltaSats = -(pending.amountMsat / 1000)
-            )
-            val backing = persistence.backingSats
-                ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
-            _stableChannel.value = sc.copy(backingSats = backing)
-            saveChannelToDB(preserveBacking = true)
+            synchronized(booksLock) {
+                val persistence = db.recordPaymentAndMaybeUpdateBacking(
+                    paymentId = pendingPaymentId,
+                    paymentType = "stability",
+                    direction = "sent",
+                    amountMsat = pending.amountMsat,
+                    amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.price,
+                    btcPrice = pending.price,
+                    counterparty = sc.counterparty,
+                    userChannelId = sc.userChannelId,
+                    backingDeltaSats = -(pending.amountMsat / 1000)
+                )
+                persistence.backingSats
+                    ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
+                // Same rule as runStabilityCheck(): publish from the row under booksLock. The
+                // old snapshot republish + preserveBacking save here wrote a stale expected_usd
+                // over a concurrent ordinary-send reconcile (#299 review).
+                publishBooksFromDB()
+            }
             db.clearPendingSend()
             true
         } catch (e: Exception) {
@@ -3547,6 +3571,24 @@ class AppState(private val context: Context) : ViewModel() {
      *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
     fun onForegroundResume() {
         loadChannelFromDB()
+    }
+
+    /** Republish expectedUSD/backingSats from the channel row — the single source of truth for
+     *  the stable books — never from an earlier in-memory snapshot or a transaction's return
+     *  value. Must be called inside synchronized(booksLock), immediately after the transaction
+     *  that changed the row, so no other path can commit-and-publish in between.
+     *  [recomputeNative] is only safe when the in-memory receiver balance is already live. */
+    private fun publishBooksFromDB(lastStabilityPayment: Long? = null, recomputeNative: Boolean = false) {
+        val ucid = _stableChannel.value.userChannelId
+        if (ucid.isEmpty()) return
+        val record = databaseService?.loadChannel(ucid) ?: return
+        _stableChannel.update {
+            it.copy(
+                expectedUSD = USD(record.expectedUSD),
+                backingSats = record.backingSats,
+                lastStabilityPayment = lastStabilityPayment ?: it.lastStabilityPayment
+            ).also { c -> if (recomputeNative) StabilityService.recomputeNative(c) }
+        }
     }
 
     private fun loadChannelFromDB() {
