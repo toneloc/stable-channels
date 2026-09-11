@@ -1940,33 +1940,51 @@ class AppState(private val context: Context) : ViewModel() {
         if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
 
         // Ordinary (non-trade, non-stability) outgoing payment. Mirrors iOS's
-        // handlePaymentSuccessful: reconcileOutgoing() reduces expectedUSD and backingSats
-        // together when this send dipped into the stable backing — otherwise the on-screen
-        // Stable USD never reflects the send and the balances stop adding up to the total.
-        // The original bug (#296) was persisting only the expectedUSD half of that result via
+        // handlePaymentSuccessful: reconcile expectedUSD and backingSats together when this
+        // send dipped into the stable backing — otherwise the on-screen Stable USD never
+        // reflects the send and the balances stop adding up to the total. The original bug
+        // (#296) was persisting only the expectedUSD half of that result via
         // saveChannelToDB(preserveBacking = true), permanently desyncing the two fields.
         //
-        // Persisting is NOT a plain full save, though: the stability timer (runStabilityCheck(),
-        // a separate in-process coroutine) can commit its own backing debit straight to the DB
-        // between when _stableChannel.value was last refreshed here and when this save runs. An
-        // absolute overwrite of backingSats computed from that possibly-stale in-memory value
-        // would silently clobber the timer's already-committed debit. So only the *delta*
-        // reconcileOutgoing() computed is persisted, applied against the DB's current value
-        // inside a transaction (saveChannelWithBackingDelta) — the same delta-against-fresh-state
-        // pattern recordPaymentAndMaybeUpdateBacking() uses for stability payments. When nothing
-        // was deducted, backing is untouched and the existing preserveBacking save is used.
+        // The reconcile math itself has to run inside the DB transaction that persists it, not
+        // be precomputed against an in-memory snapshot: the stability timer (runStabilityCheck(),
+        // a separate in-process coroutine) can commit its own backing debit straight to this row
+        // via recordPaymentAndMaybeUpdateBacking() at any time. reconcileOutgoing()'s result is a
+        // function of the backing value it's given, so computing it against a snapshot taken
+        // before that debit — then applying the result as a delta on top of the DB's
+        // already-debited row — double-counts the difference. reconcileOutgoingBacking() instead
+        // re-reads expected_usd/stable_sats fresh and does the whole computation inside one
+        // BEGIN IMMEDIATE transaction, composing correctly with whatever the timer already wrote.
         refreshBalances()
         updateStableBalances()
         val price = priceService.currentPrice.value
-        val preReconcileBacking = _stableChannel.value.backingSats
-        val oldExpected = _stableChannel.value.expectedUSD.amount
-        val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-        val reconciled = result.first
-        val usdDeducted = result.second
-        if (usdDeducted != null) {
-            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        val channelId = _stableChannel.value.channelId
+        val userChannelId = _stableChannel.value.userChannelId
+        val note = _stableChannel.value.note
+        val latestPrice = _stableChannel.value.latestPrice
+        // stableReceiverBTC is refreshed from live channel state just above, not from the
+        // racy in-memory backingSats copy — safe to use directly as the reconcile input.
+        val receiverSats = _stableChannel.value.stableReceiverBTC.sats
+        val reconcileResult = try {
+            databaseService?.reconcileOutgoingBacking(
+                channelId = channelId,
+                userChannelId = userChannelId,
+                note = note,
+                receiverSats = receiverSats,
+                latestPrice = latestPrice,
+                price = price
+            )
+        } catch (e: Exception) {
+            Log.w("AppState", "Failed to reconcile outgoing send: ${e.message}")
+            null
         }
-        _stableChannel.value = reconciled
+        if (reconcileResult != null) {
+            _stableChannel.value = _stableChannel.value.copy(
+                expectedUSD = USD(reconcileResult.newExpectedUSD),
+                backingSats = reconcileResult.newBackingSats,
+                lastStabilityPayment = System.currentTimeMillis() / 1000
+            ).also { StabilityService.recomputeNative(it) }
+        }
         var displayVal: String? = null
         if (paymentId != null) {
             databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
@@ -1985,39 +2003,19 @@ class AppState(private val context: Context) : ViewModel() {
                 Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
             }
         }
-        if (usdDeducted != null) {
-            // Apply only the delta reconcileOutgoing() computed, against the DB's current
-            // backing, inside a transaction — never an absolute overwrite (see comment above).
-            val deltaSats = reconciled.backingSats - preReconcileBacking
-            try {
-                val persistedBacking = databaseService?.saveChannelWithBackingDelta(
-                    channelId = reconciled.channelId,
-                    userChannelId = reconciled.userChannelId,
-                    expectedUSD = reconciled.expectedUSD.amount,
-                    note = reconciled.note,
-                    receiverSats = reconciled.stableReceiverBTC.sats,
-                    latestPrice = reconciled.latestPrice,
-                    backingDeltaSats = deltaSats
-                )
-                if (persistedBacking != null && persistedBacking != reconciled.backingSats) {
-                    // A concurrent stability debit landed in between — resync in-memory state
-                    // with what was actually persisted instead of what we computed.
-                    _stableChannel.value = _stableChannel.value.copy(backingSats = persistedBacking)
-                }
-            } catch (e: Exception) {
-                Log.w("AppState", "Failed to persist outgoing reconcile delta: ${e.message}")
-            }
+        if (reconcileResult != null) {
             AuditService.log("OUTGOING_STABLE_DEDUCTED", mapOf(
                 "payment_id" to (paymentId ?: ""),
-                "usd_deducted" to usdDeducted,
-                "old_expected_usd" to oldExpected,
-                "new_expected_usd" to reconciled.expectedUSD.amount,
+                "usd_deducted" to reconcileResult.usdDeducted,
+                "old_expected_usd" to reconcileResult.oldExpectedUSD,
+                "new_expected_usd" to reconcileResult.newExpectedUSD,
                 "btc_price" to price
             ))
         } else {
-            // Nothing to reconcile — only expectedUSD-independent metadata (status, note,
-            // price) may have changed. preserveBacking keeps this call from ever touching
-            // stable_sats, so it's always safe regardless of any concurrent stability write.
+            // Nothing to reconcile (or the reconcile attempt failed) — only
+            // expectedUSD-independent metadata (status, note, price) may have changed.
+            // preserveBacking keeps this call from ever touching stable_sats, so it's always
+            // safe regardless of any concurrent stability write.
             saveChannelToDB(preserveBacking = true)
         }
         val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""

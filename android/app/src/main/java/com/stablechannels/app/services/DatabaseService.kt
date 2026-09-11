@@ -10,6 +10,7 @@ import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
+import kotlin.math.roundToLong
 
 data class PaymentPersistenceResult(
     val isNewPayment: Boolean,
@@ -246,39 +247,68 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Result of [reconcileOutgoingBacking]: the USD/backing values it actually wrote. */
+    data class OutgoingReconcileResult(
+        val usdDeducted: Double,
+        val oldExpectedUSD: Double,
+        val newExpectedUSD: Double,
+        val newBackingSats: Long
+    )
+
     /**
-     * Persist an ordinary-send reconcile (expectedUSD reduced, backing reduced to match) as a
-     * signed delta against the *current DB row*, not as an absolute overwrite of in-memory state.
+     * Atomically reconciles an ordinary outgoing send against the row's *current, freshly-read*
+     * expected_usd/stable_sats — mirroring StabilityService.reconcileOutgoing()'s math exactly,
+     * but performed entirely inside one BEGIN IMMEDIATE transaction instead of being computed
+     * ahead of time against an in-memory snapshot.
      *
-     * Written the same way recordPaymentAndMaybeUpdateBacking() updates backing for stability
-     * payments: BEGIN IMMEDIATE, re-read stable_sats fresh, apply the delta, clamp at 0. This is
-     * required because the stability timer (runStabilityCheck(), a separate in-process coroutine)
-     * can commit its own backing debit directly to this table between when this call's caller last
-     * refreshed in-memory state and when it actually runs. An absolute write of a possibly-stale
-     * in-memory backingSats would silently undo that debit; a delta survives it.
+     * This has to read-and-compute in one transaction, not read-precompute-then-apply-a-delta:
+     * reconcileOutgoing()'s result (both the USD deducted and the resulting backing) is a
+     * function of the backing value it's given. If that input is a snapshot taken before the
+     * stability timer's own concurrent debit (runStabilityCheck(), a separate in-process
+     * coroutine that commits its debit straight to this table via
+     * recordPaymentAndMaybeUpdateBacking()), the computed reduction implicitly assumes the old,
+     * pre-debit backing — so applying it as a delta on top of the DB's already-debited row
+     * double-counts the difference. Recomputing fresh, inside the same transaction that writes
+     * the result, uses only one read of backing and composes correctly with whatever the timer
+     * already committed.
      *
-     * Returns the resulting backing sats so the caller can resync its in-memory copy with what was
-     * actually persisted (which may differ slightly from what it computed, if a concurrent debit
-     * landed in between).
+     * [receiverSats] must be the live, already-fresh post-send receiver balance (from
+     * refreshBalances()/updateStableBalances()) — that value reflects real channel state
+     * directly and isn't subject to the same race as the in-memory backingSats copy.
+     *
+     * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
      */
-    fun saveChannelWithBackingDelta(
+    fun reconcileOutgoingBacking(
         channelId: String,
         userChannelId: String,
-        expectedUSD: Double,
         note: String?,
         receiverSats: Long,
         latestPrice: Double,
-        backingDeltaSats: Long
-    ): Long {
+        price: Double
+    ): OutgoingReconcileResult? {
+        if (price <= 0.0) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val current = readBackingSats(db, userChannelId)
-                ?: throw MissingChannelRowException(userChannelId)
-            val newBacking = maxOf(0L, current + backingDeltaSats)
+            val cursor = db.rawQuery(
+                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId)
+            )
+            val (currentExpected, currentBacking) = cursor.use {
+                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                it.getDouble(0) to it.getLong(1)
+            }
+            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
+            val overflowSats = currentBacking - receiverSats
+            val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdToDeduct, 0.0)
+            val newBacking = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
             val cv = ContentValues().apply {
                 put("channel_id", channelId)
-                put("expected_usd", expectedUSD)
+                put("expected_usd", newExpected)
                 put("stable_sats", newBacking)
                 put("note", note)
                 put("receiver_sats", receiverSats)
@@ -292,7 +322,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 )
             }
             db.execSQL("COMMIT")
-            return newBacking
+            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
         } catch (e: Exception) {
             try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
             throw e
