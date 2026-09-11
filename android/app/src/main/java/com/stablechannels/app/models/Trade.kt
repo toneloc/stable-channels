@@ -62,7 +62,8 @@ data class TradeRecord(
     val feeUSD: Double,
     val paymentId: String?,
     val status: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val reasonCode: String? = null
 ) {
     val date: Date get() = Date(createdAt * 1000)
     val tradeAction: TradeAction? get() = TradeAction.fromString(action)
