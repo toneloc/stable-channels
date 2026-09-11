@@ -247,6 +247,59 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     /**
+     * Persist an ordinary-send reconcile (expectedUSD reduced, backing reduced to match) as a
+     * signed delta against the *current DB row*, not as an absolute overwrite of in-memory state.
+     *
+     * Written the same way recordPaymentAndMaybeUpdateBacking() updates backing for stability
+     * payments: BEGIN IMMEDIATE, re-read stable_sats fresh, apply the delta, clamp at 0. This is
+     * required because the stability timer (runStabilityCheck(), a separate in-process coroutine)
+     * can commit its own backing debit directly to this table between when this call's caller last
+     * refreshed in-memory state and when it actually runs. An absolute write of a possibly-stale
+     * in-memory backingSats would silently undo that debit; a delta survives it.
+     *
+     * Returns the resulting backing sats so the caller can resync its in-memory copy with what was
+     * actually persisted (which may differ slightly from what it computed, if a concurrent debit
+     * landed in between).
+     */
+    fun saveChannelWithBackingDelta(
+        channelId: String,
+        userChannelId: String,
+        expectedUSD: Double,
+        note: String?,
+        receiverSats: Long,
+        latestPrice: Double,
+        backingDeltaSats: Long
+    ): Long {
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val current = readBackingSats(db, userChannelId)
+                ?: throw MissingChannelRowException(userChannelId)
+            val newBacking = maxOf(0L, current + backingDeltaSats)
+            val cv = ContentValues().apply {
+                put("channel_id", channelId)
+                put("expected_usd", expectedUSD)
+                put("stable_sats", newBacking)
+                put("note", note)
+                put("receiver_sats", receiverSats)
+                put("latest_price", latestPrice)
+                put("updated_at", System.currentTimeMillis() / 1000)
+            }
+            val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
+            if (rows != 1) {
+                throw IllegalStateException(
+                    "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
+                )
+            }
+            db.execSQL("COMMIT")
+            return newBacking
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
+        }
+    }
+
+    /**
      * Persist channel metadata without touching stable_sats.
      *
      * Incoming stability payments update stable_sats transactionally. Keeping that column out of
