@@ -27,8 +27,14 @@ fun ChannelView(appState: AppState) {
     val scope = rememberCoroutineScope()
     var showCloseConfirm by remember { mutableStateOf(false) }
 
+    // Observe the closing flag and channel readiness as Compose state. This screen used to read
+    // the plain appState.isChannelClosing getter and derive readiness from nodeService.channels,
+    // neither of which is observable — so when a close confirmed while this screen was open, the
+    // flag cleared but nothing recomposed and "Closing channel..." spun until the screen was left
+    // and reopened (e2e flow 09). Both flows flip at close; reading them re-reads the list.
+    val isClosing by appState.isChannelClosingFlow.collectAsState()
+    val hasReadyChannel by appState.hasReadyChannel.collectAsState()
     val channels = appState.nodeService.channels
-    val hasReadyChannel = channels.any { it.isChannelReady }
 
     Column(
         modifier = Modifier
@@ -36,7 +42,7 @@ fun ChannelView(appState: AppState) {
             .verticalScroll(rememberScrollState())
             .padding(16.dp)
     ) {
-        if (channels.isNotEmpty() && !appState.isChannelClosing) {
+        if (channels.isNotEmpty() && !isClosing) {
             val ch = channels.first()
 
             // Status with colored dot
@@ -123,7 +129,7 @@ fun ChannelView(appState: AppState) {
                     Text("Close channel")
                 }
             }
-        } else if (appState.isChannelClosing) {
+        } else if (isClosing) {
             // Channel is closing — show status
             Spacer(Modifier.height(32.dp))
             Column(
