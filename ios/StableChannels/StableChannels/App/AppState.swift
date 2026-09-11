@@ -6,7 +6,7 @@ import SQLite3
 private enum SyncMessageHandlingResult {
     case notSync
     case applied
-    case retry
+    case retry(signedRecord: Data)
 }
 
 private enum IncomingSettlementResult {
@@ -102,14 +102,14 @@ class AppState {
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
-    let syncRetryTracker: SyncRetryTracking
+    private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
 
     init(
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
-        syncRetryTracker: SyncRetryTracking = SyncRetryTracker()
+        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil
     ) {
         self.spliceBroadcastChecker = spliceBroadcastChecker
-        self.syncRetryTracker = syncRetryTracker
+        self.verifyTradeSignature = verifyTradeSignature
     }
 
     // MARK: - State
@@ -1543,7 +1543,8 @@ class AppState {
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
             handleSpliceNegotiationFailed(
                 channelId: channelId,
-                userChannelId: userChannelId
+                userChannelId: userChannelId,
+                ackToken: ackToken
             )
 
         case .channelClosed(let channelId, let userChannelId, let counterpartyNodeId, let reason):
@@ -1561,7 +1562,7 @@ class AppState {
 
     // MARK: - Payment Received
 
-    private func handlePaymentReceived(
+    func handlePaymentReceived(
         paymentId: PaymentId?,
         amountMsat: UInt64,
         paymentHash: PaymentHash,
@@ -1571,25 +1572,36 @@ class AppState {
         let paymentHashStr = "\(paymentHash)"
         let paymentIdStr = paymentId.map { "\($0)" } ?? paymentHashStr
 
-        // Check for SYNC_V1 message from LSP. A valid sync that cannot yet be applied must
-        // remain in LDK's event queue; treating it like malformed control traffic loses it.
+        // A retryable signed response must remain in LDK or in our durable inbox.
+        // Once persisted, it can release the sequential queue (including ChannelClosed).
         switch handleSyncMessage(
             customRecords: customRecords,
             paymentHash: paymentHashStr,
             amountMsat: amountMsat
         ) {
         case .applied:
-            syncRetryTracker.clear(key: paymentHashStr)
+            try? databaseService?.channelRepo.removeDeferredTradeResponse(paymentHash: paymentHashStr)
             refreshBalances()
             updateStableBalances()
             return
-        case .retry:
-            let shouldGiveUp = syncRetryTracker.recordAttemptAndShouldGiveUp(key: paymentHashStr)
-            if shouldGiveUp {
-                AuditService.log("TRADE_RESULT_GIVEN_UP", data: ["payment_hash": paymentHashStr])
+        case .retry(let signedRecord):
+            do {
+                guard let databaseService else {
+                    throw DatabaseError.executeFailed("Database unavailable for trade response recovery")
+                }
+                try databaseService.channelRepo.deferTradeResponse(
+                    paymentHash: paymentHashStr,
+                    signedRecord: signedRecord,
+                    counterparty: stableChannel.counterparty
+                )
+                AuditService.log("TRADE_RESULT_QUEUED", data: ["payment_hash": paymentHashStr])
                 ackToken?.shouldAck = true
-            } else {
+            } catch {
+                // No durable owner yet: let LDK redeliver even during a long DB outage.
                 ackToken?.shouldAck = false
+                AuditService.log("TRADE_RESULT_QUEUE_FAILED", data: [
+                    "payment_hash": paymentHashStr, "error": error.localizedDescription
+                ])
             }
             return
         case .notSync:
@@ -1785,16 +1797,18 @@ class AppState {
     private func handleSyncMessage(
         customRecords: [CustomTlvRecord],
         paymentHash: String,
-        amountMsat: UInt64
+        amountMsat: UInt64,
+        expectedCounterparty: String? = nil
     ) -> SyncMessageHandlingResult {
         for tlv in customRecords {
             guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
 
             guard let message = TradeProtocol.parseSignedControl(
                 data: tlv.value,
-                expectedCounterparty: stableChannel.counterparty,
+                expectedCounterparty: expectedCounterparty ?? stableChannel.counterparty,
                 verifySignature: { [weak self] msg, sig, pubkey in
-                    self?.nodeService.verifySignature(message: msg, signature: sig, pubkey: pubkey) ?? false
+                    if let verify = self?.verifyTradeSignature { return verify(msg, sig, pubkey) }
+                    return self?.nodeService.verifySignature(message: msg, signature: sig, pubkey: pubkey) ?? false
                 }
             ) else { continue }
             guard amountMsat == TradeProtocol.resultControlAmountMsat else {
@@ -1804,7 +1818,7 @@ class AppState {
                 ])
                 return .applied
             }
-            guard let databaseService else { return .retry }
+            guard let databaseService else { return .retry(signedRecord: tlv.value) }
             let result: TradeControlApplyResult
             switch message {
             case .rejected(let rejection):
@@ -1819,7 +1833,7 @@ class AppState {
                             "reason": "untrusted_price",
                             "payment_hash": paymentHash
                         ])
-                        return .retry
+                        return .retry(signedRecord: tlv.value)
                     }
                     result = databaseService.channelRepo.applyUncorrelatedSyncIfNewer(
                         sync,
@@ -1831,13 +1845,11 @@ class AppState {
             case .retry:
                 _ = try? databaseService.channelRepo.markTradeResponseNotCommittable(message)
                 AuditService.log("TRADE_RESULT_DEFERRED", data: ["payment_hash": paymentHash])
-                return .retry
+                return .retry(signedRecord: tlv.value)
             case .invalid:
-                syncRetryTracker.clear(key: paymentHash)
                 AuditService.log("TRADE_RESULT_INVALID", data: ["payment_hash": paymentHash])
                 return .applied
             case .duplicate:
-                syncRetryTracker.clear(key: paymentHash)
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
                     if case .rejected(let rejection) = message {
@@ -1851,7 +1863,7 @@ class AppState {
                 }
                 guard let channel = try? databaseService.channelRepo.loadChannel(
                     userChannelId: stableChannel.userChannelId
-                ) else { return .retry }
+                ) else { return .retry(signedRecord: tlv.value) }
                 stableChannel.channelId = channel.channelId
                 stableChannel.expectedUSD = USD(amount: channel.expectedUSD)
                 stableChannel.backingSats = channel.backingSats
@@ -1860,7 +1872,6 @@ class AppState {
                 stableChannel.latestPrice = channel.latestPrice
                 return .applied
             case .applied:
-                syncRetryTracker.clear(key: paymentHash)
                 if let paymentId = result.paymentId {
                     pendingTradePayments.removeValue(forKey: paymentId)
                     if case .rejected(let rejection) = message {
@@ -1874,7 +1885,7 @@ class AppState {
                 }
                 guard let channel = try? databaseService.channelRepo.loadChannel(
                     userChannelId: stableChannel.userChannelId
-                ) else { return .retry }
+                ) else { return .retry(signedRecord: tlv.value) }
                 stableChannel.channelId = channel.channelId
                 stableChannel.expectedUSD = USD(amount: channel.expectedUSD)
                 stableChannel.backingSats = channel.backingSats
@@ -1907,6 +1918,37 @@ class AppState {
             }
         }
         return .notSync
+    }
+
+    /// Apply in arrival order, but a still-unavailable channel must not block other responses.
+    /// Application is idempotent; a crash between apply and deletion is safe to replay.
+    func retryDeferredTradeResponses() {
+        guard let databaseService else { return }
+        do {
+            let responses = try databaseService.channelRepo.deferredTradeResponses()
+            guard !responses.isEmpty else { return }
+            refreshBalances()
+            updateStableBalances()
+            if nodeService.channels.contains(where: { $0.channelId == stableChannel.channelId && $0.isChannelReady }) {
+                try databaseService.channelRepo.updateReceiverBalance(
+                    channelId: stableChannel.channelId, receiverSats: stableChannel.stableReceiverBTC.sats
+                )
+            }
+            for response in responses {
+                let result = handleSyncMessage(
+                    customRecords: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: response.signedRecord)],
+                    paymentHash: response.paymentHash,
+                    amountMsat: TradeProtocol.resultControlAmountMsat,
+                    expectedCounterparty: response.counterparty
+                )
+                if case .applied = result {
+                    try databaseService.channelRepo.removeDeferredTradeResponse(paymentHash: response.paymentHash)
+                }
+                // Keep retries and temporarily unverifiable envelopes (e.g. node stopped).
+            }
+        } catch {
+            AuditService.log("TRADE_RESULT_REPLAY_FAILED", data: ["error": error.localizedDescription])
+        }
     }
 
     // MARK: - Payment Successful
@@ -2400,70 +2442,74 @@ class AppState {
         statusMessage = "Splice failed"
     }
 
-    private func handleSpliceNegotiationFailed(
+    func handleSpliceNegotiationFailed(
         channelId: ChannelId,
-        userChannelId: UserChannelId
+        userChannelId: UserChannelId,
+        ackToken: EventAckToken? = nil
     ) {
-        let capturedTxid = spliceTxid
-        let capturedGeneration = spliceGeneration
-        if let capturedTxid, !capturedTxid.isEmpty {
-            Task { [weak self] in
-                guard let self else { return }
+        do {
+            guard let databaseService else {
+                throw DatabaseError.executeFailed("Database unavailable for splice recovery")
+            }
+            let capturedTxid = try spliceTxid ?? databaseService.spliceRepo.getPendingSpliceTxid()
+            if let capturedTxid, !capturedTxid.isEmpty {
+                // Persist before returning to NodeService: the network check can outlive
+                // this event, lose connectivity, or be interrupted by a process restart.
+                try databaseService.spliceRepo.deferFailureCheck(
+                    txid: capturedTxid, channelId: "\(channelId)", userChannelId: "\(userChannelId)"
+                )
+                Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+            } else {
+                guard databaseService.spliceRepo.failLatestPendingSplice() else {
+                    throw DatabaseError.executeFailed("Could not persist splice failure")
+                }
+                teardownSpliceState(channelId: channelId, capturedTxid: nil, userChannelId: userChannelId)
+            }
+        } catch {
+            ackToken?.shouldAck = false
+            AuditService.log("SPLICE_FAILURE_QUEUE_FAILED", data: ["error": error.localizedDescription])
+        }
+    }
+
+    private var isCheckingSpliceFailures = false
+
+    func retryPendingSpliceFailureChecks() async {
+        guard !isCheckingSpliceFailures, let databaseService else { return }
+        isCheckingSpliceFailures = true
+        defer { isCheckingSpliceFailures = false }
+        do {
+            for check in try databaseService.spliceRepo.pendingFailureChecks() {
+                let capturedGeneration = spliceGeneration
                 var urls: [String] = []
-                for url in [self.chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
+                for url in [chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
                     where !urls.contains(url) {
                     urls.append(url)
                 }
-                let status = await self.spliceBroadcastChecker.checkStatus(txid: capturedTxid, endpointURLs: urls)
+                let status = await spliceBroadcastChecker.checkStatus(txid: check.txid, endpointURLs: urls)
+                // A reset or a new splice can happen across the await. Leave the obligation
+                // intact for a later pass; this result must not tear down newer state.
+                guard !Task.isCancelled, self.databaseService === databaseService,
+                      spliceGeneration == capturedGeneration else { continue }
                 switch status {
                 case .exists:
-                    AuditService.log("SPLICE_FAILED_IGNORED_STALE", data: [
-                        "channel_id": "\(channelId)",
-                        "splice_txid": capturedTxid
-                    ])
+                    try databaseService.spliceRepo.clearFailureCheck(txid: check.txid)
+                    AuditService.log("SPLICE_FAILED_IGNORED_STALE", data: ["splice_txid": check.txid])
                 case .inconclusive:
-                    AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", data: [
-                        "channel_id": "\(channelId)",
-                        "splice_txid": capturedTxid
-                    ])
+                    AuditService.log("SPLICE_FAILED_CHECK_INCONCLUSIVE", data: ["splice_txid": check.txid])
                 case .notFound:
-                    if self.spliceGeneration != capturedGeneration {
-                        // The broadcast check above is asynchronous and takes seconds,
-                        // long enough for the user to start another splice.
-                        // failLatestPendingSplice() targets the newest NULL-txid row,
-                        // which by now is that new splice's initiation row — and failed
-                        // rows are terminal (setPendingSpliceTxid never stamps them), so
-                        // writing here would strand the new splice permanently. This
-                        // event's own row already carries a txid and stays with the
-                        // confirmation monitor.
-                        AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
-                            "channel_id": "\(channelId)",
-                            "splice_txid": capturedTxid
-                        ])
-                    } else {
-                        self.databaseService?.spliceRepo.failLatestPendingSplice()
-                        self.teardownSpliceState(
-                            channelId: channelId,
-                            capturedTxid: capturedTxid,
+                    let failed = try databaseService.spliceRepo.failUnbroadcastSplice(txid: check.txid)
+                    if failed && spliceTxid == check.txid {
+                        teardownSpliceState(
+                            channelId: check.channelId,
+                            capturedTxid: check.txid,
+                            userChannelId: check.userChannelId,
                             reason: "txid_never_broadcast"
                         )
                     }
                 }
             }
-        } else {
-            databaseService?.spliceRepo.failLatestPendingSplice()
-            if spliceGeneration == capturedGeneration {
-                teardownSpliceState(
-                    channelId: channelId,
-                    capturedTxid: nil,
-                    userChannelId: userChannelId
-                )
-            } else {
-                AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
-                    "channel_id": "\(channelId)",
-                    "user_channel_id": "\(userChannelId)"
-                ])
-            }
+        } catch {
+            AuditService.log("SPLICE_FAILURE_REPLAY_FAILED", data: ["error": error.localizedDescription])
         }
     }
 
@@ -2562,6 +2608,8 @@ class AppState {
     }
 
     private func resumePendingSpliceConfirmation() {
+        retryDeferredTradeResponses()
+        Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
         guard let hasSplice = try? databaseService?.spliceRepo.hasPendingSplice(), hasSplice else { return }
         let txid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
         let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
@@ -2656,6 +2704,8 @@ class AppState {
     // MARK: - Stability Timer
 
     private func startStabilityTimer() {
+        retryDeferredTradeResponses()
+        Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
         stabilityTimer?.cancel()
         heartbeatTimer?.cancel()
 
@@ -2679,10 +2729,12 @@ class AppState {
 
                 await MainActor.run { [weak self] in
                     self?.recordCurrentPrice()
+                    self?.retryDeferredTradeResponses()
                     self?.refreshTradeUncertainty()
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
                 }
+                await self?.retryPendingSpliceFailureChecks()
             }
         }
     }

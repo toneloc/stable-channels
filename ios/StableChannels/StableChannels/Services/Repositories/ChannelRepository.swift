@@ -49,6 +49,12 @@ struct DefaultChannelCloseChecker: ChannelCloseChecking {
     }
 }
 
+struct DeferredTradeResponse {
+    let paymentHash: String
+    let signedRecord: Data
+    let counterparty: String
+}
+
 final class ChannelRepository {
     private let rawSQL: RawSQL
     private let channelCloseChecker: ChannelCloseChecking
@@ -59,6 +65,44 @@ final class ChannelRepository {
     ) {
         self.rawSQL = rawSQL
         self.channelCloseChecker = channelCloseChecker ?? DefaultChannelCloseChecker(rawSQL: rawSQL)
+    }
+
+    /// Transfer custody from LDK only after the original signed envelope is durable.
+    /// Keep the first envelope and its authenticated peer on redelivery.
+    func deferTradeResponse(paymentHash: String, signedRecord: Data, counterparty: String) throws {
+        try rawSQL.execute(
+            """
+            INSERT INTO deferred_trade_responses (payment_hash, signed_record, counterparty)
+            VALUES (?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING
+            """,
+            params: [.text(paymentHash), .text(signedRecord.base64EncodedString()), .text(counterparty)]
+        )
+    }
+
+    func deferredTradeResponses() throws -> [DeferredTradeResponse] {
+        try rawSQL.query(
+            "SELECT payment_hash, signed_record, counterparty FROM deferred_trade_responses ORDER BY created_at, rowid"
+        ).map { row in
+            guard let data = Data(base64Encoded: row.string(1)) else {
+                throw DatabaseError.executeFailed("Unreadable deferred trade response")
+            }
+            return DeferredTradeResponse(paymentHash: row.string(0), signedRecord: data, counterparty: row.string(2))
+        }
+    }
+
+    func removeDeferredTradeResponse(paymentHash: String) throws {
+        try rawSQL.execute("DELETE FROM deferred_trade_responses WHERE payment_hash = ?", params: [.text(paymentHash)])
+    }
+
+    /// Refresh the live capacity constraint without overwriting a concurrently settled allocation.
+    func updateReceiverBalance(channelId: String, receiverSats: UInt64) throws {
+        guard receiverSats <= UInt64(Int64.max) else {
+            throw DatabaseError.executeFailed("Receiver balance exceeds SQLite integer range")
+        }
+        try rawSQL.execute(
+            "UPDATE channels SET receiver_sats = ? WHERE channel_id = ?",
+            params: [.integer(Int64(receiverSats)), .text(channelId)]
+        )
     }
 
     func saveChannel(
