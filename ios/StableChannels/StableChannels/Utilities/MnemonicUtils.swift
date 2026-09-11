@@ -2,22 +2,30 @@ import Foundation
 
 /// Mnemonic word parsing utilities - full BIP39 validation handled by LDKNode
 enum MnemonicUtils {
-    /// Regex pattern for validating mnemonic word format (alphabetic only)
-    private static let wordPattern: NSRegularExpression? = try? NSRegularExpression(
-        pattern: "^[a-z]+$",
-        options: .caseInsensitive
-    )
+    struct ValidationResult {
+        let words: [String]
+        let isValidWordCount: Bool
+        let hasValidCharacterFormat: Bool
+
+        var isValid: Bool {
+            isValidWordCount && hasValidCharacterFormat
+        }
+
+        var displayString: String {
+            words.joined(separator: " ")
+        }
+    }
 
     // MARK: - Word Parsing
 
-    /// Parse mnemonic string into array of words, trimmed, lowercased and filtered
+    /// Parse mnemonic string into array of words, trimmed and lowercased.
+    /// Splits across any Unicode/ASCII whitespace (spaces, tabs, newlines).
     static func parseMnemonic(_ input: String) -> [String] {
         input
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-            .split(separator: " ")
+            .split(whereSeparator: { $0.isWhitespace })
             .map(String.init)
-            .filter { !$0.isEmpty }
     }
 
     /// Convert word array to filled array of maxWordCount (empty strings for unfilled)
@@ -31,6 +39,12 @@ enum MnemonicUtils {
 
     // MARK: - Validation
 
+    /// Checks if a single word contains only ASCII alphabetic characters.
+    static func isAlphabeticWord(_ word: String) -> Bool {
+        guard !word.isEmpty else { return false }
+        return word.allSatisfy { ($0 >= "a" && $0 <= "z") || ($0 >= "A" && $0 <= "Z") }
+    }
+
     /// Detect word count from mnemonic string (12 or 24, defaults based on input)
     static func detectWordCount(_ mnemonic: String) -> Int {
         let count = parseMnemonic(mnemonic).count
@@ -40,24 +54,37 @@ enum MnemonicUtils {
         return SeedConstants.wordCount24
     }
 
+    /// Check if word list has valid word count (12 or 24)
+    static func isValidWordCount(words: [String]) -> Bool {
+        let count = words.count
+        return count == SeedConstants.wordCount12 || count == SeedConstants.wordCount24
+    }
+
     /// Check if mnemonic has valid word count (12 or 24)
     static func isValidWordCount(_ mnemonic: String) -> Bool {
-        let count = parseMnemonic(mnemonic).count
-        return count == SeedConstants.wordCount12 || count == SeedConstants.wordCount24
+        isValidWordCount(words: parseMnemonic(mnemonic))
+    }
+
+    /// Check if all words contain only alphabetic characters
+    static func hasValidCharacterFormat(words: [String]) -> Bool {
+        guard !words.isEmpty else { return false }
+        return words.allSatisfy(isAlphabeticWord)
     }
 
     /// Check if all words contain only alphabetic characters (basic format check)
     /// Note: Full BIP39 validation (wordlist + checksum) is handled by LDKNode
     static func hasValidCharacterFormat(_ mnemonic: String) -> Bool {
+        hasValidCharacterFormat(words: parseMnemonic(mnemonic))
+    }
+
+    /// Consolidated validation returning words and validity checks.
+    static func validate(_ mnemonic: String) -> ValidationResult {
         let words = parseMnemonic(mnemonic)
-        guard !words.isEmpty else { return false }
-        return words.allSatisfy { word in
-            wordPattern?.firstMatch(
-                in: word,
-                options: [],
-                range: NSRange(word.startIndex..., in: word)
-            ) != nil
-        }
+        return ValidationResult(
+            words: words,
+            isValidWordCount: isValidWordCount(words: words),
+            hasValidCharacterFormat: hasValidCharacterFormat(words: words)
+        )
     }
 
     // MARK: - Display
