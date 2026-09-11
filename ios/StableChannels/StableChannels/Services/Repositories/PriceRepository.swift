@@ -136,7 +136,15 @@ final class PriceRepository {
     )]) throws -> Int {
         guard !prices.isEmpty else { return 0 }
         return try rawSQL.inTransaction(mode: "DEFERRED") {
+            var insertedCount = 0
             for (date, open, high, low, close, volume) in prices {
+                let existing = try rawSQL.query(
+                    "SELECT 1 FROM daily_prices WHERE date = ? LIMIT 1",
+                    params: [.text(date)]
+                )
+                if existing.isEmpty {
+                    insertedCount += 1
+                }
                 try rawSQL.execute(
                     "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')",
                     params: [
@@ -145,7 +153,7 @@ final class PriceRepository {
                     ]
                 )
             }
-            return prices.count
+            return insertedCount
         }
     }
 }

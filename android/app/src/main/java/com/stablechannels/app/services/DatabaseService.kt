@@ -1770,10 +1770,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         var count = 0
         db.beginTransaction()
         try {
+            val checkStmt = db.compileStatement("SELECT COUNT(*) FROM daily_prices WHERE date = ?")
             val stmt = db.compileStatement(
                 "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')"
             )
             for (p in prices) {
+                checkStmt.clearBindings()
+                checkStmt.bindString(1, p.date)
+                val exists = checkStmt.simpleQueryForLong() > 0L
+                if (!exists) {
+                    count++
+                }
                 stmt.clearBindings()
                 stmt.bindString(1, p.date)
                 stmt.bindDouble(2, p.open)
@@ -1785,10 +1792,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 } else {
                     stmt.bindNull(6)
                 }
-                val rowId = stmt.executeInsert()
-                if (rowId != -1L) {
-                    count++
-                }
+                stmt.executeInsert()
             }
             db.setTransactionSuccessful()
         } finally {

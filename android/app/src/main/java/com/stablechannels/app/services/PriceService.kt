@@ -207,12 +207,6 @@ class PriceService(private val appContext: Context? = null) {
         }
     }
 
-    /**
-     * Delegated to PriceChartService.
-     */
-    suspend fun fetchKrakenOHLC(since: Long? = null): List<Pair<Long, Double>> {
-        return PriceChartService.shared.fetchKrakenHourlyOHLC(since) ?: emptyList()
-    }
 
     companion object {
         private const val TAG = "PriceOracle"

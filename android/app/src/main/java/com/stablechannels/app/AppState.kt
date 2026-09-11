@@ -458,6 +458,8 @@ class AppState(private val context: Context) : ViewModel() {
     val nodeService = NodeService(context)
     val priceService = PriceService(context)
     val priceChartService: PriceChartFetcher = PriceChartService.shared
+    private val isBackfillingHourly = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val isBackfillingDaily = java.util.concurrent.atomic.AtomicBoolean(false)
     var databaseService: DatabaseService? = null
         private set
     var tradeService: TradeService? = null
@@ -3669,67 +3671,77 @@ class AppState(private val context: Context) : ViewModel() {
 
     private suspend fun backfillHourlyPrices() {
         val db = databaseService ?: return
-        val thirtyDaysAgo = System.currentTimeMillis() / 1000 - 30 * 24 * 3600
-        val oldest = db.getOldestPriceHistoryTimestamp()
-        val since = if (oldest != null && oldest < thirtyDaysAgo) {
-            db.getLatestPriceHistoryTimestamp() ?: thirtyDaysAgo
-        } else {
-            thirtyDaysAgo
-        }
-        for (attempt in 1..3) {
-            val candles = priceChartService.fetchKrakenHourlyOHLC(since)
-            if (candles != null) {
-                if (candles.isNotEmpty()) {
-                    val count = db.backfillHourlyPrices(candles)
-                    if (count > 0) {
-                        AuditService.log("CHART_BACKFILL", mapOf("points" to count))
-                        cachedChartHourly = db.getPriceHistory(24 * 30)
-                        _chartUpdateTrigger.value = System.currentTimeMillis()
+        if (!isBackfillingHourly.compareAndSet(false, true)) return
+        try {
+            val thirtyDaysAgo = System.currentTimeMillis() / 1000 - 30 * 24 * 3600
+            val oldest = db.getOldestPriceHistoryTimestamp()
+            val since = if (oldest != null && oldest < thirtyDaysAgo) {
+                db.getLatestPriceHistoryTimestamp() ?: thirtyDaysAgo
+            } else {
+                thirtyDaysAgo
+            }
+            for (attempt in 1..3) {
+                val candles = priceChartService.fetchKrakenHourlyOHLC(since)
+                if (candles != null) {
+                    if (candles.isNotEmpty()) {
+                        val count = db.backfillHourlyPrices(candles)
+                        if (count > 0) {
+                            AuditService.log("CHART_BACKFILL", mapOf("points" to count))
+                            cachedChartHourly = db.getPriceHistory(24 * 30)
+                            _chartUpdateTrigger.value = System.currentTimeMillis()
+                        }
                     }
+                    break
                 }
-                break
+                if (attempt < 3) {
+                    kotlinx.coroutines.delay(attempt * 1000L)
+                }
             }
-            if (attempt < 3) {
-                kotlinx.coroutines.delay(attempt * 1000L)
-            }
+        } finally {
+            isBackfillingHourly.set(false)
         }
     }
 
     private suspend fun backfillDailyPrices() {
         val db = databaseService ?: return
-        val sevenTwentyDaysAgo = System.currentTimeMillis() / 1000 - 720 * 24 * 3600
-        val latest = db.getLatestDailyPriceDate()
-        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
-        }
-        val since = if (latest != null) {
-            val date = try { fmt.parse(latest) } catch (_: Exception) { null }
-            if (date != null) maxOf(date.time / 1000 - 86400, sevenTwentyDaysAgo) else sevenTwentyDaysAgo
-        } else {
-            sevenTwentyDaysAgo
-        }
-        for (attempt in 1..3) {
-            val candles = priceChartService.fetchKrakenDailyOHLC(since)
-            if (candles != null) {
-                if (candles.isNotEmpty()) {
-                    val count = db.backfillDailyPrices(candles)
-                    if (count > 0) {
-                        AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
-                        val dailyPrices = db.getDailyPrices(99999)
-                        val daily = dailyPrices.mapNotNull { d ->
-                            val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
-                            val ts = date.time / 1000
-                            com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
-                        }.sortedBy { it.timestamp }
-                        cachedChartDaily = daily
-                        _chartUpdateTrigger.value = System.currentTimeMillis()
+        if (!isBackfillingDaily.compareAndSet(false, true)) return
+        try {
+            val sevenTwentyDaysAgo = System.currentTimeMillis() / 1000 - 720 * 24 * 3600
+            val latest = db.getLatestDailyPriceDate()
+            val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("UTC")
+            }
+            val since = if (latest != null) {
+                val date = try { fmt.parse(latest) } catch (_: Exception) { null }
+                if (date != null) maxOf(date.time / 1000 - 86400, sevenTwentyDaysAgo) else sevenTwentyDaysAgo
+            } else {
+                sevenTwentyDaysAgo
+            }
+            for (attempt in 1..3) {
+                val candles = priceChartService.fetchKrakenDailyOHLC(since)
+                if (candles != null) {
+                    if (candles.isNotEmpty()) {
+                        val count = db.backfillDailyPrices(candles)
+                        if (count > 0) {
+                            AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
+                            val dailyPrices = db.getDailyPrices(99999)
+                            val daily = dailyPrices.mapNotNull { d ->
+                                val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
+                                val ts = date.time / 1000
+                                com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
+                            }.sortedBy { it.timestamp }
+                            cachedChartDaily = daily
+                            _chartUpdateTrigger.value = System.currentTimeMillis()
+                        }
                     }
+                    break
                 }
-                break
+                if (attempt < 3) {
+                    kotlinx.coroutines.delay(attempt * 1000L)
+                }
             }
-            if (attempt < 3) {
-                kotlinx.coroutines.delay(attempt * 1000L)
-            }
+        } finally {
+            isBackfillingDaily.set(false)
         }
     }
 

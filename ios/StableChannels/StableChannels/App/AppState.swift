@@ -123,6 +123,8 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
+    private var isBackfillingHourly: Bool = false
+    private var isBackfillingDaily: Bool = false
     private enum BalanceCacheKey {
         static let lightning = "cached_lightning_sats"
         static let onchain = "cached_onchain_sats"
@@ -3667,6 +3669,9 @@ class AppState {
     /// Fetch hourly candles from Kraken and backfill price_history for smooth 1D/1W/1M charts.
     private func backfillHourlyPrices() async {
         guard let db = databaseService else { return }
+        guard !isBackfillingHourly else { return }
+        isBackfillingHourly = true
+        defer { isBackfillingHourly = false }
 
         // Determine how far back we need data — up to 30 days
         let thirtyDaysAgo = Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600
@@ -3707,6 +3712,9 @@ class AppState {
     /// Fetch daily candles from Kraken and backfill daily_prices for smooth 3M/6M/1Y/ALL charts.
     private func backfillDailyPrices() async {
         guard let db = databaseService else { return }
+        guard !isBackfillingDaily else { return }
+        isBackfillingDaily = true
+        defer { isBackfillingDaily = false }
 
         // Determine how far back we need data — up to 720 days
         let sevenTwentyDaysAgo = Int64(Date().timeIntervalSince1970) - 720 * 24 * 3600
