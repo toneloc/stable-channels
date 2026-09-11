@@ -36,6 +36,11 @@
 		4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */; };
 		4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */; };
 		4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */; };
+		4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F30540C1B00B5A146 /* BinarySearch.swift */; };
+		4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458130540C3500B5A146 /* BinarySearchTests.swift */; };
+		4944458630540C3500B5A146 /* MnemonicUtilsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */; };
+		4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */; };
+		4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458330540C3500B5A146 /* InputSanitizerTests.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
 		495CB3FA3013F14100560837 /* TransactionMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3F93013F14100560837 /* TransactionMatcher.swift */; };
 		495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */; };
@@ -224,6 +229,11 @@
 		4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithms.swift; sourceTree = "<group>"; };
 		4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartPeriod.swift; sourceTree = "<group>"; };
 		4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithmsTests.swift; sourceTree = "<group>"; };
+		4944457F30540C1B00B5A146 /* BinarySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearch.swift; sourceTree = "<group>"; };
+		4944458130540C3500B5A146 /* BinarySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearchTests.swift; sourceTree = "<group>"; };
+		4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsFormattingTests.swift; sourceTree = "<group>"; };
+		4944458330540C3500B5A146 /* InputSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizerTests.swift; sourceTree = "<group>"; };
+		4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicUtilsTests.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
 		495CB3F93013F14100560837 /* TransactionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionMatcher.swift; sourceTree = "<group>"; };
 		495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketProtocol.swift; sourceTree = "<group>"; };
@@ -687,6 +697,7 @@
 		AD3E779FC98D09AA36FFCAE9 /* Utilities */ = {
 			isa = PBXGroup;
 			children = (
+				4944457F30540C1B00B5A146 /* BinarySearch.swift */,
 				4F22F6639A59D4B86A959586 /* Constants.swift */,
 				AD425F9D6479B95B2258FCAE /* Extensions.swift */,
 				496A44452FCD5845005AF12F /* InputSanitizer.swift */,
@@ -756,10 +767,14 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
+				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
+				4944458330540C3500B5A146 /* InputSanitizerTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
+				4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
@@ -921,6 +936,10 @@
 				5C279A022FEA00020074ACD2 /* SpliceRepositoryTests.swift in Sources */,
 				5C279A042FEA00040074ACD2 /* StabilitySettlementTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
+				4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */,
+				4944458630540C3500B5A146 /* MnemonicUtilsTests.swift in Sources */,
+				4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */,
+				4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */,
 				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 				D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */,
@@ -1009,6 +1028,7 @@
 				49F0B0DF2FC0EF3A003A3B89 /* ChannelSettingsView.swift in Sources */,
 				49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */,
 				49F0B0E12FC0EF3A003A3B89 /* NotificationsSettingsView.swift in Sources */,
+				4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */,
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,
 				49F0B0E32FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift in Sources */,
 				49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */,
