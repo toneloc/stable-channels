@@ -1,0 +1,45 @@
+name: Android Format
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'android/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-format-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: ktfmt Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install ktfmt
+        run: |
+          mkdir -p /tmp/ktfmt-bin
+          curl -sL -o /tmp/ktfmt-bin/ktfmt.jar https://repo1.maven.org/maven2/com/facebook/ktfmt/0.64/ktfmt-0.64-with-dependencies.jar
+          echo '#!/bin/bash' > /tmp/ktfmt-bin/ktfmt
+          echo 'exec java -jar /tmp/ktfmt-bin/ktfmt.jar "$@"' >> /tmp/ktfmt-bin/ktfmt
+          chmod +x /tmp/ktfmt-bin/ktfmt
+          echo "/tmp/ktfmt-bin" >> "$GITHUB_PATH"
+
+      - name: Run ktfmt
+        working-directory: android
+        run: |
+          find app/src -name "*.kt" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
