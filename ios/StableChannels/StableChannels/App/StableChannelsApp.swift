@@ -182,4 +182,5 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
 extension Notification.Name {
     static let pushPaymentNotification = Notification.Name("pushPaymentNotification")
+    static let priceHistoryUpdated = Notification.Name("priceHistoryUpdated")
 }

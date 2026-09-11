@@ -40,6 +40,11 @@ final class PriceRepository {
         return rows.first?.optInt64(0)
     }
 
+    func getLatestPriceHistoryTimestamp() throws -> Int64? {
+        let rows = try rawSQL.query("SELECT MAX(timestamp) FROM price_history")
+        return rows.first?.optInt64(0)
+    }
+
     func getPriceHistory(hours: UInt32) throws -> [PriceRecord] {
         let cutoff = Int64(Date().timeIntervalSince1970) - Int64(hours) * 3600
         let sql = """
@@ -114,5 +119,41 @@ final class PriceRepository {
     func getOldestDailyPriceDate() throws -> String? {
         let rows = try rawSQL.query("SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1", params: [])
         return rows.first?.optString(0)
+    }
+
+    func getLatestDailyPriceDate() throws -> String? {
+        let rows = try rawSQL.query("SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1", params: [])
+        return rows.first?.optString(0)
+    }
+
+    func backfillDailyPrices(_ prices: [(
+        date: String,
+        open: Double,
+        high: Double,
+        low: Double,
+        close: Double,
+        volume: Double?
+    )]) throws -> Int {
+        guard !prices.isEmpty else { return 0 }
+        return try rawSQL.inTransaction(mode: "DEFERRED") {
+            var insertedCount = 0
+            for (date, open, high, low, close, volume) in prices {
+                let existing = try rawSQL.query(
+                    "SELECT 1 FROM daily_prices WHERE date = ? LIMIT 1",
+                    params: [.text(date)]
+                )
+                if existing.isEmpty {
+                    insertedCount += 1
+                }
+                try rawSQL.execute(
+                    "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')",
+                    params: [
+                        .text(date), .real(open), .real(high), .real(low), .real(close),
+                        volume.map { .real($0) } ?? .null
+                    ]
+                )
+            }
+            return insertedCount
+        }
     }
 }

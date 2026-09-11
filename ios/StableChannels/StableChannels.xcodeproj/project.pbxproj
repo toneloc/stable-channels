@@ -32,6 +32,10 @@
 		492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AB300CC81D003EC383 /* EsploraError.swift */; };
 		492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */; };
 		492B54C1300CE85C003EC383 /* MempoolWebSocketService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */; };
+		494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494445783053DB2400B5A146 /* PriceChartFetching.swift */; };
+		4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */; };
+		4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */; };
+		4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
 		495CB3FA3013F14100560837 /* TransactionMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3F93013F14100560837 /* TransactionMatcher.swift */; };
 		495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */; };
@@ -216,6 +220,10 @@
 		492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationResolver.swift; sourceTree = "<group>"; };
 		492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationPollingService.swift; sourceTree = "<group>"; };
 		492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketService.swift; sourceTree = "<group>"; };
+		494445783053DB2400B5A146 /* PriceChartFetching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartFetching.swift; sourceTree = "<group>"; };
+		4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithms.swift; sourceTree = "<group>"; };
+		4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartPeriod.swift; sourceTree = "<group>"; };
+		4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithmsTests.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
 		495CB3F93013F14100560837 /* TransactionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionMatcher.swift; sourceTree = "<group>"; };
 		495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketProtocol.swift; sourceTree = "<group>"; };
@@ -405,6 +413,17 @@
 				F11CF0F21D3319E86AF791B6 /* StableChannelsTests */,
 				052E4A6FC61BFB06E0A2A974 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		4944457E3053E42800B5A146 /* Price */ = {
+			isa = PBXGroup;
+			children = (
+				494445783053DB2400B5A146 /* PriceChartFetching.swift */,
+				4962F9A730340E8A00852B66 /* PriceChartService.swift */,
+				49A0F0013029000000000001 /* PriceOracle.swift */,
+				0446A88D1E083A380EDC5436 /* PriceService.swift */,
+			);
+			path = Price;
 			sourceTree = "<group>";
 		};
 		495CB4013017917400560837 /* WebSocket */ = {
@@ -626,9 +645,6 @@
 				5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
-				4962F9A730340E8A00852B66 /* PriceChartService.swift */,
-				49A0F0013029000000000001 /* PriceOracle.swift */,
-				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
@@ -640,6 +656,7 @@
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
 				498244AC3022718B0086BDB6 /* Biometric */,
 				495CB4023017AD1800560837 /* Confirmation */,
+				4944457E3053E42800B5A146 /* Price */,
 				49DDB0002FF0000000000001 /* Repositories */,
 				495CB4013017917400560837 /* WebSocket */,
 			);
@@ -729,6 +746,8 @@
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
+				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
+				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
 				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
 			);
 			path = Home;
@@ -745,6 +764,7 @@
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
+				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
@@ -886,6 +906,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
+				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
@@ -949,11 +970,14 @@
 				49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */,
 				49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */,
 				49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */,
+				4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */,
+				4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
 				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
 				4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */,
+				494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */,
 				88769D82377C43BCF549A52C /* HistoryView.swift in Sources */,
 				1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */,
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
