@@ -498,11 +498,11 @@ class AppState {
     /// owns the full sequence: stop LDK, drop DB handles, wipe LDK + app DB
     /// files, clear in-memory/app-group cache, then start the node fresh.
     func restoreWalletFromMnemonic(_ mnemonic: String, acknowledgeForceClose: Bool = false) async throws {
-        let words = MnemonicUtils.formatForDisplay(mnemonic)
-        guard MnemonicUtils.isValidWordCount(words),
-              MnemonicUtils.hasValidCharacterFormat(words) else {
+        let validation = MnemonicUtils.validate(mnemonic)
+        guard validation.isValid else {
             throw WalletRestoreError.invalidMnemonic
         }
+        let words = validation.displayString
 
         let priorPhase = phase
         phase = .syncing
