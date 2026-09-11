@@ -1641,6 +1641,44 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
         writableDatabase.insertWithOnConflict("daily_prices", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
+
+    fun getLatestDailyPriceDate(): String? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1", null
+        )
+        return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+    }
+
+    fun backfillDailyPrices(prices: List<DailyPriceRecord>): Int {
+        if (prices.isEmpty()) return 0
+        val db = writableDatabase
+        var count = 0
+        db.beginTransaction()
+        try {
+            val stmt = db.compileStatement(
+                "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')"
+            )
+            for (p in prices) {
+                stmt.clearBindings()
+                stmt.bindString(1, p.date)
+                stmt.bindDouble(2, p.open)
+                stmt.bindDouble(3, p.high)
+                stmt.bindDouble(4, p.low)
+                stmt.bindDouble(5, p.close)
+                if (p.volume != null) {
+                    stmt.bindDouble(6, p.volume)
+                } else {
+                    stmt.bindNull(6)
+                }
+                stmt.executeInsert()
+                count++
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return count
+    }
 }
 
 // Cursor extension helpers
