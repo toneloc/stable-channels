@@ -38,7 +38,6 @@
 		4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */; };
 		4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F30540C1B00B5A146 /* BinarySearch.swift */; };
 		4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458130540C3500B5A146 /* BinarySearchTests.swift */; };
-		4944458630540C3500B5A146 /* MnemonicUtilsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */; };
 		4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */; };
 		4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458330540C3500B5A146 /* InputSanitizerTests.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
@@ -233,7 +232,6 @@
 		4944458130540C3500B5A146 /* BinarySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearchTests.swift; sourceTree = "<group>"; };
 		4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsFormattingTests.swift; sourceTree = "<group>"; };
 		4944458330540C3500B5A146 /* InputSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizerTests.swift; sourceTree = "<group>"; };
-		4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MnemonicUtilsTests.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
 		495CB3F93013F14100560837 /* TransactionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionMatcher.swift; sourceTree = "<group>"; };
 		495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketProtocol.swift; sourceTree = "<group>"; };
@@ -774,7 +772,6 @@
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
 				4944458330540C3500B5A146 /* InputSanitizerTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
-				4944458430540C3500B5A146 /* MnemonicUtilsTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
@@ -937,7 +934,6 @@
 				5C279A042FEA00040074ACD2 /* StabilitySettlementTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */,
-				4944458630540C3500B5A146 /* MnemonicUtilsTests.swift in Sources */,
 				4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */,
 				4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */,
 				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
