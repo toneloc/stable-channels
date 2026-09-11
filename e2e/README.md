@@ -198,7 +198,13 @@ is in `aux-tests-pr-analysis.md`, and the copy/mechanism research in
 | `24_splicein_confirmation_badge` | splice-in badge stuck at 0/6 instead of counting to 1 (issue #276) | #267 | android, ios |
 | `25_spliceout_usd_overflow` | overflow splice-out failing to debit USD (issue #277) | — | android, ios |
 | `26_double_spliceout_history` | second consecutive splice-out missing from history (issue #278) | — | android, ios |
-| `28_overflow_send_books` | overflow-send books desync → phantom settlement + dead trading (issue #296; RED until fixed) | — | android, ios |
+| `28_overflow_send_books` | overflow-send books desync → phantom settlement + dead trading (issue #296) | #299 | android, ios |
+| `29_app_pays_lsp_settlement` | the app-pays-LSP half of stability: wrong/duplicate/unsigned outbound settlement | #177 #231 #233 #288 #299 | android, ios |
+| `30_failed_and_interrupted_ln_send` | failed send deducting USD; in-flight send lost or double-reconciled across a kill | #297 #299 | android |
+| `31_onchain_deposit_survives_kill` | deposit lost or duplicated by an app kill before it confirms | #290 #267 #222 #228 | android, ios |
+| `32_price_feed_outage` | trading/settling on a stale price; wallet stuck after an outage + >10% move | #239 | android, ios |
+| `33_reonboard_after_close` | a closed channel's leftovers breaking the next channel (trade, settlement) | #266 #303 #310 | android, ios |
+| `34_onchain_deposit_old_address` | deposit to an earlier receive address never confirming after Onchain is reopened (**RED until fixed**) | #183 #267 | android |
 
 Aux flows substitute into, or append to, a lifecycle:
 
@@ -221,6 +227,14 @@ make ios FLOWS="01_onboard_lightning 02_btc_to_usd 25_spliceout_usd_overflow"
 make ios FLOWS="01_onboard_lightning 26_double_spliceout_history"
 # 28 runs after 01+02 (issue #296 repro — EXPECTED TO FAIL until the fix lands):
 make android FLOWS="01_onboard_lightning 02_btc_to_usd 28_overflow_send_books"
+# 29–32 each run after 01+02 at the $100k base (29 and 32 restore the price in post-hooks):
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 29_app_pays_lsp_settlement"
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 30_failed_and_interrupted_ln_send"
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 31_onchain_deposit_survives_kill"
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 34_onchain_deposit_old_address"  # RED until fixed
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 32_price_feed_outage"
+# 33 needs a closed channel first:
+make android FLOWS="01_onboard_lightning 02_btc_to_usd 09_close_channel 33_reonboard_after_close"
 # 20 is opt-in like 11: reveal the ACTIVE seed via 10, keep the channel open,
 # then run the guard flow directly through maestro with the seed:
 maestro test -e RESTORE_SEED="word1 ... word12" flows/20_restore_guard.yaml
@@ -233,14 +247,38 @@ pre-negotiation kill is a known iOS gap (see the analysis doc).
 Aux settlement assertions use `helpers/assert_stability_payment_v1.js`, which
 matches the LSP's current `STABILITY_PAYMENT_V1_SENT` audit event (as does
 flow 03's `helpers/assert_lsp_stability_payment.js`; the v1 helper adds
-direction and present/absent modes).
+direction and present/absent modes). Flows 29–33 use the generic
+`helpers/assert_audit_events.js`: any event names, filtered server-side by
+name and time, with present / absent / exact-count modes. Prefer it for new
+flows — a fixed tail window can't see past the LSP's `SYNC_MESSAGE_FAILED`
+flood, which made "absent" checks pass vacuously.
 
 Analyzed but NOT yet automated (see the analysis doc's backlog): stale-tip
 stability gate (#243 — the skip is deliberately silent; asserting it needs
-device-side audit logs), price-feed fail-closed trading (#239),
-onchain-receive duplicate-row integrity (#222/#228), the node.start feerate
+device-side audit logs), the node.start feerate
 failover layer (#242 — needs a half-broken Esplora the harness lacks), and a
 custom-LSP switch flow (#201/#207 — needs a second harness LSP).
+
+### Findings from flows 29–34 (2026-09-11)
+
+1. **App-paid settlements can split the books (flow 29, not asserted).** The
+   LSP applies an app-paid settlement at *its own* price
+   (`backing_after_user_to_lsp_stability` floors at the LSP's equilibrium).
+   App and LSP each poll feeds every 15s, independently. When the app sees a
+   rise first and pays before the LSP refreshes, the LSP finds nothing owed,
+   books the paid sats as native (`STABILITY_PAYMENT_V1_APPLIED` with
+   `backing_sats_after == backing_sats_before`), then — at the new price —
+   decides the user still owes (`STABILITY_CHECK_ONLY` / `STABILITY_PUSH_QUEUED
+   user_to_lsp`), while the app, at par, never pays again. Observed at $101k:
+   745 sats (~$0.75) of divergence that does not converge. In production the
+   gap per settlement is whatever the price moved inside one poll window.
+   Flow 29 doesn't assert backing_after because which poll lands first is
+   random; a deterministic repro needs a harness knob that lags the LSP's feed.
+2. **A deposit to an earlier receive address never confirms (flow 34, RED).**
+   Android stamps a newly detected deposit with the *current* receive address
+   and resolves its txid only by that address. Reopening Receive → Onchain
+   hands out a new address, so a deposit sent to the previous one and noticed
+   afterwards stays "Receiving onchain…" forever.
 
 ## Prerequisites
 
@@ -267,6 +305,11 @@ Expected endpoints (see `flows/helpers/*.js`):
 | `POST /send`      | `{"address": ..., "amount_sats": N}` | counterparty sends onchain to us |
 | `POST /mine`      | `{"blocks": N}` | mine regtest blocks |
 | `POST /price`     | `{"price": 100000.0}` | set the mocked BTC/USD price |
+| `POST /feeds/outage` | `{"down": true}` | every mock price feed returns 503 (app AND LSP) until `{"down": false}` |
+| `POST /hold-invoice` | `{"amount_msat": N, "mode": "hold"\|"fail"}` → `{"invoice", "payment_hash"}` | invoice whose HTLC the counterparty holds (or rejects on arrival) |
+| `GET /hold-status?hash=` | → `{"state": "open"\|"held"\|"claimed"\|"failed"}` | where a hold invoice's HTLC is |
+| `POST /hold-claim` / `POST /hold-fail` | `{"payment_hash": ...}` | settle / reject a held HTLC |
+| `GET /audit-tail` | `?n=&event=A,B&since=ISO&exclude=` | LSP audit lines, filtered before the last-N cut; `SYNC_MESSAGE_FAILED` excluded by default |
 
 The harness itself lives under `e2e/harness/` and is started by the Make
 targets via Docker Compose: bitcoin-core regtest, the block-explorer (electrs),

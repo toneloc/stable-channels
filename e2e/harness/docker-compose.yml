@@ -118,6 +118,30 @@ services:
       # the E2E Cargo feature, then SC_E2E=1 activates mock feeds at runtime.
       SC_E2E: "1"
       SC_PRICE_FEED_BASE: http://ldk-node:9737
+    # Hermetic pricing: SC_PRICE_FEED_BASE reroutes only the LSP's DIRECT USD
+    # feeds. Its USDT-fallback and USDT/USD peg feeds (src/constants.rs) still
+    # point at live exchanges, so a mock-feed outage (flow 32) silently switched
+    # the LSP to the real market price. The mobile apps already drop those
+    # fallbacks under test_config; black-hole them here so the LSP matches.
+    extra_hosts:
+      - "api-pub.bitfinex.com:127.0.0.1"
+      - "api.binance.com:127.0.0.1"
+      - "api.binance.us:127.0.0.1"
+      - "api.btcturk.com:127.0.0.1"
+      - "api.bybit.com:127.0.0.1"
+      - "api.coinbase.com:127.0.0.1"
+      - "api.coingecko.com:127.0.0.1"
+      - "api.coinlore.net:127.0.0.1"
+      - "api.coinpaprika.com:127.0.0.1"
+      - "api.crypto.com:127.0.0.1"
+      - "api.gateio.ws:127.0.0.1"
+      - "api.huobi.pro:127.0.0.1"
+      - "api.kraken.com:127.0.0.1"
+      - "api.kucoin.com:127.0.0.1"
+      - "api.mexc.com:127.0.0.1"
+      - "public.coindcx.com:127.0.0.1"
+      - "www.bitstamp.net:127.0.0.1"
+      - "www.okx.com:127.0.0.1"
     command: ["/usr/local/bin/stable-channels-lsp", "/etc/sc-lsp/config.toml"]
     ports:
       - "127.0.0.1:3002:3002"     # SC daemon REST — the wallets hit this

@@ -1,0 +1,112 @@
+# Step 29 — Aux: the app pays the LSP when the price rises (outbound settlement)
+# Price up 1%: the user's backing is worth more than the peg, so the APP owes the LSP. It must send exactly one signed settlement the LSP accepts; nothing fires again after the cooldown or a restart, and the books stay at par.
+#
+# Every other settlement flow (03, 16) moves the price DOWN, so only the
+# LSP→user half of the stability loop was ever exercised. This is the other
+# half: the app's own stability timer deciding to pay (#177, #231, #233), the
+# app-signed STABILITY_PAYMENT_V1 envelope the LSP must verify (#288), and the
+# timer's re-validate-before-pay + single-debit path (#299).
+#
+# LSP-side evidence (harness /audit-tail, filtered server-side by event+time):
+#   STABILITY_PAYMENT_V1_APPLIED    the LSP verified and booked the app's signed
+#     (is_new=true)                 payment (older builds logged the unsigned
+#                                   path as STABILITY_RECEIVED_RECONCILED)
+#   STABILITY_PAYMENT_SIGNATURE_INVALID / _SIGNATURE_CHECK_FAILED,
+#   STABILITY_RECEIVE_UNATTRIBUTED, STABILITY_PAYMENT_STATE_DIVERGENCE
+#                                   must never appear — each means the app's
+#                                   signed claim and the LSP's books disagree
+#   STABILITY_PAYMENT_V1_SENT (lsp_to_user) must not follow — that would be the
+#                                   #296-style ping-pong
+#
+# Amount at $101,000 on the flow-02 position (~75,309 backing sats vs a $75.31
+# target — Android; iOS lands at $74.22): owed ≈ $0.75 → ~745 sats; the
+# tolerance spans both platforms.
+#
+# NOT asserted (known divergence — see "Findings" in e2e/README): the LSP
+# settles the payment at ITS OWN price. Both sides poll feeds every 15s
+# independently; when the app sees $101,000 first and pays before the LSP
+# refreshes, the LSP books the sats as native (backing_sats_after ==
+# backing_sats_before) and its books then disagree with the app's by the
+# settlement amount. Which poll lands first is random, so a backing assert
+# here would be a coin flip; the helper logs backing before/after instead.
+#
+# Run RIGHT AFTER 01 + 02 at the $100k base. The post-hook restores $100,000.
+appId: com.stablechannels.app
+tags: [android, ios, stability, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  PRICE_USD: "101000"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- assertVisible: "\\$7[45]\\.\\d\\d"
+
+# Move the price UP 1%: backing sats now worth ~$0.75 more than the peg.
+- runScript:
+    file: helpers/set_price_and_mark.js
+
+# The app's own stability timer must pay. Allow for the 120s post-trade
+# cooldown plus a tick; E2E ticks every 3s once the cooldown clears.
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_V1_APPLIED"
+      MATCH: "is_new=true"
+      AFTER_ISO: ${output.settlementAfterIso}
+      EXPECTED_AMOUNT_MSAT: "740000"
+      AMOUNT_TOLERANCE_MSAT: "20000"
+      DEADLINE_SECS: "200"
+
+# The LSP accepted the app's signed claim and its books agree.
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_SIGNATURE_INVALID,STABILITY_PAYMENT_SIGNATURE_CHECK_FAILED,STABILITY_RECEIVE_UNATTRIBUTED,STABILITY_PAYMENT_STATE_DIVERGENCE"
+      AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "absent"
+
+# No double settlement: wait out the 120s cooldown so a second payment COULD
+# fire, then require exactly one payment and no LSP payback.
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "135"
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_V1_APPLIED"
+      MATCH: "is_new=true"
+      AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "count"
+      COUNT: "1"
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_V1_SENT"
+      AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "absent"
+
+# Restart: the reloaded books must still be at par — nothing re-sends.
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "30"
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_V1_APPLIED"
+      MATCH: "is_new=true"
+      AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "count"
+      COUNT: "1"
+
+# The peg held: Stable USD still reads the flow-02 target.
+- assertVisible: "\\$7[45]\\.\\d\\d"

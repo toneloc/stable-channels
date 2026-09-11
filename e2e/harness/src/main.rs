@@ -18,8 +18,9 @@
 //!   LSP_P2P_ADDR       127.0.0.1:9735
 
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -31,6 +32,8 @@ use ldk_node::bitcoin::{Address, Network};
 use ldk_node::config::EsploraSyncConfig;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
+use ldk_node::bitcoin::hashes::{sha256, Hash};
+use ldk_node::lightning_types::payment::{PaymentHash, PaymentPreimage};
 use ldk_node::payment::PaymentStatus;
 use ldk_node::{Builder, Node};
 use serde_json::{json, Value};
@@ -39,11 +42,35 @@ struct AppState {
     node: Arc<Node>,
     /// BTC/USD price as f64 bits — the mocked feed value.
     price_bits: AtomicU64,
+    /// When set, every /feeds/* endpoint returns 503 — a full price-feed outage
+    /// for BOTH the app and the LSP (both read the mock feeds in E2E).
+    feeds_down: AtomicBool,
+    /// Hold invoices created by /hold-invoice, keyed by payment hash.
+    holds: Holds,
     rpc_url: String,
     rpc_auth: String, // "Basic <b64>"
     lsp_node_id: Option<String>,
     lsp_p2p_addr: String,
 }
+
+/// Mode of a harness hold invoice: `Hold` keeps an arriving HTLC pending until
+/// /hold-claim or /hold-fail; `Fail` rejects it the moment it arrives, so the
+/// payer sees a deterministic recipient-rejected failure.
+#[derive(Clone, Copy, PartialEq)]
+enum HoldMode {
+    Hold,
+    Fail,
+}
+
+struct Hold {
+    preimage: [u8; 32],
+    mode: HoldMode,
+    /// "open" (no HTLC yet), "held", "claimed", "failed"
+    state: &'static str,
+    claimable_amount_msat: Option<u64>,
+}
+
+type Holds = Arc<Mutex<HashMap<[u8; 32], Hold>>>;
 
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
@@ -78,12 +105,29 @@ fn main() {
     node.start().expect("start ldk-node");
     println!("[harness] counterparty node: {}", node.node_id());
 
-    // Drain the event queue so it never wedges; log for debugging.
+    // Drain the event queue so it never wedges; log for debugging. Also drives
+    // hold invoices: record an arriving HTLC, or fail it at once in `Fail` mode.
+    let holds: Holds = Arc::new(Mutex::new(HashMap::new()));
     {
         let node = node.clone();
+        let holds = holds.clone();
         std::thread::spawn(move || loop {
             let event = node.wait_next_event();
             println!("[harness] event: {:?}", event);
+            if let ldk_node::Event::PaymentClaimable { payment_hash, claimable_amount_msat, .. } = &event {
+                let mut map = holds.lock().unwrap();
+                if let Some(hold) = map.get_mut(&payment_hash.0) {
+                    hold.claimable_amount_msat = Some(*claimable_amount_msat);
+                    if hold.mode == HoldMode::Fail {
+                        match node.bolt11_payment().fail_for_hash(*payment_hash) {
+                            Ok(()) => hold.state = "failed",
+                            Err(e) => println!("[harness] fail_for_hash {payment_hash}: {e}"),
+                        }
+                    } else {
+                        hold.state = "held";
+                    }
+                }
+            }
             let _ = node.event_handled();
         });
     }
@@ -93,6 +137,8 @@ fn main() {
     let state = Arc::new(AppState {
         node,
         price_bits: AtomicU64::new(100_000.0f64.to_bits()),
+        feeds_down: AtomicBool::new(false),
+        holds,
         rpc_url,
         rpc_auth: format!("Basic {auth_b64}"),
         lsp_node_id: std::env::var("LSP_NODE_ID").ok(),
@@ -111,6 +157,11 @@ fn main() {
         .route("/feeds/kraken", get(feed_kraken))
         .route("/feeds/coinbase", get(feed_coinbase))
         .route("/feeds/blockchain", get(feed_blockchain))
+        .route("/feeds/outage", post(set_feed_outage))
+        .route("/hold-invoice", post(hold_invoice))
+        .route("/hold-status", get(hold_status))
+        .route("/hold-claim", post(hold_claim))
+        .route("/hold-fail", post(hold_fail))
         .route("/bootstrap", post(bootstrap))
         .route("/audit-tail", get(audit_tail))
         .route("/info", get(info))
@@ -230,20 +281,138 @@ fn price(st: &AppState) -> f64 {
 
 // Feed shapes mirror src/price_feeds.rs / the mobile Constants feed list, so a
 // test build can point each feed URL at this harness unchanged.
-async fn feed_bitstamp(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"last": format!("{:.2}", price(&st))}))
+fn feed(st: &AppState, body: Value) -> Resp {
+    if st.feeds_down.load(Ordering::SeqCst) {
+        return Err((axum::http::StatusCode::SERVICE_UNAVAILABLE, "feed outage (harness)".into()));
+    }
+    Ok(Json(body))
 }
-async fn feed_coingecko(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"bitcoin": {"usd": price(&st)}}))
+async fn feed_bitstamp(State(st): State<Arc<AppState>>) -> Resp {
+    feed(&st, json!({"last": format!("{:.2}", price(&st))}))
 }
-async fn feed_kraken(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"result": {"XXBTZUSD": {"c": [format!("{:.5}", price(&st)), "1.0"]}}}))
+async fn feed_coingecko(State(st): State<Arc<AppState>>) -> Resp {
+    feed(&st, json!({"bitcoin": {"usd": price(&st)}}))
 }
-async fn feed_coinbase(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"data": {"amount": format!("{:.2}", price(&st))}}))
+async fn feed_kraken(State(st): State<Arc<AppState>>) -> Resp {
+    feed(&st, json!({"result": {"XXBTZUSD": {"c": [format!("{:.5}", price(&st)), "1.0"]}}}))
 }
-async fn feed_blockchain(State(st): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"USD": {"last": price(&st)}}))
+async fn feed_coinbase(State(st): State<Arc<AppState>>) -> Resp {
+    feed(&st, json!({"data": {"amount": format!("{:.2}", price(&st))}}))
+}
+async fn feed_blockchain(State(st): State<Arc<AppState>>) -> Resp {
+    feed(&st, json!({"USD": {"last": price(&st)}}))
+}
+
+/// POST /feeds/outage {"down": true|false} — take every mock price feed down or
+/// back up. Both the app and the LSP price from these feeds in E2E.
+async fn set_feed_outage(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
+    let down = body["down"].as_bool().ok_or_else(|| bad_req("missing down"))?;
+    st.feeds_down.store(down, Ordering::SeqCst);
+    println!("[harness] price feeds {}", if down { "DOWN" } else { "up" });
+    Ok(Json(json!({"down": down})))
+}
+
+fn parse_hash(hex: &str) -> Result<[u8; 32], (axum::http::StatusCode, String)> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return Err(bad_req("payment_hash must be 64 hex chars"));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(bad_req)?;
+    }
+    Ok(out)
+}
+
+fn hex32(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// POST /hold-invoice {"amount_msat": N, "mode": "hold"|"fail"} ->
+/// {"invoice", "payment_hash"}. `hold` keeps the payer's HTLC pending until
+/// /hold-claim or /hold-fail; `fail` rejects it on arrival (recipient-rejected).
+async fn hold_invoice(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let amount_msat = body["amount_msat"].as_u64().ok_or_else(|| bad_req("missing amount_msat"))?;
+    let mode = match body["mode"].as_str().unwrap_or("hold") {
+        "hold" => HoldMode::Hold,
+        "fail" => HoldMode::Fail,
+        other => return Err(bad_req(format!("unknown mode {other}"))),
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(err500)?
+        .as_nanos();
+    let seed = format!("sc-e2e-hold:{nanos}:{}", COUNTER.fetch_add(1, Ordering::SeqCst));
+    let preimage = sha256::Hash::hash(seed.as_bytes()).to_byte_array();
+    let hash = sha256::Hash::hash(&preimage).to_byte_array();
+    let node = st.node.clone();
+    let inv = tokio::task::spawn_blocking(move || {
+        let desc = Bolt11InvoiceDescription::Direct(
+            Description::new("sc-e2e-hold".to_string()).map_err(err500)?,
+        );
+        node.bolt11_payment()
+            .receive_for_hash(amount_msat, &desc, 3600, PaymentHash(hash))
+            .map_err(err500)
+    })
+    .await
+    .map_err(err500)??;
+    st.holds.lock().unwrap().insert(
+        hash,
+        Hold { preimage, mode, state: "open", claimable_amount_msat: None },
+    );
+    Ok(Json(json!({"invoice": inv.to_string(), "payment_hash": hex32(&hash)})))
+}
+
+/// GET /hold-status?hash=<hex> -> {"state", "claimable_amount_msat"}
+async fn hold_status(
+    State(st): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
+) -> Resp {
+    let hash = parse_hash(q.get("hash").map(String::as_str).unwrap_or(""))?;
+    let map = st.holds.lock().unwrap();
+    let hold = map.get(&hash).ok_or_else(|| bad_req("unknown hold invoice"))?;
+    Ok(Json(json!({"state": hold.state, "claimable_amount_msat": hold.claimable_amount_msat})))
+}
+
+/// POST /hold-claim {"payment_hash"} — settle a held HTLC.
+async fn hold_claim(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
+    let hash = parse_hash(body["payment_hash"].as_str().unwrap_or(""))?;
+    let (preimage, amount) = {
+        let map = st.holds.lock().unwrap();
+        let hold = map.get(&hash).ok_or_else(|| bad_req("unknown hold invoice"))?;
+        if hold.state != "held" {
+            return Err(bad_req(format!("hold is {}, not held", hold.state)));
+        }
+        (hold.preimage, hold.claimable_amount_msat.unwrap_or(0))
+    };
+    let node = st.node.clone();
+    tokio::task::spawn_blocking(move || {
+        node.bolt11_payment()
+            .claim_for_hash(PaymentHash(hash), amount, PaymentPreimage(preimage))
+            .map_err(err500)
+    })
+    .await
+    .map_err(err500)??;
+    if let Some(hold) = st.holds.lock().unwrap().get_mut(&hash) {
+        hold.state = "claimed";
+    }
+    Ok(Json(json!({"state": "claimed", "amount_msat": amount})))
+}
+
+/// POST /hold-fail {"payment_hash"} — reject a held HTLC back to the payer.
+async fn hold_fail(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> Resp {
+    let hash = parse_hash(body["payment_hash"].as_str().unwrap_or(""))?;
+    let node = st.node.clone();
+    tokio::task::spawn_blocking(move || {
+        node.bolt11_payment().fail_for_hash(PaymentHash(hash)).map_err(err500)
+    })
+    .await
+    .map_err(err500)??;
+    if let Some(hold) = st.holds.lock().unwrap().get_mut(&hash) {
+        hold.state = "failed";
+    }
+    Ok(Json(json!({"state": "failed"})))
 }
 
 /// Ask ldk-server (gRPC, TLS + api_key from the shared volume) for an onchain
@@ -382,18 +551,64 @@ async fn bootstrap(State(st): State<Arc<AppState>>, Json(body): Json<Value>) -> 
     .map_err(err500)?
 }
 
-/// GET /audit-tail?n=50 — last N lines of the SC daemon's audit log (mounted
-/// read-only), so flows can assert LSP-side effects (settlements, trades).
+/// GET /audit-tail?n=50[&event=A,B][&exclude=C,D][&since=ISO] — last N lines of
+/// the SC daemon's audit log (mounted read-only), so flows can assert LSP-side
+/// effects (settlements, trades).
+///
+/// Filters apply BEFORE the last-N cut: `event` keeps only the named events,
+/// `exclude` drops named events (default `SYNC_MESSAGE_FAILED`, which the LSP
+/// sprays at closed channels fast enough to push every real event out of any
+/// fixed window — that made "absent" asserts pass vacuously), and `since` keeps
+/// lines whose `ts` sorts after the given ISO timestamp. `exclude=` (empty)
+/// disables the default.
 async fn audit_tail(
-    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>,
 ) -> Resp {
     let n: usize = q.get("n").and_then(|v| v.parse().ok()).unwrap_or(50);
+    let names = |key: &str, default: &str| -> Vec<String> {
+        q.get(key)
+            .map(String::as_str)
+            .unwrap_or(default)
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let only = names("event", "");
+    let exclude = names("exclude", "SYNC_MESSAGE_FAILED");
+    let since = q.get("since").cloned();
     let path = env_or("SC_LSP_AUDIT", "/data/sc-lsp/audit_log.txt");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| err500(format!("read {path}: {e}")))?;
-    let lines: Vec<&str> = text.lines().rev().take(n).collect();
-    let lines: Vec<&str> = lines.into_iter().rev().collect();
-    Ok(Json(json!({ "lines": lines })))
+    let bytes = std::fs::read(&path).map_err(|e| err500(format!("read {path}: {e}")))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let event_of = |line: &str| -> Option<String> {
+        let at = line.find("\"event\":\"")? + 9;
+        let end = line[at..].find('"')?;
+        Some(line[at..at + end].to_string())
+    };
+    let ts_of = |line: &str| -> Option<String> {
+        let at = line.find("\"ts\":\"")? + 6;
+        let end = line[at..].find('"')?;
+        Some(line[at..at + end].to_string())
+    };
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            let ev = event_of(line);
+            if !only.is_empty() && !ev.as_ref().is_some_and(|e| only.contains(e)) {
+                return false;
+            }
+            if ev.as_ref().is_some_and(|e| exclude.contains(e)) {
+                return false;
+            }
+            match (&since, ts_of(line)) {
+                (Some(since), Some(ts)) => ts.as_str() > since.as_str(),
+                (Some(_), None) => false,
+                _ => true,
+            }
+        })
+        .collect();
+    let start = kept.len().saturating_sub(n);
+    Ok(Json(json!({ "lines": &kept[start..] })))
 }
 
 /// GET /info
