@@ -150,7 +150,8 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                 guard let open = parseDouble(1),
                       let high = parseDouble(2),
                       let low = parseDouble(3),
-                      let close = parseDouble(4) else {
+                      let close = parseDouble(4),
+                      open > 0, high > 0, low > 0, close > 0, high >= low else {
                     return nil
                 }
 
