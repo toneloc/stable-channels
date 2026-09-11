@@ -565,6 +565,11 @@ class AppState {
 
         do {
             try initializeDatabaseServices()
+            seedHistoricalPrices()
+            Task {
+                await backfillHourlyPrices()
+                await backfillDailyPrices()
+            }
             try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
@@ -585,6 +590,7 @@ class AppState {
             Task { await confirmationPollingService?.pollOnce() }
             reregisterPushTokenIfNeeded()
             statusMessage = ""
+            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
             // node owns the wallet dir — release so the NSE isn't blocked.
@@ -3472,19 +3478,25 @@ class AppState {
             since = thirtyDaysAgo
         }
 
-        let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since)
-        guard !candles.isEmpty else { return }
-
-        do {
-            let count = try db.priceRepo.backfillHourlyPrices(candles)
-            if count > 0 {
-                print("[Chart] Backfilled \(count) hourly price points from Kraken")
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+        for attempt in 1...3 {
+            let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since)
+            if !candles.isEmpty {
+                do {
+                    let count = try db.priceRepo.backfillHourlyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) hourly price points from Kraken")
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                        }
+                    }
+                } catch {
+                    print("[Chart] Hourly backfill failed: \(error)")
                 }
+                break
             }
-        } catch {
-            print("[Chart] Hourly backfill failed: \(error)")
+            if attempt < 3 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            }
         }
     }
 
@@ -3509,19 +3521,25 @@ class AppState {
             since = sevenTwentyDaysAgo
         }
 
-        let candles = await priceChartService.fetchKrakenDailyOHLC(since: since)
-        guard !candles.isEmpty else { return }
-
-        do {
-            let count = try db.priceRepo.backfillDailyPrices(candles)
-            if count > 0 {
-                print("[Chart] Backfilled \(count) daily price points from Kraken")
-                await MainActor.run {
-                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+        for attempt in 1...3 {
+            let candles = await priceChartService.fetchKrakenDailyOHLC(since: since)
+            if !candles.isEmpty {
+                do {
+                    let count = try db.priceRepo.backfillDailyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) daily price points from Kraken")
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                        }
+                    }
+                } catch {
+                    print("[Chart] Daily backfill failed: \(error)")
                 }
+                break
             }
-        } catch {
-            print("[Chart] Daily backfill failed: \(error)")
+            if attempt < 3 {
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            }
         }
     }
 
@@ -3550,6 +3568,11 @@ class AppState {
         do {
             let count = try db.priceRepo.bulkInsertDailyPrices(HistoricalPrices.seedPrices)
             print("[Chart] Seeded \(count) historical price records")
+            if count > 0 {
+                Task { @MainActor in
+                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                }
+            }
         } catch {
             print("[Chart] Failed to seed historical prices: \(error)")
         }

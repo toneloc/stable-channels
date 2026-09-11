@@ -219,7 +219,9 @@ struct PriceChartView: View {
                 timestamp: Int64(date.timeIntervalSince1970)
             )
         }
-        dataLoaded = true
+        if !hourlyPrices.isEmpty || !allDailyPrices.isEmpty {
+            dataLoaded = true
+        }
     }
 
     private func filterForPeriod() {
@@ -228,7 +230,15 @@ struct PriceChartView: View {
 
         if chartPeriod.usesHourly {
             let startIdx = PriceChartAlgorithms.lowerBound(in: hourlyPrices, cutoff: cutoff)
-            raw = Array(hourlyPrices[startIdx...])
+            let hourlySlice = Array(hourlyPrices[startIdx...])
+            if hourlySlice.count >= 2 {
+                raw = hourlySlice
+            } else {
+                // Fallback to daily if hourly is still backfilling or empty
+                let dailyStartIdx = PriceChartAlgorithms.lowerBound(in: allDailyPrices, cutoff: cutoff)
+                let dailySlice = Array(allDailyPrices[dailyStartIdx...])
+                raw = dailySlice.count >= 2 ? dailySlice : hourlySlice
+            }
         } else {
             let startIdx = PriceChartAlgorithms.lowerBound(in: allDailyPrices, cutoff: cutoff)
             let dailySlice = Array(allDailyPrices[startIdx...])

@@ -37,8 +37,12 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                 return []
             }
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [String: Any],
-                  let candles = result["XXBTZUSD"] as? [[Any]] else {
+                  let result = json["result"] as? [String: Any] else {
+                return []
+            }
+
+            let candlesArray: [[Any]]? = (result["XXBTZUSD"] as? [[Any]]) ?? (result["XBTUSD"] as? [[Any]])
+            guard let candles = candlesArray else {
                 return []
             }
 
