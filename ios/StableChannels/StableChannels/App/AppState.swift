@@ -85,6 +85,7 @@ class AppState {
 
     let nodeService = NodeService.shared
     let priceService = PriceService()
+    let priceChartService: any PriceChartFetching = PriceChartService.shared
     let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
     var tradeService: TradeService?
@@ -792,8 +793,11 @@ class AppState {
             "db_read_ms": dbReadMs
         ])
 
-        // Backfill hourly prices from Kraken for smooth 1D/1W/1M charts
-        Task { await backfillHourlyPrices() }
+        // Backfill hourly and daily prices from Kraken for smooth charts across all periods
+        Task {
+            await backfillHourlyPrices()
+            await backfillDailyPrices()
+        }
 
         // Seed price from cache so UI can compute native USD immediately
         if stableChannel.latestPrice > 0 {
@@ -3468,16 +3472,56 @@ class AppState {
             since = thirtyDaysAgo
         }
 
-        let candles = await priceService.fetchKrakenOHLC(since: since)
+        let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since)
         guard !candles.isEmpty else { return }
 
         do {
             let count = try db.priceRepo.backfillHourlyPrices(candles)
             if count > 0 {
                 print("[Chart] Backfilled \(count) hourly price points from Kraken")
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                }
             }
         } catch {
             print("[Chart] Hourly backfill failed: \(error)")
+        }
+    }
+
+    // MARK: - Daily Price Backfill
+
+    /// Fetch daily candles from Kraken and backfill daily_prices for smooth 3M/6M/1Y/ALL charts.
+    private func backfillDailyPrices() async {
+        guard let db = databaseService else { return }
+
+        // Determine how far back we need data — up to 720 days
+        let sevenTwentyDaysAgo = Int64(Date().timeIntervalSince1970) - 720 * 24 * 3600
+        let since: Int64
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+
+        if let latest = try? db.priceRepo.getLatestDailyPriceDate(),
+           let date = formatter.date(from: latest) {
+            let latestTs = Int64(date.timeIntervalSince1970)
+            since = max(latestTs - 86400, sevenTwentyDaysAgo)
+        } else {
+            since = sevenTwentyDaysAgo
+        }
+
+        let candles = await priceChartService.fetchKrakenDailyOHLC(since: since)
+        guard !candles.isEmpty else { return }
+
+        do {
+            let count = try db.priceRepo.backfillDailyPrices(candles)
+            if count > 0 {
+                print("[Chart] Backfilled \(count) daily price points from Kraken")
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                }
+            }
+        } catch {
+            print("[Chart] Daily backfill failed: \(error)")
         }
     }
 
