@@ -2427,13 +2427,21 @@ class AppState {
                         "splice_txid": capturedTxid
                     ])
                 case .notFound:
-                    self.databaseService?.spliceRepo.failLatestPendingSplice()
                     if self.spliceGeneration != capturedGeneration {
+                        // The broadcast check above is asynchronous and takes seconds,
+                        // long enough for the user to start another splice.
+                        // failLatestPendingSplice() targets the newest NULL-txid row,
+                        // which by now is that new splice's initiation row — and failed
+                        // rows are terminal (setPendingSpliceTxid never stamps them), so
+                        // writing here would strand the new splice permanently. This
+                        // event's own row already carries a txid and stays with the
+                        // confirmation monitor.
                         AuditService.log("SPLICE_FAILED_STALE_GENERATION", data: [
                             "channel_id": "\(channelId)",
                             "splice_txid": capturedTxid
                         ])
                     } else {
+                        self.databaseService?.spliceRepo.failLatestPendingSplice()
                         self.teardownSpliceState(
                             channelId: channelId,
                             capturedTxid: capturedTxid,
