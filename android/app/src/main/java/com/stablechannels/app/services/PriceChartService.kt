@@ -88,7 +88,8 @@ class PriceChartService(
                 val close = candle.optString(4).toDoubleOrNull() ?: continue
                 val volume = candle.optString(6).toDoubleOrNull()
 
-                if (ts > 0 && open > 0 && high > 0 && low > 0 && close > 0 && high >= low) {
+                if (ts > 0 && open > 0 && high > 0 && low > 0 && close > 0 &&
+                    high >= low && open in low..high && close in low..high) {
                     val dateStr = fmt.format(Date(ts * 1000))
                     records.add(
                         DailyPriceRecord(

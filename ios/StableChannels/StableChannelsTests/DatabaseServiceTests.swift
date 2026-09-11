@@ -753,6 +753,38 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(newCount, 1)
     }
 
+    func testBackfillDailyPricesNewDateAccounting() throws {
+        let candles: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] = [
+            ("2026-09-08", 55000.0, 56000.0, 54000.0, 55500.0, 100.0),
+            ("2026-09-09", 55500.0, 57000.0, 55000.0, 56500.0, 150.0),
+            ("2026-09-10", 56500.0, 58000.0, 56000.0, 57500.0, 200.0)
+        ]
+
+        let inserted = try service.priceRepo.backfillDailyPrices(candles)
+        XCTAssertEqual(inserted, 3)
+
+        // Re-inserting existing dates with updated close price returns 0 newly inserted dates
+        let updatedCandles: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] =
+            [
+                ("2026-09-10", 56500.0, 58500.0, 56000.0, 58200.0, 250.0)
+            ]
+        let updatedCount = try service.priceRepo.backfillDailyPrices(updatedCandles)
+        XCTAssertEqual(updatedCount, 0)
+
+        // Verify the existing row's close price was refreshed
+        let daily = try service.priceRepo.getDailyPrices(days: 10)
+        let sep10 = daily.first { $0.date == "2026-09-10" }
+        XCTAssertNotNil(sep10)
+        XCTAssertEqual(sep10?.close, 58200.0)
+
+        // Inserting a new date returns 1
+        let newDay: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] = [
+            ("2026-09-11", 58200.0, 59000.0, 58000.0, 58800.0, 180.0)
+        ]
+        let newDayCount = try service.priceRepo.backfillDailyPrices(newDay)
+        XCTAssertEqual(newDayCount, 1)
+    }
+
     // MARK: - Query Indexes & Deduplication Tests
 
     func testCustomQueryIndexesAndUniquePaymentIdCreated() throws {

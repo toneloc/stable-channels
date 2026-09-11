@@ -70,7 +70,7 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                 } else {
                     return nil
                 }
-                guard let close = Double(closeStr) else { return nil }
+                guard let close = Double(closeStr), ts > 0, close > 0 else { return nil }
 
                 return (ts, close)
             }
@@ -151,7 +151,8 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                       let high = parseDouble(2),
                       let low = parseDouble(3),
                       let close = parseDouble(4),
-                      open > 0, high > 0, low > 0, close > 0, high >= low else {
+                      ts > 0, open > 0, high > 0, low > 0, close > 0,
+                      high >= low, open >= low, open <= high, close >= low, close <= high else {
                     return nil
                 }
 

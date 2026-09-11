@@ -62,6 +62,38 @@ class PriceChartAlgorithmsTest {
     }
 
     @Test
+    fun testLttbEdgeCases() {
+        val records = (0..9).map { i ->
+            makeRecord(i.toLong() * 100, 50000.0 + i * 100)
+        }
+
+        // targetCount >= records.size returns original
+        val sameCount = PriceChartAlgorithms.lttbDownsample(records, 10)
+        assertEquals(10, sameCount.size)
+        val largerCount = PriceChartAlgorithms.lttbDownsample(records, 20)
+        assertEquals(10, largerCount.size)
+
+        // targetCount <= 2 returns original records per LTTB boundary guard
+        val twoPoints = PriceChartAlgorithms.lttbDownsample(records, 2)
+        assertEquals(records.size, twoPoints.size)
+
+        // Preserves local valley (negative extrema)
+        val valleyRecords = (0..99).map { i ->
+            val price = if (i == 50) 1000.0 else 50000.0 + i * 10
+            makeRecord(i.toLong() * 100, price)
+        }
+        val valleySampled = PriceChartAlgorithms.lttbDownsample(valleyRecords, 20)
+        assertEquals(20, valleySampled.size)
+        assertTrue(valleySampled.any { it.price == 1000.0 })
+
+        // Monotonically increasing data preserves chronological order
+        val monotonicRecords = (0..49).map { i -> makeRecord(i.toLong() * 10, i.toDouble()) }
+        val monotonicSampled = PriceChartAlgorithms.lttbDownsample(monotonicRecords, 10)
+        assertEquals(10, monotonicSampled.size)
+        assertTrue(monotonicSampled.zipWithNext().all { it.first.timestamp < it.second.timestamp })
+    }
+
+    @Test
     fun testFormatYAxis() {
         assertEquals("$65K", PriceChartAlgorithms.formatYAxis(65432.0))
         assertEquals("$100K", PriceChartAlgorithms.formatYAxis(100000.0))
