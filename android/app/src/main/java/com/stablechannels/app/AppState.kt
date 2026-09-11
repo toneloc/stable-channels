@@ -1990,6 +1990,11 @@ class AppState(private val context: Context) : ViewModel() {
             _stableChannel.value = _stableChannel.value.copy(
                 lastStabilityPayment = System.currentTimeMillis() / 1000
             )
+            // reconcileOutgoingBacking() wrote directly to the DB, bypassing saveChannelToDB()
+            // — so the SharedPreferences launch cache (used to seed Stable USD before the DB is
+            // open on next launch) needs its own explicit refresh here too, or it keeps showing
+            // the pre-send, too-high figure until loadChannelFromDB() runs during DB init.
+            cacheBalanceForLaunch()
         }
         var displayVal: String? = null
         if (paymentId != null) {
@@ -3498,7 +3503,15 @@ class AppState(private val context: Context) : ViewModel() {
                 latestPrice = sc.latestPrice
             )
         }
-        // Cache in SharedPreferences so UI has correct state on next launch
+        cacheBalanceForLaunch()
+    }
+
+    /** Cache in SharedPreferences so the UI has correct state on next launch, before the
+     *  database is open. Must be called any time _stableChannel's expectedUSD changes and is
+     *  considered durable — including paths that update the DB directly (e.g.
+     *  reconcileOutgoingBacking()) without going through saveChannelToDB(). */
+    private fun cacheBalanceForLaunch() {
+        val sc = _stableChannel.value
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putString("cached_channel_id", sc.channelId)
             .putString("cached_user_channel_id", sc.userChannelId)
