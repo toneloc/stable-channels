@@ -1979,11 +1979,17 @@ class AppState(private val context: Context) : ViewModel() {
             null
         }
         if (reconcileResult != null) {
+            // Refresh in-memory state from the DB's current, authoritative row instead of
+            // trusting reconcileResult's values directly: reconcileOutgoingBacking()'s
+            // transaction may have already committed some time ago by the time this line runs,
+            // and the stability timer (a concurrent coroutine) could have committed and
+            // published its own newer backing update in between. loadChannelFromDB() re-reads
+            // fresh, so this can never clobber a concurrent writer's already-applied change —
+            // the same pattern onForegroundResume() already relies on for this exact reason.
+            loadChannelFromDB()
             _stableChannel.value = _stableChannel.value.copy(
-                expectedUSD = USD(reconcileResult.newExpectedUSD),
-                backingSats = reconcileResult.newBackingSats,
                 lastStabilityPayment = System.currentTimeMillis() / 1000
-            ).also { StabilityService.recomputeNative(it) }
+            )
         }
         var displayVal: String? = null
         if (paymentId != null) {
