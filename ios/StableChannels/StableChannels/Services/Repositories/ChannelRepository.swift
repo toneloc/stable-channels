@@ -1,11 +1,108 @@
 import Foundation
 import SQLite3
 
-final class ChannelRepository {
+/// Defines a contract for determining whether a channel has permanently closed on-chain.
+protocol ChannelCloseChecking: Sendable {
+    func isChannelClosed(channelId: String, userChannelId: String?) -> Bool
+}
+
+/// Verifies whether payments or pending_operations indicate a channel is permanently closed.
+struct DefaultChannelCloseChecker: ChannelCloseChecking {
     private let rawSQL: RawSQL
 
     init(rawSQL: RawSQL) {
         self.rawSQL = rawSQL
+    }
+
+    func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {
+        do {
+            var paymentIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                paymentIds.append(userChannelId)
+                paymentIds.append("close-\(userChannelId)")
+            }
+            let placeholders = paymentIds.map { _ in "?" }.joined(separator: ", ")
+            let paymentParams: [SQLValue] = paymentIds.map { .text($0) }
+            let paymentRows = try rawSQL.query(
+                "SELECT 1 FROM payments WHERE payment_type = 'channel_close' AND payment_id IN (\(placeholders)) LIMIT 1",
+                params: paymentParams
+            )
+            if !paymentRows.isEmpty {
+                return true
+            }
+
+            var opIds = [channelId, "close-\(channelId)"]
+            if let userChannelId, !userChannelId.isEmpty {
+                opIds.append(userChannelId)
+                opIds.append("close-\(userChannelId)")
+            }
+            let opPlaceholders = opIds.map { _ in "?" }.joined(separator: ", ")
+            let opParams: [SQLValue] = opIds.map { .text($0) }
+            let opRows = try rawSQL.query(
+                "SELECT 1 FROM pending_operations WHERE op_type = 'channel_close' AND op_id IN (\(opPlaceholders)) LIMIT 1",
+                params: opParams
+            )
+            return !opRows.isEmpty
+        } catch {
+            return false
+        }
+    }
+}
+
+struct DeferredTradeResponse {
+    let paymentHash: String
+    let signedRecord: Data
+    let counterparty: String
+}
+
+final class ChannelRepository {
+    private let rawSQL: RawSQL
+    private let channelCloseChecker: ChannelCloseChecking
+
+    init(
+        rawSQL: RawSQL,
+        channelCloseChecker: ChannelCloseChecking? = nil
+    ) {
+        self.rawSQL = rawSQL
+        self.channelCloseChecker = channelCloseChecker ?? DefaultChannelCloseChecker(rawSQL: rawSQL)
+    }
+
+    /// Transfer custody from LDK only after the original signed envelope is durable.
+    /// Keep the first envelope and its authenticated peer on redelivery.
+    func deferTradeResponse(paymentHash: String, signedRecord: Data, counterparty: String) throws {
+        try rawSQL.execute(
+            """
+            INSERT INTO deferred_trade_responses (payment_hash, signed_record, counterparty)
+            VALUES (?, ?, ?) ON CONFLICT(payment_hash) DO NOTHING
+            """,
+            params: [.text(paymentHash), .text(signedRecord.base64EncodedString()), .text(counterparty)]
+        )
+    }
+
+    func deferredTradeResponses() throws -> [DeferredTradeResponse] {
+        try rawSQL.query(
+            "SELECT payment_hash, signed_record, counterparty FROM deferred_trade_responses ORDER BY created_at, rowid"
+        ).map { row in
+            guard let data = Data(base64Encoded: row.string(1)) else {
+                throw DatabaseError.executeFailed("Unreadable deferred trade response")
+            }
+            return DeferredTradeResponse(paymentHash: row.string(0), signedRecord: data, counterparty: row.string(2))
+        }
+    }
+
+    func removeDeferredTradeResponse(paymentHash: String) throws {
+        try rawSQL.execute("DELETE FROM deferred_trade_responses WHERE payment_hash = ?", params: [.text(paymentHash)])
+    }
+
+    /// Refresh the live capacity constraint without overwriting a concurrently settled allocation.
+    func updateReceiverBalance(channelId: String, receiverSats: UInt64) throws {
+        guard receiverSats <= UInt64(Int64.max) else {
+            throw DatabaseError.executeFailed("Receiver balance exceeds SQLite integer range")
+        }
+        try rawSQL.execute(
+            "UPDATE channels SET receiver_sats = ? WHERE channel_id = ?",
+            params: [.integer(Int64(receiverSats)), .text(channelId)]
+        )
     }
 
     func saveChannel(
@@ -115,6 +212,12 @@ final class ChannelRepository {
 
     func deleteChannel(userChannelId: String) throws {
         try rawSQL.execute("DELETE FROM channels WHERE user_channel_id = ?", params: [.text(userChannelId)])
+    }
+
+    /// True if a channel_close payment record already exists for this channel_id/user_channel_id — i.e. the
+    /// channel is gone for good and will never reappear in the channels table.
+    func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {
+        channelCloseChecker.isChannelClosed(channelId: channelId, userChannelId: userChannelId)
     }
 
     func recordTrade(
@@ -449,14 +552,21 @@ final class ChannelRepository {
                     return TradeControlApplyResult(status: .invalid)
                 }
                 let channels = try rawSQL.query(
-                    "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
-                    params: [.text(sync.userChannelId)]
+                    "SELECT channel_id, receiver_sats, sync_version, stable_sats, user_channel_id FROM channels WHERE channel_id = ?",
+                    params: [.text(sync.channelId)]
                 )
                 guard let channel = channels.first else {
+                    if self.isChannelClosed(channelId: sync.channelId, userChannelId: sync.userChannelId) {
+                        return TradeControlApplyResult(status: .invalid)
+                    }
                     return TradeControlApplyResult(status: .retry)
                 }
-                guard channel.string(0) == sync.channelId else {
-                    return TradeControlApplyResult(status: .invalid)
+                if channel.string(4) != sync.userChannelId {
+                    AuditService.log("USER_CHANNEL_ID_MISMATCH", data: [
+                        "channel_id": sync.channelId,
+                        "stored": channel.string(4),
+                        "incoming": sync.userChannelId
+                    ])
                 }
                 let receiverSigned = channel.int64(1)
                 let currentVersion = channel.int64(2)
@@ -476,12 +586,12 @@ final class ChannelRepository {
                         UPDATE channels
                         SET expected_usd = ?, stable_sats = ?, native_sats = ?, sync_version = ?,
                             updated_at = strftime('%s', 'now')
-                        WHERE user_channel_id = ? AND channel_id = ? AND sync_version < ?
+                        WHERE channel_id = ? AND sync_version < ?
                         """,
                         params: [
                             .real(sync.expectedUSD), .integer(Int64(storedBacking)),
                             .integer(Int64(native)), .integer(Int64(sync.syncVersion)),
-                            .text(sync.userChannelId), .text(sync.channelId),
+                            .text(sync.channelId),
                             .integer(Int64(sync.syncVersion))
                         ]
                     )
@@ -595,16 +705,23 @@ final class ChannelRepository {
             return try rawSQL.inTransaction {
                 let rows = try rawSQL.query(
                     """
-                    SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version
-                    FROM channels WHERE user_channel_id = ?
+                    SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version, user_channel_id
+                    FROM channels WHERE channel_id = ?
                     """,
-                    params: [.text(sync.userChannelId)]
+                    params: [.text(sync.channelId)]
                 )
                 guard let channel = rows.first else {
+                    if self.isChannelClosed(channelId: sync.channelId, userChannelId: sync.userChannelId) {
+                        return TradeControlApplyResult(status: .invalid)
+                    }
                     return TradeControlApplyResult(status: .retry)
                 }
-                guard channel.string(0) == sync.channelId else {
-                    return TradeControlApplyResult(status: .invalid)
+                if channel.string(5) != sync.userChannelId {
+                    AuditService.log("USER_CHANNEL_ID_MISMATCH", data: [
+                        "channel_id": sync.channelId,
+                        "stored": channel.string(5),
+                        "incoming": sync.userChannelId
+                    ])
                 }
                 if Int64(sync.syncVersion) <= channel.int64(4) {
                     return TradeControlApplyResult(status: .duplicate)
@@ -637,12 +754,12 @@ final class ChannelRepository {
                     UPDATE channels
                     SET expected_usd = ?, stable_sats = ?, native_sats = ?, sync_version = ?,
                         latest_price = ?, updated_at = strftime('%s', 'now')
-                    WHERE user_channel_id = ? AND channel_id = ? AND sync_version < ?
+                    WHERE channel_id = ? AND sync_version < ?
                     """,
                     params: [
                         .real(sync.expectedUSD), .integer(Int64(localBacking)),
                         .integer(Int64(native)), .integer(Int64(sync.syncVersion)),
-                        .real(trustedPrice), .text(sync.userChannelId), .text(sync.channelId),
+                        .real(trustedPrice), .text(sync.channelId),
                         .integer(Int64(sync.syncVersion))
                     ]
                 )
