@@ -32,7 +32,7 @@ struct PendingTradePayment {
     let status: String
 }
 
-enum TradeControlApplyStatus {
+enum TradeControlApplyStatus: Equatable {
     case applied
     case duplicate
     case invalid

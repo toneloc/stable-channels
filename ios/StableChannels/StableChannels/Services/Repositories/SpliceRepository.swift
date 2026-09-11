@@ -1,11 +1,54 @@
 import Foundation
 import SQLite3
 
+struct PendingSpliceFailureCheck {
+    let txid: String
+    let channelId: String
+    let userChannelId: String
+}
+
 final class SpliceRepository {
     private let rawSQL: RawSQL
 
     init(rawSQL: RawSQL) {
         self.rawSQL = rawSQL
+    }
+
+    func deferFailureCheck(txid: String, channelId: String, userChannelId: String) throws {
+        try rawSQL.execute(
+            """
+            INSERT INTO pending_splice_failure_checks (txid, channel_id, user_channel_id)
+            VALUES (?, ?, ?) ON CONFLICT(txid) DO NOTHING
+            """,
+            params: [.text(txid), .text(channelId), .text(userChannelId)]
+        )
+    }
+
+    func pendingFailureChecks() throws -> [PendingSpliceFailureCheck] {
+        try rawSQL.query(
+            "SELECT txid, channel_id, user_channel_id FROM pending_splice_failure_checks ORDER BY created_at, rowid"
+        ).map { PendingSpliceFailureCheck(txid: $0.string(0), channelId: $0.string(1), userChannelId: $0.string(2)) }
+    }
+
+    func clearFailureCheck(txid: String) throws {
+        try rawSQL.execute("DELETE FROM pending_splice_failure_checks WHERE txid = ?", params: [.text(txid)])
+    }
+
+    /// Never target the newest initiation row: an asynchronous check owns one exact txid.
+    /// Retire its recovery obligation only if the final status write also commits.
+    @discardableResult
+    func failUnbroadcastSplice(txid: String) throws -> Bool {
+        try rawSQL.inTransaction {
+            let changed = try rawSQL.executeReturningChanges(
+                """
+                UPDATE payments SET status = 'failed'
+                WHERE payment_type IN ('splice_in', 'splice_out') AND txid = ? AND status = 'pending'
+                """,
+                params: [.text(txid)]
+            )
+            try clearFailureCheck(txid: txid)
+            return changed > 0
+        }
     }
 
     /// Stamps a negotiated txid onto the latest NULL-txid splice initiation

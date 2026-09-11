@@ -188,6 +188,22 @@ final class DatabaseService {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS deferred_trade_responses (
+                payment_hash TEXT PRIMARY KEY NOT NULL,
+                signed_record TEXT NOT NULL,
+                counterparty TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS pending_splice_failure_checks (
+                txid TEXT PRIMARY KEY NOT NULL,
+                channel_id TEXT NOT NULL,
+                user_channel_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS onchain_receive_txids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,
