@@ -593,11 +593,16 @@ class AppState(private val context: Context) : ViewModel() {
     private val pendingLock = Any()
 
     /** Serializes "commit a stable-books mutation, then publish the row to _stableChannel"
-     *  across every path that changes expected_usd/stable_sats in-process: the stability
-     *  timer, the pending-send replay, incoming settlements and ordinary-send reconciles.
+     *  across the four payment paths that change expected_usd/stable_sats: runStabilityCheck()
+     *  (decision re-validation and post-send debit), reconcilePendingOutgoingStabilityPayment(),
+     *  handlePaymentReceived() and handlePaymentSuccessful()'s ordinary-send reconcile.
      *  Without it, path A can commit+publish between path B's commit and B's publish, and B's
      *  publish (built from B's own transaction result or an earlier snapshot) then overwrites
-     *  A's newer books in memory — which is what the stability check reads (#299 review). */
+     *  A's newer books in memory — which is what the stability check reads (#299 review).
+     *
+     *  NOT yet covered (pre-existing, tracked as a follow-up to #299): the trade-sync apply
+     *  paths under processSignedSyncMessage() and completeConfirmedSplice()'s full save. Both
+     *  write these columns from in-memory state without taking this lock. */
     private val booksLock = Any()
     private var sendGeneration: Long = 0L
 
@@ -1662,6 +1667,14 @@ class AppState(private val context: Context) : ViewModel() {
                 // newer value another path committed and published in the meantime.
                 publishBooksFromDB()
             }
+            // The balance refresh, native recompute and save below are a read-modify-write of
+            // the books too — the save writes expected_usd from memory — so they stay inside
+            // the lock. Released early, an ordinary-send reconcile could commit and publish in
+            // between and this save would write the pre-reconcile target back (#299 review).
+            refreshBalances()
+            updateStableBalances()
+            _stableChannel.update { StabilityService.reconcileIncoming(it) }
+            saveChannelToDB(preserveBacking = isStabilityPayment)
             p
         }
         if (settlementId != null && !persistence.isNewPayment) {
@@ -1670,11 +1683,6 @@ class AppState(private val context: Context) : ViewModel() {
                 "payment_hash" to paymentHash
             ))
         }
-        refreshBalances()
-        updateStableBalances()
-        val sc = StabilityService.reconcileIncoming(_stableChannel.value)
-        _stableChannel.value = sc
-        saveChannelToDB(preserveBacking = isStabilityPayment)
         if (persistence.isNewPayment) {
             val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
             _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
@@ -2731,14 +2739,40 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
 
+            // Re-validate under booksLock now that the send is claimed. The decision above was
+            // made on the tick-top `sc`; an ordinary-send reconcile or an incoming settlement
+            // may have committed and published since, leaving the books already on par. Re-read
+            // the row and re-decide at the same price; if the answer or the amount changed,
+            // release the claim and let the next tick decide afresh. This narrows the
+            // stale-decision window to the sign+send below — it cannot be closed without
+            // holding the lock across a network call, which would block the LDK event handler
+            // (#299 review).
+            val revalidated = synchronized(booksLock) {
+                publishBooksFromDB()
+                _stableChannel.value
+            }
+            val recheck = StabilityService.checkStabilityAction(revalidated, price)
+            val recheckedAmountMsat = if (recheck.action == StabilityService.StabilityAction.PAY) {
+                (USD(abs(recheck.dollarsFromPar)).toMsats(price) / 1000L) * 1000L
+            } else 0L
+            if (recheckedAmountMsat != amountMsat) {
+                try { databaseService?.clearPendingSend() } catch (_: Exception) {}
+                AuditService.log("STABILITY_SKIP", mapOf(
+                    "reason" to "books_changed_after_decision",
+                    "claimed_amount_msat" to amountMsat,
+                    "rechecked_amount_msat" to recheckedAmountMsat
+                ))
+                return
+            }
+
             val paymentId = try {
                 // Attach only the signed STABILITY_PAYMENT_V1 envelope — the legacy
                 // STABLE_CHANNEL_TLV [0x01] marker is gone (#270). If the envelope can't
                 // be built, release the claim and skip the payment entirely.
                 val signedEnvelope = StabilityPaymentProtocol.buildSignedEnvelope(
-                    channelId = sc.channelId,
+                    channelId = revalidated.channelId,
                     amountMsat = amountMsat,
-                    expectedUsd = sc.expectedUSD.amount,
+                    expectedUsd = revalidated.expectedUSD.amount,
                     sign = { payload -> nodeService.signMessage(payload) }
                 )
                 if (signedEnvelope == null) {
