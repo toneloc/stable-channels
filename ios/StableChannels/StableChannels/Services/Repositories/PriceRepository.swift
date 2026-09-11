@@ -115,4 +115,32 @@ final class PriceRepository {
         let rows = try rawSQL.query("SELECT date FROM daily_prices ORDER BY date ASC LIMIT 1", params: [])
         return rows.first?.optString(0)
     }
+
+    func getLatestDailyPriceDate() throws -> String? {
+        let rows = try rawSQL.query("SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1", params: [])
+        return rows.first?.optString(0)
+    }
+
+    func backfillDailyPrices(_ prices: [(
+        date: String,
+        open: Double,
+        high: Double,
+        low: Double,
+        close: Double,
+        volume: Double?
+    )]) throws -> Int {
+        guard !prices.isEmpty else { return 0 }
+        return try rawSQL.inTransaction(mode: "DEFERRED") {
+            for (date, open, high, low, close, volume) in prices {
+                try rawSQL.execute(
+                    "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')",
+                    params: [
+                        .text(date), .real(open), .real(high), .real(low), .real(close),
+                        volume.map { .real($0) } ?? .null
+                    ]
+                )
+            }
+            return prices.count
+        }
+    }
 }
