@@ -45,4 +45,32 @@ final class MnemonicUtilsTests: XCTestCase {
         XCTAssertFalse(resultInvalid.isValidWordCount)
         XCTAssertFalse(resultInvalid.hasValidCharacterFormat)
     }
+
+    func testWordCountBoundaryCases() {
+        func makeWords(_ count: Int) -> String {
+            Array(repeating: "abandon", count: count).joined(separator: " ")
+        }
+        XCTAssertFalse(MnemonicUtils.isValidWordCount(makeWords(1)))
+        XCTAssertFalse(MnemonicUtils.isValidWordCount(makeWords(11)))
+        XCTAssertTrue(MnemonicUtils.isValidWordCount(makeWords(12)))
+        XCTAssertFalse(MnemonicUtils.isValidWordCount(makeWords(13)))
+        XCTAssertFalse(MnemonicUtils.isValidWordCount(makeWords(23)))
+        XCTAssertTrue(MnemonicUtils.isValidWordCount(makeWords(24)))
+        XCTAssertFalse(MnemonicUtils.isValidWordCount(makeWords(25)))
+    }
+
+    func testNonAlphabeticCharacterRejection() {
+        XCTAssertFalse(MnemonicUtils.isAlphabeticWord("abandon1"))
+        XCTAssertFalse(MnemonicUtils.isAlphabeticWord("abandon-word"))
+        XCTAssertFalse(MnemonicUtils.isAlphabeticWord("abandon_word"))
+        XCTAssertFalse(MnemonicUtils.isAlphabeticWord("abandon@"))
+        XCTAssertFalse(MnemonicUtils.isAlphabeticWord("abándon"))
+        XCTAssertTrue(MnemonicUtils.isAlphabeticWord("abandon"))
+        XCTAssertTrue(MnemonicUtils.isAlphabeticWord("ABANDON"))
+    }
+
+    func testFormatForDisplayNormalizesSpaces() {
+        let messy = "  abandon\t\tabandon   \n  abandon   about  "
+        XCTAssertEqual(MnemonicUtils.formatForDisplay(messy), "abandon abandon abandon about")
+    }
 }

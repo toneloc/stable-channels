@@ -23,7 +23,9 @@ enum InputSanitizer {
                 result.append(ch)
             } else if ch == "." && !seenDot {
                 seenDot = true
-                result.append(ch)
+                if maxDecimals > 0 {
+                    result.append(ch)
+                }
             }
         }
 
