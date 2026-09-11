@@ -252,7 +252,7 @@ struct PriceChartView: View {
             }
         }
 
-        priceHistory = PriceChartAlgorithms.lttbDownsample(raw, targetCount: 120)
+        priceHistory = PriceChartAlgorithms.lttbDownsample(raw, targetCount: 200)
     }
 }
 

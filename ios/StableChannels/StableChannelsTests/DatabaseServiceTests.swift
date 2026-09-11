@@ -721,6 +721,38 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(history.first?.price, 60_000)
     }
 
+    func testLatestPriceHistoryTimestampAndBackfillDeduplication() throws {
+        XCTAssertNil(try service.priceRepo.getLatestPriceHistoryTimestamp())
+
+        let now = Int64(Date().timeIntervalSince1970)
+        let baseTs = now - 24 * 3600
+        let candles: [(timestamp: Int64, price: Double)] = [
+            (timestamp: baseTs, price: 50000.0),
+            (timestamp: baseTs + 3600, price: 51000.0),
+            (timestamp: baseTs + 7200, price: 52000.0)
+        ]
+
+        let inserted = try service.priceRepo.backfillHourlyPrices(candles)
+        XCTAssertEqual(inserted, 3)
+
+        let latest = try service.priceRepo.getLatestPriceHistoryTimestamp()
+        XCTAssertEqual(latest, baseTs + 7200)
+
+        // Re-inserting identical candles should insert 0 rows
+        let reinserted = try service.priceRepo.backfillHourlyPrices(candles)
+        XCTAssertEqual(reinserted, 0)
+
+        // Inserting candle within 30 minutes should be ignored
+        let nearDuplicate = [(timestamp: baseTs + 600, price: 50500.0)]
+        let nearCount = try service.priceRepo.backfillHourlyPrices(nearDuplicate)
+        XCTAssertEqual(nearCount, 0)
+
+        // Inserting candle outside 30 minutes should be inserted
+        let newCandle = [(timestamp: baseTs + 10800, price: 53000.0)]
+        let newCount = try service.priceRepo.backfillHourlyPrices(newCandle)
+        XCTAssertEqual(newCount, 1)
+    }
+
     // MARK: - Query Indexes & Deduplication Tests
 
     func testCustomQueryIndexesAndUniquePaymentIdCreated() throws {

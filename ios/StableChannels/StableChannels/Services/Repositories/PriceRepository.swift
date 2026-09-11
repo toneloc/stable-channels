@@ -40,6 +40,11 @@ final class PriceRepository {
         return rows.first?.optInt64(0)
     }
 
+    func getLatestPriceHistoryTimestamp() throws -> Int64? {
+        let rows = try rawSQL.query("SELECT MAX(timestamp) FROM price_history")
+        return rows.first?.optInt64(0)
+    }
+
     func getPriceHistory(hours: UInt32) throws -> [PriceRecord] {
         let cutoff = Int64(Date().timeIntervalSince1970) - Int64(hours) * 3600
         let sql = """

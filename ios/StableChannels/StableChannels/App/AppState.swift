@@ -3673,24 +3673,26 @@ class AppState {
         let since: Int64
         if let oldest = try? db.priceRepo.getOldestPriceHistoryTimestamp(), oldest < thirtyDaysAgo {
             // Already have old enough data, just fill gaps from the newest record
-            since = (try? db.priceRepo.getPriceHistory(hours: 1).last?.timestamp) ?? thirtyDaysAgo
+            since = (try? db.priceRepo.getLatestPriceHistoryTimestamp()) ?? thirtyDaysAgo
         } else {
             since = thirtyDaysAgo
         }
 
         for attempt in 1...3 {
             let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since)
-            if !candles.isEmpty {
-                do {
-                    let count = try db.priceRepo.backfillHourlyPrices(candles)
-                    if count > 0 {
-                        print("[Chart] Backfilled \(count) hourly price points from Kraken")
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+            if let candles {
+                if !candles.isEmpty {
+                    do {
+                        let count = try db.priceRepo.backfillHourlyPrices(candles)
+                        if count > 0 {
+                            print("[Chart] Backfilled \(count) hourly price points from Kraken")
+                            await MainActor.run {
+                                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                            }
                         }
+                    } catch {
+                        print("[Chart] Hourly backfill failed: \(error)")
                     }
-                } catch {
-                    print("[Chart] Hourly backfill failed: \(error)")
                 }
                 break
             }
@@ -3723,17 +3725,19 @@ class AppState {
 
         for attempt in 1...3 {
             let candles = await priceChartService.fetchKrakenDailyOHLC(since: since)
-            if !candles.isEmpty {
-                do {
-                    let count = try db.priceRepo.backfillDailyPrices(candles)
-                    if count > 0 {
-                        print("[Chart] Backfilled \(count) daily price points from Kraken")
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+            if let candles {
+                if !candles.isEmpty {
+                    do {
+                        let count = try db.priceRepo.backfillDailyPrices(candles)
+                        if count > 0 {
+                            print("[Chart] Backfilled \(count) daily price points from Kraken")
+                            await MainActor.run {
+                                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                            }
                         }
+                    } catch {
+                        print("[Chart] Daily backfill failed: \(error)")
                     }
-                } catch {
-                    print("[Chart] Daily backfill failed: \(error)")
                 }
                 break
             }

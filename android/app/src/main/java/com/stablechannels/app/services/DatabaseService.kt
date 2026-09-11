@@ -50,7 +50,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 ) {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
-        internal const val DB_VERSION = 3
+        internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
     }
 
@@ -151,7 +151,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
 
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
         createTradeIndexes(db)
@@ -183,6 +183,19 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 "resolved_at INTEGER"
             ).forEach { column -> db.execSQL("ALTER TABLE trades ADD COLUMN $column") }
             createTradeIndexes(db)
+        }
+        if (oldVersion < 4) {
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    price REAL NOT NULL,
+                    source TEXT,
+                    timestamp INTEGER DEFAULT (strftime('%s','now'))
+                )
+            """)
+            db.execSQL("DELETE FROM price_history WHERE id NOT IN (SELECT MIN(id) FROM price_history GROUP BY timestamp)")
+            db.execSQL("DROP INDEX IF EXISTS idx_price_history_ts")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         }
     }
 
@@ -1690,20 +1703,39 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
     }
 
+    fun getLatestPriceHistoryTimestamp(): Long? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT MAX(timestamp) FROM price_history", null
+        )
+        return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
+    }
+
     fun backfillHourlyPrices(candles: List<Pair<Long, Double>>): Int {
+        if (candles.isEmpty()) return 0
         val db = writableDatabase
         var count = 0
         db.beginTransaction()
         try {
-            val stmt = db.compileStatement(
+            val checkStmt = db.compileStatement(
+                "SELECT COUNT(*) FROM price_history WHERE timestamp BETWEEN ? AND ?"
+            )
+            val insertStmt = db.compileStatement(
                 "INSERT OR IGNORE INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)"
             )
             for ((ts, price) in candles) {
-                stmt.clearBindings()
-                stmt.bindDouble(1, price)
-                stmt.bindLong(2, ts)
-                stmt.executeInsert()
-                count++
+                checkStmt.clearBindings()
+                checkStmt.bindLong(1, ts - 1800)
+                checkStmt.bindLong(2, ts + 1800)
+                val exists = checkStmt.simpleQueryForLong() > 0
+                if (!exists) {
+                    insertStmt.clearBindings()
+                    insertStmt.bindDouble(1, price)
+                    insertStmt.bindLong(2, ts)
+                    val rowId = insertStmt.executeInsert()
+                    if (rowId != -1L) {
+                        count++
+                    }
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -1753,8 +1785,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 } else {
                     stmt.bindNull(6)
                 }
-                stmt.executeInsert()
-                count++
+                val rowId = stmt.executeInsert()
+                if (rowId != -1L) {
+                    count++
+                }
             }
             db.setTransactionSuccessful()
         } finally {

@@ -23,22 +23,27 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
     }
 
     /// Fetch hourly OHLC candles from Kraken for the last ~30 days.
-    /// Returns array of (unix_timestamp, close_price).
-    func fetchKrakenHourlyOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)] {
+    /// Returns array of (unix_timestamp, close_price), or nil on network/API error.
+    func fetchKrakenHourlyOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)]? {
         let sinceTs = since ?? (Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600)
         guard let url = URL(string: "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=\(sinceTs)")
         else {
-            return []
+            return nil
         }
 
         do {
             let (data, response) = try await chartSession.data(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return []
+                return nil
             }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [String: Any] else {
-                return []
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            if let errors = json["error"] as? [Any], !errors.isEmpty {
+                return nil
+            }
+            guard let result = json["result"] as? [String: Any] else {
+                return nil
             }
 
             let candlesArray: [[Any]]? = (result["XXBTZUSD"] as? [[Any]]) ?? (result["XBTUSD"] as? [[Any]])
@@ -70,17 +75,17 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                 return (ts, close)
             }
         } catch {
-            return []
+            return nil
         }
     }
 
     /// Convenience wrapper for backward compatibility.
-    func fetchKrakenOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)] {
+    func fetchKrakenOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)]? {
         await fetchKrakenHourlyOHLC(since: since)
     }
 
     /// Fetch daily OHLC candles from Kraken (up to 720 days).
-    /// Returns array of (date, open, high, low, close, volume).
+    /// Returns array of (date, open, high, low, close, volume), or nil on network/API error.
     func fetchKrakenDailyOHLC(since: Int64? = nil) async -> [(
         date: String,
         open: Double,
@@ -88,21 +93,26 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
         low: Double,
         close: Double,
         volume: Double?
-    )] {
+    )]? {
         var urlString = "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=1440"
         if let since {
             urlString += "&since=\(since)"
         }
-        guard let url = URL(string: urlString) else { return [] }
+        guard let url = URL(string: urlString) else { return nil }
 
         do {
             let (data, response) = try await chartSession.data(from: url)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                return []
+                return nil
             }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let result = json["result"] as? [String: Any] else {
-                return []
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return nil
+            }
+            if let errors = json["error"] as? [Any], !errors.isEmpty {
+                return nil
+            }
+            guard let result = json["result"] as? [String: Any] else {
+                return nil
             }
 
             let candlesArray: [[Any]]? = (result["XXBTZUSD"] as? [[Any]]) ?? (result["XBTUSD"] as? [[Any]])
@@ -149,7 +159,7 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
                 return (date, open, high, low, close, volume)
             }
         } catch {
-            return []
+            return nil
         }
     }
 }
