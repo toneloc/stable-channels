@@ -4,11 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - 'android/**'
+      - 'android/**/*.kt'
   pull_request:
     branches: [main]
     paths:
-      - 'android/**'
+      - 'android/**/*.kt'
   workflow_dispatch:
 
 permissions:
@@ -35,29 +35,30 @@ jobs:
 
       - name: Install ktfmt
         run: |
-          mkdir -p /tmp/ktfmt-bin
-          curl -sL -o /tmp/ktfmt-bin/ktfmt.jar https://repo1.maven.org/maven2/com/facebook/ktfmt/0.64/ktfmt-0.64-with-dependencies.jar
-          echo '#!/bin/bash' > /tmp/ktfmt-bin/ktfmt
-          echo 'exec java -jar /tmp/ktfmt-bin/ktfmt.jar "$@"' >> /tmp/ktfmt-bin/ktfmt
-          chmod +x /tmp/ktfmt-bin/ktfmt
-          echo "/tmp/ktfmt-bin" >> "$GITHUB_PATH"
+          curl -fsSL \
+            -o /tmp/ktfmt.jar \
+            https://repo1.maven.org/maven2/com/facebook/ktfmt/0.64/ktfmt-0.64-with-dependencies.jar
 
-      - name: Run ktfmt
+      - name: Check formatting
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             BASE_REF="${{ github.base_ref }}"
             if [ -z "$BASE_REF" ]; then
               BASE_REF="main"
             fi
-            git fetch origin "$BASE_REF" --depth=1 2>/dev/null || true
-            CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" 2>/dev/null | grep '^android/.*\.kt$' || git diff --name-only "$BASE_REF...HEAD" 2>/dev/null | grep '^android/.*\.kt$' || true)
-            if [ -n "$CHANGED" ]; then
-              echo "Checking changed Kotlin files in PR:"
-              echo "$CHANGED"
-              echo "$CHANGED" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
-            else
-              echo "No Kotlin files modified in this pull request."
+            git fetch origin "$BASE_REF" --depth=1
+            CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep '^android/.*\.kt$' || true)
+            if [ -z "$CHANGED" ]; then
+              echo "No Kotlin files modified."
+              exit 0
             fi
+            echo "Checking Kotlin files:"
+            echo "$CHANGED"
+            echo "$CHANGED" | xargs java -jar /tmp/ktfmt.jar --kotlinlang-style --dry-run --set-exit-if-changed
           else
-            find android/app/src -name "*.kt" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
+            find android -name "*.kt" -print0 |
+              xargs -0 java -jar /tmp/ktfmt.jar \
+                --kotlinlang-style \
+                --dry-run \
+                --set-exit-if-changed
           fi
