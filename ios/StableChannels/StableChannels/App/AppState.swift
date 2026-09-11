@@ -1936,7 +1936,10 @@ class AppState {
             }
             for response in responses {
                 let result = handleSyncMessage(
-                    customRecords: [CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: response.signedRecord)],
+                    customRecords: [CustomTlvRecord(
+                        typeNum: Constants.stableChannelTLVType,
+                        value: response.signedRecord
+                    )],
                     paymentHash: response.paymentHash,
                     amountMsat: TradeProtocol.resultControlAmountMsat,
                     expectedCounterparty: response.counterparty

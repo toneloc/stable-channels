@@ -247,12 +247,12 @@ final class SpliceRepositoryTests: XCTestCase {
 
 private struct RecoverySpliceChecker: SpliceBroadcastChecking {
     let result: TxBroadcastStatus
-    func checkStatus(txid: String, endpointURLs: [String]) async -> TxBroadcastStatus { result }
+    func checkStatus(txid _: String, endpointURLs _: [String]) async -> TxBroadcastStatus { result }
 }
 
 private struct CallbackSpliceChecker: SpliceBroadcastChecking {
     let check: @MainActor @Sendable () -> TxBroadcastStatus
-    func checkStatus(txid: String, endpointURLs: [String]) async -> TxBroadcastStatus { await check() }
+    func checkStatus(txid _: String, endpointURLs _: [String]) async -> TxBroadcastStatus { await check() }
 }
 
 @MainActor

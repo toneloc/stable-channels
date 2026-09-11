@@ -416,7 +416,11 @@ final class TradeResponseRecoveryTests: XCTestCase {
         ))
         XCTAssertNoThrow(try db.channelRepo.recordPreparedTrade(nextTrade))
         // Crash after apply but before inbox deletion: replay must not allocate twice.
-        try db.channelRepo.deferTradeResponse(paymentHash: paymentHash, signedRecord: envelope, counterparty: "original-peer")
+        try db.channelRepo.deferTradeResponse(
+            paymentHash: paymentHash,
+            signedRecord: envelope,
+            counterparty: "original-peer"
+        )
         app.retryDeferredTradeResponses()
         XCTAssertTrue(try db.channelRepo.deferredTradeResponses().isEmpty)
         XCTAssertEqual(try db.channelRepo.loadChannel(userChannelId: "7")?.backingSats, trade.newBackingSats)
@@ -429,7 +433,9 @@ final class TradeResponseRecoveryTests: XCTestCase {
             CREATE TRIGGER fail_inbox BEFORE INSERT ON deferred_trade_responses
             BEGIN SELECT RAISE(ABORT, 'injected disk failure'); END
         """)
-        for _ in 0..<25 { XCTAssertFalse(receive(envelope).shouldAck) }
+        for _ in 0..<25 {
+            XCTAssertFalse(receive(envelope).shouldAck)
+        }
         XCTAssertTrue(try db.channelRepo.deferredTradeResponses().isEmpty)
         try db.rawSQL.execute("DROP TRIGGER fail_inbox")
         XCTAssertTrue(receive(envelope).shouldAck)
