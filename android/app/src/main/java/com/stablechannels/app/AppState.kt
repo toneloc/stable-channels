@@ -2316,6 +2316,12 @@ class AppState(private val context: Context) : ViewModel() {
         databaseService?.assignPendingSpliceTxid(txid, capturedPaymentRowId)
         val completed = databaseService?.completeSplice(txid) == true
         if (completed) {
+            // completeSplice() just marked the row completed/1-conf. History only reloads when
+            // this epoch moves, and the confirmation poller won't move it for this row: it now
+            // has confirmations >= 1, so the poller no longer selects it. Without this bump,
+            // whenever this monitor sees the confirmation before the poller does, an open
+            // History screen keeps showing "0/1 confirmed" until it is left and reopened (#304).
+            _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
             refreshBalances()
             updateStableBalances()
 
