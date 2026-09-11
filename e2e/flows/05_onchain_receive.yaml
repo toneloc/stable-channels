@@ -28,11 +28,27 @@ env:
     text: "Done"
     optional: true
 
-# Deposit confirms -> the onchain card appears on Home with a Swap button
+# Deposit confirms -> the onchain card on Home offers to move the funds.
+# Since #298 the Android card has two layouts: a plain "Move" button, or — while the
+# incoming-deposit row is still confirming — a collapsed "Ready to move · Receiving
+# onchain (n/6)" summary that hides the button until the card is tapped. It can flip
+# from the first to the second right after "Move" appears, so wait for the funds, then
+# for the deposit row to finish, and only then tap (expanding first if still collapsed).
 - extendedWaitUntil:
-    visible: "(Swap|Move)"       # Android / iOS label
-    timeout: 240000              # E2E config syncs every 3s; keep a generous CI ceiling
-- tapOn: "(Swap|Move)"
+    visible: "(Swap|Move|Ready to move.*)"   # Android / iOS label, or the collapsed card
+    timeout: 240000                          # E2E config syncs every 3s; keep a generous CI ceiling
+- extendedWaitUntil:
+    notVisible: ".*Receiving onchain.*"
+    timeout: 120000
+- retry:
+    maxRetries: 3
+    commands:
+      - runFlow:
+          when:
+            visible: "Ready to move.*"
+          commands:
+            - tapOn: "Ready to move.*"
+      - tapOn: "(Swap|Move)"
 
 # Prove the splice entered its pending state before mining.
 - extendedWaitUntil:
