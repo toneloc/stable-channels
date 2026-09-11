@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.home
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import com.stablechannels.app.models.PriceRecord
+import com.stablechannels.app.util.lowerBound
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.max
@@ -18,17 +19,7 @@ object PriceChartAlgorithms {
      * Assumes records are chronologically sorted.
      */
     fun lowerBound(records: List<PriceRecord>, cutoffSec: Long): Int {
-        var low = 0
-        var high = records.size
-        while (low < high) {
-            val mid = low + (high - low) / 2
-            if (records[mid].timestamp < cutoffSec) {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
+        return records.lowerBound(cutoffSec) { it.timestamp }
     }
 
     /**
