@@ -196,7 +196,8 @@ The NSE target depends only on LDK Node (no KeychainAccess or CodeScanner needed
 | `stabilityCheckIntervalSecs` | 60 | Main app stability check frequency |
 | `stabilityThresholdPercent` | 0.1% | Minimum deviation to trigger payment |
 | `stabilityPaymentCooldownSecs` | 120 | Minimum time between stability payments |
-| `stableChannelTLVType` | 13377331 | Custom TLV type for stability markers |
+| `stableChannelTLVType` | 13377331 | Custom TLV type for stable-channel trade/control messages |
+| `signedStabilityTLVType` | 13377333 | Custom TLV type for signed stability settlement records |
 
 ## Testing Push Notifications
 

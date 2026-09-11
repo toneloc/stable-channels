@@ -19,6 +19,10 @@ final class OnchainTxidResolverTests: XCTestCase {
         service = try? DatabaseService(dataDir: dataDir)
         resolutionId = service?.onchainRepo.insertOnchainReceiveResolution(address: testAddress)
         XCTAssertNotNil(resolutionId, "Failed to insert seed row for test")
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "pending-deposit", amountMsat: 100_000, amountUSD: nil,
+            btcPrice: nil, resolutionId: resolutionId
+        ))
 
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
@@ -41,7 +45,14 @@ final class OnchainTxidResolverTests: XCTestCase {
     }
 
     private func jsonArrayResponse(body: [[String: Any]], status: Int = 200) -> (HTTPURLResponse, Data) {
-        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        let transactions = body.map { transaction in
+            var transaction = transaction
+            if transaction["vout"] == nil {
+                transaction["vout"] = [["scriptpubkey_address": testAddress, "value": 100]]
+            }
+            return transaction
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: transactions)) ?? Data()
         let resp = HTTPURLResponse(
             url: URL(string: "https://mock.local")!,
             statusCode: status,
@@ -83,6 +94,80 @@ final class OnchainTxidResolverTests: XCTestCase {
     }
 
     // MARK: - resolve()
+
+    @MainActor
+    func testRestoredAddressSkipsOldEqualDepositAndResolvesNewMempoolDeposit() async throws {
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "deposit-test-\(UUID().uuidString)"))
+        let store = TxidLinkStore(defaults: defaults)
+        store.setReceiveAddress(testAddress)
+        let restored = TxidLinkStore(defaults: defaults)
+        XCTAssertEqual(restored.onchainReceiveAddress, testAddress)
+        defer { store.clearReceiveAddress() }
+        let oldTxid = String(repeating: "b", count: 64)
+        try service.paymentRepo.recordPayment(
+            paymentId: "old-deposit", paymentType: "onchain", direction: "received",
+            amountMsat: 100_000, amountUSD: nil, btcPrice: nil, counterparty: nil,
+            status: "completed", txid: oldTxid
+        )
+        MockURLProtocol.requestHandler = { req in
+            self.jsonArrayResponse(body: [["txid": req.url!.path.hasSuffix("/txs/chain") ? oldTxid : self.validTxid]])
+        }
+        await makeResolver().resolve(
+            resolutionId: resolutionId, address: try XCTUnwrap(restored.onchainReceiveAddress), databaseService: service
+        )
+        let captured = await box.value
+        XCTAssertEqual(captured?.txid, validTxid)
+        XCTAssertNotNil(service.paymentRepo.payment(txid: oldTxid))
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId))
+        XCTAssertTrue(MockURLProtocol.seenURLs.contains { $0.path.hasSuffix("/txs/mempool") })
+        restored.setReceiveAddress(nil)
+        XCTAssertNil(TxidLinkStore(defaults: defaults).onchainReceiveAddress)
+    }
+
+    func testOnlyHistoricalTransactionLeavesDepositPending() async throws {
+        try service.paymentRepo.recordPayment(
+            paymentId: "old-deposit", paymentType: "onchain", direction: "received",
+            amountMsat: 100_000, amountUSD: nil, btcPrice: nil, counterparty: nil,
+            status: "completed", txid: validTxid
+        )
+        MockURLProtocol.requestHandler = { _ in self.jsonArrayResponse(body: [["txid": self.validTxid]]) }
+        await makeResolver().resolve(resolutionId: resolutionId, address: testAddress, databaseService: service)
+        let captured = await box.value
+        XCTAssertNil(captured)
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId })
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId))
+        XCTAssertFalse(service.onchainRepo.updateOnchainReceiveResolution(id: resolutionId, txid: validTxid))
+    }
+
+    func testWrongIncomingAmountLeavesDepositPending() async {
+        MockURLProtocol.requestHandler = { _ in
+            self.jsonArrayResponse(body: [["txid": self.validTxid,
+                                           "vout": [["scriptpubkey_address": self.testAddress, "value": 99]]]])
+        }
+        await makeResolver().resolve(resolutionId: resolutionId, address: testAddress, databaseService: service)
+        let captured = await box.value
+        XCTAssertNil(captured)
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId })
+    }
+
+    func testResolutionCannotReuseAnotherResolutionTransaction() throws {
+        let other = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: testAddress))
+        XCTAssertTrue(service.onchainRepo.updateOnchainReceiveResolution(id: other, txid: validTxid))
+        XCTAssertFalse(service.onchainRepo.updateOnchainReceiveResolution(id: resolutionId, txid: validTxid))
+        XCTAssertTrue(try service.onchainRepo.recordedReceiveTxids().contains(validTxid))
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId))
+    }
+
+    func testAddressHistorySpendDoesNotResolveIncomingDeposit() async {
+        MockURLProtocol.requestHandler = { _ in
+            self.jsonArrayResponse(body: [["txid": self.validTxid,
+                                           "vout": [["scriptpubkey_address": "another-address", "value": 100]]]])
+        }
+        await makeResolver().resolve(resolutionId: resolutionId, address: testAddress, databaseService: service)
+        let captured = await box.value
+        XCTAssertNil(captured)
+        XCTAssertNotNil(service.onchainRepo.fetchPendingOnchainReceives().first { $0.id == resolutionId })
+    }
 
     func testResolve_findsTxidOnChainEndpoint() async {
         MockURLProtocol.requestHandler = { req in

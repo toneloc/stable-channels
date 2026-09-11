@@ -117,7 +117,7 @@ fun AppAccessView() {
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = "Require authentication before Lightning sends",
+                        text = "Require authentication before sends (Lightning and on-chain)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

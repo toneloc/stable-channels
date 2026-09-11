@@ -1,3 +1,4 @@
+import Foundation
 import Observation
 
 /// Service responsible for managing transaction link states (receive address,
@@ -7,7 +8,10 @@ import Observation
 final class TransactionLinkService {
     private let txidLinks = TxidLinkStore()
 
-    var onchainReceiveAddress: String?
+    var onchainReceiveAddress: String? {
+        get { txidLinks.onchainReceiveAddress }
+        set { txidLinks.setReceiveAddress(newValue) }
+    }
 
     var lastCloseTxid: String? { txidLinks.lastCloseTxid }
     var lastReceiveTxid: String? { txidLinks.lastReceiveTxid }

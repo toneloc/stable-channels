@@ -55,6 +55,18 @@ pub struct MempoolWs {
     cmd_tx: Sender<Cmd>,
 }
 
+fn normalize_address_for_tracking(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let is_bech32 = (trimmed.len() >= 3
+        && (trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("bc1")) || trimmed.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("tb1"))))
+        || (trimmed.len() >= 5 && trimmed.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("bcrt1")));
+    if is_bech32 && trimmed.as_bytes().iter().any(|b| b.is_ascii_uppercase()) {
+        trimmed.to_ascii_lowercase()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl MempoolWs {
     /// Spawn the websocket thread. It stays idle (no connection) until the first
     /// tracked address arrives, and reconnects with growing backoff on failures.
@@ -65,16 +77,16 @@ impl MempoolWs {
     }
 
     pub fn track_address(&self, address: &str) {
-        let normalized = address.trim();
+        let normalized = normalize_address_for_tracking(address);
         if !normalized.is_empty() {
-            let _ = self.cmd_tx.send(Cmd::Track(normalized.to_string()));
+            let _ = self.cmd_tx.send(Cmd::Track(normalized));
         }
     }
 
     pub fn untrack_address(&self, address: &str) {
-        let normalized = address.trim();
+        let normalized = normalize_address_for_tracking(address);
         if !normalized.is_empty() {
-            let _ = self.cmd_tx.send(Cmd::Untrack(normalized.to_string()));
+            let _ = self.cmd_tx.send(Cmd::Untrack(normalized));
         }
     }
 
@@ -494,6 +506,111 @@ mod tests {
 
     fn tracked(addrs: &[&str]) -> HashSet<String> {
         addrs.iter().map(|a| a.to_string()).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // normalize_address_for_tracking — table-driven tests
+    // -----------------------------------------------------------------------
+
+    /// Table-driven test covering every meaningful input class for address
+    /// normalization: bech32 (mainnet, testnet, regtest), base58, multibyte
+    /// safety, whitespace handling, and edge cases.
+    #[test]
+    fn normalize_address_for_tracking_table() {
+        let cases: &[(&str, &str)] = &[
+            // Already-canonical lowercase bech32 — zero-copy passthrough
+            ("bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            ("tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
+             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
+            ("bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
+             "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"),
+
+            // Uppercase bech32 (QR alphanumeric mode) — lowercased
+            ("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            ("TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX",
+             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
+            ("BCRT1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KYGT080",
+             "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080"),
+
+            // Mixed-case bech32 — lowercased (BIP-173 rejects mixed-case,
+            // but the node's checksum validation will catch corruption;
+            // normalizing is a deliberate leniency)
+            ("Bc1Qw508d6qejXTDG4Y5R3ZARVARY0C5XW7KV8F3T4",
+             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            ("tB1QW508d6qejxtdg4y5R3ZARVARY0C5XW7KXPJZSX",
+             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"),
+
+            // Base58 addresses — case preserved exactly (checksum is case-sensitive)
+            ("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+             "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
+            ("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy",
+             "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"),
+
+            // Testnet/regtest base58 prefixes — case preserved
+            ("2N3oefVeg6stiTb5Kh3ozCRPgMBLCnBKE1m",
+             "2N3oefVeg6stiTb5Kh3ozCRPgMBLCnBKE1m"),
+            ("mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn",
+             "mipcBbFg9gMiCh81Kj8tqqdgoZub1ZJRfn"),
+            ("n1ww1VkBbNk2KeEDqN3nR8EVJi5tKBczAo",
+             "n1ww1VkBbNk2KeEDqN3nR8EVJi5tKBczAo"),
+
+            // Whitespace trimming
+            ("  bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4  ",
+             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
+            ("\tBC1QTEST\t",
+             "bc1qtest"),
+
+            // Empty and whitespace-only inputs
+            ("", ""),
+            ("   ", ""),
+            ("\t\n", ""),
+
+            // Multibyte UTF-8 — must not panic (the panic was the blocking defect)
+            ("\u{00e9}\u{00e9}\u{00e9}", "\u{00e9}\u{00e9}\u{00e9}"),          // eee (2-byte)
+            ("\u{1f4b8}\u{1f4b8}\u{1f4b8}", "\u{1f4b8}\u{1f4b8}\u{1f4b8}"),    // money emoji (4-byte)
+            ("Send 5\u{20ac} to bc1qexample", "Send 5\u{20ac} to bc1qexample"), // euro sign mid-string
+            ("\u{00e9}bc1test", "\u{00e9}bc1test"),                              // multibyte before prefix
+
+            // Short strings that are shorter than any prefix
+            ("bc", "bc"),
+            ("b", "b"),
+            ("1", "1"),
+
+            // Strings that look like prefixes but are not bech32
+            ("bc2qsomething", "bc2qsomething"),
+            ("tbanotbech32", "tbanotbech32"),
+        ];
+
+        for (input, expected) in cases {
+            let actual = normalize_address_for_tracking(input);
+            assert_eq!(
+                &actual, expected,
+                "normalize_address_for_tracking({:?}) => {:?}, expected {:?}",
+                input, actual, expected
+            );
+        }
+    }
+
+    /// Ensures the function does not allocate when the input is already
+    /// canonical lowercase bech32 (the hot path for node-generated addresses).
+    #[test]
+    fn normalize_already_lowercase_returns_owned_copy() {
+        let addr = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+        let result = normalize_address_for_tracking(addr);
+        assert_eq!(result, addr);
+    }
+
+    /// Verifies that only ASCII uppercase triggers lowercasing —
+    /// non-ASCII uppercase (e.g., accented characters) should not cause
+    /// bech32 addresses to be lowercased when the prefix does not match.
+    #[test]
+    fn normalize_non_ascii_uppercase_not_lowercased() {
+        // German sharp-s uppercase equivalent; not a bech32 prefix
+        let input = "\u{00C0}someaddress"; // A-grave
+        let result = normalize_address_for_tracking(input);
+        assert_eq!(result, input);
     }
 
     #[test]

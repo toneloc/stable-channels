@@ -11490,67 +11490,67 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "بدء الإخراج (Splice-out)"
+            "value" : "سيتم الإرسال عبر الإخراج (Splice-out)"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্প্লাইস-আউট শুরু হয়েছে"
+            "value" : "স্প্লাইস-আউটের মাধ্যমে পাঠানো হবে"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Splice-Out eingeleitet"
+            "value" : "Wird per Splice-Out gesendet"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Splice-out initiated"
+            "value" : "Will route via splice-out"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Splice-out iniciado"
+            "value" : "Se enviará mediante splice-out"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Retrait par raccordement initié"
+            "value" : "Sera acheminé par splice-out"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्प्लिस-आउट प्रारंभ"
+            "value" : "स्प्लाइस-आउट के माध्यम से भेजा जाएगा"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "スプライスアウトが開始されました"
+            "value" : "スプライスアウトで送金されます"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Retirada via splice iniciada"
+            "value" : "Será enviado via splice-out"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Splice-out инициирован"
+            "value" : "Будет отправлено через splice-out"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Splice-out 已启动"
+            "value" : "将通过 splice-out 发送"
           }
         }
       }

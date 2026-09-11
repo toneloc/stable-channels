@@ -10,6 +10,7 @@ import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
+import kotlin.math.roundToLong
 
 data class PaymentPersistenceResult(
     val isNewPayment: Boolean,
@@ -148,6 +149,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         """)
 
         createPendingStabilitySendTable(db)
+        createStabilitySettlementsTable(db)
 
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
@@ -189,6 +191,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // IF NOT EXISTS so either process (main app or background service) can create it,
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
+        createStabilitySettlementsTable(db)
         createTradeIndexes(db)
     }
 
@@ -200,6 +203,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 amount_msat INTEGER NOT NULL,
                 price REAL NOT NULL,
                 created_at INTEGER NOT NULL
+            )
+        """)
+    }
+
+    /** Applied inbound STABILITY_PAYMENT_V1 settlement ids — replay guard so a signed
+     *  settlement can never credit backing twice, even under a re-sent keysend. */
+    private fun createStabilitySettlementsTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                created_at INTEGER DEFAULT (strftime('%s','now'))
             )
         """)
     }
@@ -230,6 +244,88 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         if (updated == 0) {
             cv.put("created_at", now)
             db.insertWithOnConflict("channels", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+    }
+
+    /** Result of [reconcileOutgoingBacking]: the USD/backing values it actually wrote. */
+    data class OutgoingReconcileResult(
+        val usdDeducted: Double,
+        val oldExpectedUSD: Double,
+        val newExpectedUSD: Double,
+        val newBackingSats: Long
+    )
+
+    /**
+     * Atomically reconciles an ordinary outgoing send against the row's *current, freshly-read*
+     * expected_usd/stable_sats — mirroring StabilityService.reconcileOutgoing()'s math exactly,
+     * but performed entirely inside one BEGIN IMMEDIATE transaction instead of being computed
+     * ahead of time against an in-memory snapshot.
+     *
+     * This has to read-and-compute in one transaction, not read-precompute-then-apply-a-delta:
+     * reconcileOutgoing()'s result (both the USD deducted and the resulting backing) is a
+     * function of the backing value it's given. If that input is a snapshot taken before the
+     * stability timer's own concurrent debit (runStabilityCheck(), a separate in-process
+     * coroutine that commits its debit straight to this table via
+     * recordPaymentAndMaybeUpdateBacking()), the computed reduction implicitly assumes the old,
+     * pre-debit backing — so applying it as a delta on top of the DB's already-debited row
+     * double-counts the difference. Recomputing fresh, inside the same transaction that writes
+     * the result, uses only one read of backing and composes correctly with whatever the timer
+     * already committed.
+     *
+     * [receiverSats] must be the live, already-fresh post-send receiver balance (from
+     * refreshBalances()/updateStableBalances()) — that value reflects real channel state
+     * directly and isn't subject to the same race as the in-memory backingSats copy.
+     *
+     * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
+     */
+    fun reconcileOutgoingBacking(
+        channelId: String,
+        userChannelId: String,
+        note: String?,
+        receiverSats: Long,
+        latestPrice: Double,
+        price: Double
+    ): OutgoingReconcileResult? {
+        if (price <= 0.0) return null
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val cursor = db.rawQuery(
+                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId)
+            )
+            val (currentExpected, currentBacking) = cursor.use {
+                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                it.getDouble(0) to it.getLong(1)
+            }
+            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
+            val overflowSats = currentBacking - receiverSats
+            val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdToDeduct, 0.0)
+            val newBacking = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
+            val cv = ContentValues().apply {
+                put("channel_id", channelId)
+                put("expected_usd", newExpected)
+                put("stable_sats", newBacking)
+                put("note", note)
+                put("receiver_sats", receiverSats)
+                put("latest_price", latestPrice)
+                put("updated_at", System.currentTimeMillis() / 1000)
+            }
+            val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
+            if (rows != 1) {
+                throw IllegalStateException(
+                    "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
+                )
+            }
+            db.execSQL("COMMIT")
+            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
         }
     }
 
@@ -920,7 +1016,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         btcPrice: Double? = null,
         counterparty: String? = null,
         userChannelId: String? = null,
-        backingDeltaSats: Long? = null
+        backingDeltaSats: Long? = null,
+        settlementId: String? = null
     ): PaymentPersistenceResult {
         val db = writableDatabase
         // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT, preventing
@@ -944,6 +1041,26 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     return PaymentPersistenceResult(false, backing)
                 }
             }
+            // Replay guard: an already-applied settlement id never credits backing again.
+            if (settlementId != null) {
+                val cursor = db.rawQuery(
+                    "SELECT settlement_id FROM stability_settlements WHERE settlement_id = ?",
+                    arrayOf(settlementId)
+                )
+                val seen = cursor.use { it.moveToFirst() }
+                if (seen) {
+                    val backing = if (backingDeltaSats != null) {
+                        val ucid = userChannelId
+                            ?: throw IllegalStateException("userChannelId required for backing update")
+                        readBackingSats(db, ucid)
+                            ?: throw MissingChannelRowException(ucid)
+                    } else {
+                        null
+                    }
+                    db.execSQL("ROLLBACK")
+                    return PaymentPersistenceResult(false, backing)
+                }
+            }
             val cv = ContentValues().apply {
                 put("payment_id", paymentId)
                 put("payment_type", paymentType)
@@ -955,6 +1072,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 put("status", "completed")
             }
             db.insertOrThrow("payments", null, cv)
+            if (settlementId != null) {
+                db.execSQL(
+                    "INSERT INTO stability_settlements (settlement_id) VALUES (?)",
+                    arrayOf(settlementId)
+                )
+            }
             var resultingBacking: Long? = null
             if (backingDeltaSats != null) {
                 val ucid = userChannelId

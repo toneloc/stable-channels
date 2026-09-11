@@ -17,6 +17,7 @@ import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.TestOverrides
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.*
@@ -591,6 +592,19 @@ class AppState(private val context: Context) : ViewModel() {
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
 
     private val pendingLock = Any()
+
+    /** Serializes "commit a stable-books mutation, then publish the row to _stableChannel"
+     *  across the four payment paths that change expected_usd/stable_sats: runStabilityCheck()
+     *  (decision re-validation and post-send debit), reconcilePendingOutgoingStabilityPayment(),
+     *  handlePaymentReceived() and handlePaymentSuccessful()'s ordinary-send reconcile.
+     *  Without it, path A can commit+publish between path B's commit and B's publish, and B's
+     *  publish (built from B's own transaction result or an earlier snapshot) then overwrites
+     *  A's newer books in memory — which is what the stability check reads (#299 review).
+     *
+     *  NOT yet covered (pre-existing, tracked as a follow-up to #299): the trade-sync apply
+     *  paths under processSignedSyncMessage() and completeConfirmedSplice()'s full save. Both
+     *  write these columns from in-memory state without taking this lock. */
+    private val booksLock = Any()
     private var sendGeneration: Long = 0L
 
     @Volatile
@@ -609,7 +623,7 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats = MutableStateFlow(cachedOnchain)
         _totalBalanceSats = MutableStateFlow(cachedLightning + cachedOnchain)
         _nativeSats = MutableStateFlow(prefs.getLong(BalanceCacheKey.NATIVE, 0L))
-        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)
+        _onchainReceiveAddress.value = prefs.getString(BalanceCacheKey.RECEIVE_ADDRESS, null)?.let { QRCodeUtils.normalizeAddress(it) }
         _lastReceiveTxid.value = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID, null)
         lastReceiveTxidAddress = prefs.getString(BalanceCacheKey.LAST_RECEIVE_TXID_ADDRESS, null)
 
@@ -1540,7 +1554,10 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val price = priceService.currentPrice.value
-        val isStabilityPayment = customRecords.any { it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() && it.value.contentEquals(byteArrayOf(1)) }
+        val signedRecord = customRecords.firstOrNull {
+            it.typeNum == Constants.SIGNED_STABILITY_TLV_TYPE.toULong()
+        }
+        var isStabilityPayment = false
         val hasStableControlMessage = customRecords.any {
             it.typeNum == Constants.STABLE_CHANNEL_TLV_TYPE.toULong() &&
                 !it.value.contentEquals(byteArrayOf(1))
@@ -1554,11 +1571,12 @@ class AppState(private val context: Context) : ViewModel() {
             ))
             return
         }
-        val paymentType = if (isStabilityPayment) "stability" else "lightning"
         var sc0 = _stableChannel.value
         // Always use paymentHash as fallback so dedup check runs even when paymentId is null.
         val effectiveId = paymentId ?: paymentHash
-        if (isStabilityPayment && sc0.userChannelId.isEmpty()) {
+        if (signedRecord != null &&
+            (sc0.userChannelId.isEmpty() || sc0.channelId.isEmpty())
+        ) {
             // Inline discovery from the node's channel list (mirrors StabilityService.updateBalances)
             // before giving up on the backing update.
             nodeService.refreshChannels()
@@ -1575,6 +1593,47 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             }
         }
+        // A valid signed STABILITY_PAYMENT_V1 record is the only stability classifier —
+        // the legacy [0x01] marker is gone (#270); without one this is ordinary Lightning.
+        var settlementId: String? = null
+        if (signedRecord != null) {
+            if (sc0.channelId.isEmpty() || sc0.userChannelId.isEmpty()) {
+                // Discovery above could not recover local state. This is a retryable local
+                // condition, not a bad envelope: demoting it to a Lightning receipt would dedupe
+                // the payment id and make the backing credit unrecoverable. Nack instead.
+                AuditService.log("STABILITY_PAYMENT_STATE_UNAVAILABLE", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "payment_hash" to paymentHash,
+                    "amount_msat" to amountMsat
+                ))
+                throw Exception(
+                    "Channel state unavailable for signed settlement — not acknowledging, will retry"
+                )
+            }
+            when (val validation = StabilityPaymentProtocol.validateInbound(
+                signedRecord.value,
+                sc0.counterparty,
+                sc0.channelId,
+                amountMsat
+            ) { msg, sig, pk -> nodeService.verifySignature(msg, sig, pk) }) {
+                is SignedSettlementValidation.Valid -> {
+                    isStabilityPayment = true
+                    settlementId = validation.payment.settlementId
+                }
+                is SignedSettlementValidation.Invalid -> {
+                    // An invalid signed record must not credit backing — record the keysend as
+                    // an ordinary Lightning receipt instead (mirrors desktop user.rs).
+                    AuditService.log("STABILITY_PAYMENT_INVALID", mapOf(
+                        "payment_id" to (paymentId ?: ""),
+                        "payment_hash" to paymentHash,
+                        "amount_msat" to amountMsat,
+                        "reason" to validation.reason
+                    ))
+                    isStabilityPayment = false
+                }
+            }
+        }
+        val paymentType = if (isStabilityPayment) "stability" else "lightning"
         val userChannelId = if (isStabilityPayment) sc0.userChannelId.ifEmpty { null } else null
         if (isStabilityPayment && userChannelId == null) {
             throw Exception("Stability payment received but userChannelId is empty — cannot update backing, not acknowledging")
@@ -1589,29 +1648,44 @@ class AppState(private val context: Context) : ViewModel() {
                 amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
                 btcPrice = price, counterparty = sc0.counterparty,
                 userChannelId = userChannelId,
-                backingDeltaSats = backingDelta
+                backingDeltaSats = backingDelta,
+                settlementId = settlementId
             ) ?: throw Exception("DB service unavailable")
         }
-        val persistence = try {
-            record()
-        } catch (e: MissingChannelRowException) {
-            // The channels row vanished (e.g. DB recreated) — rebuild it from in-memory state
-            // via the full save, then retry once. If it still fails, rethrow to nack.
-            Log.w("AppState", "Channel row missing during payment persist — recreating and retrying: ${e.message}")
-            AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
-            saveChannelToDB()
-            record()
+        val persistence = synchronized(booksLock) {
+            val p = try {
+                record()
+            } catch (e: MissingChannelRowException) {
+                // The channels row vanished (e.g. DB recreated) — rebuild it from in-memory state
+                // via the full save, then retry once. If it still fails, rethrow to nack.
+                Log.w("AppState", "Channel row missing during payment persist — recreating and retrying: ${e.message}")
+                AuditService.log("CHANNEL_ROW_RECREATED", mapOf("user_channel_id" to (userChannelId ?: "")))
+                saveChannelToDB()
+                record()
+            }
+            if (isStabilityPayment) {
+                p.backingSats ?: throw Exception("DB did not return backing after stability payment")
+                // Publish the credited backing from the row, under booksLock, for the same reason
+                // as the outgoing paths: an absolute taken from this transaction can overwrite a
+                // newer value another path committed and published in the meantime.
+                publishBooksFromDB()
+            }
+            // The balance refresh, native recompute and save below are a read-modify-write of
+            // the books too — the save writes expected_usd from memory — so they stay inside
+            // the lock. Released early, an ordinary-send reconcile could commit and publish in
+            // between and this save would write the pre-reconcile target back (#299 review).
+            refreshBalances()
+            updateStableBalances()
+            _stableChannel.update { StabilityService.reconcileIncoming(it) }
+            saveChannelToDB(preserveBacking = isStabilityPayment)
+            p
         }
-        refreshBalances()
-        updateStableBalances()
-        if (isStabilityPayment) {
-            val backing = persistence.backingSats
-                ?: throw Exception("DB did not return backing after stability payment")
-            _stableChannel.value = _stableChannel.value.copy(backingSats = backing)
+        if (settlementId != null && !persistence.isNewPayment) {
+            AuditService.log("STABILITY_PAYMENT_REPLAY_IGNORED", mapOf(
+                "settlement_id" to settlementId,
+                "payment_hash" to paymentHash
+            ))
         }
-        val sc = StabilityService.reconcileIncoming(_stableChannel.value)
-        _stableChannel.value = sc
-        saveChannelToDB(preserveBacking = isStabilityPayment)
         if (persistence.isNewPayment) {
             val usdVal = (amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price
             _statusMessage.value = "Payment received: ${usdVal.usdFormatted()}"
@@ -1889,15 +1963,85 @@ class AppState(private val context: Context) : ViewModel() {
 
         if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
 
+        // Ordinary (non-trade, non-stability) outgoing payment. Mirrors iOS's
+        // handlePaymentSuccessful: reconcile expectedUSD and backingSats together when this
+        // send dipped into the stable backing — otherwise the on-screen Stable USD never
+        // reflects the send and the balances stop adding up to the total. The original bug
+        // (#296) was persisting only the expectedUSD half of that result via
+        // saveChannelToDB(preserveBacking = true), permanently desyncing the two fields.
+        //
+        // The reconcile math itself has to run inside the DB transaction that persists it, not
+        // be precomputed against an in-memory snapshot: the stability timer (runStabilityCheck(),
+        // a separate in-process coroutine) can commit its own backing debit straight to this row
+        // via recordPaymentAndMaybeUpdateBacking() at any time. reconcileOutgoing()'s result is a
+        // function of the backing value it's given, so computing it against a snapshot taken
+        // before that debit — then applying the result as a delta on top of the DB's
+        // already-debited row — double-counts the difference. reconcileOutgoingBacking() instead
+        // re-reads expected_usd/stable_sats fresh and does the whole computation inside one
+        // BEGIN IMMEDIATE transaction, composing correctly with whatever the timer already wrote.
         refreshBalances()
         updateStableBalances()
         val price = priceService.currentPrice.value
-        val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-        val reconciled = result.first
-        if (result.second != null) {
-            reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        val channelId = _stableChannel.value.channelId
+        val userChannelId = _stableChannel.value.userChannelId
+        val note = _stableChannel.value.note
+        val latestPrice = _stableChannel.value.latestPrice
+        // stableReceiverBTC is refreshed from live channel state just above, not from the
+        // racy in-memory backingSats copy — safe to use directly as the reconcile input.
+        val receiverSats = _stableChannel.value.stableReceiverBTC.sats
+        // The transaction that mutates the books and the in-memory publish of its result run
+        // under booksLock, and the publish re-reads the row rather than trusting the
+        // transaction's return value. Every other path that mutates expected_usd/stable_sats
+        // takes the same lock, so none of them can commit-and-publish between this commit and
+        // this publish — the interleaving that let an older absolute backing overwrite a newer
+        // one in memory and trigger a phantom stability payment (#299 review).
+        val reconcileResult = synchronized(booksLock) {
+            val result = if (userChannelId.isEmpty()) null else try {
+                databaseService?.reconcileOutgoingBacking(
+                    channelId = channelId,
+                    userChannelId = userChannelId,
+                    note = note,
+                    receiverSats = receiverSats,
+                    latestPrice = latestPrice,
+                    price = price
+                )
+            } catch (e: MissingChannelRowException) {
+                // Structural: there is no row to reconcile against and a retry can't create one.
+                // Treat as nothing-to-reconcile, but leave a trace in the audit log.
+                AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "reason" to "missing_channel_row",
+                    "user_channel_id" to userChannelId
+                ))
+                null
+            } catch (e: Exception) {
+                // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
+                // transaction rolled back, so the deduction has NOT been recorded — rethrow so
+                // the event loop leaves this PaymentSuccessful un-acked and LDK redelivers it
+                // with backoff. reconcileOutgoingBacking() is idempotent on retry because it
+                // measures overflow against live channel state. Swallowing the error here acked
+                // the payment with the books still wrong (#299 review, P2).
+                AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
+                    "payment_id" to (paymentId ?: ""),
+                    "error" to (e.message ?: e.javaClass.simpleName),
+                    "will_retry" to true
+                ))
+                throw e
+            }
+            if (result != null) {
+                // receiverSats above is live post-send channel state, so native is safe to
+                // recompute against it here.
+                publishBooksFromDB(
+                    lastStabilityPayment = System.currentTimeMillis() / 1000,
+                    recomputeNative = true
+                )
+                // reconcileOutgoingBacking() bypasses saveChannelToDB(), the usual writer of the
+                // SharedPreferences launch cache — refresh it so the next cold start doesn't
+                // briefly show the pre-send Stable USD.
+                cacheBalanceForLaunch()
+            }
+            result
         }
-        _stableChannel.value = reconciled
         var displayVal: String? = null
         if (paymentId != null) {
             databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
@@ -1916,7 +2060,21 @@ class AppState(private val context: Context) : ViewModel() {
                 Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
             }
         }
-        saveChannelToDB(preserveBacking = true)
+        if (reconcileResult != null) {
+            AuditService.log("OUTGOING_STABLE_DEDUCTED", mapOf(
+                "payment_id" to (paymentId ?: ""),
+                "usd_deducted" to reconcileResult.usdDeducted,
+                "old_expected_usd" to reconcileResult.oldExpectedUSD,
+                "new_expected_usd" to reconcileResult.newExpectedUSD,
+                "btc_price" to price
+            ))
+        } else {
+            // Nothing to reconcile (or the reconcile attempt failed) — only
+            // expectedUSD-independent metadata (status, note, price) may have changed.
+            // preserveBacking keeps this call from ever touching stable_sats, so it's always
+            // safe regardless of any concurrent stability write.
+            saveChannelToDB(preserveBacking = true)
+        }
         val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
         val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
         _statusMessage.value = successMsg
@@ -2184,6 +2342,17 @@ class AppState(private val context: Context) : ViewModel() {
             monitoredSpliceTxid = null
             spliceConfirmationJob = null
             _statusMessage.value = "Move confirmed"
+            // Unlike "Move pending confirmation" (which the user can dismiss by tapping, or
+            // which naturally gets replaced by a later status), "Move confirmed" is terminal —
+            // nothing else ever overwrites or clears it, so without this it would sit in the
+            // status capsule forever. Auto-clear it a few seconds later, but only if some other
+            // event hasn't already replaced it with a newer message in the meantime.
+            viewModelScope.launch {
+                delay(4_000)
+                if (_statusMessage.value == "Move confirmed") {
+                    _statusMessage.value = ""
+                }
+            }
         } else {
             AuditService.log("SPLICE_CONFIRM_STALE_GENERATION", mapOf("txid" to txid))
         }
@@ -2411,7 +2580,8 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
         val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty() || address.isBlank()) return null
+        val targetAddress = QRCodeUtils.normalizeAddress(address)
+        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
 
         val urls = listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
         for (baseUrl in urls) {
@@ -2426,7 +2596,8 @@ class AppState(private val context: Context) : ViewModel() {
                     val vouts = txJson.optJSONArray("vout") ?: return@use
                     for (i in 0 until vouts.length()) {
                         val vout = vouts.optJSONObject(i) ?: continue
-                        if (vout.optString("scriptpubkey_address", "") == address) {
+                        val voutAddress = QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
+                        if (voutAddress == targetAddress) {
                             return true
                         }
                     }
@@ -2541,7 +2712,9 @@ class AppState(private val context: Context) : ViewModel() {
             val now = System.currentTimeMillis() / 1000
             if (now - sc.lastStabilityPayment < Constants.STABILITY_PAYMENT_COOLDOWN_SECS.toLong()) return
 
-            val amountMsat = USD(abs(result.dollarsFromPar)).toMsats(price)
+            // Stable allocations are sat-denominated — floor to whole sats so the signed
+            // amount matches the keysend exactly (mirrors src/stable.rs).
+            val amountMsat = (USD(abs(result.dollarsFromPar)).toMsats(price) / 1000L) * 1000L
             if (amountMsat == 0L) return
 
             // Chain-freshness gate (see #243): never pay on a stale chain tip, and check
@@ -2569,15 +2742,52 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
 
+            // Re-validate under booksLock now that the send is claimed. The decision above was
+            // made on the tick-top `sc`; an ordinary-send reconcile or an incoming settlement
+            // may have committed and published since, leaving the books already on par. Re-read
+            // the row and re-decide at the same price; if the answer or the amount changed,
+            // release the claim and let the next tick decide afresh. This narrows the
+            // stale-decision window to the sign+send below — it cannot be closed without
+            // holding the lock across a network call, which would block the LDK event handler
+            // (#299 review).
+            val revalidated = synchronized(booksLock) {
+                publishBooksFromDB()
+                _stableChannel.value
+            }
+            val recheck = StabilityService.checkStabilityAction(revalidated, price)
+            val recheckedAmountMsat = if (recheck.action == StabilityService.StabilityAction.PAY) {
+                (USD(abs(recheck.dollarsFromPar)).toMsats(price) / 1000L) * 1000L
+            } else 0L
+            if (recheckedAmountMsat != amountMsat) {
+                try { databaseService?.clearPendingSend() } catch (_: Exception) {}
+                AuditService.log("STABILITY_SKIP", mapOf(
+                    "reason" to "books_changed_after_decision",
+                    "claimed_amount_msat" to amountMsat,
+                    "rechecked_amount_msat" to recheckedAmountMsat
+                ))
+                return
+            }
+
             val paymentId = try {
-                // Tag with the STABLE_CHANNEL_TLV [0x01] marker so the LSP classifies
-                // this as a settlement (operator GUI) and runs reconcile_incoming_stability
-                // immediately, matching every other sender. See issue #161.
-                nodeService.sendStabilityPayment(
-                    amountMsat,
-                    sc.counterparty,
-                    listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), byteArrayOf(1)))
+                // Attach only the signed STABILITY_PAYMENT_V1 envelope — the legacy
+                // STABLE_CHANNEL_TLV [0x01] marker is gone (#270). If the envelope can't
+                // be built, release the claim and skip the payment entirely.
+                val signedEnvelope = StabilityPaymentProtocol.buildSignedEnvelope(
+                    channelId = revalidated.channelId,
+                    amountMsat = amountMsat,
+                    expectedUsd = revalidated.expectedUSD.amount,
+                    sign = { payload -> nodeService.signMessage(payload) }
                 )
+                if (signedEnvelope == null) {
+                    try { databaseService?.clearPendingSend() } catch (_: Exception) {}
+                    AuditService.log("STABILITY_SKIP", mapOf("reason" to "envelope_build_failed"))
+                    return
+                }
+                val records = listOf(CustomTlvRecord(
+                    Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
+                    signedEnvelope.toByteArray(Charsets.UTF_8)
+                ))
+                nodeService.sendStabilityPayment(amountMsat, sc.counterparty, records)
             } catch (e: NodeService.StaleLightningSyncException) {
                 // The wrapper's send-boundary gate fired (sync went stale after the precheck
                 // above). Send never happened — release the claim and retry next tick.
@@ -2614,28 +2824,36 @@ class AppState(private val context: Context) : ViewModel() {
             }
 
             try {
-                val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-                    paymentId = paymentIdString,
-                    paymentType = "stability",
-                    direction = "sent",
-                    amountMsat = amountMsat,
-                    amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                    btcPrice = price,
-                    counterparty = sc.counterparty,
-                    userChannelId = sc.userChannelId,
-                    backingDeltaSats = -(amountMsat / 1000)
-                ) ?: throw IllegalStateException("DB service unavailable")
-                val backing = persistence.backingSats
-                    ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
-                val updated = sc.copy(lastStabilityPayment = now, backingSats = backing)
-                _stableChannel.value = updated
-                saveChannelToDB(preserveBacking = true)
+                synchronized(booksLock) {
+                    val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
+                        paymentId = paymentIdString,
+                        paymentType = "stability",
+                        direction = "sent",
+                        amountMsat = amountMsat,
+                        amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
+                        btcPrice = price,
+                        counterparty = sc.counterparty,
+                        userChannelId = sc.userChannelId,
+                        backingDeltaSats = -(amountMsat / 1000)
+                    ) ?: throw IllegalStateException("DB service unavailable")
+                    persistence.backingSats
+                        ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
+                    // Publish from the row — not from persistence.backingSats and not from the
+                    // tick-top `sc` snapshot. An ordinary send can reconcile (commit + publish)
+                    // at any point; republishing `sc` clobbered its expectedUSD, and publishing
+                    // the transaction-returned absolute backing clobbered its newer backing,
+                    // leaving in-memory books off-par and the next tick paying for nothing
+                    // (#299 review). Under booksLock the read-and-publish can't interleave with
+                    // another path's commit-and-publish. The debit is already durable and
+                    // lastStabilityPayment isn't a column, so no save is needed here.
+                    publishBooksFromDB(lastStabilityPayment = now)
+                }
                 databaseService?.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
             } catch (e: Exception) {
                 // The send already succeeded. Keep the durable marker and block all later sends
                 // until the payment row and backing delta can be committed together.
-                _stableChannel.value = sc.copy(lastStabilityPayment = now)
+                _stableChannel.update { it.copy(lastStabilityPayment = now) }
                 FCMService.flagPendingPayment(context)
                 AuditService.log(
                     "STABILITY_PAYMENT_PERSISTENCE_FAILED",
@@ -2715,21 +2933,25 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         return try {
-            val persistence = db.recordPaymentAndMaybeUpdateBacking(
-                paymentId = pendingPaymentId,
-                paymentType = "stability",
-                direction = "sent",
-                amountMsat = pending.amountMsat,
-                amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.price,
-                btcPrice = pending.price,
-                counterparty = sc.counterparty,
-                userChannelId = sc.userChannelId,
-                backingDeltaSats = -(pending.amountMsat / 1000)
-            )
-            val backing = persistence.backingSats
-                ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
-            _stableChannel.value = sc.copy(backingSats = backing)
-            saveChannelToDB(preserveBacking = true)
+            synchronized(booksLock) {
+                val persistence = db.recordPaymentAndMaybeUpdateBacking(
+                    paymentId = pendingPaymentId,
+                    paymentType = "stability",
+                    direction = "sent",
+                    amountMsat = pending.amountMsat,
+                    amountUSD = (pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * pending.price,
+                    btcPrice = pending.price,
+                    counterparty = sc.counterparty,
+                    userChannelId = sc.userChannelId,
+                    backingDeltaSats = -(pending.amountMsat / 1000)
+                )
+                persistence.backingSats
+                    ?: throw IllegalStateException("DB did not return backing during outgoing reconciliation")
+                // Same rule as runStabilityCheck(): publish from the row under booksLock. The
+                // old snapshot republish + preserveBacking save here wrote a stale expected_usd
+                // over a concurrent ordinary-send reconcile (#299 review).
+                publishBooksFromDB()
+            }
             db.clearPendingSend()
             true
         } catch (e: Exception) {
@@ -3006,38 +3228,39 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun setOnchainReceiveAddress(address: String?) {
+        val normalized = address?.let { QRCodeUtils.normalizeAddress(it) }
         val oldAddress = _onchainReceiveAddress.value
-        _onchainReceiveAddress.value = address
-        val editor = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
-        if (address == null) {
-            editor.remove("onchain_receive_address")
+        _onchainReceiveAddress.value = normalized
+        val editor = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE).edit()
+        if (normalized == null) {
+            editor.remove(BalanceCacheKey.RECEIVE_ADDRESS)
         } else {
-            editor.putString("onchain_receive_address", address)
+            editor.putString(BalanceCacheKey.RECEIVE_ADDRESS, normalized)
         }
         editor.apply()
 
-        if (!oldAddress.isNullOrBlank() && oldAddress != address) {
+        if (!oldAddress.isNullOrBlank() && oldAddress != normalized) {
             mempoolWebSocketService.untrackAddress(oldAddress)
         }
 
-        if (!address.isNullOrBlank() && oldAddress != address) {
+        if (!normalized.isNullOrBlank() && oldAddress != normalized) {
             // New receive request: drop stale txid from previous address/session.
             setLastReceiveTxid(null, null)
         }
 
-        if (address == null) {
+        if (normalized == null) {
             return
         }
 
-        mempoolWebSocketService.trackAddress(address)
+        mempoolWebSocketService.trackAddress(normalized)
         
         // Start polling for this address to be hit
         viewModelScope.launch {
             val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
-            val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(address, esploraUrl)
+            val txid = com.stablechannels.app.services.OnchainTxidResolver.resolve(normalized, esploraUrl)
             if (txid != null) {
-                setLastReceiveTxid(txid, address)
-                databaseService?.reconcileResolvedReceiveTxid(txid, address)
+                setLastReceiveTxid(txid, normalized)
+                databaseService?.reconcileResolvedReceiveTxid(txid, normalized)
             }
         }
     }
@@ -3367,7 +3590,15 @@ class AppState(private val context: Context) : ViewModel() {
                 latestPrice = sc.latestPrice
             )
         }
-        // Cache in SharedPreferences so UI has correct state on next launch
+        cacheBalanceForLaunch()
+    }
+
+    /** Cache in SharedPreferences so the UI has correct state on next launch, before the
+     *  database is open. Must be called any time _stableChannel's expectedUSD changes and is
+     *  considered durable — including paths that update the DB directly (e.g.
+     *  reconcileOutgoingBacking()) without going through saveChannelToDB(). */
+    private fun cacheBalanceForLaunch() {
+        val sc = _stableChannel.value
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).edit()
             .putString("cached_channel_id", sc.channelId)
             .putString("cached_user_channel_id", sc.userChannelId)
@@ -3380,6 +3611,24 @@ class AppState(private val context: Context) : ViewModel() {
      *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
     fun onForegroundResume() {
         loadChannelFromDB()
+    }
+
+    /** Republish expectedUSD/backingSats from the channel row — the single source of truth for
+     *  the stable books — never from an earlier in-memory snapshot or a transaction's return
+     *  value. Must be called inside synchronized(booksLock), immediately after the transaction
+     *  that changed the row, so no other path can commit-and-publish in between.
+     *  [recomputeNative] is only safe when the in-memory receiver balance is already live. */
+    private fun publishBooksFromDB(lastStabilityPayment: Long? = null, recomputeNative: Boolean = false) {
+        val ucid = _stableChannel.value.userChannelId
+        if (ucid.isEmpty()) return
+        val record = databaseService?.loadChannel(ucid) ?: return
+        _stableChannel.update {
+            it.copy(
+                expectedUSD = USD(record.expectedUSD),
+                backingSats = record.backingSats,
+                lastStabilityPayment = lastStabilityPayment ?: it.lastStabilityPayment
+            ).also { c -> if (recomputeNative) StabilityService.recomputeNative(c) }
+        }
     }
 
     private fun loadChannelFromDB() {

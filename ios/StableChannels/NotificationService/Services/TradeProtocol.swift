@@ -522,3 +522,149 @@ enum TradeProtocol {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 }
+
+// MARK: - Signed stability settlements (STABILITY_PAYMENT_V1, issue #270)
+
+struct StabilitySettlement: Equatable {
+    let settlementId: String
+    let channelId: String
+    let amountMsat: UInt64
+    let direction: String
+    let expectedUSD: Double
+    let createdAt: UInt64
+    let expiresAt: UInt64
+}
+
+enum StabilitySettlementValidation: Equatable {
+    case valid(StabilitySettlement)
+    case invalid(String)
+}
+
+extension TradeProtocol {
+    /// Resolve authentication from the channel being accounted for, never from the default
+    /// LSP or a different channel. Readiness is irrelevant for an already received payment.
+    static func settlementCounterparty(
+        channelId: String,
+        userChannelId: String,
+        channels: [(channelId: String, userChannelId: String, counterparty: String)]
+    ) -> String? {
+        guard !channelId.isEmpty, !userChannelId.isEmpty else { return nil }
+        let matching = channels.filter {
+            $0.channelId == channelId && $0.userChannelId == userChannelId
+        }
+        guard matching.count == 1, let peer = matching.first?.counterparty,
+              !peer.isEmpty else { return nil }
+        return peer
+    }
+
+    static let stabilitySettlementMessageType = "STABILITY_PAYMENT_V1"
+    static let stabilityDirectionUserToLsp = "user_to_lsp"
+    static let stabilityDirectionLspToUser = "lsp_to_user"
+    static let stabilitySettlementTTLSecs: UInt64 = 1_209_600
+    static let stabilitySettlementClockSkewSecs: UInt64 = 60
+    static let stabilitySettlementMaxEnvelopeBytes = 8 * 1024
+
+    /// Build the signed STABILITY_PAYMENT_V1 envelope TLV value for an outgoing settlement.
+    /// Returns nil on invalid inputs or signing failure; callers must skip the payment
+    /// entirely — there is no legacy [1] marker fallback.
+    static func buildSignedStabilitySettlement(
+        channelId: String,
+        amountMsat: UInt64,
+        direction: String,
+        expectedUSD: Double,
+        now: UInt64 = UInt64(Date().timeIntervalSince1970),
+        settlementId: String = randomIdentifier(),
+        sign: ([UInt8]) throws -> String
+    ) -> Data? {
+        guard isCanonicalIdentifier(settlementId), isCanonicalIdentifier(channelId),
+              amountMsat > 0, amountMsat % 1000 == 0,
+              direction == stabilityDirectionUserToLsp || direction == stabilityDirectionLspToUser,
+              expectedUSD.isFinite, expectedUSD >= 0 else { return nil }
+        let object: [String: Any] = [
+            "type": stabilitySettlementMessageType,
+            "settlement_id": settlementId,
+            "channel_id": channelId,
+            "amount_msat": amountMsat,
+            "direction": direction,
+            "expected_usd": expectedUSD,
+            "created_at": now,
+            "expires_at": now + stabilitySettlementTTLSecs
+        ]
+        guard JSONSerialization.isValidJSONObject(object),
+              let payloadData = try? JSONSerialization.data(
+                  withJSONObject: object,
+                  options: [.sortedKeys, .withoutEscapingSlashes]
+              ),
+              let payload = String(data: payloadData, encoding: .utf8),
+              let signature = try? sign(Array(payload.utf8)) else { return nil }
+        let envelope: [String: Any] = [
+            "payload": payload,
+            "signature": signature
+        ]
+        guard let envelopeData = try? JSONSerialization.data(
+            withJSONObject: envelope,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        ), envelopeData.count <= stabilitySettlementMaxEnvelopeBytes else { return nil }
+        return envelopeData
+    }
+
+    /// Parse and fully validate an inbound signed settlement TLV value: envelope size and
+    /// shape, payload fields, freshness window, direction, channel, amount binding, and
+    /// counterparty signature. The invalid reason strings are stable for log assertions.
+    static func parseSignedStabilitySettlement(
+        data: Data,
+        expectedDirection: String,
+        expectedChannelId: String,
+        actualAmountMsat: UInt64,
+        expectedCounterparty: String,
+        now: UInt64 = UInt64(Date().timeIntervalSince1970),
+        verifySignature: ([UInt8], String, String) -> Bool
+    ) -> StabilitySettlementValidation {
+        guard data.count <= stabilitySettlementMaxEnvelopeBytes else {
+            return .invalid("envelope_too_large")
+        }
+        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = envelope["payload"] as? String,
+              let signature = envelope["signature"] as? String,
+              let payloadData = payload.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+              let type = object["type"] as? String,
+              type == stabilitySettlementMessageType else {
+            return .invalid("malformed_envelope")
+        }
+        guard let settlementId = object["settlement_id"] as? String,
+              let channelId = object["channel_id"] as? String,
+              let direction = object["direction"] as? String,
+              let amountSigned = jsonInteger(object["amount_msat"]),
+              let expectedValue = jsonDouble(object["expected_usd"]),
+              let createdSigned = jsonInteger(object["created_at"]),
+              let expiresSigned = jsonInteger(object["expires_at"]),
+              isCanonicalIdentifier(settlementId), isCanonicalIdentifier(channelId),
+              amountSigned > 0, amountSigned % 1000 == 0,
+              expectedValue.isFinite, expectedValue >= 0,
+              createdSigned >= 0, expiresSigned >= createdSigned,
+              expiresSigned - createdSigned <= Int64(stabilitySettlementTTLSecs) else {
+            return .invalid("invalid_fields")
+        }
+        let settlement = StabilitySettlement(
+            settlementId: settlementId,
+            channelId: channelId,
+            amountMsat: UInt64(amountSigned),
+            direction: direction,
+            expectedUSD: expectedValue,
+            createdAt: UInt64(createdSigned),
+            expiresAt: UInt64(expiresSigned)
+        )
+        guard settlement.createdAt <= now + stabilitySettlementClockSkewSecs,
+              now <= settlement.expiresAt + stabilitySettlementClockSkewSecs else {
+            return .invalid("stale")
+        }
+        guard settlement.direction == expectedDirection else { return .invalid("wrong_direction") }
+        guard settlement.channelId == expectedChannelId else { return .invalid("channel_mismatch") }
+        guard settlement.amountMsat == actualAmountMsat else { return .invalid("amount_mismatch") }
+        guard verifySignature(Array(payload.utf8), signature, expectedCounterparty) else {
+            return .invalid("bad_signature")
+        }
+        return .valid(settlement)
+    }
+}

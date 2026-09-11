@@ -1642,9 +1642,10 @@ impl UserApp {
         let lower = input.to_lowercase();
 
         // Try Bolt11 invoice
-        if lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lightning:")
-        {
-            let invoice_str = if lower.starts_with("lightning:") {
+        if lower.starts_with("lnbc") || lower.starts_with("lntb") || lower.starts_with("lightning:") || lower.starts_with("lightning://") {
+            let invoice_str = if lower.starts_with("lightning://") {
+                &input[12..]
+            } else if lower.starts_with("lightning:") {
                 &input[10..]
             } else {
                 &input
@@ -1808,13 +1809,57 @@ impl UserApp {
         }
 
         // Try onchain address — route through splice_out when a channel exists
-        if lower.starts_with("bc1")
-            || lower.starts_with("tb1")
-            || lower.starts_with("1")
-            || lower.starts_with("3")
-            || lower.starts_with("bcrt1")
+        let clean_input = input
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(|line| line.replace('\u{00A0}', " "))
+            .unwrap_or_else(|| input.clone());
+        let clean_trimmed = clean_input.trim();
+        let onchain_candidate = if clean_trimmed.len() >= 10
+            && clean_trimmed.get(..10).is_some_and(|p| p.eq_ignore_ascii_case("bitcoin://"))
         {
-            match ldk_node::bitcoin::Address::from_str(&input) {
+            let without_prefix = &clean_trimmed[10..];
+            without_prefix
+                .split('?')
+                .next()
+                .unwrap_or(without_prefix)
+                .trim()
+        } else if clean_trimmed.len() >= 8 && clean_trimmed.get(..8).is_some_and(|p| p.eq_ignore_ascii_case("bitcoin:")) {
+            let without_prefix = &clean_trimmed[8..];
+            without_prefix
+                .split('?')
+                .next()
+                .unwrap_or(without_prefix)
+                .trim()
+        } else {
+            clean_trimmed
+        };
+
+        let is_bech32 = (onchain_candidate.len() >= 3
+            && (onchain_candidate.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("bc1"))
+                || onchain_candidate.get(..3).is_some_and(|p| p.eq_ignore_ascii_case("tb1"))))
+            || (onchain_candidate.len() >= 5
+                && onchain_candidate.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("bcrt1")));
+        let is_base58 = onchain_candidate.starts_with('1')
+            || onchain_candidate.starts_with('3')
+            || onchain_candidate.starts_with('2')
+            || onchain_candidate.starts_with('m')
+            || onchain_candidate.starts_with('n');
+
+        if is_bech32 || is_base58 {
+            let lower_owned;
+            let normalized_addr = if is_bech32
+                && onchain_candidate
+                    .as_bytes()
+                    .iter()
+                    .any(|b| b.is_ascii_uppercase())
+            {
+                lower_owned = onchain_candidate.to_ascii_lowercase();
+                lower_owned.as_str()
+            } else {
+                onchain_candidate
+            };
+            match ldk_node::bitcoin::Address::from_str(normalized_addr) {
                 Ok(addr) => match addr.require_network(self.network) {
                     Ok(valid_addr) => {
                         // Check if we have a ready channel for splice_out
@@ -1865,7 +1910,7 @@ impl UserApp {
                                     *self.pending_splice.lock().unwrap() = Some(PendingSplice {
                                         direction: "out".to_string(),
                                         amount_sats,
-                                        address: Some(input.clone()),
+                                        address: Some(normalized_addr.to_string()),
                                         onchain_sats_at_start,
                                         channel_value_sats_at_start: ch.channel_value_sats,
                                     });
@@ -1891,7 +1936,7 @@ impl UserApp {
                                         None,
                                         "pending",
                                         None,
-                                        Some(&input),
+                                        Some(normalized_addr),
                                     );
 
                                     self.show_toast("Withdrawal started", "-");
@@ -1973,7 +2018,7 @@ impl UserApp {
                                         None,
                                         "pending",
                                         Some(&txid_str),
-                                        None,
+                                        Some(normalized_addr),
                                     );
                                     self.show_toast("Sent!", "OK");
                                     self.status_message = format!("Onchain TX: {}", txid);

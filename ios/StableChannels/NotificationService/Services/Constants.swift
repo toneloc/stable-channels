@@ -5,6 +5,7 @@ enum Constants {
     static let lspPubkey = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     static let lspAddress = "stablechannels.com:9735"
     static let stableChannelTLVType: UInt64 = 13_377_331
+    static let signedStabilityTLVType: UInt64 = 13_377_333
     static let syncMessageType = "SYNC_V1"
     static let satsInBTC: Double = 100_000_000.0
     static let stabilityThresholdPercent: Double = 0.1

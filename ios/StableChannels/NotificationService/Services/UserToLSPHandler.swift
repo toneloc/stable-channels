@@ -109,11 +109,16 @@ final class UserToLSPHandler: PaymentHandler {
             return
         }
 
-        // Calculate amount
+        // Calculate amount. The signed settlement requires whole sats: floor to a
+        // sat boundary so the signed amount_msat equals the keysend amount exactly.
         let dollarsAbs = abs(dollarsFromPar)
         let btcAmount = dollarsAbs / price
-        let amountMsat = UInt64(btcAmount * Constants.satsInBTC * 1000)
+        let amountMsat = UInt64(btcAmount * Constants.satsInBTC * 1000) / 1000 * 1000
         let amountSats = amountMsat / 1000
+        guard amountSats > 0 else {
+            completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
+            return
+        }
 
         // Chain-freshness gate at the send boundary (see #243): never keysend on a stale
         // chain tip — an outbound HTLC built on an old best block understates its expiry,
@@ -192,12 +197,33 @@ final class UserToLSPHandler: PaymentHandler {
 
         // Send keysend
         do {
-            let tlvRecord = CustomTlvRecord(typeNum: Constants.stableChannelTLVType, value: Data([1]))
+            // Signed-only (issue #270): attach only the signed STABILITY_PAYMENT_V1
+            // envelope on 13377333 — the legacy [1] marker is gone. If the envelope
+            // cannot be built, skip the payment entirely; the next run retries.
+            guard let envelope = TradeProtocol.buildSignedStabilitySettlement(
+                channelId: channelState.channelId,
+                amountMsat: amountMsat,
+                direction: TradeProtocol.stabilityDirectionUserToLsp,
+                expectedUSD: channelState.expectedUSD,
+                sign: { message in try node.signMessage(msg: message) }
+            ) else {
+                db.clearPendingSend()
+                NSLog("[NSE] skipping stability payment: signed settlement envelope build failed")
+                completion(
+                    mutator.buildPending(
+                        base: baseContent,
+                        title: "Payment Pending",
+                        body: "Open app to process stability payment"
+                    ),
+                    true
+                )
+                return
+            }
             let paymentId = try node.spontaneousPayment().sendWithCustomTlvs(
                 amountMsat: amountMsat,
                 nodeId: Constants.lspPubkey,
                 routeParameters: nil,
-                customTlvs: [tlvRecord]
+                customTlvs: [CustomTlvRecord(typeNum: Constants.signedStabilityTLVType, value: envelope)]
             )
 
             // Only an accepted send counts as sent_* — cooldown, no-action, denied-claim,
@@ -233,7 +259,8 @@ final class UserToLSPHandler: PaymentHandler {
                 amountUSD: dollarsAbs,
                 btcPrice: price,
                 backingDeltaSats: -Int64(amountSats),
-                userChannelId: channelState.userChannelId
+                userChannelId: channelState.userChannelId,
+                settlementId: nil
             )
 
             switch result {

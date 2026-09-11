@@ -10,6 +10,12 @@ object Constants {
     const val CLIENT_SAFETY_MARGIN_SATS = 50L
     const val SATS_IN_BTC: Long = 100_000_000L
     const val STABLE_CHANNEL_TLV_TYPE: Long = 13_377_331L
+    const val SIGNED_STABILITY_TLV_TYPE: Long = 13_377_333L
+    /** Maximum signed stability metadata accepted before parsing (src/constants.rs). */
+    const val MAX_SIGNED_STABILITY_TLV_VALUE_BYTES: Int = 8 * 1024
+    const val STABILITY_PAYMENT_MESSAGE_TYPE = "STABILITY_PAYMENT_V1"
+    const val STABILITY_PAYMENT_TTL_SECS: Long = 1_209_600L
+    const val STABILITY_PAYMENT_CLOCK_SKEW_SECS: Long = 60L
     const val TRADE_MESSAGE_TYPE = "TRADE_V1"
     const val SYNC_MESSAGE_TYPE = "SYNC_V1"
     const val TRADE_REJECTED_MESSAGE_TYPE = "TRADE_REJECTED_V1"

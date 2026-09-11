@@ -182,6 +182,12 @@ final class DatabaseService {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS seen_stability_settlements (
+                settlement_id TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS onchain_receive_txids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,

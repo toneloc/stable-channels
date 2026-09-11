@@ -7,12 +7,11 @@ import android.content.Context
  *
  * Two independent toggles:
  * - App Unlock: requires biometric auth on launch and resume after 5s in background
- * - Payment Confirmation: requires biometric auth before Lightning sends
+ * - Payment Confirmation: requires biometric auth before sends (on-chain or Lightning)
  *
- * Auth gate rules:
- * - On-chain sends ALWAYS require auth (regardless of toggle state)
+ * Auth gate rules (matches iOS parity: a single toggle governs both send types):
  * - Seed phrase viewing ALWAYS requires auth (regardless of toggle state)
- * - Lightning sends require auth only when Payment Confirmation is enabled
+ * - On-chain and Lightning sends both require auth only when Payment Confirmation is enabled
  * - Disabling either toggle requires auth; enabling does not
  */
 data class AppAccessPreferences(
@@ -75,16 +74,14 @@ object AppAccessPreferencesManager {
     /**
      * Determines whether biometric authentication should be required for a send operation.
      *
-     * Rules:
-     * - On-chain sends ALWAYS require auth (regardless of Payment Confirmation toggle)
-     * - Lightning sends require auth only when Payment Confirmation is enabled
+     * Matches iOS parity: a single Payment Confirmation toggle governs both send types,
+     * with no hardcoded exception for on-chain.
      *
      * @param context Android context for reading preferences
      * @param isOnChain true if this is an on-chain send (splice-out or direct), false for Lightning
      * @return true if auth should be required before proceeding with the send
      */
     fun shouldRequireAuth(context: Context, isOnChain: Boolean): Boolean {
-        if (isOnChain) return true
         return isPaymentConfirmationEnabled(context)
     }
 
