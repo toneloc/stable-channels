@@ -3684,26 +3684,26 @@ class AppState {
         }
 
         for attempt in 1...3 {
-            let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since)
-            if let candles {
-                if !candles.isEmpty {
-                    do {
-                        let count = try db.priceRepo.backfillHourlyPrices(candles)
-                        if count > 0 {
-                            print("[Chart] Backfilled \(count) hourly price points from Kraken")
-                            await MainActor.run {
-                                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                            }
-                        }
-                    } catch {
-                        print("[Chart] Hourly backfill failed: \(error)")
-                    }
+            guard let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since) else {
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
                 }
-                break
+                continue
             }
-            if attempt < 3 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            if !candles.isEmpty {
+                do {
+                    let count = try db.priceRepo.backfillHourlyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) hourly price points from Kraken")
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                        }
+                    }
+                } catch {
+                    print("[Chart] Hourly backfill failed: \(error)")
+                }
             }
+            break
         }
     }
 
@@ -3732,26 +3732,26 @@ class AppState {
         }
 
         for attempt in 1...3 {
-            let candles = await priceChartService.fetchKrakenDailyOHLC(since: since)
-            if let candles {
-                if !candles.isEmpty {
-                    do {
-                        let count = try db.priceRepo.backfillDailyPrices(candles)
-                        if count > 0 {
-                            print("[Chart] Backfilled \(count) daily price points from Kraken")
-                            await MainActor.run {
-                                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                            }
-                        }
-                    } catch {
-                        print("[Chart] Daily backfill failed: \(error)")
-                    }
+            guard let candles = await priceChartService.fetchKrakenDailyOHLC(since: since) else {
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
                 }
-                break
+                continue
             }
-            if attempt < 3 {
-                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+            if !candles.isEmpty {
+                do {
+                    let count = try db.priceRepo.backfillDailyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) daily price points from Kraken")
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                        }
+                    }
+                } catch {
+                    print("[Chart] Daily backfill failed: \(error)")
+                }
             }
+            break
         }
     }
 

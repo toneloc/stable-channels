@@ -3682,20 +3682,19 @@ class AppState(private val context: Context) : ViewModel() {
             }
             for (attempt in 1..3) {
                 val candles = priceChartService.fetchKrakenHourlyOHLC(since)
-                if (candles != null) {
-                    if (candles.isNotEmpty()) {
-                        val count = db.backfillHourlyPrices(candles)
-                        if (count > 0) {
-                            AuditService.log("CHART_BACKFILL", mapOf("points" to count))
-                            cachedChartHourly = db.getPriceHistory(24 * 30)
-                            _chartUpdateTrigger.value = System.currentTimeMillis()
-                        }
+                if (candles == null) {
+                    if (attempt < 3) kotlinx.coroutines.delay(attempt * 1000L)
+                    continue
+                }
+                if (candles.isNotEmpty()) {
+                    val count = db.backfillHourlyPrices(candles)
+                    if (count > 0) {
+                        AuditService.log("CHART_BACKFILL", mapOf("points" to count))
+                        cachedChartHourly = db.getPriceHistory(24 * 30)
+                        _chartUpdateTrigger.value = System.currentTimeMillis()
                     }
-                    break
                 }
-                if (attempt < 3) {
-                    kotlinx.coroutines.delay(attempt * 1000L)
-                }
+                break
             }
         } finally {
             isBackfillingHourly.set(false)
@@ -3719,26 +3718,25 @@ class AppState(private val context: Context) : ViewModel() {
             }
             for (attempt in 1..3) {
                 val candles = priceChartService.fetchKrakenDailyOHLC(since)
-                if (candles != null) {
-                    if (candles.isNotEmpty()) {
-                        val count = db.backfillDailyPrices(candles)
-                        if (count > 0) {
-                            AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
-                            val dailyPrices = db.getDailyPrices(99999)
-                            val daily = dailyPrices.mapNotNull { d ->
-                                val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
-                                val ts = date.time / 1000
-                                com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
-                            }.sortedBy { it.timestamp }
-                            cachedChartDaily = daily
-                            _chartUpdateTrigger.value = System.currentTimeMillis()
-                        }
+                if (candles == null) {
+                    if (attempt < 3) kotlinx.coroutines.delay(attempt * 1000L)
+                    continue
+                }
+                if (candles.isNotEmpty()) {
+                    val count = db.backfillDailyPrices(candles)
+                    if (count > 0) {
+                        AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
+                        val dailyPrices = db.getDailyPrices(99999)
+                        val daily = dailyPrices.mapNotNull { d ->
+                            val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
+                            val ts = date.time / 1000
+                            com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
+                        }.sortedBy { it.timestamp }
+                        cachedChartDaily = daily
+                        _chartUpdateTrigger.value = System.currentTimeMillis()
                     }
-                    break
                 }
-                if (attempt < 3) {
-                    kotlinx.coroutines.delay(attempt * 1000L)
-                }
+                break
             }
         } finally {
             isBackfillingDaily.set(false)

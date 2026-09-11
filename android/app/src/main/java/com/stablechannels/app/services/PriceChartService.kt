@@ -32,23 +32,23 @@ class PriceChartService(
         return try {
             val request = Request.Builder().url(url).build()
             val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
-            response.use { resp ->
+            val body = response.use { resp ->
                 if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
-                val json = JSONObject(body)
-                val errorArray = json.optJSONArray("error")
-                if (errorArray != null && errorArray.length() > 0) return null
-                val result = json.optJSONObject("result") ?: return null
-                val xxbtzusd = result.optJSONArray("XXBTZUSD") ?: result.optJSONArray("XBTUSD") ?: return emptyList()
-                val candles = mutableListOf<Pair<Long, Double>>()
-                for (i in 0 until xxbtzusd.length()) {
-                    val candle = xxbtzusd.optJSONArray(i) ?: continue
-                    val ts = candle.optLong(0)
-                    val close = candle.optString(4).toDoubleOrNull() ?: continue
-                    if (ts > 0 && close > 0) candles.add(ts to close)
-                }
-                candles.sortedBy { it.first }
+                resp.body?.string()
+            } ?: return null
+            val json = JSONObject(body)
+            val errorArray = json.optJSONArray("error")
+            if (errorArray != null && errorArray.length() > 0) return null
+            val result = json.optJSONObject("result") ?: return null
+            val xxbtzusd = result.optJSONArray("XXBTZUSD") ?: result.optJSONArray("XBTUSD") ?: return emptyList()
+            val candles = mutableListOf<Pair<Long, Double>>()
+            for (i in 0 until xxbtzusd.length()) {
+                val candle = xxbtzusd.optJSONArray(i) ?: continue
+                val ts = candle.optLong(0)
+                val close = candle.optString(4).toDoubleOrNull() ?: continue
+                if (ts > 0 && close > 0) candles.add(ts to close)
             }
+            candles.sortedBy { it.first }
         } catch (_: Exception) {
             null
         }
@@ -64,45 +64,45 @@ class PriceChartService(
         return try {
             val request = Request.Builder().url(url).build()
             val response = withContext(Dispatchers.IO) { client.newCall(request).execute() }
-            response.use { resp ->
+            val body = response.use { resp ->
                 if (!resp.isSuccessful) return null
-                val body = resp.body?.string() ?: return null
-                val json = JSONObject(body)
-                val errorArray = json.optJSONArray("error")
-                if (errorArray != null && errorArray.length() > 0) return null
-                val result = json.optJSONObject("result") ?: return null
-                val candlesArray = result.optJSONArray("XXBTZUSD") ?: result.optJSONArray("XBTUSD") ?: return emptyList()
+                resp.body?.string()
+            } ?: return null
+            val json = JSONObject(body)
+            val errorArray = json.optJSONArray("error")
+            if (errorArray != null && errorArray.length() > 0) return null
+            val result = json.optJSONObject("result") ?: return null
+            val candlesArray = result.optJSONArray("XXBTZUSD") ?: result.optJSONArray("XBTUSD") ?: return emptyList()
 
-                val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-                    timeZone = TimeZone.getTimeZone("UTC")
-                }
-
-                val records = mutableListOf<DailyPriceRecord>()
-                for (i in 0 until candlesArray.length()) {
-                    val candle = candlesArray.optJSONArray(i) ?: continue
-                    val ts = candle.optLong(0)
-                    val open = candle.optString(1).toDoubleOrNull() ?: continue
-                    val high = candle.optString(2).toDoubleOrNull() ?: continue
-                    val low = candle.optString(3).toDoubleOrNull() ?: continue
-                    val close = candle.optString(4).toDoubleOrNull() ?: continue
-                    val volume = candle.optString(6).toDoubleOrNull()
-
-                    if (ts > 0) {
-                        val dateStr = fmt.format(Date(ts * 1000))
-                        records.add(
-                            DailyPriceRecord(
-                                date = dateStr,
-                                open = open,
-                                high = high,
-                                low = low,
-                                close = close,
-                                volume = volume
-                            )
-                        )
-                    }
-                }
-                records.sortedBy { it.date }
+            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
             }
+
+            val records = mutableListOf<DailyPriceRecord>()
+            for (i in 0 until candlesArray.length()) {
+                val candle = candlesArray.optJSONArray(i) ?: continue
+                val ts = candle.optLong(0)
+                val open = candle.optString(1).toDoubleOrNull() ?: continue
+                val high = candle.optString(2).toDoubleOrNull() ?: continue
+                val low = candle.optString(3).toDoubleOrNull() ?: continue
+                val close = candle.optString(4).toDoubleOrNull() ?: continue
+                val volume = candle.optString(6).toDoubleOrNull()
+
+                if (ts > 0) {
+                    val dateStr = fmt.format(Date(ts * 1000))
+                    records.add(
+                        DailyPriceRecord(
+                            date = dateStr,
+                            open = open,
+                            high = high,
+                            low = low,
+                            close = close,
+                            volume = volume
+                        )
+                    )
+                }
+            }
+            records.sortedBy { it.date }
         } catch (_: Exception) {
             null
         }
