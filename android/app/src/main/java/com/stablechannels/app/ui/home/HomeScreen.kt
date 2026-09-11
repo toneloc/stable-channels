@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -289,7 +291,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         if (direction == TradeDirection.BUY) showBuy = true else showSell = true
                     } else null
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(12.dp))
             }
 
             // Syncing indicator
@@ -319,61 +321,154 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                 val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
 
+                val pendingReceive = latestPendingOnchainReceive
+                val pendingReceiveTxid = pendingReceive?.txid
+                val hasPendingOnchainReceive = pendingReceive != null
+                val receiveConfirmations = pendingReceive?.confirmations
+                val receiveRequiredConfirmations = pendingReceive?.let {
+                    AppState.requiredConfirmationsForType(it.paymentType)
+                }
+                // Only the "Move" + incoming-deposit combo is busy enough (3 rows) to warrant
+                // collapsing; every other state is already a single compact row like iOS.
+                val isBusyOnchainState = hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive
+                var onchainExpanded by remember { mutableStateOf(false) }
+                val chevronRotation by animateFloatAsState(if (onchainExpanded) 90f else 0f, label = "onchainChevron")
+
                 Card(
                     modifier = Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                    Column(
+                        (if (isBusyOnchainState) Modifier.clickable { onchainExpanded = !onchainExpanded } else Modifier)
+                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Onchain Account", style = MaterialTheme.typography.labelMedium)
-                            Text(
-                                onchainUSD.usdFormatted(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            Text("Onchain Account", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    onchainUSD.usdFormatted(),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                if (isBusyOnchainState) {
+                                    Icon(
+                                        Icons.Filled.ChevronRight,
+                                        contentDescription = if (onchainExpanded) "Collapse" else "Expand",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .padding(start = 2.dp)
+                                            .size(18.dp)
+                                            .rotate(chevronRotation)
+                                    )
+                                }
+                            }
                         }
-                        val pendingReceiveTxid = latestPendingOnchainReceive?.txid
-                        val hasPendingOnchainReceive = latestPendingOnchainReceive != null
                         if (isSweeping) {
                             // 1. Splice-in in progress
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(10.dp))
                             PendingRow("Move pending...", appState.spliceTxid, context)
                         } else if (isChannelClosing) {
                             // 2. Channel closing
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(10.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
-                            Spacer(Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("Move to Lightning Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Button(
-                                    onClick = {
-                                        scope.launch(Dispatchers.IO) {
-                                            appState.sweepToChannel()
-                                        }
-                                    },
-                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
-                                ) {
-                                    Text("Move", fontSize = 13.sp)
-                                }
-                            }
                             if (hasPendingOnchainReceive) {
-                                Spacer(Modifier.height(6.dp))
-                                PendingRow("Receiving onchain...", pendingReceiveTxid, context)
+                                // Busy state — both "Move" and an incoming deposit at once.
+                                // Collapsed: a one-line gist. Expanded: Move button + the full
+                                // receiving-deposit detail (progress ring + explorer link).
+                                if (!onchainExpanded) {
+                                    Spacer(Modifier.height(4.dp))
+                                    val suffix = if (receiveConfirmations != null && receiveRequiredConfirmations != null) {
+                                        " ($receiveConfirmations/$receiveRequiredConfirmations)"
+                                    } else ""
+                                    Text(
+                                        "Ready to move \u00b7 Receiving onchain$suffix",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    )
+                                }
+                                AnimatedVisibility(
+                                    visible = onchainExpanded,
+                                    enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+                                    exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
+                                ) {
+                                    Column {
+                                        Spacer(Modifier.height(10.dp))
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text("Move to Lightning Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    scope.launch(Dispatchers.IO) {
+                                                        appState.sweepToChannel()
+                                                    }
+                                                },
+                                                shape = RoundedCornerShape(12.dp),
+                                                colors = ButtonDefaults.filledTonalButtonColors(
+                                                    containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = if (isSystemInDarkTheme()) 0.15f else 0.15f),
+                                                    contentColor = MaterialTheme.colorScheme.secondary
+                                                ),
+                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                                modifier = Modifier.height(32.dp)
+                                            ) {
+                                                Text("Move", fontSize = 13.sp)
+                                            }
+                                        }
+                                        Spacer(Modifier.height(8.dp))
+                                        PendingRow(
+                                            "Receiving onchain...",
+                                            pendingReceiveTxid,
+                                            context,
+                                            amountSats = pendingReceive?.amountSats,
+                                            confirmations = receiveConfirmations,
+                                            requiredConfirmations = receiveRequiredConfirmations
+                                        )
+                                    }
+                                }
+                            } else {
+                                // Simple case — nothing else pending, match iOS's plain layout.
+                                Spacer(Modifier.height(10.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Move to Lightning Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    FilledTonalButton(
+                                        onClick = {
+                                            scope.launch(Dispatchers.IO) {
+                                                appState.sweepToChannel()
+                                            }
+                                        },
+                                        shape = RoundedCornerShape(12.dp),
+                                        colors = ButtonDefaults.filledTonalButtonColors(
+                                            // Same tonal treatment as the Send/Receive buttons below
+                                            // (ActionButton), just tinted with the app's amber "native
+                                            // BTC" accent so this on-chain action still reads as distinct.
+                                            containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = if (isSystemInDarkTheme()) 0.15f else 0.15f),
+                                            contentColor = MaterialTheme.colorScheme.secondary
+                                        ),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(32.dp)
+                                    ) {
+                                        Text("Move", fontSize = 13.sp)
+                                    }
+                                }
                             }
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
-                            Spacer(Modifier.height(8.dp))
+                            Spacer(Modifier.height(10.dp))
                             val pendingCloseId = appState.pendingClosePaymentId
                             // Prefer close txid if known — pendingClosePaymentId may already be
                             // cleared by detectOnchainDeposit even while funds are still unconfirmed
@@ -390,15 +485,23 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 hasPendingOnchainReceive -> "Receiving onchain..."
                                 else -> "Deposit confirming..."
                             }
-                            PendingRow(text, effectiveTxid, context)
+                            PendingRow(
+                                text,
+                                effectiveTxid,
+                                context,
+                                amountSats = if (hasPendingOnchainReceive && !isClosePending) pendingReceive?.amountSats else null,
+                                confirmations = if (hasPendingOnchainReceive && !isClosePending) receiveConfirmations else null,
+                                requiredConfirmations = if (hasPendingOnchainReceive && !isClosePending) receiveRequiredConfirmations else null
+                            )
                             if (!hasReadyChannel) {
+                                Spacer(Modifier.height(4.dp))
                                 Text("Receive a payment over Lightning to activate your account.",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
-                            Spacer(Modifier.height(4.dp))
+                            Spacer(Modifier.height(8.dp))
                             Text("Receive a payment over Lightning to activate your account.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -587,37 +690,70 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
 }
 
 @Composable
-private fun PendingRow(text: String, txid: String?, context: android.content.Context) {
-    if (txid != null) {
-        // Has txid — short text + button in one row (matches iOS layout)
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
+private fun PendingRow(
+    text: String,
+    txid: String?,
+    context: android.content.Context,
+    amountSats: Long? = null,
+    confirmations: Int? = null,
+    requiredConfirmations: Int? = null
+) {
+    // A real confirmation count gives concrete progress ("2/6 confirmations") instead of
+    // a static hourglass that never changes for up to an hour on a fresh onchain deposit.
+    // Only show progress once a txid is known — before that the confirmation tracker has
+    // nothing to count yet, and an empty ring next to "0/6" would read as stalled rather
+    // than as not-yet-detected.
+    val progress = if (txid != null && confirmations != null && requiredConfirmations != null && requiredConfirmations > 0) {
+        (confirmations.toFloat() / requiredConfirmations.toFloat()).coerceIn(0f, 1f)
+    } else null
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        if (progress != null) {
+            CircularProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.size(14.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+            )
+        } else {
             Text("\u231B", fontSize = 14.sp)
-            Spacer(Modifier.width(6.dp))
-            Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
-            TextButton(
+        }
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            val amountPrefix = if (amountSats != null) "${amountSats.btcSpacedFormatted()} BTC \u00b7 " else ""
+            val caption = when {
+                progress != null -> "$amountPrefix$confirmations/$requiredConfirmations confirmations"
+                txid == null -> "${amountPrefix}pending confirmation"
+                amountSats != null -> amountPrefix.removeSuffix(" \u00b7 ")
+                else -> null
+            }
+            if (caption != null) {
+                Text(caption, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+            }
+        }
+        if (txid != null) {
+            IconButton(
                 onClick = {
                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
                     context.startActivity(intent)
                 },
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                modifier = Modifier.size(28.dp)
             ) {
-                Text("View on explorer", fontSize = 12.sp)
-            }
-        }
-    } else {
-        // No txid yet — show text with "pending confirmation" below
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("\u231B", fontSize = 14.sp)
-            Spacer(Modifier.width(6.dp))
-            Column {
-                Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("pending confirmation", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                Icon(
+                    Icons.AutoMirrored.Filled.OpenInNew,
+                    contentDescription = "View on explorer",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
             }
         }
     }
