@@ -6,7 +6,6 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +24,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
@@ -33,38 +33,12 @@ import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.ui.components.CurvePattern
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.usdFormatted
-import androidx.compose.ui.tooling.preview.Preview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
-import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import kotlin.math.abs
-import kotlin.math.max
-
-enum class ChartPeriod(val label: String, val days: Int, val usesHourly: Boolean) {
-    DAY_1("1D", 1, true),
-    WEEK_1("1W", 7, true),
-    MONTH_1("1M", 30, true),
-    MONTH_3("3M", 90, false),
-    MONTH_6("6M", 180, false),
-    YTD("YTD", -1, false),  // computed dynamically
-    YEAR_1("1Y", 365, false),
-    YEAR_2("2Y", 730, false),
-    YEAR_5("5Y", 1825, false),
-    YEAR_10("10Y", 3650, false),
-    ALL("ALL", 99999, false);
-
-    fun effectiveDays(): Int {
-        if (this == YTD) {
-            val cal = Calendar.getInstance()
-            val dayOfYear = cal.get(Calendar.DAY_OF_YEAR)
-            return dayOfYear
-        }
-        return days
-    }
-}
+import java.util.TimeZone
 
 @Composable
 fun PriceChart(
@@ -77,29 +51,28 @@ fun PriceChart(
     var priceHistory by remember { mutableStateOf(emptyList<PriceRecord>()) }
     var selectedPoint by remember { mutableStateOf<PriceRecord?>(null) }
 
-    // Local refs — initialized from AppState cache (survives tab switches)
     var allDailyPrices by remember { mutableStateOf(appState.cachedChartDaily) }
     var hourlyPrices by remember { mutableStateOf(appState.cachedChartHourly) }
     var dataLoaded by remember { mutableStateOf(appState.chartDataLoaded) }
 
-    // Load all data once per app lifecycle (cache in AppState)
-    LaunchedEffect(Unit) {
-        if (dataLoaded) return@LaunchedEffect
+    val chartUpdateTrigger by appState.chartUpdateTrigger.collectAsState()
+
+    // Load/reload data when triggered by startup or backfill completion
+    LaunchedEffect(chartUpdateTrigger) {
         withContext(Dispatchers.IO) {
             val hourly = databaseService?.getPriceHistory(24 * 30) ?: emptyList()
             val dailyPrices = databaseService?.getDailyPrices(99999) ?: emptyList()
-            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-            val daily = dailyPrices.mapNotNull { daily ->
-                val date = fmt.parse(daily.date) ?: return@mapNotNull null
+            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val daily = dailyPrices.mapNotNull { d ->
+                val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
                 val ts = date.time / 1000
-                PriceRecord(id = ts, price = daily.close, source = "daily", timestamp = ts)
+                PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
             }.sortedBy { it.timestamp }
 
-            // Write to local state
             hourlyPrices = hourly
             allDailyPrices = daily
-
-            // Persist in AppState cache for next tab switch
             appState.cachedChartHourly = hourly
             appState.cachedChartDaily = daily
             appState.chartDataLoaded = true
@@ -107,20 +80,31 @@ fun PriceChart(
         dataLoaded = true
     }
 
-    // Filter when period changes or data loads
-    LaunchedEffect(chartPeriod, dataLoaded) {
+    // Filter when period changes or data updates
+    LaunchedEffect(chartPeriod, dataLoaded, hourlyPrices, allDailyPrices) {
         if (!dataLoaded) return@LaunchedEffect
         selectedPoint = null
         val cutoffMs = System.currentTimeMillis() - chartPeriod.effectiveDays().toLong() * 86400 * 1000
         val cutoffSec = cutoffMs / 1000
-        val hourly = hourlyPrices.filter { it.timestamp >= cutoffSec }
-        val daily = allDailyPrices.filter { it.timestamp >= cutoffSec }
-        val raw = if (chartPeriod.usesHourly && hourly.size >= 2) hourly else daily
-        // Cap at 200 points — keeps Canvas draw smooth while preserving detail
-        priceHistory = downsample(raw, 200)
+
+        val raw = if (chartPeriod.usesHourly) {
+            val startIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
+            hourlyPrices.subList(startIdx, hourlyPrices.size)
+        } else {
+            val startIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
+            val dailySlice = allDailyPrices.subList(startIdx, allDailyPrices.size)
+            if (dailySlice.size >= 2) {
+                dailySlice
+            } else {
+                // Fallback to hourly if daily is sparse or still backfilling
+                val hourlyStartIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
+                val hourlySlice = hourlyPrices.subList(hourlyStartIdx, hourlyPrices.size)
+                if (hourlySlice.size >= 2) hourlySlice else dailySlice
+            }
+        }
+        priceHistory = PriceChartAlgorithms.lttbDownsample(raw, 200)
     }
 
-    // Isolate live price label via derivedStateOf so price ticks only update text, not Canvas
     val livePriceText by remember(currentPrice) {
         derivedStateOf { currentPrice.usdFormatted() }
     }
@@ -178,7 +162,7 @@ fun PriceChart(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            String.format("%+.2f%%", changePercent),
+                            String.format(Locale.US, "%+.2f%%", changePercent),
                             color = changeColor,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 14.sp
@@ -216,11 +200,12 @@ fun PriceChart(
             Spacer(Modifier.height(4.dp))
 
             if (priceHistory.size >= 2) {
-                val prices = priceHistory.map { it.price }
-                val minPrice = prices.min() * 0.98
-                val maxPrice = prices.max() * 1.02
+                // Single-pass min/max calculation
+                val (minPrice, maxPrice) = remember(priceHistory) {
+                    PriceChartAlgorithms.minMaxPrices(priceHistory)
+                }
                 val priceRange = maxPrice - minPrice
-                val firstPrice = prices.first()
+                val firstPrice = priceHistory.first().price
                 val displayPrice = selectedPoint?.price ?: currentPrice
                 val isUp = displayPrice >= firstPrice
                 val lineColor = if (isUp) Color(0xFF10B981) else Color(0xFFEF4444)
@@ -231,134 +216,113 @@ fun PriceChart(
 
                 // Chart with Y-axis labels
                 Row(Modifier.fillMaxWidth()) {
-                    // Chart canvas — wrapped in key(priceHistory) to skip recomposition on parent state changes
-                    key(priceHistory) {
-                        Canvas(
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(160.dp)
-                                .pointerInput(priceHistory) {
-                                    detectDragGestures(
-                                        onDragEnd = { selectedPoint = null },
-                                        onDragCancel = { selectedPoint = null },
-                                        onDrag = { change, _ ->
-                                            change.consume()
-                                            val x = change.position.x
-                                            val w = size.width.toFloat()
-                                            val index = ((x / w) * (priceHistory.size - 1))
-                                                .toInt()
-                                                .coerceIn(0, priceHistory.size - 1)
-                                            selectedPoint = priceHistory[index]
-                                        }
-                                    )
-                                }
-                                .pointerInput(priceHistory) {
-                                    detectTapGestures(
-                                        onPress = {
-                                            val x = it.x
-                                            val w = size.width.toFloat()
-                                            val index = ((x / w) * (priceHistory.size - 1))
-                                                .toInt()
-                                                .coerceIn(0, priceHistory.size - 1)
-                                            selectedPoint = priceHistory[index]
-                                            tryAwaitRelease()
-                                            selectedPoint = null
-                                        }
-                                    )
-                                }
-                        ) {
-                            val w = size.width
-                            val h = size.height
-
-                            if (priceRange < 0.01) {
-                                drawLine(color = lineColor, start = Offset(0f, h / 2), end = Offset(w, h / 2), strokeWidth = 2f)
-                                return@Canvas
-                            }
-
-                            // Grid lines
-                            for (i in 1..3) {
-                                val gy = h * i / 4
-                                drawLine(
-                                    color = Color.Gray.copy(alpha = 0.15f),
-                                    start = Offset(0f, gy),
-                                    end = Offset(w, gy),
-                                    strokeWidth = 0.5f,
-                                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
+                    Canvas(
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(160.dp)
+                            .pointerInput(priceHistory) {
+                                detectDragGestures(
+                                    onDragEnd = { selectedPoint = null },
+                                    onDragCancel = { selectedPoint = null },
+                                    onDrag = { change, _ ->
+                                        change.consume()
+                                        val x = change.position.x
+                                        val w = size.width.toFloat()
+                                        val index = ((x / w) * (priceHistory.size - 1))
+                                            .toInt()
+                                            .coerceIn(0, priceHistory.size - 1)
+                                        selectedPoint = priceHistory[index]
+                                    }
                                 )
                             }
-
-                            // Build line path — Catmull-Rom spline for ≥4 points, straight lines for 2-3
-                            val linePath = Path()
-                            val points = priceHistory.mapIndexed { i, record ->
-                                val px = (i.toFloat() / (priceHistory.size - 1)) * w
-                                val py = h - ((record.price - minPrice) / priceRange).toFloat() * h
-                                Offset(px, py)
+                            .pointerInput(priceHistory) {
+                                detectTapGestures(
+                                    onPress = {
+                                        val x = it.x
+                                        val w = size.width.toFloat()
+                                        val index = ((x / w) * (priceHistory.size - 1))
+                                            .toInt()
+                                            .coerceIn(0, priceHistory.size - 1)
+                                        selectedPoint = priceHistory[index]
+                                        tryAwaitRelease()
+                                        selectedPoint = null
+                                    }
+                                )
                             }
+                    ) {
+                        val w = size.width
+                        val h = size.height
 
-                            linePath.moveTo(points[0].x, points[0].y)
+                        if (priceRange < 0.01) {
+                            drawLine(color = lineColor, start = Offset(0f, h / 2), end = Offset(w, h / 2), strokeWidth = 2f)
+                            return@Canvas
+                        }
 
-                            if (points.size >= 4) {
-                                // Catmull-Rom spline converted to cubic Bezier control points
-                                for (i in 0 until points.size - 1) {
-                                    val p0 = points[max(i - 1, 0)]
-                                    val p1 = points[i]
-                                    val p2 = points[(i + 1).coerceAtMost(points.size - 1)]
-                                    val p3 = points[(i + 2).coerceAtMost(points.size - 1)]
-
-                                    // Catmull-Rom to cubic Bezier conversion (tension = 0.3 for smoother curves)
-                                    val cp1x = p1.x + (p2.x - p0.x) / 4f
-                                    val cp1y = p1.y + (p2.y - p0.y) / 4f
-                                    val cp2x = p2.x - (p3.x - p1.x) / 4f
-                                    val cp2y = p2.y - (p3.y - p1.y) / 4f
-
-                                    linePath.cubicTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y)
-                                }
-                            } else {
-                                // 2-3 points: straight lines
-                                for (i in 1 until points.size) {
-                                    linePath.lineTo(points[i].x, points[i].y)
-                                }
-                            }
-
-                            // Area fill
-                            val areaPath = Path().apply {
-                                addPath(linePath)
-                                lineTo(w, h)
-                                lineTo(0f, h)
-                                close()
-                            }
-                            drawPath(
-                                path = areaPath,
-                                brush = Brush.verticalGradient(
-                                    colors = listOf(lineColor.copy(alpha = 0.15f), lineColor.copy(alpha = 0.02f))
-                                ),
-                                style = Fill
+                        // Grid lines
+                        for (i in 1..3) {
+                            val gy = h * i / 4
+                            drawLine(
+                                color = Color.Gray.copy(alpha = 0.15f),
+                                start = Offset(0f, gy),
+                                end = Offset(w, gy),
+                                strokeWidth = 0.5f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
                             )
+                        }
 
-                            // Line
-                            drawPath(path = linePath, color = lineColor, style = Stroke(width = if (selectedIndex != null) 1.5f else 2f))
+                        // Project points to canvas dimensions
+                        val points = priceHistory.mapIndexed { i, record ->
+                            val px = (i.toFloat() / (priceHistory.size - 1)) * w
+                            val py = h - ((record.price - minPrice) / priceRange).toFloat() * h
+                            Offset(px, py)
+                        }
 
-                            // Selected indicator
-                            if (selectedIndex != null) {
-                                val sx = (selectedIndex.toFloat() / (priceHistory.size - 1)) * w
-                                val record = priceHistory[selectedIndex]
-                                val sy = h - ((record.price - minPrice) / priceRange).toFloat() * h
-                                drawLine(Color.Gray.copy(alpha = 0.5f), Offset(sx, 0f), Offset(sx, h), 1f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)))
-                                drawCircle(lineColor, 5f, Offset(sx, sy))
-                                drawCircle(Color.White, 3f, Offset(sx, sy))
-                            }
+                        val linePath = PriceChartAlgorithms.buildSplinePath(points)
+                        val areaPath = PriceChartAlgorithms.buildAreaPath(linePath, w, h)
+
+                        // Area fill
+                        drawPath(
+                            path = areaPath,
+                            brush = Brush.verticalGradient(
+                                colors = listOf(lineColor.copy(alpha = 0.15f), lineColor.copy(alpha = 0.02f))
+                            ),
+                            style = Fill
+                        )
+
+                        // Line
+                        drawPath(
+                            path = linePath,
+                            color = lineColor,
+                            style = Stroke(width = if (selectedIndex != null) 1.5f else 2f)
+                        )
+
+                        // Selected indicator
+                        if (selectedIndex != null) {
+                            val sx = (selectedIndex.toFloat() / (priceHistory.size - 1)) * w
+                            val record = priceHistory[selectedIndex]
+                            val sy = h - ((record.price - minPrice) / priceRange).toFloat() * h
+                            drawLine(
+                                color = Color.Gray.copy(alpha = 0.5f),
+                                start = Offset(sx, 0f),
+                                end = Offset(sx, h),
+                                strokeWidth = 1f,
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                            )
+                            drawCircle(lineColor, 5f, Offset(sx, sy))
+                            drawCircle(Color.White, 3f, Offset(sx, sy))
                         }
                     }
 
                     // Y-axis labels
                     Column(
                         modifier = Modifier.height(160.dp).padding(start = 4.dp),
-                        verticalArrangement = Arrangement.SpaceBetween
+                        verticalArrangement = Arrangement.SpaceBetween,
+                        horizontalAlignment = Alignment.End
                     ) {
-                        for (i in 0..3) {
-                            val price = maxPrice - (maxPrice - minPrice) * i / 3
+                        for (i in 4 downTo 0) {
+                            val price = minPrice + (priceRange * i / 4)
                             Text(
-                                formatYAxis(price),
+                                PriceChartAlgorithms.formatYAxis(price),
                                 fontSize = 9.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -414,17 +378,6 @@ fun PriceChart(
             }
         }
     }
-}
-
-private fun formatYAxis(price: Double): String {
-    return if (price >= 1000) "$${(price / 1000).toInt()}K" else "$${price.toInt()}"
-}
-
-// Uniform downsample: pick evenly-spaced indices to preserve shape
-private fun downsample(records: List<PriceRecord>, maxPoints: Int): List<PriceRecord> {
-    if (records.size <= maxPoints) return records
-    val step = (records.size - 1).toDouble() / (maxPoints - 1)
-    return (0 until maxPoints).map { i -> records[(i * step).toInt().coerceAtMost(records.size - 1)] }
 }
 
 @Preview(showBackground = true)
