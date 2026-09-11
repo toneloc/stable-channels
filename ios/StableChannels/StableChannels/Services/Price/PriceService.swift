@@ -125,9 +125,9 @@ class PriceService {
 
     // MARK: - Kraken OHLC Backfill
 
-    /// Delegated to PriceChartService for Single Responsibility separation.
+    /// Delegated to PriceChartService.
     func fetchKrakenOHLC(since: Int64? = nil) async -> [(timestamp: Int64, price: Double)] {
-        await PriceChartService.shared.fetchKrakenOHLC(since: since)
+        await PriceChartService.shared.fetchKrakenOHLC(since: since) ?? []
     }
 
     // MARK: - Private

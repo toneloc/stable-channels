@@ -10,6 +10,7 @@ import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
+import kotlin.math.roundToLong
 
 data class PaymentPersistenceResult(
     val isNewPayment: Boolean,
@@ -49,7 +50,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 ) {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
-        internal const val DB_VERSION = 3
+        internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
     }
 
@@ -150,7 +151,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
 
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
         createTradeIndexes(db)
@@ -182,6 +183,19 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 "resolved_at INTEGER"
             ).forEach { column -> db.execSQL("ALTER TABLE trades ADD COLUMN $column") }
             createTradeIndexes(db)
+        }
+        if (oldVersion < 4) {
+            db.execSQL("""
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    price REAL NOT NULL,
+                    source TEXT,
+                    timestamp INTEGER DEFAULT (strftime('%s','now'))
+                )
+            """)
+            db.execSQL("DELETE FROM price_history WHERE id NOT IN (SELECT MIN(id) FROM price_history GROUP BY timestamp)")
+            db.execSQL("DROP INDEX IF EXISTS idx_price_history_ts")
+            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         }
     }
 
@@ -243,6 +257,88 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         if (updated == 0) {
             cv.put("created_at", now)
             db.insertWithOnConflict("channels", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+        }
+    }
+
+    /** Result of [reconcileOutgoingBacking]: the USD/backing values it actually wrote. */
+    data class OutgoingReconcileResult(
+        val usdDeducted: Double,
+        val oldExpectedUSD: Double,
+        val newExpectedUSD: Double,
+        val newBackingSats: Long
+    )
+
+    /**
+     * Atomically reconciles an ordinary outgoing send against the row's *current, freshly-read*
+     * expected_usd/stable_sats — mirroring StabilityService.reconcileOutgoing()'s math exactly,
+     * but performed entirely inside one BEGIN IMMEDIATE transaction instead of being computed
+     * ahead of time against an in-memory snapshot.
+     *
+     * This has to read-and-compute in one transaction, not read-precompute-then-apply-a-delta:
+     * reconcileOutgoing()'s result (both the USD deducted and the resulting backing) is a
+     * function of the backing value it's given. If that input is a snapshot taken before the
+     * stability timer's own concurrent debit (runStabilityCheck(), a separate in-process
+     * coroutine that commits its debit straight to this table via
+     * recordPaymentAndMaybeUpdateBacking()), the computed reduction implicitly assumes the old,
+     * pre-debit backing — so applying it as a delta on top of the DB's already-debited row
+     * double-counts the difference. Recomputing fresh, inside the same transaction that writes
+     * the result, uses only one read of backing and composes correctly with whatever the timer
+     * already committed.
+     *
+     * [receiverSats] must be the live, already-fresh post-send receiver balance (from
+     * refreshBalances()/updateStableBalances()) — that value reflects real channel state
+     * directly and isn't subject to the same race as the in-memory backingSats copy.
+     *
+     * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
+     */
+    fun reconcileOutgoingBacking(
+        channelId: String,
+        userChannelId: String,
+        note: String?,
+        receiverSats: Long,
+        latestPrice: Double,
+        price: Double
+    ): OutgoingReconcileResult? {
+        if (price <= 0.0) return null
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            val cursor = db.rawQuery(
+                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId)
+            )
+            val (currentExpected, currentBacking) = cursor.use {
+                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                it.getDouble(0) to it.getLong(1)
+            }
+            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
+            val overflowSats = currentBacking - receiverSats
+            val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdToDeduct, 0.0)
+            val newBacking = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
+            val cv = ContentValues().apply {
+                put("channel_id", channelId)
+                put("expected_usd", newExpected)
+                put("stable_sats", newBacking)
+                put("note", note)
+                put("receiver_sats", receiverSats)
+                put("latest_price", latestPrice)
+                put("updated_at", System.currentTimeMillis() / 1000)
+            }
+            val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
+            if (rows != 1) {
+                throw IllegalStateException(
+                    "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
+                )
+            }
+            db.execSQL("COMMIT")
+            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
         }
     }
 
@@ -1669,20 +1765,39 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
     }
 
+    fun getLatestPriceHistoryTimestamp(): Long? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT MAX(timestamp) FROM price_history", null
+        )
+        return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
+    }
+
     fun backfillHourlyPrices(candles: List<Pair<Long, Double>>): Int {
+        if (candles.isEmpty()) return 0
         val db = writableDatabase
         var count = 0
         db.beginTransaction()
         try {
-            val stmt = db.compileStatement(
+            val checkStmt = db.compileStatement(
+                "SELECT COUNT(*) FROM price_history WHERE timestamp BETWEEN ? AND ?"
+            )
+            val insertStmt = db.compileStatement(
                 "INSERT OR IGNORE INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)"
             )
             for ((ts, price) in candles) {
-                stmt.clearBindings()
-                stmt.bindDouble(1, price)
-                stmt.bindLong(2, ts)
-                stmt.executeInsert()
-                count++
+                checkStmt.clearBindings()
+                checkStmt.bindLong(1, ts - 1800)
+                checkStmt.bindLong(2, ts + 1800)
+                val exists = checkStmt.simpleQueryForLong() > 0
+                if (!exists) {
+                    insertStmt.clearBindings()
+                    insertStmt.bindDouble(1, price)
+                    insertStmt.bindLong(2, ts)
+                    val rowId = insertStmt.executeInsert()
+                    if (rowId != -1L) {
+                        count++
+                    }
+                }
             }
             db.setTransactionSuccessful()
         } finally {
@@ -1702,6 +1817,50 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("source", source)
         }
         writableDatabase.insertWithOnConflict("daily_prices", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun getLatestDailyPriceDate(): String? {
+        val cursor = readableDatabase.rawQuery(
+            "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1", null
+        )
+        return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+    }
+
+    fun backfillDailyPrices(prices: List<DailyPriceRecord>): Int {
+        if (prices.isEmpty()) return 0
+        val db = writableDatabase
+        var count = 0
+        db.beginTransaction()
+        try {
+            val checkStmt = db.compileStatement("SELECT COUNT(*) FROM daily_prices WHERE date = ?")
+            val stmt = db.compileStatement(
+                "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')"
+            )
+            for (p in prices) {
+                checkStmt.clearBindings()
+                checkStmt.bindString(1, p.date)
+                val exists = checkStmt.simpleQueryForLong() > 0L
+                if (!exists) {
+                    count++
+                }
+                stmt.clearBindings()
+                stmt.bindString(1, p.date)
+                stmt.bindDouble(2, p.open)
+                stmt.bindDouble(3, p.high)
+                stmt.bindDouble(4, p.low)
+                stmt.bindDouble(5, p.close)
+                if (p.volume != null) {
+                    stmt.bindDouble(6, p.volume)
+                } else {
+                    stmt.bindNull(6)
+                }
+                stmt.executeInsert()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return count
     }
 }
 

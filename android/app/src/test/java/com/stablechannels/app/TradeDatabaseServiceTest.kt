@@ -498,6 +498,63 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun outgoingReconcileComposesCorrectlyWithAConcurrentStabilityDebit() {
+        // Regression for a review finding on PR #299 (gpt-6-astra / opus-5): computing the
+        // outgoing reconcile against a snapshot of in-memory state and then persisting it as a
+        // delta double-counts whatever the stability timer (a separate in-process coroutine)
+        // already committed straight to this row via recordPaymentAndMaybeUpdateBacking().
+        // reconcileOutgoingBacking() must instead read expected_usd/stable_sats fresh and do the
+        // whole computation inside its own transaction, so it composes correctly no matter what
+        // ran immediately before it.
+        val identifier = "ab".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 90.0,
+            backingSats = 100_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0
+        )
+
+        // Simulate the stability timer's own concurrent debit landing first: it commits
+        // directly to the DB (and, in real code, only updates in-memory state afterward).
+        service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = "11".repeat(32),
+            paymentType = "stability",
+            direction = "sent",
+            amountMsat = 10_000_000,
+            userChannelId = "7",
+            backingDeltaSats = -10_000
+        )
+        assertEquals(90_000L, service.loadChannel("7")?.backingSats)
+
+        // The ordinary send's own overflow, measured against the live (post-send) receiver
+        // balance and whatever backing is actually in the DB right now (90,000 sats, $90 —
+        // already corrected by the timer above), not a stale pre-timer snapshot (100,000 sats).
+        val result = service.reconcileOutgoingBacking(
+            channelId = identifier,
+            userChannelId = "7",
+            note = null,
+            receiverSats = 80_000,
+            latestPrice = 100_000.0,
+            price = 100_000.0
+        )
+
+        assertNotNull(result)
+        assertEquals(90.0, result!!.oldExpectedUSD, 0.0001)
+        assertEquals(10.0, result.usdDeducted, 0.0001)
+        assertEquals(80.0, result.newExpectedUSD, 0.0001)
+        assertEquals(80_000L, result.newBackingSats)
+
+        val persisted = service.loadChannel("7")
+        assertEquals(80.0, persisted?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(80_000L, persisted?.backingSats)
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }

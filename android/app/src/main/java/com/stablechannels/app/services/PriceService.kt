@@ -207,28 +207,6 @@ class PriceService(private val appContext: Context? = null) {
         }
     }
 
-    suspend fun fetchKrakenOHLC(since: Long? = null): List<Pair<Long, Double>> {
-        val sinceTs = since ?: (System.currentTimeMillis() / 1000 - 30 * 24 * 3600)
-        val url = "https://api.kraken.com/0/public/OHLC?pair=XXBTZUSD&interval=60&since=$sinceTs"
-        return try {
-            val request = Request.Builder().url(url).build()
-            val response = withContext(Dispatchers.IO) { chartClient.newCall(request).execute() }
-            val body = response.body?.string() ?: return emptyList()
-            val json = JSONObject(body)
-            val result = json.optJSONObject("result") ?: return emptyList()
-            val xxbtzusd = result.optJSONArray("XXBTZUSD") ?: return emptyList()
-            val candles = mutableListOf<Pair<Long, Double>>()
-            for (i in 0 until xxbtzusd.length()) {
-                val candle = xxbtzusd.optJSONArray(i) ?: continue
-                val ts = candle.optLong(0)
-                val close = candle.optString(4).toDoubleOrNull() ?: continue
-                if (ts > 0 && close > 0) candles.add(ts to close)
-            }
-            candles.sortedBy { it.first }
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
 
     companion object {
         private const val TAG = "PriceOracle"
