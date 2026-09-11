@@ -3726,15 +3726,15 @@ class AppState(private val context: Context) : ViewModel() {
                     val count = db.backfillDailyPrices(candles)
                     if (count > 0) {
                         AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
-                        val dailyPrices = db.getDailyPrices(99999)
-                        val daily = dailyPrices.mapNotNull { d ->
-                            val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
-                            val ts = date.time / 1000
-                            com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
-                        }.sortedBy { it.timestamp }
-                        cachedChartDaily = daily
-                        _chartUpdateTrigger.value = System.currentTimeMillis()
                     }
+                    val dailyPrices = db.getDailyPrices(99999)
+                    val daily = dailyPrices.mapNotNull { d ->
+                        val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
+                        val ts = date.time / 1000
+                        com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
+                    }.sortedBy { it.timestamp }
+                    cachedChartDaily = daily
+                    _chartUpdateTrigger.value = System.currentTimeMillis()
                 }
                 break
             }

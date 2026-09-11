@@ -3743,9 +3743,9 @@ class AppState {
                     let count = try db.priceRepo.backfillDailyPrices(candles)
                     if count > 0 {
                         print("[Chart] Backfilled \(count) daily price points from Kraken")
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                        }
+                    }
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
                     }
                 } catch {
                     print("[Chart] Daily backfill failed: \(error)")
