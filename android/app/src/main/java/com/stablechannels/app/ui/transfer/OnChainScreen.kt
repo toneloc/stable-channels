@@ -25,6 +25,7 @@ import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
+import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.satsFormatted
@@ -370,7 +371,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     }
                                 }
                             } catch (e: Exception) {
-                                error = e.message ?: "Send failed"
+                                error = WalletErrorMessages.operation(e, "The withdrawal could not complete. Check History before trying again.")
                             }
                         }
                         isSending = false

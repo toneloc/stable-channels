@@ -46,6 +46,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
+import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
@@ -126,6 +127,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     var isSendMax by remember { mutableStateOf(false) }
     var isSending by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
+    var pendingPaymentId by remember { mutableStateOf<String?>(null) }
+    var attemptStartedAtNanos by remember { mutableLongStateOf(0L) }
     var error by remember { mutableStateOf<String?>(null) }
     var showScanner by remember { mutableStateOf(false) }
     var isExtractingQR by remember { mutableStateOf(false) }
@@ -139,21 +142,28 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val accountingBtcPrice by appState.priceService.accountingPrice.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
-    val lastPaymentResult by appState.lastPaymentResult.collectAsState()
+    val paymentOutcomes by appState.paymentOutcomes.collectAsState()
+    val paymentOutcome = pendingPaymentId?.let { paymentOutcomes[it] }
+        ?.takeIf { it.belongsToAttempt(attemptStartedAtNanos) }
 
-    // Watch for payment success or failure while result screen is showing
-    LaunchedEffect(lastPaymentResult, result) {
-        if (result != null && lastPaymentResult != null) {
-            when {
-                lastPaymentResult!!.startsWith("Payment failed") -> {
-                    result = null
-                    error = lastPaymentResult
-                    appState.clearLastPaymentResult()
-                }
-                lastPaymentResult!!.startsWith("Payment sent") || lastPaymentResult!!.startsWith("Payment confirmed") -> {
-                    result = lastPaymentResult
-                    appState.clearLastPaymentResult()
-                }
+    LaunchedEffect(pendingPaymentId, attemptStartedAtNanos) {
+        val pid = pendingPaymentId ?: return@LaunchedEffect
+        while (appState.paymentOutcomes.value[pid]?.belongsToAttempt(attemptStartedAtNanos) != true) {
+            appState.refreshPaymentOutcome(pid, attemptStartedAtNanos)
+            kotlinx.coroutines.delay(2_000)
+        }
+    }
+
+    // The event can arrive before the send call returns. Retain it by payment ID so
+    // a stale result or a background settlement cannot complete this payment's UI.
+    LaunchedEffect(paymentOutcome, result) {
+        if (pendingPaymentId != null && paymentOutcome != null) {
+            if (paymentOutcome.succeeded) {
+                result = paymentOutcome.message
+                error = null
+            } else {
+                result = null
+                error = paymentOutcome.message
             }
         }
     }
@@ -473,12 +483,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (!isSending) {
-                Button(
-                    onClick = onDismiss
-                ) {
-                    Text("Done")
-                }
+            // Done stays visible while sending: the outcome is durable and lands in History.
+            Button(
+                onClick = onDismiss
+            ) {
+                Text("Done")
             }
         } else {
             // Loading indicator during photo QR extraction
@@ -637,6 +646,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 onClick = {
                     isSending = true
                     error = null
+                    pendingPaymentId = null
+                    attemptStartedAtNanos = System.nanoTime()
                     scope.launch {
                         // Auth gate: check if authentication is required
                         val isOnChain = inputType == InputType.ONCHAIN
@@ -690,12 +701,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             recordPrice = accountingPrice
                                             paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
                                         }
-                                        appState.databaseService?.recordPayment(
-                                            paymentId = paymentId, paymentType = "lightning",
-                                            direction = "sent", amountMsat = actualMsat,
-                                            amountUSD = if (recordPrice > 0) (actualMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * recordPrice else null,
-                                            btcPrice = if (recordPrice > 0) recordPrice else null
-                                        )
+                                        pendingPaymentId = paymentId
+                                        appState.recordOutgoingLightningPayment(paymentId, "lightning", actualMsat, recordPrice)
                                         result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
@@ -705,13 +712,9 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
                                         val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
-                                        appState.databaseService?.recordPayment(
-                                            paymentId = paymentId, paymentType = "bolt12",
-                                            direction = "sent", amountMsat = sats * 1000,
-                                            amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
-                                            btcPrice = accountingPrice
-                                        )
-                                        result = "Bolt12 payment sent"
+                                        pendingPaymentId = paymentId
+                                        appState.recordOutgoingLightningPayment(paymentId, "bolt12", sats * 1000, accountingPrice)
+                                        result = "Sending payment..."
                                     }
                                     InputType.ONCHAIN -> {
                                         if (enteredUSD <= 0) throw Exception("Enter amount")
@@ -750,7 +753,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     InputType.UNKNOWN -> throw Exception("Enter a valid invoice, offer, or address")
                                 }
                             } catch (e: Exception) {
-                                error = e.message ?: "Send failed"
+                                Log.w("SendScreen", "Send operation failed", e)
+                                error = WalletErrorMessages.operation(e, "The payment could not be sent. Check History before trying again.")
                             }
                             isSending = false
                         }

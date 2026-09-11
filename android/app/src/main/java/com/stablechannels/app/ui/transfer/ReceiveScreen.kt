@@ -27,6 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
 import com.stablechannels.app.util.Constants
@@ -276,7 +277,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                             invoice = inv.toString()
                             appState.isWaitingForPayment = true
                         } catch (e: Exception) {
-                            error = e.message ?: "Failed to generate invoice"
+                            error = WalletErrorMessages.operation(e, "The invoice could not be created. Try again later.")
                         }
                         isGenerating = false
                     }
@@ -301,7 +302,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                                 invoice = inv.toString()
                                 appState.isWaitingForPayment = true
                             } catch (e: Exception) {
-                                error = e.message ?: "Failed to generate invoice"
+                                error = WalletErrorMessages.operation(e, "The invoice could not be created. Try again later.")
                             }
                             isGenerating = false
                         }

@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.BuyAmountPolicy
+import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.usdFormatted
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -256,7 +257,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                 }
                                 step = TradeStep.DONE
                             } catch (e: Exception) {
-                                error = e.message ?: "Trade failed"
+                                error = WalletErrorMessages.operation(e, "The trade could not start. Try again later.")
                             }
                             isExecuting = false
                         }
@@ -272,12 +273,11 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
             }
 
             TradeStep.DONE -> {
-                // Only a signed, correlated acceptance confirms the order and only a signed
-                // rejection fails it. Absence from the pending map proves nothing — a
-                // rejection also clears it, and the old absence heuristic showed
-                // "Order Confirmed" for rejected trades (caught by e2e flow 13).
+                // Signed results and definitive fee failures come from durable outcomes.
                 val tradeOutcomes by appState.tradeOutcomes.collectAsState()
+                val pendingTrades by appState.pendingTradePayments.collectAsState()
                 val outcome = pendingPaymentId?.let { tradeOutcomes[it] }
+                val isDelayed = pendingPaymentId?.let { pendingTrades[it]?.status } == "uncertain"
                 // Background services commit results straight to SQLite without touching
                 // the in-memory outcome map, so poll the database while the result is
                 // unknown — otherwise a trade resolved while backgrounded stays "Pending".
@@ -294,12 +294,12 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 if (isRejected) {
                     Icon(
                         Icons.Filled.Cancel,
-                        contentDescription = "Rejected",
+                        contentDescription = if (outcome?.sendFailed == true) "Failed" else "Rejected",
                         tint = Color(0xFFEF4444),
                         modifier = Modifier.size(48.dp)
                     )
                     Spacer(Modifier.height(8.dp))
-                    Text("Order Rejected", style = MaterialTheme.typography.headlineMedium)
+                    Text(if (outcome?.sendFailed == true) "Order Failed" else "Order Rejected", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
                         outcome?.message ?: "The provider could not process the trade.",
@@ -322,17 +322,16 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 } else {
                     CurveProgressIndicator(size = 56.dp)
                     Spacer(Modifier.height(12.dp))
-                    Text("Order Pending", style = MaterialTheme.typography.headlineMedium)
+                    Text(if (isDelayed) "Order Result Delayed" else "Order Pending", style = MaterialTheme.typography.headlineMedium)
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        "Your order is being processed. Balance will update when the payment confirms.",
+                        if (isDelayed) "The provider's result has not arrived. Keep the wallet connected. Do not place this order again while its result is unknown."
+                        else "Your order is being processed. Balance will update when the provider confirms the order.",
                         style = MaterialTheme.typography.bodyMedium
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (isConfirmed || isRejected) {
-                    Button(onClick = onDismiss) { Text("Done") }
-                }
+                Button(onClick = onDismiss) { Text("Done") }
             }
         }
     }

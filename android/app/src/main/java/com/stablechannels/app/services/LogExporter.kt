@@ -13,6 +13,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import androidx.annotation.RequiresApi
 import com.stablechannels.app.util.Constants
 import java.io.File
 import java.io.FileInputStream
@@ -97,6 +98,7 @@ object LogExporter {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     private fun saveToDownloadsViaMediaStore(context: Context, zipFile: File): Boolean {
         return try {
             val resolver = context.contentResolver

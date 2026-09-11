@@ -309,13 +309,18 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
 @Composable
 private fun StatusBadge(status: String, color: Color? = null) {
     val resolvedColor = color ?: when (status.lowercase()) {
-        "completed" -> Color(0xFF10B981)
-        "pending" -> Color(0xFFF59E0B)
-        "failed" -> Color(0xFFEF4444)
+        "completed", "accepted" -> Color(0xFF10B981)
+        "pending", "prepared", "sent", "fee_paid", "uncertain" -> Color(0xFFF59E0B)
+        "failed", "send_failed", "rejected" -> Color(0xFFEF4444)
         else -> MaterialTheme.colorScheme.onSurfaceVariant
     }
     Text(
-        text = status,
+        text = when (status) {
+            "send_failed" -> "Failed"
+            "fee_paid" -> "Awaiting result"
+            "uncertain" -> "Result delayed"
+            else -> status
+        },
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Medium,
         color = resolvedColor

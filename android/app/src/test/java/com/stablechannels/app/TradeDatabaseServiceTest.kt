@@ -10,6 +10,7 @@ import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeCorrelation
 import com.stablechannels.app.services.TradeProtocol
+import com.stablechannels.app.services.TradeOutcome
 import com.stablechannels.app.util.Constants
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -282,7 +283,7 @@ class TradeDatabaseServiceTest {
             decidedAt = now
         )
         assertEquals(TradeControlApplyStatus.APPLIED, service.applyTradeRejection(rejection).status)
-        assertEquals(Pair(false, "quote_deviation"), service.terminalTradeOutcome(rejectedPaymentId))
+        assertEquals(TradeOutcome(false, TradeProtocol.rejectionMessage("quote_deviation")), service.terminalTradeOutcome(rejectedPaymentId))
 
         // Accepted trade: outcome must flip to accepted with no reason code.
         val acceptedTrade = TradeProtocol.prepare(
@@ -322,7 +323,7 @@ class TradeDatabaseServiceTest {
             TradeControlApplyStatus.APPLIED,
             service.applyCorrelatedTradeAcceptance(sync).status
         )
-        assertEquals(Pair(true, null as String?), service.terminalTradeOutcome(acceptedPaymentId))
+        assertEquals(TradeOutcome(true, ""), service.terminalTradeOutcome(acceptedPaymentId))
         service.close()
     }
 

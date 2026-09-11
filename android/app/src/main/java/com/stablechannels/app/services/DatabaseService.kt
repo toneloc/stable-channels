@@ -430,7 +430,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun getRecentTrades(limit: Int = 50): List<TradeRecord> {
         val cursor = readableDatabase.rawQuery(
-            "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status, created_at FROM trades ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status, created_at, reason_code FROM trades ORDER BY created_at DESC LIMIT ?",
             arrayOf(limit.toString())
         )
         return cursor.use { c ->
@@ -440,7 +440,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     id = c.getLong(0), channelId = c.getString(1), action = c.getString(2),
                     amountUSD = c.getDouble(3), amountBTC = c.getDouble(4), btcPrice = c.getDouble(5),
                     feeUSD = c.getDouble(6), paymentId = c.getStringOrNull(7),
-                    status = c.getString(8), createdAt = c.getLong(9)
+                    status = c.getString(8), createdAt = c.getLong(9), reasonCode = c.getStringOrNull(10)
                 ))
             }
             list
@@ -598,7 +598,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    fun failUnattachedPreparedTrade(paymentId: String, amountMsat: Long): PendingTradePayment? {
+    fun failUnattachedPreparedTrade(paymentId: String, amountMsat: Long, reasonCode: String? = null): PendingTradePayment? {
         if (!TradeProtocol.isCanonicalIdentifier(paymentId) || amountMsat < 0L) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
@@ -633,6 +633,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 put("trade_payment_id", paymentId)
                 put("status", "send_failed")
                 put("outcome", "send_failed")
+                put("reason_code", reasonCode)
                 put("resolved_at", System.currentTimeMillis() / 1000L)
             }
             if (db.update(
@@ -658,10 +659,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    fun markTradeSendFailed(tradeDbId: Long): Boolean {
+    fun markTradeSendFailed(tradeDbId: Long, reasonCode: String? = null): Boolean {
         val cv = ContentValues().apply {
             put("status", "send_failed")
             put("outcome", "send_failed")
+            put("reason_code", reasonCode)
             put("resolved_at", System.currentTimeMillis() / 1000L)
         }
         return writableDatabase.update(
@@ -673,15 +675,28 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     /** Terminal outcome for a trade's fee payment id, straight from SQLite — the source
      *  of truth that BOTH the foreground handler and the background service write. The
      *  in-memory outcome map alone misses results committed while the app was backgrounded
-     *  or before a restart. Returns (accepted, reason_code) or null while unresolved. */
-    fun terminalTradeOutcome(paymentId: String): Pair<Boolean, String?>? {
+     *  or before a restart. A failed fee send is also terminal. */
+    fun terminalTradeOutcome(paymentId: String): TradeOutcome? {
         val cursor = readableDatabase.rawQuery(
-            "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected') ORDER BY id DESC LIMIT 1",
+            "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected','send_failed') ORDER BY id DESC LIMIT 1",
             arrayOf(paymentId)
         )
         return cursor.use { c ->
-            if (c.moveToFirst()) Pair(c.getString(0) == "accepted", c.getString(1)) else null
+            if (c.moveToFirst()) TradeOutcome.fromStored(c.getString(0), c.getStringOrNull(1)) else null
         }
+    }
+
+    /** Resolve by durable payment ID even if the event beats the UI or follows a restart. */
+    fun markTradePaymentFailed(paymentId: String, reasonCode: String?): Boolean {
+        val values = ContentValues().apply {
+            put("status", "send_failed")
+            put("outcome", "send_failed")
+            put("reason_code", reasonCode)
+            put("resolved_at", System.currentTimeMillis() / 1000L)
+        }
+        return writableDatabase.update("trades", values,
+            "trade_payment_id = ? AND status IN ('prepared','sent','uncertain')",
+            arrayOf(paymentId)) == 1
     }
 
     fun unresolvedTradePayments(): Map<String, PendingTradePayment> {
@@ -1016,6 +1031,53 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("address", address)
         }
         return writableDatabase.insert("payments", null, cv)
+    }
+
+    /** The send API returns before settlement. A retry may reuse an existing invoice ID. */
+    fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double) {
+        val values = ContentValues().apply {
+            put("payment_type", paymentType)
+            put("direction", "sent")
+            put("amount_msat", amountMsat)
+            put("status", "pending")
+            put("fee_msat", 0L)
+            if (price > 0.0) {
+                put("amount_usd", amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * price)
+                put("btc_price", price)
+            } else {
+                putNull("amount_usd")
+                putNull("btc_price")
+            }
+        }
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            if (db.update("payments", values, "payment_id = ?", arrayOf(paymentId)) == 0) {
+                values.put("payment_id", paymentId)
+                db.insertOrThrow("payments", null, values)
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    fun getPendingOutgoingLightningPaymentIds(limit: Int = 100): List<String> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT payment_id FROM payments
+            WHERE payment_id IS NOT NULL AND payment_id != ''
+              AND payment_type IN ('lightning', 'bolt12')
+              AND direction = 'sent' AND status = 'pending'
+            ORDER BY created_at ASC LIMIT ?
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            buildList {
+                while (c.moveToNext()) add(c.getString(0))
+            }
+        }
     }
 
     /** Insert a payment and atomically update channel backing sats in one SQLite transaction.

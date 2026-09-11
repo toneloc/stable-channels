@@ -73,9 +73,13 @@ class FCMService : FirebaseMessagingService() {
                     .url(Constants.LSP_PUSH_REGISTER_URL)
                     .post(body)
                     .build()
-                val response = httpClient.newCall(request).execute()
-                Log.d(TAG, "Push token registered with LSP: ${response.code}")
-                response.close()
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "Push token registered with LSP: ${response.code}")
+                    } else {
+                        Log.w(TAG, "Push registration rejected by LSP: HTTP ${response.code}")
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to register push token with LSP", e)
             }

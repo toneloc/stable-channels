@@ -5,6 +5,8 @@ import com.stablechannels.app.util.Constants
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 import kotlin.math.abs
 import kotlin.math.floor
 
@@ -87,6 +89,7 @@ data class PreparedTrade(
 )
 
 object TradeProtocol {
+    const val MAX_CONTROL_TLV_BYTES = 8 * 1024
     const val RESULT_CONTROL_AMOUNT_MSAT = 1L
     const val RESULT_TIMEOUT_SECS = 15L * 60L
     const val RESPONSE_RETRY_WINDOW_SECS = 14L * 24L * 60L * 60L
@@ -281,18 +284,23 @@ object TradeProtocol {
         expectedCounterparty: String,
         verifySignature: (ByteArray, String, String) -> Boolean
     ): TradeControlMessage? {
+        if (data.size > MAX_CONTROL_TLV_BYTES) return null
         return try {
-            val envelope = JSONObject(String(data, Charsets.UTF_8))
-            val payloadStr = envelope.getString("payload")
-            val signature = envelope.getString("signature")
-            val payloadBytes = payloadStr.toByteArray(Charsets.UTF_8)
-            if (!verifySignature(payloadBytes, signature, expectedCounterparty)) return null
+            val raw = Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(data)).toString()
+            val envelope = JSONObject(raw)
+            val payloadStr = envelope.opt("payload") as? String ?: return null
+            val signature = envelope.opt("signature") as? String ?: return null
             val payload = JSONObject(payloadStr)
-            when (payload.optString("type")) {
+            val message = when (payload.optString("type")) {
                 Constants.SYNC_MESSAGE_TYPE -> parseSync(payload)
                 Constants.TRADE_REJECTED_MESSAGE_TYPE -> parseRejection(payload)
                 else -> null
-            }
+            } ?: return null
+            if (!verifySignature(payloadStr.toByteArray(Charsets.UTF_8), signature, expectedCounterparty)) return null
+            message
         } catch (_: Exception) {
             null
         }
@@ -350,15 +358,15 @@ object TradeProtocol {
     }
 
     fun rejectionMessage(reason: String): String = when (reason) {
-        "invalid_amount" -> "The trade amount is invalid. Review the amount and retry."
+        "invalid_amount" -> "The amount is invalid. Review the amount and retry."
         "stale_request" -> "The quote expired before it could be accepted. Refresh and retry."
-        "invalid_fee" -> "The trade fee was invalid. Refresh the quote before retrying."
+        "invalid_fee" -> "The fee was invalid. Refresh the quote before retrying."
         "invalid_quote" -> "A valid market quote is required. Refresh and retry."
         "quote_deviation" -> "The market moved outside the quote range. Refresh and retry."
-        "insufficient_capacity" -> "The channel does not have enough capacity for this trade. Reduce the amount."
-        "settlement_required" -> "Settle the current stability adjustment before retrying this trade."
-        "unsafe_allocation" -> "This trade cannot preserve the current channel allocation safely."
-        else -> "The provider could not process the trade. Try again later."
+        "insufficient_capacity" -> "The channel does not have enough capacity. Reduce the amount."
+        "settlement_required" -> "Settle the current stability adjustment before retrying."
+        "unsafe_allocation" -> "Cannot preserve the current channel allocation safely."
+        else -> "The provider could not process. Try again later."
     }
 
     fun isCanonicalIdentifier(value: String): Boolean =
