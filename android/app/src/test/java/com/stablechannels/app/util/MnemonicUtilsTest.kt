@@ -55,4 +55,33 @@ class MnemonicUtilsTest {
         assertFalse(resultInvalid.isValidWordCount)
         assertFalse(resultInvalid.hasValidCharacterFormat)
     }
+
+    @Test
+    fun `word count boundary cases`() {
+        fun makeWords(count: Int) = List(count) { "abandon" }.joinToString(" ")
+        assertFalse(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(1))))
+        assertFalse(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(11))))
+        assertTrue(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(12))))
+        assertFalse(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(13))))
+        assertFalse(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(23))))
+        assertTrue(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(24))))
+        assertFalse(MnemonicUtils.isValidWordCount(MnemonicUtils.parseMnemonic(makeWords(25))))
+    }
+
+    @Test
+    fun `non alphabetic character rejection`() {
+        assertFalse(MnemonicUtils.isAlphabeticWord("abandon1"))
+        assertFalse(MnemonicUtils.isAlphabeticWord("abandon-word"))
+        assertFalse(MnemonicUtils.isAlphabeticWord("abandon_word"))
+        assertFalse(MnemonicUtils.isAlphabeticWord("abandon@"))
+        assertFalse(MnemonicUtils.isAlphabeticWord("abándon"))
+        assertTrue(MnemonicUtils.isAlphabeticWord("abandon"))
+        assertTrue(MnemonicUtils.isAlphabeticWord("ABANDON"))
+    }
+
+    @Test
+    fun `formatForDisplay normalizes spaces`() {
+        val messy = "  abandon\t\tabandon   \n  abandon   about  "
+        assertEquals("abandon abandon abandon about", MnemonicUtils.formatForDisplay(messy))
+    }
 }

@@ -2,6 +2,7 @@ package com.stablechannels.app.util
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
@@ -90,5 +91,74 @@ class BinarySearchTest {
         assertEquals(0, empty.upperBound(10))
         val target: Int = 10
         assertNull(empty.binarySearchNearest(target) { it })
+    }
+
+    @Test
+    fun `single-element collection edge cases`() {
+        val single = listOf(42L)
+        assertEquals(0, single.lowerBound(10L))
+        assertEquals(0, single.lowerBound(42L))
+        assertEquals(1, single.lowerBound(50L))
+
+        assertEquals(0, single.upperBound(10L))
+        assertEquals(1, single.upperBound(42L))
+        assertEquals(1, single.upperBound(50L))
+
+        assertEquals(42L, single.binarySearchNearest(10L) { it })
+        assertEquals(42L, single.binarySearchNearest(42L) { it })
+        assertEquals(42L, single.binarySearchNearest(50L) { it })
+
+        // Also test Int overload with explicit Int variable
+        val singleInt = listOf(42)
+        val targetInt: Int = 10
+        assertEquals(42, singleInt.binarySearchNearest(targetInt) { x: Int -> x })
+    }
+
+    @Test
+    fun `duplicate and repeated elements lowerBound and upperBound`() {
+        val list = listOf(10L, 20L, 20L, 20L, 30L)
+        assertEquals(1, list.lowerBound(20L))
+        assertEquals(4, list.upperBound(20L))
+        assertEquals(1, list.lowerBound(15L))
+        assertEquals(1, list.upperBound(15L))
+        assertEquals(4, list.lowerBound(25L))
+        assertEquals(4, list.upperBound(25L))
+        assertEquals(20L, list.binarySearchNearest(20L) { it })
+    }
+
+    @Test
+    fun `all identical elements`() {
+        val list = listOf(5L, 5L, 5L, 5L, 5L)
+        assertEquals(0, list.lowerBound(5L))
+        assertEquals(5, list.upperBound(5L))
+        assertEquals(0, list.lowerBound(1L))
+        assertEquals(0, list.upperBound(1L))
+        assertEquals(5, list.lowerBound(10L))
+        assertEquals(5, list.upperBound(10L))
+        assertEquals(5L, list.binarySearchNearest(5L) { it })
+    }
+
+    @Test
+    fun `nearest boundary targets and tie breaking`() {
+        val list = listOf(10L, 20L, 30L)
+        assertEquals(10L, list.binarySearchNearest(-100L) { it })
+        assertEquals(30L, list.binarySearchNearest(1000L) { it })
+
+        // Equidistant tie-breaking should return one of the adjacent values deterministically without crashing
+        val pair = listOf(10L, 20L)
+        val nearest = pair.binarySearchNearest(15L) { it }
+        assertTrue(nearest == 10L || nearest == 20L)
+    }
+
+    @Test
+    fun `large monotonic collection binary search accuracy`() {
+        val large = (0 until 1000).map { it * 2L } // 0L, 2L, 4L, ..., 1998L
+        assertEquals(200, large.lowerBound(400L))
+        assertEquals(201, large.lowerBound(401L))
+        assertEquals(201, large.upperBound(400L))
+        assertEquals(201, large.upperBound(401L))
+        assertEquals(400L, large.binarySearchNearest(400L) { it })
+        assertEquals(400L, large.binarySearchNearest(400.4) { it.toDouble() })
+        assertEquals(402L, large.binarySearchNearest(401.6) { it.toDouble() })
     }
 }

@@ -98,4 +98,63 @@ final class BinarySearchTests: XCTestCase {
         XCTAssertEqual(empty.upperBound(for: 10), 0)
         XCTAssertNil(empty.binarySearchNearest(target: 10, keySelector: { $0 }))
     }
+
+    func testSingleElementCollection() {
+        let single = [42]
+        XCTAssertEqual(single.lowerBound(for: 10), 0)
+        XCTAssertEqual(single.lowerBound(for: 42), 0)
+        XCTAssertEqual(single.lowerBound(for: 50), 1)
+
+        XCTAssertEqual(single.upperBound(for: 10), 0)
+        XCTAssertEqual(single.upperBound(for: 42), 1)
+        XCTAssertEqual(single.upperBound(for: 50), 1)
+
+        XCTAssertEqual(single.binarySearchNearest(target: 10, keySelector: { $0 }), 42)
+        XCTAssertEqual(single.binarySearchNearest(target: 42, keySelector: { $0 }), 42)
+        XCTAssertEqual(single.binarySearchNearest(target: 50, keySelector: { $0 }), 42)
+    }
+
+    func testDuplicateElements() {
+        let list = [10, 20, 20, 20, 30]
+        XCTAssertEqual(list.lowerBound(for: 20), 1)
+        XCTAssertEqual(list.upperBound(for: 20), 4)
+        XCTAssertEqual(list.lowerBound(for: 15), 1)
+        XCTAssertEqual(list.upperBound(for: 15), 1)
+        XCTAssertEqual(list.lowerBound(for: 25), 4)
+        XCTAssertEqual(list.upperBound(for: 25), 4)
+        XCTAssertEqual(list.binarySearchNearest(target: 20, keySelector: { $0 }), 20)
+    }
+
+    func testAllIdenticalElements() {
+        let list = [5, 5, 5, 5, 5]
+        XCTAssertEqual(list.lowerBound(for: 5), 0)
+        XCTAssertEqual(list.upperBound(for: 5), 5)
+        XCTAssertEqual(list.lowerBound(for: 1), 0)
+        XCTAssertEqual(list.upperBound(for: 1), 0)
+        XCTAssertEqual(list.lowerBound(for: 10), 5)
+        XCTAssertEqual(list.upperBound(for: 10), 5)
+        XCTAssertEqual(list.binarySearchNearest(target: 5, keySelector: { $0 }), 5)
+    }
+
+    func testNearestBoundariesAndTieBreaking() {
+        let list = [10, 20, 30]
+        XCTAssertEqual(list.binarySearchNearest(target: -100, keySelector: { $0 }), 10)
+        XCTAssertEqual(list.binarySearchNearest(target: 1000, keySelector: { $0 }), 30)
+
+        // Equidistant tie-breaking should return one of the adjacent values deterministically without crashing
+        let pair = [10, 20]
+        let nearest = pair.binarySearchNearest(target: 15, keySelector: { $0 })
+        XCTAssertTrue(nearest == 10 || nearest == 20)
+    }
+
+    func testLargeMonotonicCollection() {
+        let large = (0..<1000).map { $0 * 2 } // 0, 2, 4, ..., 1998
+        XCTAssertEqual(large.lowerBound(for: 400), 200)
+        XCTAssertEqual(large.lowerBound(for: 401), 201)
+        XCTAssertEqual(large.upperBound(for: 400), 201)
+        XCTAssertEqual(large.upperBound(for: 401), 201)
+        XCTAssertEqual(large.binarySearchNearest(target: 400, keySelector: { $0 }), 400)
+        XCTAssertEqual(large.binarySearchNearest(target: 400.4, keySelector: { Double($0) }), 400)
+        XCTAssertEqual(large.binarySearchNearest(target: 401.6, keySelector: { Double($0) }), 402)
+    }
 }

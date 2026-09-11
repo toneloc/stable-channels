@@ -30,7 +30,9 @@ object InputSanitizer {
                 sb.append(ch)
             } else if (ch == '.' && !seenDot) {
                 seenDot = true
-                sb.append(ch)
+                if (maxDecimals > 0) {
+                    sb.append(ch)
+                }
             }
         }
 
