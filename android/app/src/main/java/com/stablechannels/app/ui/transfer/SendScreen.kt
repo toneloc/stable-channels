@@ -50,6 +50,7 @@ import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -587,7 +588,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     BasicTextField(
                         value = amountUSDStr,
                         onValueChange = { 
-                            amountUSDStr = it.filter { c -> c.isDigit() || c == '.' }
+                            amountUSDStr = InputSanitizer.decimal(it)
                             isSendMax = false
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),

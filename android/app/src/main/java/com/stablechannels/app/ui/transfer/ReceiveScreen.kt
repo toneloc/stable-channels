@@ -29,6 +29,7 @@ import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -193,7 +194,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 Spacer(Modifier.width(2.dp))
                 BasicTextField(
                     value = amountUSD,
-                    onValueChange = { amountUSD = it.filter { c -> c.isDigit() || c == '.' } },
+                    onValueChange = { amountUSD = InputSanitizer.decimal(it) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     textStyle = TextStyle(
                         fontSize = 44.sp,
