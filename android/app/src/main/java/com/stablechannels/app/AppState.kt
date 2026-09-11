@@ -1965,7 +1965,7 @@ class AppState(private val context: Context) : ViewModel() {
         // stableReceiverBTC is refreshed from live channel state just above, not from the
         // racy in-memory backingSats copy — safe to use directly as the reconcile input.
         val receiverSats = _stableChannel.value.stableReceiverBTC.sats
-        val reconcileResult = try {
+        val reconcileResult = if (userChannelId.isEmpty()) null else try {
             databaseService?.reconcileOutgoingBacking(
                 channelId = channelId,
                 userChannelId = userChannelId,
@@ -1974,9 +1974,28 @@ class AppState(private val context: Context) : ViewModel() {
                 latestPrice = latestPrice,
                 price = price
             )
-        } catch (e: Exception) {
-            Log.w("AppState", "Failed to reconcile outgoing send: ${e.message}")
+        } catch (e: MissingChannelRowException) {
+            // Structural: there is no row to reconcile against and a retry can't create one.
+            // Treat as nothing-to-reconcile, but leave a trace in the audit log.
+            AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
+                "payment_id" to (paymentId ?: ""),
+                "reason" to "missing_channel_row",
+                "user_channel_id" to userChannelId
+            ))
             null
+        } catch (e: Exception) {
+            // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
+            // transaction rolled back, so the deduction has NOT been recorded — rethrow so the
+            // event loop leaves this PaymentSuccessful un-acked and LDK redelivers it with
+            // backoff. reconcileOutgoingBacking() is idempotent on retry because it measures
+            // overflow against live channel state. Swallowing the error here acked the payment
+            // with the books still wrong (#299 review, P2).
+            AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
+                "payment_id" to (paymentId ?: ""),
+                "error" to (e.message ?: e.javaClass.simpleName),
+                "will_retry" to true
+            ))
+            throw e
         }
         if (reconcileResult != null) {
             // Refresh in-memory state from the DB's current, authoritative row instead of
@@ -1987,9 +2006,7 @@ class AppState(private val context: Context) : ViewModel() {
             // fresh, so this can never clobber a concurrent writer's already-applied change —
             // the same pattern onForegroundResume() already relies on for this exact reason.
             loadChannelFromDB()
-            _stableChannel.value = _stableChannel.value.copy(
-                lastStabilityPayment = System.currentTimeMillis() / 1000
-            )
+            _stableChannel.update { it.copy(lastStabilityPayment = System.currentTimeMillis() / 1000) }
             // reconcileOutgoingBacking() wrote directly to the DB, bypassing saveChannelToDB()
             // — so the SharedPreferences launch cache (used to seed Stable USD before the DB is
             // open on next launch) needs its own explicit refresh here too, or it keeps showing
@@ -2765,15 +2782,21 @@ class AppState(private val context: Context) : ViewModel() {
                 ) ?: throw IllegalStateException("DB service unavailable")
                 val backing = persistence.backingSats
                     ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
-                val updated = sc.copy(lastStabilityPayment = now, backingSats = backing)
-                _stableChannel.value = updated
-                saveChannelToDB(preserveBacking = true)
+                // Patch only the fields this tick owns, against the *current* in-memory value —
+                // not the `sc` snapshot captured at the top of the tick. A concurrent ordinary
+                // send (handlePaymentSuccessful) may have reconciled expectedUSD/backing since
+                // then; republishing `sc` clobbered that in memory, and the old
+                // saveChannelToDB(preserveBacking = true) here then wrote the stale expected_usd
+                // back to the DB, undoing the send's committed reconcile (#299 review, P1).
+                // The debit itself is already durable via recordPaymentAndMaybeUpdateBacking(),
+                // and lastStabilityPayment is not a DB column, so no save is needed here.
+                _stableChannel.update { it.copy(lastStabilityPayment = now, backingSats = backing) }
                 databaseService?.clearPendingSend()
                 AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
             } catch (e: Exception) {
                 // The send already succeeded. Keep the durable marker and block all later sends
                 // until the payment row and backing delta can be committed together.
-                _stableChannel.value = sc.copy(lastStabilityPayment = now)
+                _stableChannel.update { it.copy(lastStabilityPayment = now) }
                 FCMService.flagPendingPayment(context)
                 AuditService.log(
                     "STABILITY_PAYMENT_PERSISTENCE_FAILED",
