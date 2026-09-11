@@ -29,6 +29,10 @@
 		492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AB300CC81D003EC383 /* EsploraError.swift */; };
 		492B54B1300CE85C003EC383 /* ConfirmationPollingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */; };
 		492B54C1300CE85C003EC383 /* MempoolWebSocketService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */; };
+		494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494445783053DB2400B5A146 /* PriceChartFetching.swift */; };
+		4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */; };
+		4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */; };
+		4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
 		495CB3FA3013F14100560837 /* TransactionMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3F93013F14100560837 /* TransactionMatcher.swift */; };
 		495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */; };
@@ -85,8 +89,6 @@
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
-		5C279A022FEA00020074ACD2 /* SpliceRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */; };
-		5C279A042FEA00040074ACD2 /* StabilitySettlementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */; };
 		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */; };
@@ -121,6 +123,8 @@
 		49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */; };
 		55681ED47BE9198B5635346A /* TradeDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F10632049E3C904E518EDD2 /* TradeDetailView.swift */; };
 		581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */; };
+		5C279A022FEA00020074ACD2 /* SpliceRepositoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */; };
+		5C279A042FEA00040074ACD2 /* StabilitySettlementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */; };
 		62340228B969D280C66FD733 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFC40949E35E9317ACA30E35 /* AppState.swift */; };
 		6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82EFF29BD58A394274F50B96 /* MnemonicUtils.swift */; };
 		6929CC2C37EEDC6219317621 /* TradeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6EF4DE5A43647E46CAAD52B /* TradeService.swift */; };
@@ -210,6 +214,10 @@
 		492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationResolver.swift; sourceTree = "<group>"; };
 		492B54B0300CE85C003EC383 /* ConfirmationPollingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConfirmationPollingService.swift; sourceTree = "<group>"; };
 		492B54C0300CE85C003EC383 /* MempoolWebSocketService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketService.swift; sourceTree = "<group>"; };
+		494445783053DB2400B5A146 /* PriceChartFetching.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartFetching.swift; sourceTree = "<group>"; };
+		4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithms.swift; sourceTree = "<group>"; };
+		4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartPeriod.swift; sourceTree = "<group>"; };
+		4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithmsTests.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
 		495CB3F93013F14100560837 /* TransactionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionMatcher.swift; sourceTree = "<group>"; };
 		495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketProtocol.swift; sourceTree = "<group>"; };
@@ -265,8 +273,6 @@
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
-		5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceRepositoryTests.swift; sourceTree = "<group>"; };
-		5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilitySettlementTests.swift; sourceTree = "<group>"; };
 		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateService.swift; sourceTree = "<group>"; };
@@ -303,6 +309,8 @@
 		5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloudBackupService.swift; sourceTree = "<group>"; };
 		55E70A76A6F35E1A6677742F /* RestoreSeedSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreSeedSheet.swift; sourceTree = "<group>"; };
 		5AFFF3730F0DCCB9662892DE /* KeychainService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainService.swift; sourceTree = "<group>"; };
+		5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceRepositoryTests.swift; sourceTree = "<group>"; };
+		5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilitySettlementTests.swift; sourceTree = "<group>"; };
 		5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPService.swift; sourceTree = "<group>"; };
 		61BB0D1D623E0794FC1ED6ED /* NodeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeService.swift; sourceTree = "<group>"; };
 		623F41D841B312F0C9AE01E6 /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
@@ -620,6 +628,7 @@
 				5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
+				494445783053DB2400B5A146 /* PriceChartFetching.swift */,
 				4962F9A730340E8A00852B66 /* PriceChartService.swift */,
 				49A0F0013029000000000001 /* PriceOracle.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
@@ -722,6 +731,8 @@
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
+				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
+				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
 				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
 			);
 			path = Home;
@@ -738,11 +749,12 @@
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
+				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
-				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
+				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
@@ -877,6 +889,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
+				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
@@ -938,11 +951,14 @@
 				49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */,
 				49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */,
 				49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */,
+				4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */,
+				4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
 				2770708ED911F0D15D5C3670 /* Extensions.swift in Sources */,
 				96B467E3F04FC01EB23B8413 /* FundWalletView.swift in Sources */,
 				E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */,
 				4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */,
+				494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */,
 				88769D82377C43BCF549A52C /* HistoryView.swift in Sources */,
 				1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */,
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
