@@ -244,3 +244,156 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(rows[0].status, "failed")
     }
 }
+
+private struct RecoverySpliceChecker: SpliceBroadcastChecking {
+    let result: TxBroadcastStatus
+    func checkStatus(txid _: String, endpointURLs _: [String]) async -> TxBroadcastStatus { result }
+}
+
+private struct CallbackSpliceChecker: SpliceBroadcastChecking {
+    let check: @MainActor @Sendable () -> TxBroadcastStatus
+    func checkStatus(txid _: String, endpointURLs _: [String]) async -> TxBroadcastStatus { await check() }
+}
+
+@MainActor
+final class SpliceFailureRecoveryTests: XCTestCase {
+    private var dataDir: URL!
+    private var db: DatabaseService!
+    private var app: AppState!
+    private let txid = String(repeating: "ab", count: 32)
+
+    override func setUp() async throws {
+        dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        db = try DatabaseService(dataDir: dataDir)
+        app = makeApp(.inconclusive)
+    }
+
+    override func tearDown() async throws {
+        app = nil
+        db = nil
+        try FileManager.default.removeItem(at: dataDir)
+    }
+
+    private func makeApp(_ status: TxBroadcastStatus) -> AppState {
+        let value = AppState(spliceBroadcastChecker: RecoverySpliceChecker(result: status))
+        value.databaseService = db
+        return value
+    }
+
+    private func beginNegotiatedSplice() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest")
+        try db.spliceRepo.setPendingSpliceTxid(txid)
+        app.spliceTxid = txid
+    }
+
+    private func queueFailure() throws {
+        try db.spliceRepo.deferFailureCheck(txid: txid, channelId: "channel", userChannelId: "7")
+    }
+
+    private func status(_ txid: String) throws -> String? {
+        try db.rawSQL.query("SELECT status FROM payments WHERE txid = ?", params: [.text(txid)]).first?.string(0)
+    }
+
+    func testFailureEventIsDurableBeforeAcknowledgement() throws {
+        try beginNegotiatedSplice()
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertTrue(ack.shouldAck)
+        XCTAssertEqual(try db.spliceRepo.pendingFailureChecks().map(\.txid), [txid])
+    }
+
+    func testQueueFailureKeepsLdkEventUnacknowledged() throws {
+        try beginNegotiatedSplice()
+        try db.rawSQL.execute("""
+            CREATE TRIGGER fail_splice_inbox BEFORE INSERT ON pending_splice_failure_checks
+            BEGIN SELECT RAISE(ABORT, 'injected disk failure'); END
+        """)
+        let ack = EventAckToken()
+        app.handleSpliceNegotiationFailed(channelId: "channel", userChannelId: "7", ackToken: ack)
+        XCTAssertFalse(ack.shouldAck)
+        XCTAssertTrue(app.isSweeping)
+        XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+    }
+
+    func testInconclusiveCheckSurvivesRestartAndFinalizesExactRow() async throws {
+        try beginNegotiatedSplice()
+        try queueFailure()
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertTrue(app.isSweeping)
+        XCTAssertEqual(try status(txid), "pending")
+        XCTAssertEqual(try db.spliceRepo.pendingFailureChecks().count, 1)
+        app = nil
+        db = nil
+        db = try DatabaseService(dataDir: dataDir)
+        app = makeApp(.notFound)
+        app.spliceTxid = txid
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertEqual(try status(txid), "failed")
+        XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+        XCTAssertFalse(try db.spliceRepo.hasPendingSplice())
+        XCTAssertFalse(app.isSweeping)
+        XCTAssertNoThrow(try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnext"))
+    }
+
+    func testBroadcastTransactionKeepsConfirmationOwnership() async throws {
+        app = makeApp(.exists)
+        try beginNegotiatedSplice()
+        try queueFailure()
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertTrue(app.isSweeping)
+        XCTAssertEqual(try status(txid), "pending")
+        XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+    }
+
+    func testFinalizationFailureRetainsRecoveryObligation() async throws {
+        app = makeApp(.notFound)
+        try beginNegotiatedSplice()
+        try queueFailure()
+        try db.rawSQL.execute("""
+            CREATE TRIGGER fail_splice_update BEFORE UPDATE OF status ON payments
+            BEGIN SELECT RAISE(ABORT, 'injected disk failure'); END
+        """)
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertEqual(try status(txid), "pending")
+        XCTAssertEqual(try db.spliceRepo.pendingFailureChecks().count, 1)
+        XCTAssertTrue(app.isSweeping)
+        try db.rawSQL.execute("DROP TRIGGER fail_splice_update")
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertEqual(try status(txid), "failed")
+        XCTAssertFalse(app.isSweeping)
+    }
+
+    func testNewSpliceDuringCheckIsNotFailedOrTornDown() async throws {
+        app = AppState(spliceBroadcastChecker: CallbackSpliceChecker { [unowned self] in
+            self.app.spliceTxid = nil
+            self.app.cancelPendingSpliceStart()
+            try! self.app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew")
+            return .notFound
+        })
+        app.databaseService = db
+        try beginNegotiatedSplice()
+        try queueFailure()
+        await app.retryPendingSpliceFailureChecks()
+        XCTAssertTrue(app.isSweeping)
+        XCTAssertEqual(try status(txid), "pending")
+        XCTAssertEqual(try db.spliceRepo.pendingFailureChecks().count, 1)
+        let latest = try db.rawSQL.query("SELECT status, txid FROM payments ORDER BY id DESC LIMIT 1").first
+        XCTAssertEqual(latest?.string(0), "pending")
+        XCTAssertNil(latest?.optString(1))
+    }
+
+    func testExactTxidFinalizationLeavesNewInitiationAndCompletedRowsAlone() throws {
+        try beginNegotiatedSplice()
+        try queueFailure()
+        app.spliceTxid = nil
+        app.cancelPendingSpliceStart()
+        try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew")
+        XCTAssertTrue(try db.spliceRepo.failUnbroadcastSplice(txid: txid))
+        XCTAssertTrue(try db.spliceRepo.hasPendingSplice(), "The newer NULL-txid splice is still pending")
+        XCTAssertTrue(db.spliceRepo.completeSplice(txid: txid))
+        try queueFailure()
+        XCTAssertFalse(try db.spliceRepo.failUnbroadcastSplice(txid: txid))
+        XCTAssertEqual(try status(txid), "completed")
+        XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+    }
+}
