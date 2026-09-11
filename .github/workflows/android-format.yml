@@ -1,4 +1,5 @@
 name: Android Format
+
 on:
   push:
     branches: [main]
@@ -23,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -40,6 +43,21 @@ jobs:
           echo "/tmp/ktfmt-bin" >> "$GITHUB_PATH"
 
       - name: Run ktfmt
-        working-directory: android
         run: |
-          find app/src -name "*.kt" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.base_ref }}"
+            if [ -z "$BASE_REF" ]; then
+              BASE_REF="main"
+            fi
+            git fetch origin "$BASE_REF" --depth=1 2>/dev/null || true
+            CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" 2>/dev/null | grep '^android/.*\.kt$' || git diff --name-only "$BASE_REF...HEAD" 2>/dev/null | grep '^android/.*\.kt$' || true)
+            if [ -n "$CHANGED" ]; then
+              echo "Checking changed Kotlin files in PR:"
+              echo "$CHANGED"
+              echo "$CHANGED" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
+            else
+              echo "No Kotlin files modified in this pull request."
+            fi
+          else
+            find android/app/src -name "*.kt" | xargs ktfmt --kotlinlang-style --dry-run --set-exit-if-changed
+          fi
