@@ -803,7 +803,10 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 val db = DatabaseService(context)
                 databaseService = db
-                launch { databaseService?.seedHistoricalPrices() }
+                launch {
+                    databaseService?.seedHistoricalPrices()
+                    _chartUpdateTrigger.value = System.currentTimeMillis()
+                }
                 launch {
                     backfillHourlyPrices()
                     backfillDailyPrices()
@@ -959,6 +962,7 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
                 resetNodeStartRetryState()
                 _phase.value = Phase.WALLET
+                _chartUpdateTrigger.value = System.currentTimeMillis()
                 refreshBalances()
                 pollPaymentConfirmations(force = true)
                 connectMempoolWebSocket()
@@ -3503,13 +3507,20 @@ class AppState(private val context: Context) : ViewModel() {
         } else {
             thirtyDaysAgo
         }
-        val candles = priceChartService.fetchKrakenHourlyOHLC(since)
-        if (candles.isEmpty()) return
-        val count = db.backfillHourlyPrices(candles)
-        if (count > 0) {
-            AuditService.log("CHART_BACKFILL", mapOf("points" to count))
-            cachedChartHourly = db.getPriceHistory(24 * 30)
-            _chartUpdateTrigger.value = System.currentTimeMillis()
+        for (attempt in 1..3) {
+            val candles = priceChartService.fetchKrakenHourlyOHLC(since)
+            if (candles.isNotEmpty()) {
+                val count = db.backfillHourlyPrices(candles)
+                if (count > 0) {
+                    AuditService.log("CHART_BACKFILL", mapOf("points" to count))
+                    cachedChartHourly = db.getPriceHistory(24 * 30)
+                    _chartUpdateTrigger.value = System.currentTimeMillis()
+                }
+                break
+            }
+            if (attempt < 3) {
+                kotlinx.coroutines.delay(attempt * 1000L)
+            }
         }
     }
 
@@ -3526,19 +3537,26 @@ class AppState(private val context: Context) : ViewModel() {
         } else {
             sevenTwentyDaysAgo
         }
-        val candles = priceChartService.fetchKrakenDailyOHLC(since)
-        if (candles.isEmpty()) return
-        val count = db.backfillDailyPrices(candles)
-        if (count > 0) {
-            AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
-            val dailyPrices = db.getDailyPrices(99999)
-            val daily = dailyPrices.mapNotNull { d ->
-                val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
-                val ts = date.time / 1000
-                com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
-            }.sortedBy { it.timestamp }
-            cachedChartDaily = daily
-            _chartUpdateTrigger.value = System.currentTimeMillis()
+        for (attempt in 1..3) {
+            val candles = priceChartService.fetchKrakenDailyOHLC(since)
+            if (candles.isNotEmpty()) {
+                val count = db.backfillDailyPrices(candles)
+                if (count > 0) {
+                    AuditService.log("CHART_DAILY_BACKFILL", mapOf("points" to count))
+                    val dailyPrices = db.getDailyPrices(99999)
+                    val daily = dailyPrices.mapNotNull { d ->
+                        val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
+                        val ts = date.time / 1000
+                        com.stablechannels.app.models.PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
+                    }.sortedBy { it.timestamp }
+                    cachedChartDaily = daily
+                    _chartUpdateTrigger.value = System.currentTimeMillis()
+                }
+                break
+            }
+            if (attempt < 3) {
+                kotlinx.coroutines.delay(attempt * 1000L)
+            }
         }
     }
 

@@ -75,9 +75,13 @@ fun PriceChart(
             allDailyPrices = daily
             appState.cachedChartHourly = hourly
             appState.cachedChartDaily = daily
-            appState.chartDataLoaded = true
+            if (hourly.isNotEmpty() || daily.isNotEmpty()) {
+                appState.chartDataLoaded = true
+            }
         }
-        dataLoaded = true
+        if (hourlyPrices.isNotEmpty() || allDailyPrices.isNotEmpty()) {
+            dataLoaded = true
+        }
     }
 
     // Filter when period changes or data updates
@@ -89,7 +93,15 @@ fun PriceChart(
 
         val raw = if (chartPeriod.usesHourly) {
             val startIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
-            hourlyPrices.subList(startIdx, hourlyPrices.size)
+            val hourlySlice = hourlyPrices.subList(startIdx, hourlyPrices.size)
+            if (hourlySlice.size >= 2) {
+                hourlySlice
+            } else {
+                // Fallback to daily if hourly is sparse or still backfilling
+                val dailyStartIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
+                val dailySlice = allDailyPrices.subList(dailyStartIdx, allDailyPrices.size)
+                if (dailySlice.size >= 2) dailySlice else hourlySlice
+            }
         } else {
             val startIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
             val dailySlice = allDailyPrices.subList(startIdx, allDailyPrices.size)
