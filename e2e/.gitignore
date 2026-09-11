@@ -1,0 +1,11 @@
+
+# E2E iOS build DerivedData
+.dd-ios/
+.last-run.log
+.build.log
+.run-lock
+
+# Mac desktop E2E runtime data (contains regtest seeds/wallets — never commit)
+.mac-user-flows/
+.mac-user-demo/
+.mac-user-ui/

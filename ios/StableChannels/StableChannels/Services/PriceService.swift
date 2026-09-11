@@ -69,7 +69,9 @@ class PriceService {
             return self.currentPrice
         }
 
-        let usdPrices = await Self.fetchFeeds(PriceOracle.directUSDFeeds)
+        // Constants.defaultPriceFeeds is PriceOracle.directUSDFeeds in production and the
+        // local E2E feed set when TestOverrides supplies one.
+        let usdPrices = await Self.fetchFeeds(Constants.defaultPriceFeeds)
         do {
             let result: PriceOracleResult
             do {
@@ -81,8 +83,8 @@ class PriceService {
                 )
             } catch let failure as PriceOracleFailure where !failure.quarantinesPrice {
                 print("[PriceOracle] direct USD unavailable: \(failure); trying USDT fallback")
-                async let usdtPrices = Self.fetchFeeds(PriceOracle.bitcoinUSDTFeeds)
-                async let pegPrices = Self.fetchFeeds(PriceOracle.usdtUSDFeeds)
+                async let usdtPrices = Self.fetchFeeds(Constants.fallbackUSDTPriceFeeds)
+                async let pegPrices = Self.fetchFeeds(Constants.usdtUSDPriceFeeds)
                 let (fetchedUSDTPrices, fetchedPegPrices) = await (usdtPrices, pegPrices)
                 result = try PriceOracle.resolve(
                     usdPrices: [],

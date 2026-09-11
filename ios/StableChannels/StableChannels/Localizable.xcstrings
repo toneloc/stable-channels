@@ -24328,6 +24328,17 @@
         }
       }
     },
+    "status_trade_rejected" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Order Rejected"
+          }
+        }
+      }
+    },
     "status_waiting_lsp" : {
       "extractionState" : "manual",
       "localizations" : {

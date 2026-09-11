@@ -1,0 +1,10 @@
+appId: com.stablechannels.app
+---
+# y=26%: the balance slider sits below the price chart on the current home
+# layout (verified against a device screenshot 2026-08-26).
+# A single slow pull gives Compose time to show 100% BTC at the starting
+# position before moving, then sells roughly $75 of the $85 balance.
+- swipe:
+    start: 9%, 26%
+    end: 86%, 26%
+    duration: 4000

@@ -26,7 +26,7 @@ fn main() -> eframe::Result<()> {
 	};
 
 	eframe::run_native(
-		"LSP Server GUI",
+		"Stable Channels LSP",
 		options,
 		Box::new(|cc| Ok(Box::new(app::LspServerApp::new(cc)))),
 	)

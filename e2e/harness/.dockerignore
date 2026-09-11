@@ -1,0 +1,7 @@
+target/
+harness-data/
+.env
+*.log
+README.md
+configs/
+docker-compose.yml

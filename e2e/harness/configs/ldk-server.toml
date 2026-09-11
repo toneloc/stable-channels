@@ -1,0 +1,41 @@
+# ldk-server (LSP backend) — regtest E2E config.
+# PROD-PARITY: parameters mirror the live bidaemon's ldk-server-config.toml
+# (fetched 2026-07-15, secrets excluded). Regtest-only deltas: network,
+# docker hostnames, no announcement address, Debug logging, TLS SAN.
+
+[node]
+network = "regtest"
+alias = "Stable Channels"
+listening_addresses = ["0.0.0.0:9735"]
+grpc_service_address = "0.0.0.0:3536"     # prod binds 127.0.0.1; docker needs 0.0.0.0
+
+[storage.disk]
+dir_path = "/data/ldk-server"
+
+# Chain source: bitcoind RPC, same as prod (prod: 127.0.0.1:8332 mainnet).
+[bitcoind]
+rpc_address = "bitcoin-core:18443"
+rpc_user = "sc"
+rpc_password = "sc"
+
+# LSPS2 service — VALUES IDENTICAL TO PROD. Requires the ldk-server build
+# feature `experimental-lsps2-support` (see docker/Dockerfile.ldk-server).
+[liquidity.lsps2_service]
+advertise_service = true
+channel_opening_fee_ppm = 0
+channel_over_provisioning_ppm = 1000000
+min_channel_opening_fee_msat = 0
+min_channel_lifetime = 100
+max_client_to_self_delay = 1024
+min_payment_size_msat = 0
+max_payment_size_msat = 100000000000
+client_trusts_lsp = true
+disable_client_reserve = false
+
+[log]
+level = "Debug"        # prod runs Info; Debug is deliberate for E2E triage
+log_to_file = true
+
+[tls]
+# Regtest-only: sc-lsp dials the docker hostname; SAN must include it.
+hosts = ["ldk-server"]
