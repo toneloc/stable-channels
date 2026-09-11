@@ -15,6 +15,17 @@ class TradeRejectionProtocolTest {
     // Wire vocabulary from src/trade.rs, emitted by stable_manager.rs.
     private val codes = listOf("invalid_amount", "stale_request", "invalid_fee", "invalid_quote",
         "quote_deviation", "insufficient_capacity", "settlement_required", "unsafe_allocation", "internal_failure")
+    private val messages = mapOf(
+        "invalid_amount" to "The amount is invalid. Review the amount and retry.",
+        "stale_request" to "The quote expired before it could be accepted. Refresh and retry.",
+        "invalid_fee" to "The fee was invalid. Refresh the quote before retrying.",
+        "invalid_quote" to "A valid market quote is required. Refresh and retry.",
+        "quote_deviation" to "The market moved outside the quote range. Refresh and retry.",
+        "insufficient_capacity" to "The channel does not have enough capacity. Reduce the amount.",
+        "settlement_required" to "Settle the current stability adjustment before retrying.",
+        "unsafe_allocation" to "Cannot preserve the current channel allocation safely.",
+        "internal_failure" to "The provider could not process. Try again later."
+    )
     private fun payload(reason: String = "invalid_amount") = JSONObject().apply {
         put("type", "TRADE_REJECTED_V1")
         put("channel_id", "ab".repeat(32))
@@ -40,6 +51,7 @@ class TradeRejectionProtocolTest {
             assertEquals(code, (message as TradeControlMessage.Rejected).reasonCode)
         }
         assertEquals(codes.size, codes.map(TradeProtocol::rejectionMessage).toSet().size)
+        assertEquals(messages, codes.associateWith(TradeProtocol::rejectionMessage))
     }
 
     @Test

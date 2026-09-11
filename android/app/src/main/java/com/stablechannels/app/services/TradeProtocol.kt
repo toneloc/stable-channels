@@ -358,15 +358,15 @@ object TradeProtocol {
     }
 
     fun rejectionMessage(reason: String): String = when (reason) {
-        "invalid_amount" -> "The trade amount is invalid. Review the amount and retry."
+        "invalid_amount" -> "The amount is invalid. Review the amount and retry."
         "stale_request" -> "The quote expired before it could be accepted. Refresh and retry."
-        "invalid_fee" -> "The trade fee was invalid. Refresh the quote before retrying."
+        "invalid_fee" -> "The fee was invalid. Refresh the quote before retrying."
         "invalid_quote" -> "A valid market quote is required. Refresh and retry."
         "quote_deviation" -> "The market moved outside the quote range. Refresh and retry."
-        "insufficient_capacity" -> "The channel does not have enough capacity for this trade. Reduce the amount."
-        "settlement_required" -> "Settle the current stability adjustment before retrying this trade."
-        "unsafe_allocation" -> "This trade cannot preserve the current channel allocation safely."
-        else -> "The provider could not process the trade. Try again later."
+        "insufficient_capacity" -> "The channel does not have enough capacity. Reduce the amount."
+        "settlement_required" -> "Settle the current stability adjustment before retrying."
+        "unsafe_allocation" -> "Cannot preserve the current channel allocation safely."
+        else -> "The provider could not process. Try again later."
     }
 
     fun isCanonicalIdentifier(value: String): Boolean =
