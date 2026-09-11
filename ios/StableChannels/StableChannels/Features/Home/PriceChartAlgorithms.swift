@@ -5,37 +5,12 @@ enum PriceChartAlgorithms {
     /// Binary search for the first index where record date >= targetDate.
     /// Assumes records are sorted chronologically in ascending order.
     static func lowerBound(in records: [PriceRecord], cutoff: Date) -> Int {
-        var low = 0
-        var high = records.count
-        while low < high {
-            let mid = low + (high - low) / 2
-            if records[mid].date < cutoff {
-                low = mid + 1
-            } else {
-                high = mid
-            }
-        }
-        return low
+        records.lowerBound(target: cutoff) { $0.date }
     }
 
     /// Binary search to find the record closest in time to targetDate.
     static func nearestRecord(in records: [PriceRecord], targetDate: Date) -> PriceRecord? {
-        guard !records.isEmpty else { return nil }
-        if records.count == 1 { return records[0] }
-
-        let idx = lowerBound(in: records, cutoff: targetDate)
-        if idx == 0 {
-            return records[0]
-        }
-        if idx >= records.count {
-            return records[records.count - 1]
-        }
-
-        let prev = records[idx - 1]
-        let curr = records[idx]
-        let diffPrev = abs(prev.date.timeIntervalSince(targetDate))
-        let diffCurr = abs(curr.date.timeIntervalSince(targetDate))
-        return diffPrev <= diffCurr ? prev : curr
+        records.binarySearchNearest(target: targetDate) { $0.date }
     }
 
     /// Single-pass min and max calculation with 2% margin padding.
