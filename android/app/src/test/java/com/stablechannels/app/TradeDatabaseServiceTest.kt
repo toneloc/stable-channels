@@ -795,6 +795,119 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun repairDefersWhileAStabilitySendIsStillUnreconciled() {
+        // (1) A stability keysend that SUCCEEDED but whose backing debit is not recorded yet
+        // leaves the channel looking like an overflow. Repairing there would take the same sats
+        // twice — once as a USD clamp, once as the debit recovery is about to apply.
+        val identifier = "4d".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "31", expectedUSD = 20.0,
+            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+        )
+        assertTrue(service.claimPendingSend(amountMsat = 5_000_000, price = 100_000.0))
+        service.setPendingSendPaymentId("55".repeat(32))
+
+        // The sats have left the channel: backing 20,000 vs a live balance of 15,000.
+        assertNull(service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0))
+        assertEquals(20_000L, service.loadChannel("31")?.backingSats)
+
+        // Recovery records the payment and debits backing once, then clears the marker.
+        val persisted = service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = "55".repeat(32), paymentType = "stability", direction = "sent",
+            amountMsat = 5_000_000, userChannelId = "31", backingDeltaSats = -5_000
+        )
+        assertTrue(persisted.isNewPayment)
+        assertEquals(15_000L, persisted.backingSats)
+        service.clearPendingSend()
+
+        // Now the books match the live balance, so the repair has nothing left to take.
+        assertNull(service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0))
+        assertEquals(15_000L, service.loadChannel("31")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun spliceAccountingResumesExactlyOnceAfterATerminationBeforeCompletion() {
+        // (2) Books are written before the row is marked complete, so a crash in between leaves
+        // the row pending and the resume path runs the deduction again — which must be a no-op
+        // the second time.
+        val identifier = "5e".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "32", expectedUSD = 20.0,
+            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+        )
+        val txid = "6f".repeat(32)
+        service.recordPayment(
+            paymentId = "splice-resume", paymentType = "splice_out", direction = "sent",
+            amountMsat = 5_000_000, amountUSD = 5.0, btcPrice = 100_000.0,
+            txid = txid, status = "pending"
+        )
+
+        // First attempt: deduction lands, then the process dies before completeSplice().
+        val first = service.reconcileOutgoingBacking(
+            channelId = identifier, userChannelId = "32", note = null,
+            receiverSats = 15_000, latestPrice = 100_000.0, price = 100_000.0
+        )
+        assertNotNull(first)
+        assertEquals(15.0, first!!.newExpectedUSD, 0.0001)
+        assertTrue(service.hasPendingSpliceFor(txid))   // still resumable
+
+        // Resume: the reconcile is idempotent, and only now is the row completed.
+        assertNull(
+            service.reconcileOutgoingBacking(
+                channelId = identifier, userChannelId = "32", note = null,
+                receiverSats = 15_000, latestPrice = 100_000.0, price = 100_000.0
+            )
+        )
+        assertEquals(15.0, service.loadChannel("32")?.expectedUSD ?: -1.0, 0.0001)
+        assertTrue(service.completeSplice(txid))
+        assertFalse(service.hasPendingSpliceFor(txid))
+        service.close()
+    }
+
+    @Test
+    fun repairWorksWhenTheChannelBalanceIsZero() {
+        // (3) A full splice-out empties the channel; the position must be allowed to close.
+        val identifier = "7a".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "33", expectedUSD = 5.0,
+            backingSats = 5_000, note = null, receiverSats = 5_000, latestPrice = 100_000.0
+        )
+
+        val repaired = service.clampBackingToLiveReceiver("33", receiverSats = 0, price = 100_000.0)
+
+        assertNotNull(repaired)
+        assertEquals(0L, repaired!!.newBackingSats)
+        assertEquals(0.0, repaired.newExpectedUSD, 0.0001)
+        assertEquals(0L, service.loadChannel("33")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun repairRetriesOnceATrustedPriceIsAvailable() {
+        // (4) Without a trusted price the spend cannot be valued, so the repair defers — and the
+        // deferral must leave the books untouched so a later attempt still finds the work.
+        val identifier = "8b".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "34", expectedUSD = 20.0,
+            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+        )
+
+        assertNull(service.clampBackingToLiveReceiver("34", receiverSats = 15_000, price = 0.0))
+        assertEquals(20_000L, service.loadChannel("34")?.backingSats)   // nothing lost
+
+        val repaired = service.clampBackingToLiveReceiver("34", receiverSats = 15_000, price = 100_000.0)
+        assertNotNull(repaired)
+        assertEquals(15_000L, repaired!!.newBackingSats)
+        assertEquals(15.0, repaired.newExpectedUSD, 0.0001)
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }

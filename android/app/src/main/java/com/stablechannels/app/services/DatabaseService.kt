@@ -288,10 +288,22 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         receiverSats: Long,
         price: Double
     ): BackingClampResult? {
+        // receiverSats == 0 is legitimate — a full splice-out empties the channel and the
+        // position must be allowed to close. Only a negative balance is nonsense.
         if (price <= 0.0 || receiverSats < 0) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
+            // An unreconciled stability send means sats have already left the channel whose
+            // backing debit is still owed. The balance looks like an overflow, but
+            // reconcilePendingOutgoingStabilityPayment() is about to debit it — repairing here
+            // would take it twice. Defer; the retry after recovery picks it up. Checked inside
+            // the write lock so the stability timer cannot claim a send in between.
+            val pending = db.rawQuery("SELECT 1 FROM pending_stability_send WHERE id = 1", null)
+            if (pending.use { it.moveToFirst() }) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
             val cursor = db.rawQuery(
                 "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
                 arrayOf(userChannelId)
@@ -1780,6 +1792,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     /** Returns true only if a splice row was actually flipped to completed,
      *  so callers can use the result as the "this ChannelReady was a splice" signal. */
+    /** Whether completeSplice(txid) would match a row — the same pending rows it updates. */
+    fun hasPendingSpliceFor(txid: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT 1 FROM payments
+            WHERE payment_type IN ('splice_in','splice_out')
+              AND status IN ('pending','failed')
+              AND (txid = ? OR (payment_type = 'splice_in' AND txid IS NULL))
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(txid)
+        )
+        return cursor.use { it.moveToFirst() }
+    }
+
     fun completeSplice(txid: String): Boolean {
         val stmt = writableDatabase.compileStatement(
             "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"

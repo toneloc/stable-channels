@@ -1889,6 +1889,8 @@ class AppState(private val context: Context) : ViewModel() {
                 if (message is TradeControlMessage.Rejected) {
                     syncRetryTracker.clear(paymentHash)
                     _statusMessage.value = TradeProtocol.rejectionMessage(message.reasonCode)
+                    // Shown now, so the next launch must not repeat it.
+                    markTradeFailureSeen(message.correlation.tradePaymentId)
                     AuditService.log("TRADE_REJECTED_BY_LSP", mapOf("payment_id" to message.correlation.tradePaymentId,
                         "reason_code" to message.reasonCode))
                     return true
@@ -2362,25 +2364,49 @@ class AppState(private val context: Context) : ViewModel() {
         // time this tx confirms, pendingSplice may already belong to a newer operation, and
         // reading it here could bind this (older, unrelated) txid to that newer row.
         databaseService?.assignPendingSpliceTxid(txid, capturedPaymentRowId)
-        val completed = databaseService?.completeSplice(txid) == true
-        if (completed) {
-            // completeSplice() just marked the row completed/1-conf. History only reloads when
-            // this epoch moves, and the confirmation poller won't move it for this row: it now
-            // has confirmations >= 1, so the poller no longer selects it. Without this bump,
-            // whenever this monitor sees the confirmation before the poller does, an open
-            // History screen keeps showing "0/1 confirmed" until it is left and reopened (#304).
-            _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-            refreshBalances()
-            updateStableBalances()
-
-            val price = priceService.currentPrice.value
-            val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-            val reconciled = result.first
-            if (result.second != null) {
-                reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        // Books first, row second. completeSplice() only matches a row that is still 'pending',
+        // so marking it complete before the deduction is durable turns a crash in between into a
+        // permanently unaccounted withdrawal — nothing revisits a completed row (#311). With the
+        // order reversed, a crash leaves the row pending, the resume path runs this again, and
+        // the reconcile is idempotent (it only ever removes backing above the live balance), so
+        // the deduction lands exactly once either way.
+        val matchesPendingRow = try {
+            databaseService?.hasPendingSpliceFor(txid) == true
+        } catch (e: Exception) {
+            Log.w("AppState", "Could not check the pending splice row: ${e.message}")
+            false
+        }
+        var completed = false
+        if (matchesPendingRow) {
+            synchronized(booksLock) {
+                refreshBalances()
+                updateStableBalances()
+                val price = priceService.currentAccountingPrice()
+                if (price > 0.0) {
+                    val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
+                    val reconciled = result.first
+                    if (result.second != null) {
+                        reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+                    }
+                    _stableChannel.value = reconciled
+                    saveChannelToDB()
+                } else {
+                    // No trusted price to value the spend: leave the row pending so the resume
+                    // path retries, rather than completing it with the books untouched.
+                    AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
+                        "txid" to txid, "reason" to "untrusted_price"
+                    ))
+                }
             }
-            _stableChannel.value = reconciled
-            saveChannelToDB()
+            if (priceService.currentAccountingPrice() > 0.0) {
+                completed = databaseService?.completeSplice(txid) == true
+                if (completed) {
+                    // History only reloads when this epoch moves, and the confirmation poller no
+                    // longer touches splice rows at all, so without this bump an open History
+                    // screen keeps showing "0/1 confirmed" until it is reopened (#304).
+                    _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                }
+            }
         }
 
         // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
@@ -2746,6 +2772,12 @@ class AppState(private val context: Context) : ViewModel() {
 
         refreshBalances()
         updateStableBalances()
+        // Retry a repair that startup deferred (no trusted price yet, or an operation still in
+        // flight). The guard is a free in-memory comparison, so this costs nothing on the tick
+        // where the books are already consistent — which is every tick but the broken ones.
+        if (_stableChannel.value.backingSats > _stableChannel.value.stableReceiverBTC.sats) {
+            repairBooksAboveLiveBalance()
+        }
         val sc = _stableChannel.value
         val price = priceService.currentAccountingPrice()
 
@@ -3679,17 +3711,24 @@ class AppState(private val context: Context) : ViewModel() {
             null
         } ?: return
         val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
-        if (prefs.getString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, null) == failure.paymentId) return
+        val lastShown = prefs.getString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, null)
         // Mark it seen only once it is actually on screen. start() is re-invocable (ErrorView's
         // retry button), and by then the capsule may hold a live message — recording the failure
         // as shown there would swallow it for good, since the marker is keyed on the payment id.
-        if (_statusMessage.value.isNotEmpty()) return
+        if (!TradeFailureNotice.shouldShow(failure.paymentId, lastShown, _statusMessage.value.isNotEmpty())) return
         _statusMessage.value = failure.outcome.message
-        prefs.edit().putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, failure.paymentId).apply()
+        markTradeFailureSeen(failure.paymentId)
         AuditService.log("TRADE_FAILURE_RESURFACED", mapOf(
             "payment_id" to failure.paymentId,
             "resolved_at" to failure.resolvedAt
         ))
+    }
+
+    private fun markTradeFailureSeen(paymentId: String) {
+        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, paymentId)
+            .apply()
     }
 
     fun onForegroundResume() {
@@ -3714,9 +3753,16 @@ class AppState(private val context: Context) : ViewModel() {
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
         val receiverSats = sc.stableReceiverBTC.sats
-        if (receiverSats <= 0L) return
+        // A zero balance is a legitimate repair case (a full splice-out closes the position), but
+        // it is only meaningful against a live channel — without one the figure is not
+        // authoritative and there is nothing to reconcile against.
+        if (receiverSats < 0L || !_hasReadyChannel.value) return
         if (isChannelClosing || isSweeping || pendingSplice != null) return
         if (try { db.hasPendingSplice() } catch (_: Exception) { true }) return
+        // A stability send whose backing debit has not been recorded yet looks exactly like an
+        // overflow. clampBackingToLiveReceiver() re-checks this inside its transaction; this is
+        // the cheap early out.
+        if (try { db.loadPendingSend() != null } catch (_: Exception) { true }) return
         val inFlight = try {
             nodeService.node?.listPayments()?.any { it.status == PaymentStatus.PENDING } ?: true
         } catch (e: Exception) {
