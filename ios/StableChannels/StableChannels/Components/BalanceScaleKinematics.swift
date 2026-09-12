@@ -19,6 +19,10 @@ public struct BalanceScaleKinematics: Sendable {
     public let maxAngleDegrees: Double
     public let settleDuration: Double
 
+    public var totalShimmerDuration: Double {
+        shimmerDelay + shimmerDuration
+    }
+
     public init(
         shimmerDelay: Double = 0.25,
         shimmerDuration: Double = 0.90,

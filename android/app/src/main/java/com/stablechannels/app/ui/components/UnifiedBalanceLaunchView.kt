@@ -53,7 +53,8 @@ fun UnifiedBalanceLaunchView(
   var hasNotifiedBalanced by remember { mutableStateOf(false) }
 
   val internalElapsed by
-      produceState(initialValue = 0f) {
+      produceState(initialValue = 0f, key1 = elapsedSeconds) {
+        if (elapsedSeconds != null) return@produceState
         val startNanos = withFrameNanos { it }
         while (true) {
           withFrameNanos { frameTimeNanos ->
@@ -79,8 +80,9 @@ fun UnifiedBalanceLaunchView(
               settleElapsed = settleElapsed,
           )
 
-  LaunchedEffect(stage) {
-    if (stage is BalanceScaleKinematics.Stage.Balanced && !hasNotifiedBalanced) {
+  val isBalanced = stage is BalanceScaleKinematics.Stage.Balanced
+  LaunchedEffect(isBalanced) {
+    if (isBalanced && !hasNotifiedBalanced) {
       hasNotifiedBalanced = true
       onBalanced?.invoke()
     }

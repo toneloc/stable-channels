@@ -12,6 +12,9 @@ class BalanceScaleKinematics(
     val maxAngleDegrees: Float = 4.8f,
     val settleDuration: Float = 1.2f,
 ) {
+  val totalShimmerDuration: Float
+    get() = shimmerDelay + shimmerDuration
+
   sealed interface Stage {
     data object Resting : Stage
 

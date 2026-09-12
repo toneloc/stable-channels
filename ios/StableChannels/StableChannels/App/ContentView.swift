@@ -166,7 +166,8 @@ struct SyncingView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var startTime: Double = 0.0
 
-    private let shimmerDuration: Double = 1.15
+    private let kinematics = BalanceScaleKinematics()
+    private var shimmerDuration: Double { kinematics.totalShimmerDuration }
     private let crossfadeDuration: Double = 0.40
 
     var body: some View {
@@ -198,7 +199,7 @@ struct SyncingView: View {
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 
-                        Text(String(localized: "custody_subtitle", defaultValue: "Self-custodial bitcoin wallet"))
+                        Text(String(localized: "app_subtitle", defaultValue: "Self-custodial bitcoin wallet"))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -208,7 +209,7 @@ struct SyncingView: View {
 
                     // Screen 2: Active syncing status during oscillation
                     VStack(spacing: 6) {
-                        Text(String(localized: "status_syncing_wallet", defaultValue: "Wallet Syncing..."))
+                        Text(String(localized: "status_syncing_wallet", defaultValue: "Syncing Wallet"))
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 

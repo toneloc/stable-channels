@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,6 +29,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.Phase
+import com.stablechannels.app.ui.components.BalanceScaleKinematics
+import com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage
 import com.stablechannels.app.ui.components.UnifiedBalanceLaunchView
 
 @Composable
@@ -48,11 +51,12 @@ fun ContentView(appState: AppState) {
 fun SyncingView(
     modifier: Modifier = Modifier,
     isSyncComplete: Boolean = false,
-    previewStage: com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage? = null,
+    previewStage: Stage? = null,
     onBalanced: (() -> Unit)? = null,
 ) {
   val elapsedSeconds by
-      produceState(initialValue = 0f) {
+      produceState(initialValue = 0f, key1 = previewStage) {
+        if (previewStage != null) return@produceState
         val startNanos = withFrameNanos { it }
         while (true) {
           withFrameNanos { frameTimeNanos ->
@@ -61,13 +65,14 @@ fun SyncingView(
         }
       }
 
-  val shimmerDuration = 1.15f
+  val kinematics = remember { BalanceScaleKinematics() }
+  val shimmerDuration = kinematics.totalShimmerDuration
   val crossfadeDuration = 0.40f
 
   val effectiveElapsed =
       when (previewStage) {
-        is com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage.Shimmer -> 0.70f
-        is com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage.Oscillating -> 1.65f
+        is Stage.Shimmer -> 0.70f
+        is Stage.Oscillating -> 1.65f
         else -> elapsedSeconds
       }
 
@@ -127,7 +132,7 @@ fun SyncingView(
                 },
         ) {
           Text(
-              text = "Wallet Syncing...",
+              text = "Syncing Wallet",
               style = MaterialTheme.typography.titleMedium,
               fontWeight = FontWeight.Bold,
               color = MaterialTheme.colorScheme.onBackground,
@@ -175,9 +180,7 @@ private fun PreviewSyncingFlowDark() {
 private fun PreviewShimmerStageDark() {
   MaterialTheme(colorScheme = darkColorScheme()) {
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-      SyncingView(
-          previewStage = com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage.Shimmer(0.5f)
-      )
+      SyncingView(previewStage = Stage.Shimmer(0.5f))
     }
   }
 }
@@ -187,9 +190,7 @@ private fun PreviewShimmerStageDark() {
 private fun PreviewOscillatingStageDark() {
   MaterialTheme(colorScheme = darkColorScheme()) {
     Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
-      SyncingView(
-          previewStage = com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage.Oscillating(4.8f)
-      )
+      SyncingView(previewStage = Stage.Oscillating(4.8f))
     }
   }
 }
