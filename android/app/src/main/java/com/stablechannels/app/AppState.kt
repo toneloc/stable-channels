@@ -2289,8 +2289,16 @@ class AppState(private val context: Context) : ViewModel() {
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
-                    completeConfirmedSplice(normalizedTxid, monitorGeneration, monitorPaymentRowId)
-                    break
+                    // DEFERRED means the books could not be valued yet (no trusted price). Keep
+                    // monitoring and retry on the next tick rather than declaring the move done:
+                    // the row stays 'pending', which also blocks the periodic repair, so nothing
+                    // else would pick it up until the app restarted.
+                    if (completeConfirmedSplice(
+                            normalizedTxid, monitorGeneration, monitorPaymentRowId
+                        ) == SpliceCompletion.COMPLETED
+                    ) {
+                        break
+                    }
                 }
                 delay(30_000)
             }
@@ -2354,7 +2362,14 @@ class AppState(private val context: Context) : ViewModel() {
         return false
     }
 
-    private fun completeConfirmedSplice(txid: String, expectedGeneration: Long, capturedPaymentRowId: Long?) {
+    /** Whether a confirmed splice was fully accounted for, or must be retried. */
+    private enum class SpliceCompletion { COMPLETED, DEFERRED }
+
+    private fun completeConfirmedSplice(
+        txid: String,
+        expectedGeneration: Long,
+        capturedPaymentRowId: Long?
+    ): SpliceCompletion {
         // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
         // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
         // — which requires an exact txid match — can never find it, permanently desyncing Stable
@@ -2376,13 +2391,20 @@ class AppState(private val context: Context) : ViewModel() {
             Log.w("AppState", "Could not check the pending splice row: ${e.message}")
             false
         }
-        var completed = false
         if (matchesPendingRow) {
-            synchronized(booksLock) {
+            // One price read decides everything below. Reading it again to gate the row update
+            // would let a price that arrived in between complete the row with the books
+            // untouched — the exact #311 shape this ordering exists to prevent.
+            val accounted = synchronized(booksLock) {
                 refreshBalances()
                 updateStableBalances()
                 val price = priceService.currentAccountingPrice()
-                if (price > 0.0) {
+                if (price <= 0.0) {
+                    AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
+                        "txid" to txid, "reason" to "untrusted_price"
+                    ))
+                    false
+                } else {
                     val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
                     val reconciled = result.first
                     if (result.second != null) {
@@ -2390,22 +2412,18 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     _stableChannel.value = reconciled
                     saveChannelToDB()
-                } else {
-                    // No trusted price to value the spend: leave the row pending so the resume
-                    // path retries, rather than completing it with the books untouched.
-                    AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
-                        "txid" to txid, "reason" to "untrusted_price"
-                    ))
+                    true
                 }
             }
-            if (priceService.currentAccountingPrice() > 0.0) {
-                completed = databaseService?.completeSplice(txid) == true
-                if (completed) {
-                    // History only reloads when this epoch moves, and the confirmation poller no
-                    // longer touches splice rows at all, so without this bump an open History
-                    // screen keeps showing "0/1 confirmed" until it is reopened (#304).
-                    _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-                }
+            // Nothing is finalized on the deferred path: the row stays pending, the monitor and
+            // the in-memory splice state stay alive, and no "Move confirmed" is shown for a move
+            // whose accounting has not happened.
+            if (!accounted) return SpliceCompletion.DEFERRED
+            if (databaseService?.completeSplice(txid) == true) {
+                // History only reloads when this epoch moves, and the confirmation poller no
+                // longer touches splice rows at all, so without this bump an open History
+                // screen keeps showing "0/1 confirmed" until it is reopened (#304).
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
             }
         }
 
@@ -2436,8 +2454,9 @@ class AppState(private val context: Context) : ViewModel() {
 
         AuditService.log("SPLICE_CONFIRMED", mapOf(
             "txid" to txid,
-            "completed_row" to completed
+            "accounted" to matchesPendingRow
         ))
+        return SpliceCompletion.COMPLETED
     }
 
     private fun closureReasonData(reason: ClosureReason?): JSONObject {
