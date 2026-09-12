@@ -36,11 +36,26 @@ env:
     text: "Done"
     optional: true
 
-# Sweep to the channel (splice-in) and wait for broadcast.
+# Sweep to the channel (splice-in) and wait for broadcast. Since #298 the onchain
+# card collapses "Move" behind a "Ready to move · Receiving onchain (n/6)" summary
+# while the deposit row is still confirming, and can flip into it right after
+# "Move" appears — so wait for the deposit to settle, then tap, expanding the card
+# first if it is still collapsed (same handling as flow 05).
 - extendedWaitUntil:
-    visible: "(Swap|Move)"
+    visible: "(Swap|Move|Ready to move.*)"
     timeout: 240000
-- tapOn: "(Swap|Move)"
+- extendedWaitUntil:
+    notVisible: ".*Receiving onchain.*"
+    timeout: 120000
+- retry:
+    maxRetries: 3
+    commands:
+      - runFlow:
+          when:
+            visible: "Ready to move.*"
+          commands:
+            - tapOn: "Ready to move.*"
+      - tapOn: "(Swap|Move)"
 - extendedWaitUntil:
     visible: "Move pending.*"
     timeout: 60000
