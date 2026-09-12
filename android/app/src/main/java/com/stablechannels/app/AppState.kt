@@ -929,6 +929,12 @@ class AppState(private val context: Context) : ViewModel() {
                     fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
+                    // Off the critical startup path: it makes blocking LDK/DB calls, and the
+                    // first frames must not wait on a repair that almost never has work to do.
+                    launch {
+                        updateStableBalances()
+                        repairBooksAboveLiveBalance()
+                    }
                     connectMempoolWebSocket()
                     resumePendingSpliceConfirmation()
                     // Restore channel-closing state if a close is still pending on-chain
@@ -3656,6 +3662,60 @@ class AppState(private val context: Context) : ViewModel() {
      *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
     fun onForegroundResume() {
         loadChannelFromDB()
+    }
+
+    /**
+     * Heal books that claim more backing than the channel holds.
+     *
+     * backing > the live receiver balance cannot happen in normal operation: the backing is a
+     * slice of that balance. It means a withdrawal moved sats out without its stable-books
+     * deduction — the #311 splice race, which stranded wallets that cannot recover any other way
+     * (the payment row is already 'completed', so no confirmation or resume path revisits it, and
+     * on Android the LSP's corrective sync never applies). Deduct the excess once, at the current
+     * accounting price, and pin backing to the live balance.
+     *
+     * Cold start only, and only with nothing in flight: an in-flight HTLC lowers the receiver
+     * balance for as long as it is pending and would read as an overflow.
+     */
+    private fun repairBooksAboveLiveBalance() {
+        val db = databaseService ?: return
+        val sc = _stableChannel.value
+        if (sc.userChannelId.isEmpty()) return
+        val receiverSats = sc.stableReceiverBTC.sats
+        if (receiverSats <= 0L) return
+        if (isChannelClosing || isSweeping || pendingSplice != null) return
+        if (try { db.hasPendingSplice() } catch (_: Exception) { true }) return
+        val inFlight = try {
+            nodeService.node?.listPayments()?.any { it.status == PaymentStatus.PENDING } ?: true
+        } catch (e: Exception) {
+            true
+        }
+        if (inFlight) return
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) return
+        val result = try {
+            synchronized(booksLock) {
+                val clamped = db.clampBackingToLiveReceiver(sc.userChannelId, receiverSats, price)
+                if (clamped != null) {
+                    publishBooksFromDB(recomputeNative = true)
+                    cacheBalanceForLaunch()
+                }
+                clamped
+            }
+        } catch (e: Exception) {
+            Log.w("AppState", "Books repair failed: ${e.message}")
+            AuditService.log("BOOKS_REPAIR_FAILED", mapOf("error" to (e.message ?: "")))
+            return
+        } ?: return
+        AuditService.log("BOOKS_REPAIRED_ABOVE_LIVE_BALANCE", mapOf(
+            "user_channel_id" to sc.userChannelId,
+            "overflow_sats" to result.overflowSats,
+            "usd_deducted" to result.usdDeducted,
+            "old_expected_usd" to result.oldExpectedUSD,
+            "new_expected_usd" to result.newExpectedUSD,
+            "backing_sats" to result.newBackingSats,
+            "btc_price" to price
+        ))
     }
 
     /** Republish expectedUSD/backingSats from the channel row — the single source of truth for

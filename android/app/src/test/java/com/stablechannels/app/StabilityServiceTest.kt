@@ -153,6 +153,30 @@ class StabilityServiceTest {
         assertEquals(expectedDeduction, deducted!!, 0.01)
     }
 
+    @Test
+    fun `reconcileOutgoing is idempotent below par`() {
+        // A retry must never deduct twice. Backing is pinned to the live balance (preserve sats)
+        // instead of re-pegged to newExpected/price, which used to leave backing ABOVE the live
+        // balance whenever the position was below par — so a second call deducted again
+        // ($100 -> $92 -> $82) and the phantom backing hid a real below-par claim.
+        val price = 100_000.0
+        val sc = StableChannel(
+            expectedUSD = USD(100.0),
+            backingSats = 90_000L,                      // below par: worth $90, target $100
+            stableReceiverBTC = Bitcoin(82_000L)        // an 8,000 sat withdrawal just landed
+        )
+
+        val (first, deducted) = StabilityService.reconcileOutgoing(sc, price)
+        assertEquals(8.0, deducted!!, 0.0001)
+        assertEquals(92.0, first.expectedUSD.amount, 0.0001)
+        assertEquals(82_000L, first.backingSats)        // == live balance, not 92,000
+
+        val (second, deductedAgain) = StabilityService.reconcileOutgoing(first, price)
+        assertEquals(null, deductedAgain)
+        assertEquals(92.0, second.expectedUSD.amount, 0.0001)
+        assertEquals(82_000L, second.backingSats)
+    }
+
     // ---------------------------------------------------------------------------
     // PriceService.median — pure math
     // ---------------------------------------------------------------------------

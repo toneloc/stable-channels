@@ -39,7 +39,13 @@ object StabilityService {
         val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
         val newExpected = max(updated.expectedUSD.amount - usdToDeduct, 0.0)
         updated.expectedUSD = USD(newExpected)
-        updated.backingSats = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
+        // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
+        // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
+        // the live balance whenever the position was below par — so a retry deducted again
+        // ($100 -> $92 -> $82), and the leftover phantom backing masked a real below-par claim
+        // from the stability check. This mirrors the LSP (backing_after_user_to_lsp_stability)
+        // and makes the function idempotent: re-running sees backing <= receiver and returns.
+        updated.backingSats = updated.stableReceiverBTC.sats
         recomputeNative(updated)
         return Pair(updated, usdToDeduct)
     }
