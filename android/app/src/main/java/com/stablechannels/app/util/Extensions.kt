@@ -4,6 +4,7 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
 internal object AppFormatters {
@@ -32,11 +33,15 @@ internal object AppFormatters {
     }
 
     fun formatRelativeDayMonth(date: Date): String {
-        return relativeDayMonth.get()?.format(date) ?: ""
+        val formatter = relativeDayMonth.get() ?: return ""
+        formatter.timeZone = TimeZone.getDefault()
+        return formatter.format(date)
     }
 
     fun formatShortDateTime(date: Date): String {
-        return shortDateTime.get()?.format(date) ?: ""
+        val formatter = shortDateTime.get() ?: return ""
+        formatter.timeZone = TimeZone.getDefault()
+        return formatter.format(date)
     }
 }
 
