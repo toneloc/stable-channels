@@ -140,6 +140,23 @@ else
     fi
 fi
 
+# ─── 7. ktfmt (Android) ──────────────────────────────────────────────
+
+ANDROID_STAGED=$(echo "$STAGED" | grep '^android/.*\.kt$')
+if [ -z "$ANDROID_STAGED" ]; then
+    skip "ktfmt (no Android .kt changes)"
+else
+    KTFMT="$(command -v ktfmt 2>/dev/null)"
+    if [ -z "$KTFMT" ]; then
+        skip "ktfmt (not installed — brew install ktfmt)"
+    else
+        echo "$ANDROID_STAGED" | xargs ktfmt --kotlinlang-style 2>/dev/null
+        # Re-stage any files ktfmt rewrote
+        echo "$ANDROID_STAGED" | xargs git add
+        pass "ktfmt"
+    fi
+fi
+
 # ─── Result ──────────────────────────────────────────────────────────
 
 echo ""

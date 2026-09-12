@@ -1,0 +1,64 @@
+name: Android Format
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**/*.kt'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'android/**/*.kt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-format-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: ktfmt Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install ktfmt
+        run: |
+          curl -fsSL \
+            -o /tmp/ktfmt.jar \
+            https://repo1.maven.org/maven2/com/facebook/ktfmt/0.64/ktfmt-0.64-with-dependencies.jar
+
+      - name: Check formatting
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_REF="${{ github.base_ref }}"
+            if [ -z "$BASE_REF" ]; then
+              BASE_REF="main"
+            fi
+            git fetch origin "$BASE_REF" --depth=1
+            CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep '^android/.*\.kt$' || true)
+            if [ -z "$CHANGED" ]; then
+              echo "No Kotlin files modified."
+              exit 0
+            fi
+            echo "Checking Kotlin files:"
+            echo "$CHANGED"
+            echo "$CHANGED" | xargs java -jar /tmp/ktfmt.jar --kotlinlang-style --dry-run --set-exit-if-changed
+          else
+            find android -name "*.kt" -print0 |
+              xargs -0 java -jar /tmp/ktfmt.jar \
+                --kotlinlang-style \
+                --dry-run \
+                --set-exit-if-changed
+          fi

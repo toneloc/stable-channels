@@ -91,7 +91,7 @@ After cloning, install the git hooks (one-time):
 ./.githooks/install.sh
 ```
 
-This points git at `.githooks/` so the pre-commit checks (secret scanning, `cargo fmt`, `cargo clippy`, large-file guard) run automatically on every commit.
+This points git at `.githooks/` so the pre-commit checks (secret scanning, `cargo fmt`, `cargo clippy`, `swiftformat`, `ktfmt`, large-file guard) run automatically on every commit.
 
 ### Stable Channels Process
 
