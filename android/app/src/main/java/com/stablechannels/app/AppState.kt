@@ -153,6 +153,8 @@ class AppState(private val context: Context) : ViewModel() {
             const val CACHED_CHANNEL_ID = "cached_channel_id"
             const val CACHED_USER_CHANNEL_ID = "cached_user_channel_id"
             const val CACHED_EXPECTED_USD = "cached_expected_usd"
+            /** Payment id of the last trade failure already shown in the status capsule. */
+            const val LAST_SHOWN_TRADE_FAILURE = "last_shown_trade_failure"
             const val PENDING_TXIDS = "pending_outbound_txids"
 
             fun clearPendingOutbound(context: Context) {
@@ -869,6 +871,7 @@ class AppState(private val context: Context) : ViewModel() {
                 db.markExpiredTradesUncertain()
                 _pendingTradePayments.value = db.unresolvedTradePayments()
                 refreshAllTradeOutcomes(_tradeOutcomes.value.keys + _pendingTradePayments.value.keys)
+                surfaceUnseenTradeFailure()
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
                 AuditService.setLogPath(auditPath)
@@ -926,6 +929,12 @@ class AppState(private val context: Context) : ViewModel() {
                     fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
+                    // Off the critical startup path: it makes blocking LDK/DB calls, and the
+                    // first frames must not wait on a repair that almost never has work to do.
+                    launch {
+                        updateStableBalances()
+                        repairBooksAboveLiveBalance()
+                    }
                     connectMempoolWebSocket()
                     resumePendingSpliceConfirmation()
                     // Restore channel-closing state if a close is still pending on-chain
@@ -3648,8 +3657,94 @@ class AppState(private val context: Context) : ViewModel() {
     /** Called when the UI returns to the foreground. Reloads channel state from the DB so
      *  backing increments committed by StabilityProcessingService while this process was
      *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
+    /**
+     * Tell the user about an order that was refused while they were away.
+     *
+     * A rejection delivered while the app is backgrounded is verified and committed by the
+     * event handler, but the only place it is ever shown is the trade sheet's result step and a
+     * status message set in that same moment — both live in process memory. The relaunch that
+     * follows is a cold start, so both are gone and the refusal is silent: the balance simply
+     * never moved. Resurface the most recent failure once, in the status capsule, so a rejection
+     * is never lost just because the app was not in the foreground when it arrived.
+     *
+     * Once per outcome (a seen-marker keyed on its payment id) and only while the capsule is
+     * free, so it can never displace a live message or reappear on every launch.
+     */
+    private fun surfaceUnseenTradeFailure() {
+        val db = databaseService ?: return
+        val failure = try {
+            db.mostRecentTradeFailure(Constants.TRADE_FAILURE_RESURFACE_WINDOW_SECS)
+        } catch (e: Exception) {
+            Log.w("AppState", "Could not read the last trade failure: ${e.message}")
+            null
+        } ?: return
+        val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, null) == failure.paymentId) return
+        prefs.edit().putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, failure.paymentId).apply()
+        if (_statusMessage.value.isNotEmpty()) return
+        _statusMessage.value = failure.outcome.message
+        AuditService.log("TRADE_FAILURE_RESURFACED", mapOf(
+            "payment_id" to failure.paymentId,
+            "resolved_at" to failure.resolvedAt
+        ))
+    }
+
     fun onForegroundResume() {
         loadChannelFromDB()
+    }
+
+    /**
+     * Heal books that claim more backing than the channel holds.
+     *
+     * backing > the live receiver balance cannot happen in normal operation: the backing is a
+     * slice of that balance. It means a withdrawal moved sats out without its stable-books
+     * deduction — the #311 splice race, which stranded wallets that cannot recover any other way
+     * (the payment row is already 'completed', so no confirmation or resume path revisits it, and
+     * on Android the LSP's corrective sync never applies). Deduct the excess once, at the current
+     * accounting price, and pin backing to the live balance.
+     *
+     * Cold start only, and only with nothing in flight: an in-flight HTLC lowers the receiver
+     * balance for as long as it is pending and would read as an overflow.
+     */
+    private fun repairBooksAboveLiveBalance() {
+        val db = databaseService ?: return
+        val sc = _stableChannel.value
+        if (sc.userChannelId.isEmpty()) return
+        val receiverSats = sc.stableReceiverBTC.sats
+        if (receiverSats <= 0L) return
+        if (isChannelClosing || isSweeping || pendingSplice != null) return
+        if (try { db.hasPendingSplice() } catch (_: Exception) { true }) return
+        val inFlight = try {
+            nodeService.node?.listPayments()?.any { it.status == PaymentStatus.PENDING } ?: true
+        } catch (e: Exception) {
+            true
+        }
+        if (inFlight) return
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) return
+        val result = try {
+            synchronized(booksLock) {
+                val clamped = db.clampBackingToLiveReceiver(sc.userChannelId, receiverSats, price)
+                if (clamped != null) {
+                    publishBooksFromDB(recomputeNative = true)
+                    cacheBalanceForLaunch()
+                }
+                clamped
+            }
+        } catch (e: Exception) {
+            Log.w("AppState", "Books repair failed: ${e.message}")
+            AuditService.log("BOOKS_REPAIR_FAILED", mapOf("error" to (e.message ?: "")))
+            return
+        } ?: return
+        AuditService.log("BOOKS_REPAIRED_ABOVE_LIVE_BALANCE", mapOf(
+            "user_channel_id" to sc.userChannelId,
+            "overflow_sats" to result.overflowSats,
+            "usd_deducted" to result.usdDeducted,
+            "old_expected_usd" to result.oldExpectedUSD,
+            "new_expected_usd" to result.newExpectedUSD,
+            "backing_sats" to result.newBackingSats,
+            "btc_price" to price
+        ))
     }
 
     /** Republish expectedUSD/backingSats from the channel row — the single source of truth for

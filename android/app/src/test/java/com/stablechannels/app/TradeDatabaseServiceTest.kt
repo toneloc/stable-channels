@@ -555,6 +555,176 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun clampBackingToLiveReceiverHealsAStrandedWithdrawalExactlyOnce() {
+        // Issue #311: a splice-out completed without its stable-books deduction, leaving backing
+        // above the balance that actually backs it. The repair deducts the excess once, pins
+        // backing to the live balance (the LSP's preserve-sats convention rather than re-pegging
+        // sats from the USD target, which is what makes StabilityService.reconcileOutgoing()
+        // deduct again on a retry), and is a no-op afterwards.
+        val identifier = "cd".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "11",
+            expectedUSD = 75.3093,
+            backingSats = 75_309,
+            note = null,
+            receiverSats = 75_309,
+            latestPrice = 100_000.0
+        )
+
+        // A $15 withdrawal left the channel; the deduction never ran.
+        val repaired = service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0)
+
+        assertNotNull(repaired)
+        assertEquals(6_253L, repaired!!.overflowSats)
+        assertEquals(6.253, repaired.usdDeducted, 0.0001)
+        assertEquals(69.0563, repaired.newExpectedUSD, 0.0001)
+        assertEquals(69_056L, repaired.newBackingSats)
+
+        val healed = service.loadChannel("11")
+        assertEquals(69.0563, healed?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(69_056L, healed?.backingSats)
+
+        // Idempotent: the books now match the live balance, so nothing more is deducted.
+        assertNull(service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0))
+        assertEquals(69.0563, service.loadChannel("11")?.expectedUSD ?: -1.0, 0.0001)
+
+        // A position that is merely below par is NOT an overflow — leave it alone.
+        assertNull(service.clampBackingToLiveReceiver("11", receiverSats = 80_000, price = 100_000.0))
+        assertEquals(69_056L, service.loadChannel("11")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAppliesWhenTheLspUsesItsOwnUserChannelId() {
+        // Each side assigns its own user_channel_id; for a JIT channel they never match, and the
+        // LSP signs the sync with ITS id. Keying the lookup on user_channel_id therefore found
+        // no row and every uncorrelated sync was dropped, leaving the LSP unable to correct a
+        // diverged wallet (#311). channel_id is what both sides agree on.
+        val identifier = "ef".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "316138149017243335882538127405458540875",   // the app's own id
+            expectedUSD = 19.7555,
+            backingSats = 25_493,
+            note = null,
+            receiverSats = 25_493,
+            latestPrice = 100_000.0
+        )
+
+        val sync = TradeControlMessage.Sync(
+            channelId = identifier,
+            userChannelId = "317806336254983028346801304467074316335",   // the LSP's own id
+            expectedUsd = 14.6022,
+            backingSats = 18_819,
+            syncVersion = 3,
+            correlation = null
+        )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+        )
+        val healed = service.loadChannel("316138149017243335882538127405458540875")
+        assertEquals(14.6022, healed?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(20_340L, healed?.backingSats)   // delta applied against the app's own backing
+
+        // Replaying the same version changes nothing.
+        assertEquals(
+            TradeControlApplyStatus.DUPLICATE,
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+        )
+        service.close()
+    }
+
+    @Test
+    fun outgoingReconcileIsIdempotentBelowPar() {
+        // Same preserve-sats rule as StabilityService.reconcileOutgoing: a redelivered
+        // PaymentSuccessful (the handler rethrows transient failures, so LDK re-runs it) must not
+        // deduct a second time.
+        val identifier = "ab".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "9",
+            expectedUSD = 100.0,
+            backingSats = 90_000,          // below par
+            note = null,
+            receiverSats = 90_000,
+            latestPrice = 100_000.0
+        )
+
+        val first = service.reconcileOutgoingBacking(
+            channelId = identifier, userChannelId = "9", note = null,
+            receiverSats = 82_000, latestPrice = 100_000.0, price = 100_000.0
+        )
+        assertNotNull(first)
+        assertEquals(8.0, first!!.usdDeducted, 0.0001)
+        assertEquals(92.0, first.newExpectedUSD, 0.0001)
+        assertEquals(82_000L, first.newBackingSats)
+
+        val replay = service.reconcileOutgoingBacking(
+            channelId = identifier, userChannelId = "9", note = null,
+            receiverSats = 82_000, latestPrice = 100_000.0, price = 100_000.0
+        )
+        assertNull(replay)
+        assertEquals(92.0, service.loadChannel("9")?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(82_000L, service.loadChannel("9")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun mostRecentTradeFailureFindsARejectionResolvedWhileTheAppWasAway() {
+        // A rejection delivered while backgrounded is committed here, but the sheet that would
+        // have shown it dies with the process. Startup resurfaces the newest failure so the
+        // refusal is not silent (flow 15).
+        val identifier = "ba".repeat(32)
+        val service = DatabaseService(context)
+        val now = System.currentTimeMillis() / 1000L
+        val trade = TradeProtocol.prepare(
+            spendableSats = 100_000,
+            sc = StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(50.0),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 55_000
+            ),
+            action = "sell",
+            amountUsd = 10.0,
+            amountBtc = 0.000099,
+            feeUsd = 0.1,
+            newExpectedUsd = 59.9,
+            quotePrice = 100_000.0,
+            now = now,
+            tradeId = "cc".repeat(32)
+        )!!
+        val dbId = service.recordPreparedTrade(trade)
+        val paymentId = "dd".repeat(32)
+        assertTrue(service.attachTradePaymentId(dbId, paymentId))
+        assertNull(service.mostRecentTradeFailure(3600))   // nothing terminal yet
+
+        val rejection = TradeControlMessage.Rejected(
+            channelId = identifier,
+            correlation = TradeCorrelation(trade.tradeId, paymentId, trade.requestHash),
+            reasonCode = "quote_deviation",
+            decidedAt = now
+        )
+        assertEquals(TradeControlApplyStatus.APPLIED, service.applyTradeRejection(rejection).status)
+
+        val failure = service.mostRecentTradeFailure(3600)
+        assertNotNull(failure)
+        assertEquals(paymentId, failure!!.paymentId)
+        assertEquals(TradeProtocol.rejectionMessage("quote_deviation"), failure.outcome.message)
+
+        // Outside the window it is stale news — History carries it instead.
+        service.writableDatabase.execSQL("UPDATE trades SET resolved_at = resolved_at - 7200")
+        assertNull(service.mostRecentTradeFailure(3600))
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
