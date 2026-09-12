@@ -260,6 +260,91 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Result of [clampBackingToLiveReceiver]. */
+    data class BackingClampResult(
+        val overflowSats: Long,
+        val usdDeducted: Double,
+        val oldExpectedUSD: Double,
+        val newExpectedUSD: Double,
+        val newBackingSats: Long
+    )
+
+    /**
+     * Repair books that claim more backing than the channel actually holds.
+     *
+     * backing > live receiver balance is an impossible state: it means a withdrawal left the
+     * channel without its stable-books deduction (issue #311). Deduct the excess in USD once and
+     * pin backing to the live balance — the LSP's convention of preserving sats, not re-pegging
+     * sats from the USD target, so this converges instead of oscillating. Idempotent by
+     * construction: afterwards backing == receiver, so a second call finds nothing to do.
+     *
+     * The caller must only pass a [receiverSats] that reflects settled channel state — an
+     * in-flight HTLC lowers the receiver balance temporarily and would look like an overflow.
+     *
+     * Returns null when the books are already consistent.
+     */
+    fun clampBackingToLiveReceiver(
+        userChannelId: String,
+        receiverSats: Long,
+        price: Double
+    ): BackingClampResult? {
+        // receiverSats == 0 is legitimate — a full splice-out empties the channel and the
+        // position must be allowed to close. Only a negative balance is nonsense.
+        if (price <= 0.0 || receiverSats < 0) return null
+        val db = writableDatabase
+        db.execSQL("BEGIN IMMEDIATE")
+        try {
+            // An unreconciled stability send means sats have already left the channel whose
+            // backing debit is still owed. The balance looks like an overflow, but
+            // reconcilePendingOutgoingStabilityPayment() is about to debit it — repairing here
+            // would take it twice. Defer; the retry after recovery picks it up. Checked inside
+            // the write lock so the stability timer cannot claim a send in between.
+            val pending = db.rawQuery("SELECT 1 FROM pending_stability_send WHERE id = 1", null)
+            if (pending.use { it.moveToFirst() }) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
+            val cursor = db.rawQuery(
+                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId)
+            )
+            val (currentExpected, currentBacking) = cursor.use {
+                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                it.getDouble(0) to it.getLong(1)
+            }
+            if (currentBacking <= receiverSats) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
+            val overflowSats = currentBacking - receiverSats
+            val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
+            // A repair that exhausts the target closes the position: nothing backs it.
+            val newBacking =
+                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            val cv = ContentValues().apply {
+                put("expected_usd", newExpected)
+                put("stable_sats", newBacking)
+                put("receiver_sats", receiverSats)
+                put("latest_price", price)
+                put("updated_at", System.currentTimeMillis() / 1000)
+            }
+            val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
+            if (rows != 1) {
+                throw IllegalStateException(
+                    "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
+                )
+            }
+            db.execSQL("COMMIT")
+            return BackingClampResult(
+                overflowSats, usdDeducted, currentExpected, newExpected, newBacking
+            )
+        } catch (e: Exception) {
+            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            throw e
+        }
+    }
+
     /** Result of [reconcileOutgoingBacking]: the USD/backing values it actually wrote. */
     data class OutgoingReconcileResult(
         val usdDeducted: Double,
@@ -318,7 +403,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val overflowSats = currentBacking - receiverSats
             val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
             val newExpected = maxOf(currentExpected - usdToDeduct, 0.0)
-            val newBacking = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
+            // Preserve sats: the overflow left the channel, so what remains IS the backing.
+            // Re-pegging backing to newExpected/price (the old behaviour) left backing above the
+            // live balance whenever the position was below par, which made a retry deduct a
+            // SECOND time ($100 -> $92 -> $82) and hid a genuine below-par claim from the
+            // stability check. Pinning backing to the live balance matches the LSP's own
+            // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
+            // At the zero boundary the position is closed, so nothing backs it — see
+            // StabilityService.reconcileOutgoing().
+            val newBacking =
+                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
             val cv = ContentValues().apply {
                 put("channel_id", channelId)
                 put("expected_usd", newExpected)
@@ -676,6 +770,38 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      *  of truth that BOTH the foreground handler and the background service write. The
      *  in-memory outcome map alone misses results committed while the app was backgrounded
      *  or before a restart. A failed fee send is also terminal. */
+    /** A terminal trade outcome plus when it resolved, for the startup resurfacing check. */
+    data class RecentTradeFailure(val paymentId: String, val outcome: TradeOutcome, val resolvedAt: Long)
+
+    /**
+     * The most recent trade FAILURE (rejected or send-failed) resolved within [withinSecs].
+     *
+     * A rejection that lands while the app is backgrounded is committed here, but the sheet that
+     * would have shown it does not survive the cold start that follows — so nothing tells the
+     * user their order was refused. AppState resurfaces this once on launch.
+     */
+    fun mostRecentTradeFailure(withinSecs: Long): RecentTradeFailure? {
+        val cutoff = System.currentTimeMillis() / 1000L - withinSecs
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT trade_payment_id, status, reason_code, resolved_at
+            FROM trades
+            WHERE status IN ('rejected','send_failed')
+              AND trade_payment_id IS NOT NULL
+              AND resolved_at IS NOT NULL AND resolved_at >= ?
+            ORDER BY resolved_at DESC, id DESC
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(cutoff.toString())
+        )
+        return cursor.use { c ->
+            if (!c.moveToFirst()) return@use null
+            val paymentId = c.getString(0) ?: return@use null
+            val outcome = TradeOutcome.fromStored(c.getString(1), c.getStringOrNull(2)) ?: return@use null
+            RecentTradeFailure(paymentId, outcome, c.getLong(3))
+        }
+    }
+
     fun terminalTradeOutcome(paymentId: String): TradeOutcome? {
         val cursor = readableDatabase.rawQuery(
             "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected','send_failed') ORDER BY id DESC LIMIT 1",
@@ -941,11 +1067,18 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
+            // Keyed on channel_id, NOT user_channel_id: each side of a channel assigns its own
+            // user_channel_id, and for an LSP-opened (JIT) channel they never match — the LSP
+            // signs the payload with ITS id, so a user_channel_id lookup found nothing and every
+            // uncorrelated sync was dropped (or, before the retry bound, redelivered forever).
+            // That left the LSP's authoritative state unable to reach the wallet at all, which is
+            // what made the #311 books divergence unrecoverable. channel_id is the identifier
+            // both sides agree on. iOS fixed the same bug in #303.
             val row = db.rawQuery(
                 """
-                SELECT channel_id, expected_usd, stable_sats, receiver_sats, sync_version
-                FROM channels WHERE user_channel_id = ?
-                """.trimIndent(), arrayOf(sync.userChannelId)
+                SELECT user_channel_id, expected_usd, stable_sats, receiver_sats, sync_version
+                FROM channels WHERE channel_id = ?
+                """.trimIndent(), arrayOf(sync.channelId)
             ).use { c ->
                 if (!c.moveToFirst()) null else arrayOf<Any>(
                     c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4)
@@ -953,7 +1086,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             } // A missing row means the channel has since closed (deleteChannel runs on close) —
               // that's permanent, not a transient race, so give up rather than retry forever.
                 ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
-            if (row[0] as String != sync.channelId) return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            val localUserChannelId = row[0] as String
             val currentVersion = row[4] as Long
             if (sync.syncVersion <= currentVersion) {
                 db.execSQL("ROLLBACK")
@@ -981,7 +1114,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             if (db.update(
                     "channels", cv,
                     "user_channel_id = ? AND channel_id = ? AND sync_version < ?",
-                    arrayOf(sync.userChannelId, sync.channelId, sync.syncVersion.toString())
+                    arrayOf(localUserChannelId, sync.channelId, sync.syncVersion.toString())
                 ) != 1
             ) return rollbackResult(db, TradeControlApplyStatus.RETRY)
             db.execSQL("COMMIT")
@@ -1303,19 +1436,28 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /**
+     * Rows the confirmation poller advances. Splices are deliberately NOT here.
+     *
+     * A splice row's completion is what triggers the stable-books reconcile in
+     * AppState.completeConfirmedSplice(), and completeSplice() only matches a row that is still
+     * 'pending'. When the poller also completed splice rows (at 1 conf) it raced the splice
+     * monitor: whoever got there first won, and if the poller won the reconcile never ran — the
+     * withdrawal stayed absent from Stable USD, and recovery could not repair it either, because
+     * hasPendingSplice()/getPendingSpliceTxid() only look at 'pending' rows (issue #311, mainnet
+     * 2026-09-12). The poller runs far more often than the monitor on a real device — it is
+     * force-run on every mempool websocket block header, on foreground resume and whenever
+     * History is opened — so it usually won. One writer owns splice completion: the monitor.
+     */
     fun getPaymentsNeedingConfirmation(limit: Int = 50): List<PaymentRecord> {
         val cursor = readableDatabase.rawQuery(
             """
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
             FROM payments
             WHERE txid IS NOT NULL AND txid != ''
-              AND payment_type IN ('onchain', 'channel_close', 'splice_in', 'splice_out')
+              AND payment_type IN ('onchain', 'channel_close')
               AND status != 'failed'
-              AND (
-                    (payment_type IN ('onchain', 'channel_close') AND confirmations < 6)
-                    OR
-                    (payment_type IN ('splice_in', 'splice_out') AND confirmations < 1)
-                  )
+              AND confirmations < 6
             ORDER BY created_at DESC
             LIMIT ?
             """.trimIndent(),
@@ -1650,6 +1792,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     /** Returns true only if a splice row was actually flipped to completed,
      *  so callers can use the result as the "this ChannelReady was a splice" signal. */
+    /** Whether completeSplice(txid) would match a row — the same pending rows it updates. */
+    fun hasPendingSpliceFor(txid: String): Boolean {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT 1 FROM payments
+            WHERE payment_type IN ('splice_in','splice_out')
+              AND status IN ('pending','failed')
+              AND (txid = ? OR (payment_type = 'splice_in' AND txid IS NULL))
+            LIMIT 1
+            """.trimIndent(),
+            arrayOf(txid)
+        )
+        return cursor.use { it.moveToFirst() }
+    }
+
     fun completeSplice(txid: String): Boolean {
         val stmt = writableDatabase.compileStatement(
             "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"

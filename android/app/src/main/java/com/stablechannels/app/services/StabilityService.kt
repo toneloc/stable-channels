@@ -12,6 +12,9 @@ import kotlin.math.roundToLong
 
 object StabilityService {
 
+    /** Below this the position is treated as closed — matches the `expectedUSD < 0.01` guards. */
+    const val MINIMUM_STABLE_USD = 0.01
+
     enum class StabilityAction(val value: String) {
         STABLE("STABLE"),
         HIGH_RISK_NO_ACTION("HIGH_RISK_NO_ACTION"),
@@ -39,7 +42,18 @@ object StabilityService {
         val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
         val newExpected = max(updated.expectedUSD.amount - usdToDeduct, 0.0)
         updated.expectedUSD = USD(newExpected)
-        updated.backingSats = ((newExpected / price) * Constants.SATS_IN_BTC).roundToLong()
+        // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
+        // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
+        // the live balance whenever the position was below par — so a retry deducted again
+        // ($100 -> $92 -> $82), and the leftover phantom backing masked a real below-par claim
+        // from the stability check. This mirrors the LSP (backing_after_user_to_lsp_stability)
+        // and makes the function idempotent: re-running sees backing <= receiver and returns.
+        // Exception at the zero boundary: a spend that exhausts the target closes the position,
+        // so nothing backs it. Leaving the remaining sats as backing for a $0 target would book
+        // them as neither stable nor native (recomputeNative gives receiver - backing = 0) and
+        // strand them: every repair path treats a sub-cent target as "no position" and bails.
+        updated.backingSats =
+            if (newExpected < MINIMUM_STABLE_USD) 0L else updated.stableReceiverBTC.sats
         recomputeNative(updated)
         return Pair(updated, usdToDeduct)
     }

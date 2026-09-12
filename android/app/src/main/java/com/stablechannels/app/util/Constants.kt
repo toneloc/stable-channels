@@ -47,6 +47,9 @@ object Constants {
     const val INVOICE_EXPIRY_SECS: Int = 3600
     const val BALANCE_UPDATE_INTERVAL_SECS: Long = 30
     const val STABILITY_CHECK_INTERVAL_SECS: Long = 60
+    /** How recently a trade failure must have resolved to be worth resurfacing on launch. */
+    const val TRADE_FAILURE_RESURFACE_WINDOW_SECS: Long = 3600
+
     const val MAX_RISK_LEVEL = 100
     const val STABILITY_THRESHOLD_PERCENT: Double = 0.1
     const val STABILITY_THRESHOLD_USD: Double = 0.25

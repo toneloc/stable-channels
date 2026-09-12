@@ -153,6 +153,8 @@ class AppState(private val context: Context) : ViewModel() {
             const val CACHED_CHANNEL_ID = "cached_channel_id"
             const val CACHED_USER_CHANNEL_ID = "cached_user_channel_id"
             const val CACHED_EXPECTED_USD = "cached_expected_usd"
+            /** Payment id of the last trade failure already shown in the status capsule. */
+            const val LAST_SHOWN_TRADE_FAILURE = "last_shown_trade_failure"
             const val PENDING_TXIDS = "pending_outbound_txids"
 
             fun clearPendingOutbound(context: Context) {
@@ -869,6 +871,7 @@ class AppState(private val context: Context) : ViewModel() {
                 db.markExpiredTradesUncertain()
                 _pendingTradePayments.value = db.unresolvedTradePayments()
                 refreshAllTradeOutcomes(_tradeOutcomes.value.keys + _pendingTradePayments.value.keys)
+                surfaceUnseenTradeFailure()
 
                 val auditPath = File(Constants.userDataDir(context), "audit_log.txt").absolutePath
                 AuditService.setLogPath(auditPath)
@@ -926,6 +929,12 @@ class AppState(private val context: Context) : ViewModel() {
                     fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
+                    // Off the critical startup path: it makes blocking LDK/DB calls, and the
+                    // first frames must not wait on a repair that almost never has work to do.
+                    launch {
+                        updateStableBalances()
+                        repairBooksAboveLiveBalance()
+                    }
                     connectMempoolWebSocket()
                     resumePendingSpliceConfirmation()
                     // Restore channel-closing state if a close is still pending on-chain
@@ -1880,6 +1889,8 @@ class AppState(private val context: Context) : ViewModel() {
                 if (message is TradeControlMessage.Rejected) {
                     syncRetryTracker.clear(paymentHash)
                     _statusMessage.value = TradeProtocol.rejectionMessage(message.reasonCode)
+                    // Shown now, so the next launch must not repeat it.
+                    markTradeFailureSeen(message.correlation.tradePaymentId)
                     AuditService.log("TRADE_REJECTED_BY_LSP", mapOf("payment_id" to message.correlation.tradePaymentId,
                         "reason_code" to message.reasonCode))
                     return true
@@ -2278,8 +2289,16 @@ class AppState(private val context: Context) : ViewModel() {
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
-                    completeConfirmedSplice(normalizedTxid, monitorGeneration, monitorPaymentRowId)
-                    break
+                    // DEFERRED means the books could not be valued yet (no trusted price). Keep
+                    // monitoring and retry on the next tick rather than declaring the move done:
+                    // the row stays 'pending', which also blocks the periodic repair, so nothing
+                    // else would pick it up until the app restarted.
+                    if (completeConfirmedSplice(
+                            normalizedTxid, monitorGeneration, monitorPaymentRowId
+                        ) == SpliceCompletion.COMPLETED
+                    ) {
+                        break
+                    }
                 }
                 delay(30_000)
             }
@@ -2343,7 +2362,14 @@ class AppState(private val context: Context) : ViewModel() {
         return false
     }
 
-    private fun completeConfirmedSplice(txid: String, expectedGeneration: Long, capturedPaymentRowId: Long?) {
+    /** Whether a confirmed splice was fully accounted for, or must be retried. */
+    private enum class SpliceCompletion { COMPLETED, DEFERRED }
+
+    private fun completeConfirmedSplice(
+        txid: String,
+        expectedGeneration: Long,
+        capturedPaymentRowId: Long?
+    ): SpliceCompletion {
         // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
         // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
         // — which requires an exact txid match — can never find it, permanently desyncing Stable
@@ -2353,25 +2379,52 @@ class AppState(private val context: Context) : ViewModel() {
         // time this tx confirms, pendingSplice may already belong to a newer operation, and
         // reading it here could bind this (older, unrelated) txid to that newer row.
         databaseService?.assignPendingSpliceTxid(txid, capturedPaymentRowId)
-        val completed = databaseService?.completeSplice(txid) == true
-        if (completed) {
-            // completeSplice() just marked the row completed/1-conf. History only reloads when
-            // this epoch moves, and the confirmation poller won't move it for this row: it now
-            // has confirmations >= 1, so the poller no longer selects it. Without this bump,
-            // whenever this monitor sees the confirmation before the poller does, an open
-            // History screen keeps showing "0/1 confirmed" until it is left and reopened (#304).
-            _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-            refreshBalances()
-            updateStableBalances()
-
-            val price = priceService.currentPrice.value
-            val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-            val reconciled = result.first
-            if (result.second != null) {
-                reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+        // Books first, row second. completeSplice() only matches a row that is still 'pending',
+        // so marking it complete before the deduction is durable turns a crash in between into a
+        // permanently unaccounted withdrawal — nothing revisits a completed row (#311). With the
+        // order reversed, a crash leaves the row pending, the resume path runs this again, and
+        // the reconcile is idempotent (it only ever removes backing above the live balance), so
+        // the deduction lands exactly once either way.
+        val matchesPendingRow = try {
+            databaseService?.hasPendingSpliceFor(txid) == true
+        } catch (e: Exception) {
+            Log.w("AppState", "Could not check the pending splice row: ${e.message}")
+            false
+        }
+        if (matchesPendingRow) {
+            // One price read decides everything below. Reading it again to gate the row update
+            // would let a price that arrived in between complete the row with the books
+            // untouched — the exact #311 shape this ordering exists to prevent.
+            val accounted = synchronized(booksLock) {
+                refreshBalances()
+                updateStableBalances()
+                val price = priceService.currentAccountingPrice()
+                if (price <= 0.0) {
+                    AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
+                        "txid" to txid, "reason" to "untrusted_price"
+                    ))
+                    false
+                } else {
+                    val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
+                    val reconciled = result.first
+                    if (result.second != null) {
+                        reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+                    }
+                    _stableChannel.value = reconciled
+                    saveChannelToDB()
+                    true
+                }
             }
-            _stableChannel.value = reconciled
-            saveChannelToDB()
+            // Nothing is finalized on the deferred path: the row stays pending, the monitor and
+            // the in-memory splice state stay alive, and no "Move confirmed" is shown for a move
+            // whose accounting has not happened.
+            if (!accounted) return SpliceCompletion.DEFERRED
+            if (databaseService?.completeSplice(txid) == true) {
+                // History only reloads when this epoch moves, and the confirmation poller no
+                // longer touches splice rows at all, so without this bump an open History
+                // screen keeps showing "0/1 confirmed" until it is reopened (#304).
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+            }
         }
 
         // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
@@ -2401,8 +2454,9 @@ class AppState(private val context: Context) : ViewModel() {
 
         AuditService.log("SPLICE_CONFIRMED", mapOf(
             "txid" to txid,
-            "completed_row" to completed
+            "accounted" to matchesPendingRow
         ))
+        return SpliceCompletion.COMPLETED
     }
 
     private fun closureReasonData(reason: ClosureReason?): JSONObject {
@@ -2737,6 +2791,12 @@ class AppState(private val context: Context) : ViewModel() {
 
         refreshBalances()
         updateStableBalances()
+        // Retry a repair that startup deferred (no trusted price yet, or an operation still in
+        // flight). The guard is a free in-memory comparison, so this costs nothing on the tick
+        // where the books are already consistent — which is every tick but the broken ones.
+        if (_stableChannel.value.backingSats > _stableChannel.value.stableReceiverBTC.sats) {
+            repairBooksAboveLiveBalance()
+        }
         val sc = _stableChannel.value
         val price = priceService.currentAccountingPrice()
 
@@ -3648,8 +3708,111 @@ class AppState(private val context: Context) : ViewModel() {
     /** Called when the UI returns to the foreground. Reloads channel state from the DB so
      *  backing increments committed by StabilityProcessingService while this process was
      *  cached are picked up before any save can clobber them. Cheap and safe to call repeatedly. */
+    /**
+     * Tell the user about an order that was refused while they were away.
+     *
+     * A rejection delivered while the app is backgrounded is verified and committed by the
+     * event handler, but the only place it is ever shown is the trade sheet's result step and a
+     * status message set in that same moment — both live in process memory. The relaunch that
+     * follows is a cold start, so both are gone and the refusal is silent: the balance simply
+     * never moved. Resurface the most recent failure once, in the status capsule, so a rejection
+     * is never lost just because the app was not in the foreground when it arrived.
+     *
+     * Once per outcome (a seen-marker keyed on its payment id) and only while the capsule is
+     * free, so it can never displace a live message or reappear on every launch.
+     */
+    private fun surfaceUnseenTradeFailure() {
+        val db = databaseService ?: return
+        val failure = try {
+            db.mostRecentTradeFailure(Constants.TRADE_FAILURE_RESURFACE_WINDOW_SECS)
+        } catch (e: Exception) {
+            Log.w("AppState", "Could not read the last trade failure: ${e.message}")
+            null
+        } ?: return
+        val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+        val lastShown = prefs.getString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, null)
+        // Mark it seen only once it is actually on screen. start() is re-invocable (ErrorView's
+        // retry button), and by then the capsule may hold a live message — recording the failure
+        // as shown there would swallow it for good, since the marker is keyed on the payment id.
+        if (!TradeFailureNotice.shouldShow(failure.paymentId, lastShown, _statusMessage.value.isNotEmpty())) return
+        _statusMessage.value = failure.outcome.message
+        markTradeFailureSeen(failure.paymentId)
+        AuditService.log("TRADE_FAILURE_RESURFACED", mapOf(
+            "payment_id" to failure.paymentId,
+            "resolved_at" to failure.resolvedAt
+        ))
+    }
+
+    private fun markTradeFailureSeen(paymentId: String) {
+        context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, paymentId)
+            .apply()
+    }
+
     fun onForegroundResume() {
         loadChannelFromDB()
+    }
+
+    /**
+     * Heal books that claim more backing than the channel holds.
+     *
+     * backing > the live receiver balance cannot happen in normal operation: the backing is a
+     * slice of that balance. It means a withdrawal moved sats out without its stable-books
+     * deduction — the #311 splice race, which stranded wallets that cannot recover any other way
+     * (the payment row is already 'completed', so no confirmation or resume path revisits it, and
+     * on Android the LSP's corrective sync never applies). Deduct the excess once, at the current
+     * accounting price, and pin backing to the live balance.
+     *
+     * Cold start only, and only with nothing in flight: an in-flight HTLC lowers the receiver
+     * balance for as long as it is pending and would read as an overflow.
+     */
+    private fun repairBooksAboveLiveBalance() {
+        val db = databaseService ?: return
+        val sc = _stableChannel.value
+        if (sc.userChannelId.isEmpty()) return
+        val receiverSats = sc.stableReceiverBTC.sats
+        // A zero balance is a legitimate repair case (a full splice-out closes the position), but
+        // it is only meaningful against a live channel — without one the figure is not
+        // authoritative and there is nothing to reconcile against.
+        if (receiverSats < 0L || !_hasReadyChannel.value) return
+        if (isChannelClosing || isSweeping || pendingSplice != null) return
+        if (try { db.hasPendingSplice() } catch (_: Exception) { true }) return
+        // A stability send whose backing debit has not been recorded yet looks exactly like an
+        // overflow. clampBackingToLiveReceiver() re-checks this inside its transaction; this is
+        // the cheap early out.
+        if (try { db.loadPendingSend() != null } catch (_: Exception) { true }) return
+        val inFlight = try {
+            nodeService.node?.listPayments()?.any { it.status == PaymentStatus.PENDING } ?: true
+        } catch (e: Exception) {
+            true
+        }
+        if (inFlight) return
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) return
+        val result = try {
+            synchronized(booksLock) {
+                val clamped = db.clampBackingToLiveReceiver(sc.userChannelId, receiverSats, price)
+                if (clamped != null) {
+                    publishBooksFromDB(recomputeNative = true)
+                    cacheBalanceForLaunch()
+                }
+                clamped
+            }
+        } catch (e: Exception) {
+            Log.w("AppState", "Books repair failed: ${e.message}")
+            AuditService.log("BOOKS_REPAIR_FAILED", mapOf("error" to (e.message ?: "")))
+            return
+        } ?: return
+        AuditService.log("BOOKS_REPAIRED_ABOVE_LIVE_BALANCE", mapOf(
+            "user_channel_id" to sc.userChannelId,
+            "overflow_sats" to result.overflowSats,
+            "usd_deducted" to result.usdDeducted,
+            "old_expected_usd" to result.oldExpectedUSD,
+            "new_expected_usd" to result.newExpectedUSD,
+            "backing_sats" to result.newBackingSats,
+            "btc_price" to price
+        ))
     }
 
     /** Republish expectedUSD/backingSats from the channel row — the single source of truth for
