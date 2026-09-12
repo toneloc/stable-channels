@@ -25,11 +25,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             switch appState.phase {
-            case .loading:
-                LoadingView()
-            case .onboarding:
-                SyncingView()
-            case .syncing:
+            case .loading, .onboarding, .syncing:
                 SyncingView()
             case .wallet:
                 MainTabView()
@@ -163,53 +159,76 @@ struct ContentView: View {
 
 // MARK: - Views
 
-struct LoadingView: View {
-    @State private var pulse = false
-
-    var body: some View {
-        VStack(spacing: 24) {
-            Image("SplashIcon")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 90, height: 90)
-                .clipShape(Circle())
-                .scaleEffect(pulse ? 1.06 : 0.94)
-                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
-                .onAppear { pulse = true }
-
-            VStack(spacing: 4) {
-                Text(String(localized: "app_name", defaultValue: "Stable Channels"))
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text(String(localized: "app_subtitle", defaultValue: "Self-custodial bitcoin trading"))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-}
-
 struct SyncingView: View {
-    @State private var pulse = false
+    var isSyncComplete: Bool = false
+    var onBalanced: (() -> Void)?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var startTime: Double = 0.0
+
+    private let shimmerDuration: Double = 1.15
+    private let crossfadeDuration: Double = 0.40
 
     var body: some View {
-        VStack(spacing: 24) {
-            Image("SplashIcon")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 90, height: 90)
-                .clipShape(Circle())
-                .scaleEffect(pulse ? 1.06 : 0.94)
-                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulse)
-                .onAppear { pulse = true }
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { timeline in
+            let now = timeline.date.timeIntervalSinceReferenceDate
+            let effectiveStart = startTime == 0.0 ? now : startTime
+            let elapsed = max(0.0, now - effectiveStart)
 
-            VStack(spacing: 12) {
-                ProgressView()
-                Text(String(localized: "status_syncing_wallet", defaultValue: "Syncing wallet..."))
-                    .foregroundStyle(.secondary)
-                Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            let rawProgress = reduceMotion
+                ? (elapsed >= shimmerDuration ? 1.0 : 0.0)
+                : max(0.0, min(1.0, (elapsed - shimmerDuration) / crossfadeDuration))
+
+            // Smoothstep curve for seamless organic crossfade
+            let smoothProgress = rawProgress * rawProgress * (3.0 - 2.0 * rawProgress)
+
+            VStack(spacing: 22) {
+                Spacer()
+
+                UnifiedBalanceLaunchView(
+                    isSyncComplete: isSyncComplete,
+                    size: 115,
+                    onBalanced: onBalanced
+                )
+
+                ZStack {
+                    // Screen 1: Brand title & subtitle during initial shimmer
+                    VStack(spacing: 6) {
+                        Text(String(localized: "app_name", defaultValue: "Stable Channels"))
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.primary)
+
+                        Text(String(localized: "custody_subtitle", defaultValue: "Self-custodial bitcoin wallet"))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .opacity(1.0 - smoothProgress)
+                    .offset(y: reduceMotion ? 0 : -6.0 * smoothProgress)
+                    .allowsHitTesting(smoothProgress < 0.5)
+
+                    // Screen 2: Active syncing status during oscillation
+                    VStack(spacing: 6) {
+                        Text(String(localized: "status_syncing_wallet", defaultValue: "Wallet Syncing..."))
+                            .font(.title3.weight(.bold))
+                            .foregroundStyle(.primary)
+
+                        Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .opacity(smoothProgress)
+                    .offset(y: reduceMotion ? 0 : 6.0 * (1.0 - smoothProgress))
+                    .allowsHitTesting(smoothProgress >= 0.5)
+                }
+                .frame(minHeight: 52)
+
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onAppear {
+            if startTime == 0.0 {
+                startTime = Date().timeIntervalSinceReferenceDate
             }
         }
     }
@@ -255,5 +274,58 @@ struct PrivacyOverlayModifier: ViewModifier {
                         .zIndex(999)
                 }
             }
+    }
+}
+
+// MARK: - Previews
+
+#Preview("App Launch Flow - Dark") {
+    SyncingFlowPreviewContainer()
+        .preferredColorScheme(.dark)
+}
+
+#Preview("App Launch Flow - Light") {
+    SyncingFlowPreviewContainer()
+        .preferredColorScheme(.light)
+}
+
+private struct SyncingFlowPreviewContainer: View {
+    @State private var replayId = UUID()
+    @State private var isSyncComplete = false
+
+    var body: some View {
+        ZStack {
+            SyncingView(isSyncComplete: isSyncComplete)
+                .id(replayId)
+
+            VStack {
+                Spacer()
+
+                HStack(spacing: 16) {
+                    Button {
+                        isSyncComplete = false
+                        replayId = UUID()
+                    } label: {
+                        Label(
+                            String(localized: "preview_replay", defaultValue: "Replay Flow"),
+                            systemImage: "arrow.counterclockwise"
+                        )
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        isSyncComplete.toggle()
+                    } label: {
+                        Text(
+                            isSyncComplete
+                                ? String(localized: "preview_reset_sync", defaultValue: "Reset Sync")
+                                : String(localized: "preview_complete_sync", defaultValue: "Complete Sync")
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding(.bottom, 32)
+            }
+        }
     }
 }
