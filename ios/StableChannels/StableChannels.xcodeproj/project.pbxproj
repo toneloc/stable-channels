@@ -22,6 +22,8 @@
 		3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623F41D841B312F0C9AE01E6 /* MainTabView.swift */; };
 		3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3940DC5406ABC63AA090441A /* DatabaseService.swift */; };
 		490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490224CB302F90A500DF84AA /* PriceServiceTests.swift */; };
+		4904A0903055544100582069 /* UnifiedBalanceLaunchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4904A08F3055544100582069 /* UnifiedBalanceLaunchView.swift */; };
+		4904A0913055544100582069 /* BalanceScaleKinematics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4904A08B3055544100582069 /* BalanceScaleKinematics.swift */; };
 		490A1335304F1467005CDA39 /* SpliceBroadcastChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */; };
 		490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */; };
 		490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */; };
@@ -210,6 +212,8 @@
 		445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReceiveView.swift; sourceTree = "<group>"; };
 		45B3E864653E657FB0FCA3D2 /* Trade.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Trade.swift; sourceTree = "<group>"; };
 		490224CB302F90A500DF84AA /* PriceServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceServiceTests.swift; sourceTree = "<group>"; };
+		4904A08B3055544100582069 /* BalanceScaleKinematics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceScaleKinematics.swift; sourceTree = "<group>"; };
+		4904A08F3055544100582069 /* UnifiedBalanceLaunchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnifiedBalanceLaunchView.swift; sourceTree = "<group>"; };
 		490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastChecker.swift; sourceTree = "<group>"; };
 		490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastCheckerTests.swift; sourceTree = "<group>"; };
 		490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeSyncParityTests.swift; sourceTree = "<group>"; };
@@ -582,6 +586,7 @@
 		49FC3EEC2FDC8B200054CD38 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				4904A08B3055544100582069 /* BalanceScaleKinematics.swift */,
 				49BB390B0000000000000001 /* CurveProgressIndicator.swift */,
 				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
 				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
@@ -589,6 +594,7 @@
 				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
 				4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */,
 				4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */,
+				4904A08F3055544100582069 /* UnifiedBalanceLaunchView.swift */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -1005,6 +1011,8 @@
 				06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */,
 				49F0B0DE2FC0EF3A003A3B89 /* BackupSettingsView.swift in Sources */,
 				499DBE7B2FD2F06F003E89F9 /* TxidLinkStore.swift in Sources */,
+				4904A0903055544100582069 /* UnifiedBalanceLaunchView.swift in Sources */,
+				4904A0913055544100582069 /* BalanceScaleKinematics.swift in Sources */,
 				499DBE7C2FD2F06F003E89F9 /* DepositRecorder.swift in Sources */,
 				49F0B0DF2FC0EF3A003A3B89 /* ChannelSettingsView.swift in Sources */,
 				49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */,
