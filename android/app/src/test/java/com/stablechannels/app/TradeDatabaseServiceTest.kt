@@ -725,6 +725,76 @@ class TradeDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun outgoingReconcileClosesThePositionWhenTheSpendExhaustsTheTarget() {
+        // Zero boundary, persisted side: nothing backs an exhausted target.
+        val identifier = "1a".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "21", expectedUSD = 10.0,
+            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+        )
+
+        val result = service.reconcileOutgoingBacking(
+            channelId = identifier, userChannelId = "21", note = null,
+            receiverSats = 5_000, latestPrice = 100_000.0, price = 100_000.0
+        )
+
+        assertNotNull(result)
+        assertEquals(0.0, result!!.newExpectedUSD, 0.0001)
+        assertEquals(0L, result.newBackingSats)
+        val row = service.loadChannel("21")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(0L, row?.backingSats)          // the 5,000 sats are native, not stranded
+        service.close()
+    }
+
+    @Test
+    fun backingClampClosesThePositionWhenTheRepairExhaustsTheTarget() {
+        // Same boundary on the startup repair path.
+        val identifier = "2b".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier, userChannelId = "22", expectedUSD = 10.0,
+            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+        )
+
+        val repaired = service.clampBackingToLiveReceiver("22", receiverSats = 5_000, price = 100_000.0)
+
+        assertNotNull(repaired)
+        assertEquals(0.0, repaired!!.newExpectedUSD, 0.0001)
+        assertEquals(0L, repaired.newBackingSats)
+        assertEquals(0L, service.loadChannel("22")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun confirmationPollerLeavesSpliceRowsToTheSpliceMonitor() {
+        // The #311 race: the poller used to complete splice rows at 1 conf, which skipped the
+        // stable-books deduction and left nothing for recovery to find. Splice rows must not be
+        // offered to the poller at all — the monitor owns them.
+        val service = DatabaseService(context)
+        val txid = "3c".repeat(32)
+        for (type in listOf("splice_out", "splice_in", "onchain")) {
+            service.recordPayment(
+                paymentId = "$type-pending",
+                paymentType = type,
+                direction = if (type == "onchain") "received" else "sent",
+                amountMsat = 15_000_000,
+                amountUSD = 15.0,
+                btcPrice = 100_000.0,
+                txid = txid,
+                status = "pending"
+            )
+        }
+
+        val offered = service.getPaymentsNeedingConfirmation().map { it.paymentType }.toSet()
+        assertTrue(offered.contains("onchain"))
+        assertFalse(offered.contains("splice_out"))
+        assertFalse(offered.contains("splice_in"))
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
             .forEach { file -> if (file.exists()) assertTrue(file.delete()) }

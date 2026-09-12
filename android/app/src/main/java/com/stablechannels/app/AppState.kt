@@ -3680,9 +3680,12 @@ class AppState(private val context: Context) : ViewModel() {
         } ?: return
         val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, null) == failure.paymentId) return
-        prefs.edit().putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, failure.paymentId).apply()
+        // Mark it seen only once it is actually on screen. start() is re-invocable (ErrorView's
+        // retry button), and by then the capsule may hold a live message — recording the failure
+        // as shown there would swallow it for good, since the marker is keyed on the payment id.
         if (_statusMessage.value.isNotEmpty()) return
         _statusMessage.value = failure.outcome.message
+        prefs.edit().putString(BalanceCacheKey.LAST_SHOWN_TRADE_FAILURE, failure.paymentId).apply()
         AuditService.log("TRADE_FAILURE_RESURFACED", mapOf(
             "payment_id" to failure.paymentId,
             "resolved_at" to failure.resolvedAt

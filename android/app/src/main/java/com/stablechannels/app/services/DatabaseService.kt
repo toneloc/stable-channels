@@ -307,9 +307,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val overflowSats = currentBacking - receiverSats
             val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
             val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
+            // A repair that exhausts the target closes the position: nothing backs it.
+            val newBacking =
+                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
             val cv = ContentValues().apply {
                 put("expected_usd", newExpected)
-                put("stable_sats", receiverSats)
+                put("stable_sats", newBacking)
                 put("receiver_sats", receiverSats)
                 put("latest_price", price)
                 put("updated_at", System.currentTimeMillis() / 1000)
@@ -322,7 +325,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             db.execSQL("COMMIT")
             return BackingClampResult(
-                overflowSats, usdDeducted, currentExpected, newExpected, receiverSats
+                overflowSats, usdDeducted, currentExpected, newExpected, newBacking
             )
         } catch (e: Exception) {
             try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
@@ -394,7 +397,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             // SECOND time ($100 -> $92 -> $82) and hid a genuine below-par claim from the
             // stability check. Pinning backing to the live balance matches the LSP's own
             // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
-            val newBacking = receiverSats
+            // At the zero boundary the position is closed, so nothing backs it — see
+            // StabilityService.reconcileOutgoing().
+            val newBacking =
+                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
             val cv = ContentValues().apply {
                 put("channel_id", channelId)
                 put("expected_usd", newExpected)

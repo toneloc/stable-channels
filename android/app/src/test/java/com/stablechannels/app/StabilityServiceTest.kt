@@ -177,6 +177,26 @@ class StabilityServiceTest {
         assertEquals(82_000L, second.backingSats)
     }
 
+    @Test
+    fun `reconcileOutgoing closes the position when the spend exhausts the target`() {
+        // Preserve-sats must not apply at the zero boundary: with the target exhausted nothing
+        // backs it, so the remaining sats are native. Leaving them as backing for a $0 target
+        // books them as neither stable nor native, and every repair path treats a sub-cent
+        // target as "no position" and bails — the sats would be stranded for good.
+        val price = 100_000.0
+        val sc = StableChannel(
+            expectedUSD = USD(10.0),
+            backingSats = 20_000L,
+            stableReceiverBTC = Bitcoin(5_000L)   // a $15 overflow against a $10 target
+        )
+
+        val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
+        assertEquals(15.0, deducted!!, 0.0001)
+        assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
+        assertEquals(0L, updated.backingSats)
+        assertEquals(5_000L, updated.nativeChannelBTC.sats)   // the sats the user still holds
+    }
+
     // ---------------------------------------------------------------------------
     // PriceService.median — pure math
     // ---------------------------------------------------------------------------
