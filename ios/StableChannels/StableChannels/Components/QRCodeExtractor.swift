@@ -70,10 +70,16 @@ enum QRCodeExtractor {
     }
 
     private static func sanitizePaymentURI(_ raw: String, scheme: String) -> String {
-        var s = raw.components(separatedBy: .newlines)
-            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })?
-            .replacingOccurrences(of: "\u{00A0}", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard let line = raw.split(whereSeparator: \.isNewline)
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
+            return ""
+        }
+        var s = String(line)
+        if s.contains("\u{00A0}") {
+            s = s.replacingOccurrences(of: "\u{00A0}", with: " ")
+        }
+        s = s.trimmingCharacters(in: .whitespacesAndNewlines)
+
         if s.range(of: "\(scheme)//", options: [.caseInsensitive, .anchored]) != nil {
             s.removeFirst(scheme.count + 2)
         } else if s.range(of: scheme, options: [.caseInsensitive, .anchored]) != nil {
