@@ -116,6 +116,118 @@ class SpliceDatabaseServiceTest {
         service.close()
     }
 
+    // #316 follow-up (GPT-5.6-sol review): a splice-out paying our own currently tracked
+    // receive address is a self-send — the unconditional websocket "Receive" handler (added to
+    // stop deposits landing mid-splice from being silently dropped) can record it as a plain
+    // onchain/received row before this splice's own txid is known, using the exact same txid
+    // the splice later gets confirmed with. Both callers of assignPendingSpliceTxid() always
+    // pass the splice's OWN observed txid, so a collision here can only ever mean "this row and
+    // my splice describe the same transaction" — never a coincidentally-different deposit
+    // (which would necessarily have a different txid and never reach this collision at all).
+    @Test
+    fun selfSendOnchainReceivedRowSharingTheSpliceTxidIsReconciledAndReplaced() {
+        val service = DatabaseService(context)
+        val duplicateRowId = service.recordPayment(
+            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
+            direction = "received", amountMsat = 50_000, status = "pending",
+            txid = "self-send-tx", address = "bc1qourtrackedaddress"
+        )
+        val spliceId = recordSplice(service, "splice_out")
+
+        assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
+        assertEquals("self-send-tx", payment(service, spliceId).txid)
+        // The duplicate onchain row must be gone entirely, not just left orphaned — otherwise
+        // it would still show up in History/Home as a second, phantom pending deposit.
+        assertTrue(service.getRecentPayments(100).none { it.id == duplicateRowId })
+        service.close()
+    }
+
+    @Test
+    fun completedOnchainReceivedRowSharingTheSpliceTxidIsAlsoReconciled() {
+        // The duplicate can already be 'completed' (6+ confirmations) by the time the splice's
+        // own 1-conf threshold triggers this assignment — status must not matter, only that it's
+        // a plain onchain/received row.
+        val service = DatabaseService(context)
+        val duplicateRowId = service.recordPayment(
+            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
+            direction = "received", amountMsat = 50_000, status = "completed",
+            txid = "self-send-tx"
+        )
+        val spliceId = recordSplice(service, "splice_out")
+
+        assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
+        assertEquals("self-send-tx", payment(service, spliceId).txid)
+        assertTrue(service.getRecentPayments(100).none { it.id == duplicateRowId })
+        service.close()
+    }
+
+    @Test
+    fun sentOnchainRowSharingATxidIsNotTreatedAsASelfSendDuplicate() {
+        // Regression guard for the reconciliation itself: only an onchain/RECEIVED row is a
+        // plausible self-send duplicate. An onchain/SENT row sharing a txid is a different kind
+        // of conflict entirely and must still block assignment rather than being deleted.
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "sent-row", paymentType = "onchain", direction = "sent",
+            amountMsat = 50_000, status = "completed", txid = "shared-tx"
+        )
+        val spliceId = recordSplice(service, "splice_out")
+
+        assertNull(service.assignPendingSpliceTxid("shared-tx", spliceId))
+        assertNull(payment(service, spliceId).txid)
+        service.close()
+    }
+
+    // GPT-5.6-sol review (round 2): the reconciling delete must never commit unless the txid
+    // assignment itself actually succeeds — otherwise a legitimate onchain/received row can be
+    // destroyed for an assignment that fails anyway (ambiguous or expired candidate), losing the
+    // user's deposit record for nothing. These two tests pin that the conflicting row survives
+    // fully intact whenever the candidate resolution fails, in the two ways it can fail.
+
+    @Test
+    fun ambiguousSpliceCandidateLeavesConflictingReceiveRowIntact() {
+        val service = DatabaseService(context)
+        val duplicateRowId = service.recordPayment(
+            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
+            direction = "received", amountMsat = 50_000, status = "pending",
+            txid = "self-send-tx"
+        )
+        recordSplice(service, "splice_out")
+        recordSplice(service, "splice_out")
+
+        // No paymentRowId given: two untouched pending splice_out rows makes the candidate
+        // ambiguous, so assignment must refuse — and must not have deleted anything either.
+        assertNull(service.assignPendingSpliceTxid("self-send-tx"))
+        assertEquals("self-send-tx", payment(service, duplicateRowId).txid)
+        assertTrue(service.getRecentPayments(100).any { it.id == duplicateRowId })
+        service.close()
+    }
+
+    @Test
+    fun expiredSpliceCandidateLeavesConflictingReceiveRowIntact() {
+        val service = DatabaseService(context)
+        val now = 2_000_000L
+        val duplicateRowId = service.recordPayment(
+            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
+            direction = "received", amountMsat = 50_000, status = "pending",
+            txid = "self-send-tx"
+        )
+        val spliceId = recordSplice(service, "splice_out")
+        service.writableDatabase.execSQL(
+            "UPDATE payments SET created_at = ? WHERE id = ?",
+            arrayOf<Any>(
+                now - DatabaseService.PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS - 1,
+                spliceId
+            )
+        )
+
+        assertNull(service.assignPendingSpliceTxid("self-send-tx", spliceId, now))
+        assertEquals("self-send-tx", payment(service, duplicateRowId).txid)
+        assertTrue(service.getRecentPayments(100).any { it.id == duplicateRowId })
+        assertNull(payment(service, spliceId).txid)
+        service.close()
+    }
+
     @Test
     fun failingByIdChangesOnlyThatPendingSplice() {
         val service = DatabaseService(context)
