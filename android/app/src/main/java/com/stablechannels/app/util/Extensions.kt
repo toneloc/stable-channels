@@ -35,6 +35,15 @@ fun Double.usdFormatted(): String {
     return nf.format(this)
 }
 
+/** Format a signed percentage with thousands separators, e.g. "+1,234.56%" or "-2.34%". */
+fun Double.percentFormatted(): String {
+    val nf = NumberFormat.getNumberInstance(Locale.US)
+    nf.minimumFractionDigits = 2
+    nf.maximumFractionDigits = 2
+    val sign = if (this >= 0) "+" else "-"
+    return "$sign${nf.format(kotlin.math.abs(this))}%"
+}
+
 fun Date.relativeString(): String {
     val now = System.currentTimeMillis()
     val diff = now - this.time

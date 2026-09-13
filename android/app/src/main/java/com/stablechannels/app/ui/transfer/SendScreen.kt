@@ -531,7 +531,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text(it.usdFormatted(), style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
                 Text(
-                    displaySats.btcSpacedFormatted(),
+                    displaySats.btcSpacedFormatted() + " BTC",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -622,7 +622,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 if (manualAmountSats > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        manualAmountSats.btcSpacedFormatted(),
+                        manualAmountSats.btcSpacedFormatted() + " BTC",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

@@ -336,11 +336,16 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 TextButton(onClick = {
                     showCloseConfirm = false
                     appState.isChannelClosing = true
+                    appState.setStatus("Closing channel...")
                     appState.prepareChannelCloseTracking(sc.userChannelId)
                     scope.launch(Dispatchers.IO) {
                         try {
                             appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
-                        } catch (_: Exception) {}
+                            appState.refreshBalances()
+                        } catch (e: Exception) {
+                            appState.setStatus("Close failed: ${e.message}")
+                            appState.isChannelClosing = false
+                        }
                     }
                 }) { Text("Close channel", color = MaterialTheme.colorScheme.error) }
             },

@@ -126,7 +126,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text(usd.usdFormatted(), style = MaterialTheme.typography.headlineMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
                 Text(
-                    invoiceAmountSats!!.btcSpacedFormatted(),
+                    invoiceAmountSats!!.btcSpacedFormatted() + " BTC",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -226,7 +226,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             if (enteredSats > 0) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "${enteredSats.btcSpacedFormatted()}",
+                    "${enteredSats.btcSpacedFormatted()} BTC",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )

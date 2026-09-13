@@ -32,6 +32,7 @@ import com.stablechannels.app.models.PriceRecord
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.ui.components.CurvePattern
 import com.stablechannels.app.ui.components.CurveProgressIndicator
+import com.stablechannels.app.util.percentFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -174,7 +175,7 @@ fun PriceChart(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            String.format(Locale.US, "%+.2f%%", changePercent),
+                            changePercent.percentFormatted(),
                             color = changeColor,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 14.sp
