@@ -245,7 +245,7 @@ class PaymentFailureRecorderTest {
 
     @Test
     fun stabilityFailureReleasesOnlyItsOwnSendMarker() {
-        db.claimPendingSend(10_000L, 100_000.0)
+        db.claimPendingSend(10_000L, 100_000.0, "7")
         db.setPendingSendPaymentId(paymentId)
         assertFalse(recordFailure("10".repeat(32)).isStability)
         assertNotNull(db.loadPendingSend())

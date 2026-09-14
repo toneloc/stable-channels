@@ -834,7 +834,7 @@ class TradeDatabaseServiceTest {
             channelId = identifier, userChannelId = "31", expectedUSD = 20.0,
             backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
         )
-        assertTrue(service.claimPendingSend(amountMsat = 5_000_000, price = 100_000.0))
+        assertTrue(service.claimPendingSend(amountMsat = 5_000_000, price = 100_000.0, userChannelId = "31"))
         service.setPendingSendPaymentId("55".repeat(32))
 
         // The sats have left the channel: backing 20,000 vs a live balance of 15,000.

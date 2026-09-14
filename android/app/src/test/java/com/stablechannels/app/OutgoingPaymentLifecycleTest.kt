@@ -4,6 +4,7 @@ import android.content.Context
 import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
+import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.util.Constants
@@ -14,6 +15,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.lightningdevkit.ldknode.*
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
@@ -278,6 +280,254 @@ class OutgoingPaymentLifecycleTest {
         assertFalse(db.isLightningAccountingComplete("send"))
         assertTrue(db.hasPendingChannelSend())
         assertNotNull(db.loadChannel("7"))
+    }
+
+    @Test fun stabilitySuccessMustDebitOriginalArchiveAndNotReplacementChannel() {
+        closeWithPendingStabilityAndReplace()
+        event(success)
+        assertReplacementUnchanged()
+        assertArchive(10.0, 10_000L)
+        assertNull(db.loadPendingSend())
+        event(success)
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+    }
+
+    @Test fun stabilityTickMustDebitOriginalArchiveAndNotReplacementChannel() {
+        closeWithPendingStabilityAndReplace()
+        call("runStabilityCheck")
+        assertReplacementUnchanged()
+        assertArchive(10.0, 10_000L)
+        assertNull(db.loadPendingSend())
+        call("runStabilityCheck")
+        assertArchive(10.0, 10_000L)
+    }
+
+    @Test fun stabilityBackgroundRecoveryMustDebitOriginalArchiveAndNotReplacementChannel() {
+        closeWithPendingStabilityAndReplace()
+        backgroundRecovery()
+        assertReplacementUnchanged()
+        assertArchive(10.0, 10_000L)
+        assertNull(db.loadPendingSend())
+        backgroundRecovery()
+        assertArchive(10.0, 10_000L)
+    }
+
+    @Test fun stabilityOriginSurvivesDatabaseReopenBeforeTerminalRecovery() {
+        closeWithPendingStabilityAndReplace()
+        db.close()
+        db = DatabaseService(context)
+        restart()
+        setBooks(5.0, 5_000, "8", "new-channel")
+        node.channels = listOf(channel("8", "new-channel", 5_000))
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = 1_000_000uL))
+        assertEquals("7", db.loadPendingSend()!!.userChannelId)
+        event(success)
+        assertReplacementUnchanged()
+        assertArchive(10.0, 10_000L)
+    }
+
+    @Test fun stabilityPendingOrFailedOutcomeNeverDebitsEitherChannelsBooks() {
+        closeWithPendingStabilityAndReplace()
+        node.payments = node.payments.map { it.copy(status = PaymentStatus.PENDING) }
+        assertFalse(backgroundRecovery())
+        assertNotNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+        node.payments = node.payments.map { it.copy(status = PaymentStatus.FAILED) }
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+    }
+
+    @Test fun stabilityFailedEventClearsOnlyItsOriginalClaimWithoutADebit() {
+        closeWithPendingStabilityAndReplace()
+        event(Event.PaymentFailed("send", null, null))
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+    }
+
+    @Test fun stabilityArchiveDebitHistoryAndMarkerRemovalRollBackTogether() {
+        closeWithPendingStabilityAndReplace()
+        db.writableDatabase.execSQL("CREATE TRIGGER reject_stability_clear BEFORE DELETE ON pending_stability_send BEGIN SELECT RAISE(ABORT, 'test'); END")
+        event(success)
+        assertNotNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertFalse(db.isOutgoingStabilityPayment("send"))
+        assertReplacementUnchanged()
+        db.writableDatabase.execSQL("DROP TRIGGER reject_stability_clear")
+        assertTrue(backgroundRecovery())
+        event(success)
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+        assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
+        db.readableDatabase.rawQuery("SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = 'send'", null).use {
+            assertTrue(it.moveToFirst())
+            assertEquals("7", it.getString(0))
+        }
+    }
+
+    @Test fun stabilityLostPaymentIdRecoveryKeepsTheChannelSavedAtClaim() {
+        closeWithPendingStabilityAndReplace()
+        db.setPendingSendPaymentId("")
+        node.payments = node.payments.map { it.copy(latestUpdateTimestamp = (System.currentTimeMillis() / 1000).toULong()) }
+        event(success)
+        assertReplacementUnchanged()
+        assertArchive(10.0, 10_000L)
+        assertNull(db.loadPendingSend())
+    }
+
+    @Test fun stabilityLegacyMarkerWithoutOriginNeverAdoptsTheReplacementChannel() {
+        closeWithPendingStabilityAndReplace()
+        db.writableDatabase.execSQL("DROP TABLE pending_stability_send")
+        db.writableDatabase.execSQL("CREATE TABLE pending_stability_send (id INTEGER PRIMARY KEY, payment_id TEXT NOT NULL, amount_msat INTEGER NOT NULL, price REAL NOT NULL, created_at INTEGER NOT NULL)")
+        db.writableDatabase.execSQL("INSERT INTO pending_stability_send VALUES (1, 'send', 1000000, 100000.0, strftime('%s','now'))")
+        db.close()
+        db = DatabaseService(context)
+        field(state, "databaseService").set(state, db)
+        assertNull(db.loadPendingSend()!!.userChannelId)
+        event(success)
+        assertFalse(backgroundRecovery())
+        assertNotNull(db.loadPendingSend())
+        assertReplacementUnchanged()
+        assertArchive(10.0, 11_000L)
+    }
+
+    @Test fun stabilityBackgroundClaimPersistsItsExplicitOriginBeforePaymentId() {
+        // The database has a newer channel too; claim the requested channel, never the newest row.
+        db.saveChannel("new-channel", "8", 5.0, 5_000, null, 5_000, 100_000.0)
+        val controller = Robolectric.buildService(StabilityProcessingService::class.java).create()
+        try {
+            val claimed = StabilityProcessingService::class.java.getDeclaredMethod("claimPendingSendInDB",
+                Long::class.javaPrimitiveType, Double::class.javaPrimitiveType, String::class.java)
+                .apply { isAccessible = true }.invoke(controller.get(), 1_000_000L, 100_000.0, "7") as Boolean
+            assertTrue(claimed)
+            assertEquals("7", db.loadPendingSend()!!.userChannelId)
+            assertEquals("", db.loadPendingSend()!!.paymentId)
+        } finally { controller.destroy() }
+    }
+
+    @Test fun stabilityLiveChannelRecoveryDebitsExactlyOnce() {
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
+        db.setPendingSendPaymentId("send")
+        node.channels = listOf(channel(receiver = 19_000))
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = 1_000_000uL))
+        event(success)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        assertEquals(9_000L, state.stableChannel.value.nativeChannelBTC.sats)
+        event(success)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+    }
+
+    @Test fun stabilityOldReplayCannotRemoveOrCompleteANewerClaim() {
+        closeWithPendingStabilityAndReplace()
+        val oldClaim = db.loadPendingSend()!!
+        event(success)
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "8"))
+        db.setPendingSendPaymentId("new-send")
+        node.payments = node.payments + terminal().copy(id = "new-send", kind = PaymentKind.Spontaneous("new-hash", null),
+            amountMsat = 1_000_000uL, status = PaymentStatus.PENDING)
+        event(success)
+        assertFalse(db.clearPendingSend(oldClaim))
+        assertFalse(db.completePendingStabilitySend(oldClaim, channelClosed = true))
+        assertEquals("new-send", db.loadPendingSend()!!.paymentId)
+        assertEquals("8", db.loadPendingSend()!!.userChannelId)
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+    }
+
+    @Test fun stabilityUnknownArchivedBooksRecordThePaymentWithoutInventingBacking() {
+        closeWithPendingStabilityAndReplace()
+        db.writableDatabase.execSQL("UPDATE closed_channel_books SET stable_sats = NULL, expected_usd = NULL WHERE user_channel_id = '7'")
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertTrue(db.isOutgoingStabilityPayment("send"))
+        assertReplacementUnchanged()
+        db.readableDatabase.rawQuery("SELECT stable_sats FROM closed_channel_books WHERE user_channel_id = '7'", null).use {
+            assertTrue(it.moveToFirst())
+            assertTrue(it.isNull(0))
+        }
+    }
+
+    @Test fun stabilityRecordedBeforeMarkerClearIsNotDebitedAgainAfterClosure() {
+        closeWithPendingStabilityAndReplace()
+        // Emulate the old atomic history/debit writer committing before the marker was cleared.
+        db.writableDatabase.execSQL("UPDATE closed_channel_books SET stable_sats = 10000 WHERE user_channel_id = '7'")
+        db.recordPayment("send", "stability", "sent", 1_000_000, status = "completed")
+        assertTrue(backgroundRecovery())
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+        assertNull(db.loadPendingSend())
+    }
+
+    @Test fun stabilityBackgroundArchivesOriginWhenTheClosureEventWasConsumedElsewhere() {
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
+        db.setPendingSendPaymentId("send")
+        // LDK has only the replacement, while the unprocessed close left the old DB row behind.
+        db.saveChannel("new-channel", "8", 5.0, 5_000, null, 5_000, 100_000.0)
+        setBooks(5.0, 5_000, "8", "new-channel")
+        node.channels = listOf(channel("8", "new-channel", 5_000))
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = 1_000_000uL))
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadChannel("7"))
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+        assertNull(db.loadPendingSend())
+    }
+
+    @Test fun stabilityMissingLdkRecordKeepsItsOriginalUnresolvedClaim() {
+        closeWithPendingStabilityAndReplace()
+        node.payments = emptyList()
+        assertFalse(backgroundRecovery())
+        assertEquals("7", db.loadPendingSend()!!.userChannelId)
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+    }
+
+    @Test fun stabilityAmbiguousLostIdDoesNotChooseOneOfSeveralKeysends() {
+        closeWithPendingStabilityAndReplace()
+        db.setPendingSendPaymentId("")
+        val candidate = node.payments.single().copy(latestUpdateTimestamp = (System.currentTimeMillis() / 1000).toULong())
+        node.payments = listOf(candidate, candidate.copy(id = "another-send"))
+        assertFalse(backgroundRecovery())
+        assertEquals("", db.loadPendingSend()!!.paymentId)
+        assertEquals("7", db.loadPendingSend()!!.userChannelId)
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+    }
+
+    private fun closeWithPendingStabilityAndReplace() {
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
+        db.setPendingSendPaymentId("send")
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null),
+            amountMsat = 1_000_000uL, status = PaymentStatus.PENDING))
+        event(Event.ChannelClosed("channel", "7", null, null))
+        assertNotNull(db.loadPendingSend())
+        db.saveChannel("new-channel", "8", 5.0, 5_000, null, 5_000, 100_000.0)
+        setBooks(5.0, 5_000, "8", "new-channel")
+        node.channels = listOf(channel("8", "new-channel", 5_000))
+        node.payments = node.payments.map { it.copy(status = PaymentStatus.SUCCEEDED) }
+        price(100_000.0)
+    }
+
+    private fun assertReplacementUnchanged() {
+        assertEquals(5_000L, db.loadChannel("8")!!.backingSats)
+        assertEquals(5.0, db.loadChannel("8")!!.expectedUSD, 0.0)
+        assertEquals(5_000L, state.stableChannel.value.backingSats)
+    }
+
+    private fun backgroundRecovery(): Boolean {
+        val controller = Robolectric.buildService(StabilityProcessingService::class.java).create()
+        try {
+            return StabilityProcessingService::class.java.getDeclaredMethod("reconcilePendingOutgoingPayment",
+                Node::class.java, String::class.java).apply { isAccessible = true }
+                .invoke(controller.get(), node, db.writableDatabase.path) as Boolean
+        } catch (e: InvocationTargetException) { throw e.targetException }
+        finally { controller.destroy() }
     }
 
     private fun pending() = db.recordPendingLightningPayment("send", "lightning", 9_000_000, 100_000.0, "7")

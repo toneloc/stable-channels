@@ -16,7 +16,7 @@ object PaymentFailureRecorder {
     ): RecordedPaymentFailure {
         val pendingSend = db.loadPendingSend()
         if (pendingSend?.paymentId == paymentId) {
-            db.clearPendingSend()
+            db.clearPendingSend(pendingSend)
             return RecordedPaymentFailure(isStability = true)
         }
         if (db.tradePaymentExists(paymentId)) {
