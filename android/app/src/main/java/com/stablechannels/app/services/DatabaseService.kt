@@ -1759,6 +1759,15 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
+    /** True if any row (of any payment_type/status) already claims this txid — used to avoid
+     * inserting a duplicate deposit row for a txid that a splice/close has already reconciled
+     * onto its own row (e.g. a self-send whose original receive row was deleted and replaced). */
+    fun paymentExistsForTxid(txid: String): Boolean {
+        return readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)
+        ).use { it.moveToFirst() }
+    }
+
     private fun SQLiteDatabase.queryIds(sql: String, args: Array<String>): List<Long> =
         rawQuery(sql, args).use { cursor ->
             buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }

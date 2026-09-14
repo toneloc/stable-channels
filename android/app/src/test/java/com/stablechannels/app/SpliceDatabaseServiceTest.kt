@@ -142,6 +142,32 @@ class SpliceDatabaseServiceTest {
         service.close()
     }
 
+    // Astra review finding: after assignPendingSpliceTxid() reconciles a self-send (deleting the
+    // websocket-recorded receive row and giving the txid to the splice row), the balance-delta
+    // detector's frozen baseline never advanced during the splice — so once the splice confirms
+    // and the detector unfreezes, it sees the same balance increase again and must NOT re-insert
+    // a new receive row for a txid that's already accounted for on the splice row. This mirrors
+    // the check detectOnchainDeposit() now performs via paymentExistsForTxid() before inserting.
+    @Test
+    fun paymentExistsForTxidPreventsDetectorFromRecreatingAReconciledSelfSend() {
+        val service = DatabaseService(context)
+        service.recordWebSocketReceive(
+            paymentId = "onchain_receive_self-send-tx", amountMsat = 50_000_000,
+            amountUSD = null, btcPrice = null, txid = "self-send-tx", address = "bc1qourtrackedaddress"
+        )
+        val spliceId = recordSplice(service, "splice_out")
+        assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
+
+        // Detector wakes up post-confirmation, resolves the same txid via the tracked address,
+        // and must see it as already claimed rather than inserting a second row.
+        assertTrue(service.paymentExistsForTxid("self-send-tx"))
+        assertEquals(
+            1,
+            service.getRecentPayments(100).count { it.txid == "self-send-tx" }
+        )
+        service.close()
+    }
+
     @Test
     fun completedOnchainReceivedRowSharingTheSpliceTxidIsAlsoReconciled() {
         // The duplicate can already be 'completed' (6+ confirmations) by the time the splice's

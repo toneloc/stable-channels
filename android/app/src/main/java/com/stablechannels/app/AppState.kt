@@ -3148,6 +3148,17 @@ class AppState(private val context: Context) : ViewModel() {
                         lastReceiveTxidAddress == receiveAddress
                 }
 
+                // If this txid already belongs to some row (e.g. a splice self-send that
+                // reconciled and deleted the original receive row for this same txid — see
+                // #316), skip: inserting again here would recreate a deposit for funds a splice
+                // already accounted for, as a duplicate, permanent, phantom "Receiving onchain"
+                // entry. A genuinely different deposit always has a different txid, so this
+                // can't suppress a real one.
+                if (!resolvedTxid.isNullOrBlank() && db?.paymentExistsForTxid(resolvedTxid) == true) {
+                    prevOnchainSats = currentSats
+                    return
+                }
+
                 // Always record the deposit, mirroring iOS. When the websocket and this
                 // balance-delta path both see the same deposit, the pair is reconciled at
                 // txid time instead of skipped up front: recordWebSocketReceive adopts a
