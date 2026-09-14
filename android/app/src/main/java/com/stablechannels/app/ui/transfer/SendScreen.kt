@@ -683,12 +683,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val invoice = Bolt11Invoice.fromStr(trimmed)
                                         val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
                                         val paymentId: String
-                                        val actualMsat: Long
-                                        val recordPrice: Double
                                         if (invoiceMsat > 0) {
-                                            paymentId = appState.nodeService.sendPayment(invoice)
-                                            actualMsat = invoiceMsat
-                                            recordPrice = price
+                                            paymentId = appState.nodeService.sendPayment(invoice, price)
                                         } else {
                                             // Money movement converts USD at the trusted accounting
                                             // price, never the raw display price (iOS parity). The
@@ -696,13 +692,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             // reflects the rate actually used.
                                             if (enteredUSD <= 0) throw Exception("Enter amount")
                                             val accountingPrice = appState.priceService.currentAccountingPrice()
-                                            actualMsat = accountingMsatFromUSD(enteredUSD, accountingPrice)
+                                            val actualMsat = accountingMsatFromUSD(enteredUSD, accountingPrice)
                                                 ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
-                                            recordPrice = accountingPrice
-                                            paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
+                                            paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat, accountingPrice)
                                         }
                                         pendingPaymentId = paymentId
-                                        appState.recordOutgoingLightningPayment(paymentId, "lightning", actualMsat, recordPrice)
                                         result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
@@ -711,9 +705,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val sats = accountingSatsFromUSD(enteredUSD, accountingPrice)
                                             ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
-                                        val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
+                                        val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000, accountingPrice)
                                         pendingPaymentId = paymentId
-                                        appState.recordOutgoingLightningPayment(paymentId, "bolt12", sats * 1000, accountingPrice)
                                         result = "Sending payment..."
                                     }
                                     InputType.ONCHAIN -> {

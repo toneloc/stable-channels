@@ -12,7 +12,7 @@ import kotlin.math.roundToLong
 
 object StabilityService {
 
-    /** Below this the position is treated as closed — matches the `expectedUSD < 0.01` guards. */
+    /** Minimum user-visible claim; smaller claims may still have outstanding settlement backing. */
     const val MINIMUM_STABLE_USD = 0.01
 
     enum class StabilityAction(val value: String) {
@@ -32,7 +32,7 @@ object StabilityService {
 
     fun reconcileOutgoing(sc: StableChannel, price: Double): Pair<StableChannel, Double?> {
         val updated = sc.copy()
-        if (updated.expectedUSD.amount < 0.01 || updated.backingSats == 0L || price == 0.0) {
+        if (updated.backingSats == 0L || !price.isFinite() || price <= 0.0) {
             return Pair(updated, null)
         }
         if (updated.backingSats <= updated.stableReceiverBTC.sats) {
@@ -48,12 +48,8 @@ object StabilityService {
         // ($100 -> $92 -> $82), and the leftover phantom backing masked a real below-par claim
         // from the stability check. This mirrors the LSP (backing_after_user_to_lsp_stability)
         // and makes the function idempotent: re-running sees backing <= receiver and returns.
-        // Exception at the zero boundary: a spend that exhausts the target closes the position,
-        // so nothing backs it. Leaving the remaining sats as backing for a $0 target would book
-        // them as neither stable nor native (recomputeNative gives receiver - backing = 0) and
-        // strand them: every repair path treats a sub-cent target as "no position" and bails.
-        updated.backingSats =
-            if (newExpected < MINIMUM_STABLE_USD) 0L else updated.stableReceiverBTC.sats
+        // A cleared claim does not forgive the remaining stability payment owed to the LSP.
+        updated.backingSats = updated.stableReceiverBTC.sats
         recomputeNative(updated)
         return Pair(updated, usdToDeduct)
     }
@@ -75,14 +71,14 @@ object StabilityService {
     }
 
     fun deductOutgoing(sc: StableChannel, amountSats: Long, price: Double): Double? {
-        if (sc.expectedUSD.amount < 0.01 || price <= 0.0) return null
+        if (!price.isFinite() || price <= 0.0) return null
         val nativeSats = sc.nativeChannelBTC.sats
         if (amountSats <= nativeSats) return null  // Fully covered by native balance
         val overflowSats = amountSats - nativeSats
         val usdToDeduct = overflowSats.toDouble() / Constants.SATS_IN_BTC * price
         val newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
         sc.expectedUSD = USD(newExpected)
-        sc.backingSats = (newExpected / price * Constants.SATS_IN_BTC).toLong()
+        sc.backingSats = (sc.backingSats - overflowSats).coerceAtLeast(0L)
         recomputeNative(sc)
         return usdToDeduct
     }
@@ -94,7 +90,7 @@ object StabilityService {
 
     fun checkStabilityAction(sc: StableChannel, price: Double): StabilityCheckResult {
         val targetUSD = sc.expectedUSD.amount
-        if (targetUSD < 0.01 || price == 0.0) {
+        if (!price.isFinite() || price <= 0.0 || (targetUSD < 0.01 && sc.backingSats == 0L)) {
             return StabilityCheckResult(StabilityAction.STABLE, 0.0, 0.0, targetUSD, 0.0)
         }
 
@@ -106,7 +102,7 @@ object StabilityService {
         val stableUSDValue = (sc.backingSats.toDouble() / Constants.SATS_IN_BTC) * price
 
         val dollarsFromPar = stableUSDValue - targetUSD
-        val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
+        val percentFromPar = abs(dollarsFromPar / max(targetUSD, MINIMUM_STABLE_USD)) * 100.0
 
         val action = when {
             percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
@@ -117,6 +113,35 @@ object StabilityService {
         }
 
         return StabilityCheckResult(action, percentFromPar, stableUSDValue, targetUSD, dollarsFromPar)
+    }
+
+    /** Check all channel spends, including their fees, before handing them to LDK.
+     *  Callers serialize this with settlement submission and wait for pending sends to finish. */
+    fun checkOutgoingAllocation(sc: StableChannel, price: Double) {
+        if (sc.expectedUSD.amount == 0.0 && sc.backingSats == 0L) return
+        check(price.isFinite() && price > 0.0) {
+            "Waiting for a fresh price before sending. Please try again shortly."
+        }
+        check(sc.expectedUSD.amount.isFinite() && sc.expectedUSD.amount >= 0.0 &&
+            sc.backingSats >= 0L && sc.backingSats <= sc.stableReceiverBTC.sats) {
+            "Waiting for the channel balance to update. Please try again shortly."
+        }
+        val drift = abs(sc.backingSats.toDouble() / Constants.SATS_IN_BTC * price - sc.expectedUSD.amount)
+        val actionable = drift >= Constants.STABILITY_THRESHOLD_USD &&
+            (sc.expectedUSD.amount < MINIMUM_STABLE_USD ||
+                drift / sc.expectedUSD.amount * 100.0 >= Constants.STABILITY_THRESHOLD_PERCENT)
+        check(!actionable) {
+            "A stability payment must settle before sending. Please try again shortly."
+        }
+    }
+
+    /** A SYNC that clears the claim consumes its locally priced sats, retaining unpaid drift. */
+    fun backingAfterTargetClear(backing: Long, expected: Double, receiver: Long, price: Double): Long? {
+        if (!expected.isFinite() || expected < 0.0 || !price.isFinite() || price <= 0.0 ||
+            backing < 0L || receiver < 0L) return null
+        val target = expected / price * Constants.SATS_IN_BTC
+        if (!target.isFinite() || target >= Long.MAX_VALUE.toDouble()) return null
+        return (backing - kotlin.math.floor(target).toLong()).coerceIn(0L, receiver)
     }
 
     fun updateBalances(

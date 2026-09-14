@@ -540,11 +540,13 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    fun recordOutgoingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double) {
+    private fun recordOutgoingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double?) {
         val db = databaseService ?: throw IllegalStateException("Payment sent; history is unavailable. Check its status before retrying.")
-        db.recordPendingLightningPayment(paymentId, paymentType, amountMsat, price)
-        // A terminal event may beat the history insert. Read the node after writing pending;
-        // any later event will update the now-existing row through the normal event handler.
+        db.recordPendingLightningPayment(paymentId, paymentType,
+            if (amountMsat > 0) amountMsat else nodeService.node?.payment(paymentId)?.amountMsat?.toLong() ?: 0L,
+            price ?: priceService.currentAccountingPrice())
+        // Called under channelOperationLock before another send or event can run. Terminal
+        // transport state updates history, but the accounting marker remains until reconciliation.
         val payment = nodeService.node?.payment(paymentId)
         when (payment?.status) {
             PaymentStatus.SUCCEEDED -> db.updatePaymentStatus(paymentId, "completed", payment.feePaidMsat?.toLong() ?: 0)
@@ -555,6 +557,10 @@ class AppState(private val context: Context) : ViewModel() {
 
     /** Repair outbound Lightning rows for events acknowledged while the app was backgrounded. */
     private fun reconcilePendingLightningPayments() {
+        synchronized(nodeService.channelOperationLock) { reconcilePendingLightningPaymentsLocked() }
+    }
+
+    private fun reconcilePendingLightningPaymentsLocked() {
         val db = databaseService ?: return
         val repaired = LightningPaymentRecovery.reconcilePending(db) { paymentId ->
             try {
@@ -572,7 +578,24 @@ class AppState(private val context: Context) : ViewModel() {
         if (repaired > 0) {
             AuditService.log("PENDING_LIGHTNING_RECONCILED", mapOf("count" to repaired))
         }
+        // Background consumers can acknowledge success before the foreground applies the books.
+        // Retry these durable markers even though their history rows already say "completed".
+        if (isSweeping || isChannelClosing || pendingSplice != null || db.hasPendingSplice() ||
+            db.loadPendingSend() != null || hasPendingLdkChannelPayment()) return
+        val price = priceService.currentAccountingPrice()
+        if (!price.isFinite() || price <= 0.0) return
+        db.getUnaccountedOutgoingLightningPaymentIds().forEach { paymentId ->
+            val payment = nodeService.node?.payment(paymentId)
+            if (payment?.status == PaymentStatus.SUCCEEDED) {
+                handlePaymentSuccessful(paymentId, "", payment.feePaidMsat?.toLong())
+            }
+        }
     }
+
+    private fun hasPendingLdkChannelPayment(): Boolean = nodeService.node?.listPayments()?.any {
+        it.direction == PaymentDirection.OUTBOUND && it.status == PaymentStatus.PENDING &&
+            it.kind !is PaymentKind.Onchain
+    } ?: true
 
     private val _lightningBalanceSats: MutableStateFlow<Long>
     val lightningBalanceSats: StateFlow<Long> get() = _lightningBalanceSats
@@ -666,6 +689,8 @@ class AppState(private val context: Context) : ViewModel() {
     val nativeSats: StateFlow<Long> get() = _nativeSats
 
     init {
+        nodeService.channelSpendGuard = ::checkChannelSpend
+        nodeService.channelPaymentRecorder = ::recordOutgoingLightningPayment
         val prefs = context.getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
         val cachedLightning = prefs.getLong(BalanceCacheKey.LIGHTNING, 0L)
         val cachedOnchain = prefs.getLong(BalanceCacheKey.ONCHAIN, 0L)
@@ -921,13 +946,13 @@ class AppState(private val context: Context) : ViewModel() {
                     nodeStartRetryJob = null
                     _phase.value = Phase.WALLET
                     _isSyncing.value = false
-                    reconcilePendingLightningPayments()
                     // Restore the known funding txid before the first live balance refresh so
                     // an ordinary cold start is not mistaken for a funding transition.
                     val balanceCachePrefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
                     fundingTxid = balanceCachePrefs.getString("funding_txid", null)
                     fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
                     refreshBalances()
+                    reconcilePendingLightningPayments()
                     pollPaymentConfirmations(force = true)
                     // Off the critical startup path: it makes blocking LDK/DB calls, and the
                     // first frames must not wait on a repair that almost never has work to do.
@@ -1391,6 +1416,10 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun handleEvent(event: Event) {
+        synchronized(nodeService.channelOperationLock) { handleEventLocked(event) }
+    }
+
+    private fun handleEventLocked(event: Event) {
         when (event) {
             is Event.ChannelPending -> {
                 val sc = _stableChannel.value.copy()
@@ -2015,6 +2044,12 @@ class AppState(private val context: Context) : ViewModel() {
 
         if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
 
+        val db = databaseService ?: throw IllegalStateException("Payment accounting is unavailable")
+        if (paymentId != null && db.isLightningAccountingComplete(paymentId)) return
+        // Older app versions could overlap sends. Never account a settled send using a balance
+        // temporarily reduced by another pending HTLC; leave this event unacknowledged to retry.
+        check(!hasPendingLdkChannelPayment()) { "Waiting for pending payments before reconciling balances" }
+
         // Ordinary (non-trade, non-stability) outgoing payment. Mirrors iOS's
         // handlePaymentSuccessful: reconcile expectedUSD and backingSats together when this
         // send dipped into the stable backing — otherwise the on-screen Stable USD never
@@ -2033,9 +2068,11 @@ class AppState(private val context: Context) : ViewModel() {
         // BEGIN IMMEDIATE transaction, composing correctly with whatever the timer already wrote.
         refreshBalances()
         updateStableBalances()
-        val price = priceService.currentPrice.value
+        val price = priceService.currentAccountingPrice()
+        check(price.isFinite() && price > 0.0) { "Waiting for a trusted price to reconcile the payment" }
         val channelId = _stableChannel.value.channelId
         val userChannelId = _stableChannel.value.userChannelId
+        check(userChannelId.isNotEmpty() && _hasReadyChannel.value) { "Waiting for the channel balance to reconcile the payment" }
         val note = _stableChannel.value.note
         val latestPrice = _stableChannel.value.latestPrice
         // stableReceiverBTC is refreshed from live channel state just above, not from the
@@ -2048,30 +2085,31 @@ class AppState(private val context: Context) : ViewModel() {
         // this publish — the interleaving that let an older absolute backing overwrite a newer
         // one in memory and trigger a phantom stability payment (#299 review).
         val reconcileResult = synchronized(booksLock) {
-            val result = if (userChannelId.isEmpty()) null else try {
-                databaseService?.reconcileOutgoingBacking(
+            val result = try {
+                db.reconcileOutgoingBacking(
                     channelId = channelId,
                     userChannelId = userChannelId,
                     note = note,
                     receiverSats = receiverSats,
                     latestPrice = latestPrice,
-                    price = price
+                    price = price,
+                    paymentId = paymentId,
+                    feeMsat = feePaidMsat ?: 0L
                 )
             } catch (e: MissingChannelRowException) {
-                // Structural: there is no row to reconcile against and a retry can't create one.
-                // Treat as nothing-to-reconcile, but leave a trace in the audit log.
+                // Keep the event and accounting marker until the channel row is available.
                 AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
                     "payment_id" to (paymentId ?: ""),
                     "reason" to "missing_channel_row",
                     "user_channel_id" to userChannelId
                 ))
-                null
+                throw e
             } catch (e: Exception) {
                 // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
                 // transaction rolled back, so the deduction has NOT been recorded — rethrow so
                 // the event loop leaves this PaymentSuccessful un-acked and LDK redelivers it
-                // with backoff. reconcileOutgoingBacking() is idempotent on retry because it
-                // measures overflow against live channel state. Swallowing the error here acked
+                // with backoff. The accounting marker commits atomically with the books.
+                // Swallowing the error here acked
                 // the payment with the books still wrong (#299 review, P2).
                 AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
                     "payment_id" to (paymentId ?: ""),
@@ -2238,7 +2276,29 @@ class AppState(private val context: Context) : ViewModel() {
         startSpliceConfirmationMonitor(txid)
     }
 
+    private fun checkChannelSpend(isSplice: Boolean) {
+        val db = databaseService
+            ?: throw IllegalStateException("Channel accounting is not ready. Please try again shortly.")
+        check(nodeService.node != null) { "Node is not running" }
+        check(!isChannelClosing && (!isSweeping || isSplice) && spliceTxid == null) {
+            "Waiting for the previous channel operation to settle. Please try again shortly."
+        }
+        check(!db.hasPendingSplice() || (isSplice && pendingSplice?.direction == "out")) {
+            "Waiting for the previous splice to settle. Please try again shortly."
+        }
+        check(db.loadPendingSend() == null && !db.hasPendingChannelSend() && !hasPendingLdkChannelPayment()) {
+            "Waiting for the previous payment to settle. Please try again shortly."
+        }
+        refreshBalances()
+        updateStableBalances()
+        synchronized(booksLock) {
+            publishBooksFromDB(recomputeNative = true)
+            StabilityService.checkOutgoingAllocation(_stableChannel.value, priceService.currentAccountingPrice())
+        }
+    }
+
     fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
+        synchronized(nodeService.channelOperationLock) { checkChannelSpend(false) }
         if (isSweeping) {
             throw IllegalStateException("A splice is already in progress — try again shortly")
         }
@@ -2787,7 +2847,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun runStabilityCheck() {
+        synchronized(nodeService.channelOperationLock) { runStabilityCheckLocked() }
+    }
+
+    private fun runStabilityCheckLocked() {
         if (!reconcilePendingOutgoingStabilityPayment()) return
+        if (isSweeping || isChannelClosing || pendingSplice != null) return
+        reconcilePendingLightningPaymentsLocked()
+        if (databaseService?.hasPendingChannelSend() != false) return
+        if (nodeService.node?.listPayments()?.any {
+                it.direction == PaymentDirection.OUTBOUND && it.status == PaymentStatus.PENDING &&
+                    it.kind !is PaymentKind.Onchain
+            } != false) return
 
         refreshBalances()
         updateStableBalances()
@@ -2925,43 +2996,9 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
 
-            try {
-                synchronized(booksLock) {
-                    val persistence = databaseService?.recordPaymentAndMaybeUpdateBacking(
-                        paymentId = paymentIdString,
-                        paymentType = "stability",
-                        direction = "sent",
-                        amountMsat = amountMsat,
-                        amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                        btcPrice = price,
-                        counterparty = sc.counterparty,
-                        userChannelId = sc.userChannelId,
-                        backingDeltaSats = -(amountMsat / 1000)
-                    ) ?: throw IllegalStateException("DB service unavailable")
-                    persistence.backingSats
-                        ?: throw IllegalStateException("DB did not return backing after outgoing stability payment")
-                    // Publish from the row — not from persistence.backingSats and not from the
-                    // tick-top `sc` snapshot. An ordinary send can reconcile (commit + publish)
-                    // at any point; republishing `sc` clobbered its expectedUSD, and publishing
-                    // the transaction-returned absolute backing clobbered its newer backing,
-                    // leaving in-memory books off-par and the next tick paying for nothing
-                    // (#299 review). Under booksLock the read-and-publish can't interleave with
-                    // another path's commit-and-publish. The debit is already durable and
-                    // lastStabilityPayment isn't a column, so no save is needed here.
-                    publishBooksFromDB(lastStabilityPayment = now)
-                }
-                databaseService?.clearPendingSend()
-                AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
-            } catch (e: Exception) {
-                // The send already succeeded. Keep the durable marker and block all later sends
-                // until the payment row and backing delta can be committed together.
-                _stableChannel.update { it.copy(lastStabilityPayment = now) }
-                FCMService.flagPendingPayment(context)
-                AuditService.log(
-                    "STABILITY_PAYMENT_PERSISTENCE_FAILED",
-                    mapOf("error" to (e.message ?: ""))
-                )
-            }
+            _stableChannel.update { it.copy(lastStabilityPayment = now) }
+            reconcilePendingOutgoingStabilityPayment()
+            AuditService.log("STABILITY_PAYMENT_SENT", mapOf("amount_msat" to amountMsat))
         }
     }
 
@@ -3026,6 +3063,18 @@ class AppState(private val context: Context) : ViewModel() {
                 }
                 else -> return false  // young marker — another process may be mid-send
             }
+        }
+
+        // LDK accepting the send does not mean the payment succeeded. Keep the durable marker
+        // and the backing until its terminal outcome; failures must leave the debt intact.
+        when (nodeService.node?.payment(pendingPaymentId)?.status) {
+            PaymentStatus.SUCCEEDED -> Unit
+            PaymentStatus.FAILED -> {
+                db.clearPendingSend()
+                _stableChannel.update { it.copy(lastStabilityPayment = 0L) }
+                return true
+            }
+            else -> return false
         }
 
         val sc = _stableChannel.value
@@ -3768,6 +3817,10 @@ class AppState(private val context: Context) : ViewModel() {
      * balance for as long as it is pending and would read as an overflow.
      */
     private fun repairBooksAboveLiveBalance() {
+        synchronized(nodeService.channelOperationLock) { repairBooksAboveLiveBalanceLocked() }
+    }
+
+    private fun repairBooksAboveLiveBalanceLocked() {
         val db = databaseService ?: return
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
@@ -3782,6 +3835,7 @@ class AppState(private val context: Context) : ViewModel() {
         // overflow. clampBackingToLiveReceiver() re-checks this inside its transaction; this is
         // the cheap early out.
         if (try { db.loadPendingSend() != null } catch (_: Exception) { true }) return
+        if (try { db.hasPendingChannelSend() } catch (_: Exception) { true }) return
         val inFlight = try {
             nodeService.node?.listPayments()?.any { it.status == PaymentStatus.PENDING } ?: true
         } catch (e: Exception) {

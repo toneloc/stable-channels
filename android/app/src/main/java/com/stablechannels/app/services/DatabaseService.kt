@@ -150,6 +150,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
+        createOutgoingLightningAccountingTable(db)
 
         db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
@@ -205,7 +206,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
+        createOutgoingLightningAccountingTable(db)
         createTradeIndexes(db)
+    }
+
+    private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) {
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS outgoing_lightning_accounting (
+                payment_id TEXT PRIMARY KEY,
+                completed INTEGER NOT NULL DEFAULT 0
+            )
+        """)
     }
 
     private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
@@ -319,9 +330,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val overflowSats = currentBacking - receiverSats
             val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
             val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
-            // A repair that exhausts the target closes the position: nothing backs it.
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            // Retain any final settlement backing even when the USD claim is cleared.
+            val newBacking = receiverSats
             val cv = ContentValues().apply {
                 put("expected_usd", newExpected)
                 put("stable_sats", newBacking)
@@ -374,6 +384,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      * refreshBalances()/updateStableBalances()) — that value reflects real channel state
      * directly and isn't subject to the same race as the in-memory backingSats copy.
      *
+     * With [paymentId], also commits accounting completion and transport success atomically,
+     * even for a native-only send. Completed ids skip balance reconciliation on replay.
      * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
      */
     fun reconcileOutgoingBacking(
@@ -382,12 +394,22 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         note: String?,
         receiverSats: Long,
         latestPrice: Double,
-        price: Double
+        price: Double,
+        paymentId: String? = null,
+        feeMsat: Long = 0L
     ): OutgoingReconcileResult? {
-        if (price <= 0.0) return null
+        if (!price.isFinite() || price <= 0.0) {
+            check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
+            return null
+        }
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
+            // A delayed/replayed success must never reconcile against a later send's HTLC.
+            if (paymentId != null && isLightningAccountingComplete(paymentId)) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
             val cursor = db.rawQuery(
                 "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
                 arrayOf(userChannelId)
@@ -396,8 +418,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
                 it.getDouble(0) to it.getLong(1)
             }
-            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
-                db.execSQL("ROLLBACK")
+            if (currentBacking == 0L || currentBacking <= receiverSats) {
+                if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
+                db.execSQL("COMMIT")
                 return null
             }
             val overflowSats = currentBacking - receiverSats
@@ -409,10 +432,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             // SECOND time ($100 -> $92 -> $82) and hid a genuine below-par claim from the
             // stability check. Pinning backing to the live balance matches the LSP's own
             // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
-            // At the zero boundary the position is closed, so nothing backs it — see
-            // StabilityService.reconcileOutgoing().
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            // A cleared claim can still leave a final settlement owed to the LSP.
+            val newBacking = receiverSats
             val cv = ContentValues().apply {
                 put("channel_id", channelId)
                 put("expected_usd", newExpected)
@@ -428,6 +449,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
                 )
             }
+            if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
             db.execSQL("COMMIT")
             return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
         } catch (e: Exception) {
@@ -1095,7 +1117,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val currentExpected = row[1] as Double
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
-            val localBacking = if (sync.expectedUsd == 0.0) 0L else if (
+            val localBacking = if (sync.expectedUsd == 0.0) {
+                StabilityService.backingAfterTargetClear(
+                    currentBacking, currentExpected, receiverSats, trustedPrice
+                ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            } else if (
                 currentBacking > 0L && sync.expectedUsd == currentExpected
             ) {
                 currentBacking.coerceAtMost(receiverSats)
@@ -1189,6 +1215,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 values.put("payment_id", paymentId)
                 db.insertOrThrow("payments", null, values)
             }
+            db.execSQL(
+                "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)",
+                arrayOf(paymentId)
+            )
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -1330,6 +1360,46 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             arrayOf(userChannelId)
         )
         return cursor.use { if (it.moveToFirst()) it.getLong(0) else null }
+    }
+
+    /** Transport success alone is insufficient: ordinary sends must finish their accounting. */
+    fun hasPendingChannelSend(): Boolean = readableDatabase.rawQuery(
+        """
+        SELECT 1 FROM payments p
+        LEFT JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+        WHERE p.direction = 'sent' AND (
+            (p.payment_type IN ('lightning', 'bolt12', 'stability') AND p.status = 'pending') OR
+            (p.payment_type IN ('lightning', 'bolt12') AND p.status != 'failed' AND a.completed = 0)
+        ) LIMIT 1
+        """.trimIndent(), null
+    ).use { it.moveToFirst() }
+
+    fun isLightningAccountingComplete(paymentId: String): Boolean = readableDatabase.rawQuery(
+        "SELECT 1 FROM outgoing_lightning_accounting WHERE payment_id = ? AND completed = 1",
+        arrayOf(paymentId)
+    ).use { it.moveToFirst() }
+
+    fun getUnaccountedOutgoingLightningPaymentIds(): List<String> = readableDatabase.rawQuery(
+        """
+        SELECT p.payment_id FROM payments p
+        JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+        WHERE p.direction = 'sent' AND p.payment_type IN ('lightning', 'bolt12')
+          AND p.status = 'completed' AND a.completed = 0
+        ORDER BY p.created_at
+        """.trimIndent(), null
+    ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+
+    /** Must commit in the same transaction as the corresponding balance reconciliation. */
+    private fun completeLightningAccounting(db: SQLiteDatabase, paymentId: String, feeMsat: Long) {
+        db.execSQL(
+            "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 1)",
+            arrayOf(paymentId)
+        )
+        val values = ContentValues().apply {
+            put("status", "completed")
+            if (feeMsat > 0) put("fee_msat", feeMsat)
+        }
+        db.update("payments", values, "payment_id = ?", arrayOf(paymentId))
     }
 
     // --- Pending outgoing stability send marker (single row, id = 1) ---
@@ -1512,7 +1582,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             put("status", status)
             if (feeMsat > 0) put("fee_msat", feeMsat)
         }
-        writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+        writableDatabase.transaction {
+            // Also adopt pending sends from before the accounting marker was introduced.
+            // Transport success (including background recovery) cannot release this barrier.
+            if (status == "completed") execSQL("""
+                INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed)
+                SELECT payment_id, 0 FROM payments WHERE payment_id = ?
+                  AND direction = 'sent' AND payment_type IN ('lightning', 'bolt12') AND status = 'pending'
+            """.trimIndent(), arrayOf(paymentId))
+            update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+        }
     }
 
     fun isOutgoingStabilityPayment(paymentId: String): Boolean {

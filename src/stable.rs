@@ -27,7 +27,7 @@ use ureq::Agent;
 ///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` otherwise.
 pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.01 || sc.backing_sats == 0 || price <= 0.0 {
+    if sc.backing_sats == 0 || !price.is_finite() || price <= 0.0 {
         return None;
     }
 
@@ -88,11 +88,8 @@ pub fn repair_overbacked_allocation(
     let expected_usd_after = (expected_usd_before - usd_deducted).max(0.0);
 
     sc.expected_usd = USD::from_f64(expected_usd_after);
-    sc.backing_sats = if expected_usd_after < 0.01 {
-        0
-    } else {
-        live_receiver_sats
-    };
+    // A cleared USD claim may still leave sats owed to the LSP. Keep them allocated until paid.
+    sc.backing_sats = live_receiver_sats;
     sc.native_sats = live_receiver_sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
     sc.last_stability_payment = SystemTime::now()
@@ -139,7 +136,7 @@ fn is_pending_outbound_lightning(
         && !is_onchain
 }
 
-fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
+pub fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
     node.list_payments().iter().any(|payment| {
         is_pending_outbound_lightning(
             payment.direction,
@@ -191,7 +188,7 @@ pub fn reconcile_forwarded(
     total_forwarded_sats: u64,
     price: f64,
 ) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.0 || price <= 0.0 {
+    if sc.backing_sats == 0 || !price.is_finite() || price <= 0.0 {
         return None;
     }
 
@@ -281,9 +278,6 @@ pub fn deduct_outgoing_from_snapshot(
 
     sc.expected_usd = USD::from_f64(new_expected);
     sc.backing_sats = backing_sats_before.saturating_sub(overflow_sats);
-    if new_expected == 0.0 {
-        sc.backing_sats = 0;
-    }
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -377,7 +371,7 @@ pub fn normalize_trade_expected_usd(expected_usd: f64) -> f64 {
 ///
 /// Repricing the complete target would erase stability drift accumulated before the trade. A full
 /// exit is allowed only while that drift is inside the normal stability deadband; an actionable
-/// adjustment must settle first because a zero target cannot retain the old drift.
+/// adjustment must settle first because a trade exit releases the stable allocation.
 pub fn trade_backing_after_delta(
     receiver_sats: u64,
     current_backing_sats: u64,
@@ -453,6 +447,28 @@ fn allocation_drift_is_actionable(
     }
     let drift_percent = drift_usd / expected_usd * 100.0;
     drift_usd >= STABILITY_THRESHOLD_USD && drift_percent >= STABILITY_THRESHOLD_PERCENT
+}
+
+/// Admit a channel spend only after actionable drift has settled. Check the complete allocation,
+/// rather than just the requested amount: routing and splice fees also consume channel funds.
+/// The caller must serialize this check with settlement submission and reject pending payments.
+pub fn check_outgoing_allocation(sc: &StableChannel, price: f64) -> Result<(), &'static str> {
+    if sc.expected_usd.0 == 0.0 && sc.backing_sats == 0 {
+        return Ok(());
+    }
+    if !price.is_finite() || price <= 0.0 {
+        return Err("Waiting for a fresh price before sending. Please try again shortly.");
+    }
+    if !sc.expected_usd.0.is_finite()
+        || sc.expected_usd.0 < 0.0
+        || sc.backing_sats > sc.stable_receiver_btc.sats
+    {
+        return Err("Waiting for the channel balance to update. Please try again shortly.");
+    }
+    if allocation_drift_is_actionable(sc.backing_sats, sc.expected_usd.0, price) {
+        return Err("A stability payment must settle before sending. Please try again shortly.");
+    }
+    Ok(())
 }
 
 /// Apply an allocation already derived by this peer.
@@ -844,8 +860,8 @@ pub fn check_stability(
     // As BTC price moves, stable_usd_value = backing_sats * new_price will drift
     // from expected_usd, triggering a stability payment to rebalance.
 
-    // Skip if expected_usd is zero or very small (nothing to stabilize)
-    if sc.expected_usd.0 < 0.01 {
+    // A zero/sub-cent claim can still carry a final payment owed to the LSP.
+    if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
         audit_event(
             "STABILITY_SKIP",
             json!({
@@ -898,11 +914,7 @@ pub fn check_stability(
     // Calculate deviation: how much the stable portion has drifted from target
     // Due to price changes, the BTC backing the stable portion may be worth more or less
     let dollars_from_par = USD::from_f64(stable_usd_value - target_usd);
-    let percent_from_par = if target_usd > 0.0 {
-        ((dollars_from_par.0 / target_usd) * 100.0).abs()
-    } else {
-        0.0
-    };
+    let percent_from_par = (dollars_from_par.0 / target_usd.max(0.01) * 100.0).abs();
     let is_receiver_below_expected = stable_usd_value < target_usd;
 
     let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT
@@ -1077,12 +1089,11 @@ pub fn check_stability(
             sc.payment_made = true;
             sc.last_stability_payment = now;
 
-            // Reset backing_sats to equilibrium at current price.
-            // This accounts the payment against the stable pool, not native BTC.
+            // Debit only the whole sats actually sent, preserving any rounding residue.
             // Don't recompute native_sats here — receiver balance hasn't updated yet
             // (HTLC still in flight). Native will be recomputed on next balance refresh.
             let previous_backing = sc.backing_sats;
-            let new_backing = (target_usd / sc.latest_price * 100_000_000.0) as u64;
+            let new_backing = previous_backing.saturating_sub(amt / 1000);
             sc.backing_sats = new_backing;
 
             let payment_id_str = payment_id.to_string();
@@ -1114,6 +1125,65 @@ pub fn check_stability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_claim_spends_preserve_lsp_surplus_in_every_reconciliation_path() {
+        for native_before in [0, 5_000] {
+            for path in 0..4 {
+                let mut sc = test_sc(10.0, 50_000.0, 10_000);
+                let result = match path {
+                    0 => reconcile_outgoing(&mut sc, 100_000.0),
+                    1 => deduct_outgoing_from_snapshot(&mut sc, 20_000 + native_before, 20_000,
+                        10_000 + native_before, 100_000.0),
+                    2 => repair_overbacked_allocation(&mut sc, 100_000.0).map(|r| r.usd_deducted),
+                    _ => reconcile_forwarded(&mut sc, 20_000 + native_before,
+                        10_000 + native_before, 100_000.0),
+                };
+                assert_eq!(result, Some(10.0));
+                assert_eq!(sc.expected_usd.0, 0.0);
+                assert_eq!(sc.backing_sats, 10_000);
+                assert_eq!(sc.native_channel_btc.sats, 0);
+                assert!(reconcile_outgoing(&mut sc, 100_000.0).is_none());
+                assert!(repair_overbacked_allocation(&mut sc, 100_000.0).is_none());
+                assert!(check_outgoing_allocation(&sc, 100_000.0).is_err());
+                assert_eq!(backing_after_user_to_lsp_stability(10_000, 0.0, 100_000.0, 10_000, 0), Some(0));
+            }
+        }
+    }
+
+    #[test]
+    fn channel_spends_wait_for_settlement_and_a_trusted_price() {
+        let mut sc = test_sc(10.0, 100_000.0, 100_000);
+        for price in [110_000.0, 90_000.0, 0.0, f64::NAN, f64::INFINITY] {
+            assert!(check_outgoing_allocation(&sc, price).is_err());
+        }
+        assert!(check_outgoing_allocation(&sc, 100_000.0).is_ok());
+        assert!(check_outgoing_allocation(&sc, 102_000.0).is_ok(), "sub-$0.25 deadband remains allowed");
+        sc.expected_usd = USD(0.00085);
+        sc.backing_sats = 477;
+        assert!(check_outgoing_allocation(&sc, 105_000.0).is_err());
+        sc.expected_usd = USD(0.0);
+        sc.backing_sats = 249;
+        assert!(check_outgoing_allocation(&sc, 100_000.0).is_ok());
+        sc.backing_sats = 250;
+        assert!(check_outgoing_allocation(&sc, 100_000.0).is_err());
+        sc.backing_sats = 0;
+        assert!(check_outgoing_allocation(&sc, 0.0).is_ok(), "native-only wallet needs no settlement price");
+    }
+
+    #[test]
+    fn residual_backing_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sc = test_sc(10.0, 50_000.0, 10_000);
+        repair_overbacked_allocation(&mut sc, 100_000.0).unwrap();
+        {
+            let db = crate::db::Database::open(dir.path()).unwrap();
+            db.save_channel("channel", "7", sc.expected_usd.0, sc.backing_sats, sc.native_sats, None).unwrap();
+        }
+        let db = crate::db::Database::open(dir.path()).unwrap();
+        let row = db.load_channel("7").unwrap().unwrap();
+        assert_eq!((row.expected_usd, row.backing_sats, row.native_sats), (0.0, 10_000, 0));
+    }
 
     #[test]
     fn missing_future_or_old_lightning_sync_blocks_stability_send() {
@@ -1535,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn splice_out_releases_remaining_backing_when_expected_usd_reaches_zero() {
+    fn splice_out_preserves_remaining_backing_when_expected_usd_reaches_zero() {
         let mut sc = test_sc(0.005, 65_000.0, 250);
         sc.backing_sats = 500;
 
@@ -1544,8 +1614,8 @@ mod tests {
 
         assert!((deducted - 0.005).abs() < f64::EPSILON);
         assert_eq!(sc.expected_usd.0, 0.0);
-        assert_eq!(sc.backing_sats, 0);
-        assert_eq!(sc.native_sats, 250);
+        assert_eq!(sc.backing_sats, 250);
+        assert_eq!(sc.native_sats, 0);
     }
 
     // ================================================================

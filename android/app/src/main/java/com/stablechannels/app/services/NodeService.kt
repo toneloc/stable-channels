@@ -22,6 +22,33 @@ import java.io.File
 
 class NodeService(private val context: Context) {
 
+    // Shared with event accounting and the settlement worker through submission and registration.
+    internal val channelOperationLock = Any()
+    internal var channelSpendGuard: ((Boolean) -> Unit)? = null
+    internal var channelPaymentRecorder: ((String, String, Long, Double?) -> Unit)? = null
+
+    // Keep registration inside the operation lock: LDK can succeed before send() returns.
+    internal fun sendTrackedLightningPayment(
+        paymentType: String,
+        amountMsat: Long,
+        price: Double?,
+        send: () -> String
+    ): String = withSettledChannel {
+        val record = channelPaymentRecorder
+            ?: throw IllegalStateException("Payment history is not ready. Please try again shortly.")
+        val paymentId = send()
+        record(paymentId, paymentType, amountMsat, price)
+        paymentId
+    }
+
+    private inline fun <T> withSettledChannel(isSplice: Boolean = false, send: () -> T): T =
+        synchronized(channelOperationLock) {
+            val guard = channelSpendGuard
+                ?: throw IllegalStateException("Channel accounting is not ready. Please try again shortly.")
+            guard(isSplice)
+            send()
+        }
+
     var node: Node? = null
         private set
     private val _isRunning = MutableStateFlow(false)
@@ -227,30 +254,34 @@ class NodeService(private val context: Context) {
         n.spliceInWithAll(userChannelId, counterpartyNodeId)
     }
 
-    fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) {
+    fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) = withSettledChannel(isSplice = true) {
         val n = node ?: throw NodeServiceError()
         n.spliceOut(userChannelId, counterpartyNodeId, QRCodeUtils.normalizeAddress(address), amountSats.toULong())
     }
 
-    fun sendPayment(invoice: Bolt11Invoice): String {
-        val n = node ?: throw NodeServiceError()
-        return n.bolt11Payment().send(invoice, null)
-    }
+    fun sendPayment(invoice: Bolt11Invoice, price: Double? = null): String =
+        sendTrackedLightningPayment("lightning", invoice.amountMilliSatoshis()?.toLong() ?: 0L, price) {
+            val n = node ?: throw NodeServiceError()
+            n.bolt11Payment().send(invoice, null)
+        }
 
-    fun sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: Long): String {
-        val n = node ?: throw NodeServiceError()
-        return n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), null)
-    }
+    fun sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: Long, price: Double? = null): String =
+        sendTrackedLightningPayment("lightning", amountMsat, price) {
+            val n = node ?: throw NodeServiceError()
+            n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), null)
+        }
 
-    fun sendBolt12(offer: Offer): String {
-        val n = node ?: throw NodeServiceError()
-        return n.bolt12Payment().send(offer, null, null, null)
-    }
+    fun sendBolt12(offer: Offer, price: Double? = null): String =
+        sendTrackedLightningPayment("bolt12", 0L, price) {
+            val n = node ?: throw NodeServiceError()
+            n.bolt12Payment().send(offer, null, null, null)
+        }
 
-    fun sendBolt12UsingAmount(offer: Offer, amountMsat: Long): String {
-        val n = node ?: throw NodeServiceError()
-        return n.bolt12Payment().sendUsingAmount(offer, amountMsat.toULong(), null, null, null)
-    }
+    fun sendBolt12UsingAmount(offer: Offer, amountMsat: Long, price: Double? = null): String =
+        sendTrackedLightningPayment("bolt12", amountMsat, price) {
+            val n = node ?: throw NodeServiceError()
+            n.bolt12Payment().sendUsingAmount(offer, amountMsat.toULong(), null, null, null)
+        }
 
     fun sendKeysend(amountMsat: Long, toNodeId: String): String {
         val n = node ?: throw NodeServiceError()

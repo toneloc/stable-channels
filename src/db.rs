@@ -2409,6 +2409,17 @@ impl Database {
 
     /// Record a payment
     /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
+    /// An optimistic stability debit is not confirmation. Keep user channel spends blocked until
+    /// the payment event and its accounting have both reached a terminal state (including restart).
+    pub fn has_pending_channel_send(&self) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payments WHERE direction = 'sent'
+             AND status = 'pending' AND payment_type IN ('lightning', 'stability'))",
+            [], |row| row.get(0),
+        )
+    }
+
     pub fn record_payment(
         &self,
         payment_id: Option<&str>,
@@ -5587,6 +5598,29 @@ mod tests {
                 .backing_sats,
             0
         );
+    }
+
+    #[test]
+    fn final_settlement_blocks_spends_until_terminal_accounting_survives_restart() {
+        for succeeds in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let db = Database::open(dir.path()).unwrap();
+                db.save_channel("channel", "7", 0.0, 1_000, 0, None).unwrap();
+                db.record_pending_stability_payment("final", 1_000_000, Some(1.0), 100_000.0,
+                    "lsp", "channel", "7", 0.0, 1_000, 0, 0, None).unwrap();
+                assert!(db.has_pending_channel_send().unwrap());
+            }
+            let db = Database::open(dir.path()).unwrap();
+            assert!(db.has_pending_channel_send().unwrap());
+            if succeeds {
+                db.complete_pending_stability_payment("final", "hash", None).unwrap();
+            } else {
+                assert!(db.fail_pending_stability_payment("final").unwrap().unwrap().restored);
+            }
+            assert!(!db.has_pending_channel_send().unwrap());
+            assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, if succeeds { 0 } else { 1_000 });
+        }
     }
 
     #[test]

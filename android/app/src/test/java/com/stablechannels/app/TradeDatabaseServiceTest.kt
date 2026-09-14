@@ -45,6 +45,34 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
+    fun finalSettlementSurvivesZeroTargetSyncRestartAndReplay() {
+        val identifier = "ab".repeat(32)
+        var service = DatabaseService(context)
+        service.saveChannel(identifier, "7", 10.0, 11_000, null, 1_000, 100_000.0)
+        val sync = TradeControlMessage.Sync(channelId = identifier, userChannelId = "lsp-id",
+            expectedUsd = 0.0, backingSats = 1_000, syncVersion = 1, correlation = null)
+        assertEquals(TradeControlApplyStatus.APPLIED,
+            service.applyUncorrelatedSyncIfNewer(sync, 100_000.0).status)
+        assertEquals(1_000L, service.loadChannel("7")!!.backingSats)
+        assertEquals(TradeControlApplyStatus.DUPLICATE,
+            service.applyUncorrelatedSyncIfNewer(sync, 100_000.0).status)
+        service.close()
+        service = DatabaseService(context)
+        assertEquals(1_000L, service.loadChannel("7")!!.backingSats)
+        assertEquals(0.0, service.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(TradeControlApplyStatus.APPLIED,
+            service.applyUncorrelatedSyncIfNewer(sync.copy(syncVersion = 2), 100_000.0).status)
+        assertEquals(1_000L, service.loadChannel("7")!!.backingSats)
+        for (attempt in 0..1) {
+            service.recordPaymentAndMaybeUpdateBacking(paymentId = "final-payment", paymentType = "stability",
+                direction = "sent", amountMsat = 1_000_000, amountUSD = 1.0, btcPrice = 100_000.0,
+                counterparty = null, userChannelId = "7", backingDeltaSats = -1_000)
+            assertEquals(0L, service.loadChannel("7")!!.backingSats)
+        }
+        service.close()
+    }
+
+    @Test
     fun versionTwoSchemaMigratesWithoutLosingRows() {
         val legacy = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
         legacy.execSQL(
@@ -726,8 +754,8 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
-    fun outgoingReconcileClosesThePositionWhenTheSpendExhaustsTheTarget() {
-        // Zero boundary, persisted side: nothing backs an exhausted target.
+    fun outgoingReconcilePreservesSurplusWhenTheSpendExhaustsTheTarget() {
+        // A zero claim may still carry a final stability payment.
         val identifier = "1a".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
@@ -742,15 +770,15 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(result)
         assertEquals(0.0, result!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, result.newBackingSats)
+        assertEquals(5_000L, result.newBackingSats)
         val row = service.loadChannel("21")
         assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
-        assertEquals(0L, row?.backingSats)          // the 5,000 sats are native, not stranded
+        assertEquals(5_000L, row?.backingSats)
         service.close()
     }
 
     @Test
-    fun backingClampClosesThePositionWhenTheRepairExhaustsTheTarget() {
+    fun backingClampPreservesSurplusWhenTheRepairExhaustsTheTarget() {
         // Same boundary on the startup repair path.
         val identifier = "2b".repeat(32)
         val service = DatabaseService(context)
@@ -763,8 +791,8 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(repaired)
         assertEquals(0.0, repaired!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, repaired.newBackingSats)
-        assertEquals(0L, service.loadChannel("22")?.backingSats)
+        assertEquals(5_000L, repaired.newBackingSats)
+        assertEquals(5_000L, service.loadChannel("22")?.backingSats)
         service.close()
     }
 

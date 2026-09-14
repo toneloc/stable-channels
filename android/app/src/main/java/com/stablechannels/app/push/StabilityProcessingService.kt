@@ -658,6 +658,17 @@ class StabilityProcessingService : Service() {
                 "Previous outgoing payment marker is unresolved — refusing to send again"
             )
         }
+        val accountingDb = DatabaseService(this)
+        try {
+            if (accountingDb.hasPendingChannelSend() || node.listPayments().any {
+                    it.direction == PaymentDirection.OUTBOUND && it.status == PaymentStatus.PENDING &&
+                        it.kind !is PaymentKind.Onchain
+                }) {
+                throw BackingUpdateFailed("Outgoing payment accounting is pending — deferring stability settlement")
+            }
+        } finally {
+            accountingDb.close()
+        }
 
         // Cooldown: skip if we sent a stability payment recently
         val prefs = FCMService.getPrefs(this)
@@ -682,7 +693,7 @@ class StabilityProcessingService : Service() {
 
         val expectedUsd = channelState.expectedUsd
 
-        if (expectedUsd < 0.01) {
+        if (expectedUsd < 0.01 && channelState.backingSats == 0L) {
             Log.d(TAG, "No stable position, skipping")
             return
         }
@@ -700,7 +711,7 @@ class StabilityProcessingService : Service() {
         }
 
         val dollarsFromPar = stableUsdValue - expectedUsd
-        val percentFromPar = if (expectedUsd > 0) abs(dollarsFromPar / expectedUsd) * 100.0 else 0.0
+        val percentFromPar = abs(dollarsFromPar / maxOf(expectedUsd, 0.01)) * 100.0
 
         if (percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
             || abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD) {
@@ -819,19 +830,16 @@ class StabilityProcessingService : Service() {
         val sentAt = System.currentTimeMillis() / 1000
         FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", sentAt).commit()
 
-        val amountSats = amountMsat / 1000
-        val result = recordPaymentAtomicInDB(
-            dbPath, paymentIdString, "stability", "sent",
-            amountMsat, price, -amountSats,
-            userChannelId = channelState.userChannelId
-        )
-        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
-            throw BackingUpdateFailed(
-                "Payment was sent but DB persistence failed; durable marker will drive reconciliation"
-            )
+        // Do not release backing merely because LDK accepted the send. The durable marker
+        // survives service shutdown and lets the next wake/foreground event finish settlement.
+        val settlementDeadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
+        while (!reconcilePendingOutgoingPayment(node, dbPath)) {
+            if (System.currentTimeMillis() >= settlementDeadline) {
+                // Throw so onStartCommand preserves the retry flag instead of clearing it.
+                throw BackingUpdateFailed("Stability payment is still pending; retaining its backing and retry marker")
+            }
+            Thread.sleep(250)
         }
-        clearPendingSendInDB(dbPath)
-        Log.d(TAG, "Recorded outgoing payment and updated backingSats -= $amountSats atomically")
     }
 
     private fun lightningSyncAgeSecs(node: Node): Long? =
@@ -901,6 +909,15 @@ class StabilityProcessingService : Service() {
                 }
                 else -> return false  // young marker — another process may be mid-send
             }
+        }
+
+        when (node.payment(pendingPaymentId)?.status) {
+            PaymentStatus.SUCCEEDED -> Unit
+            PaymentStatus.FAILED -> {
+                clearPendingSendInDB(dbPath)
+                return true
+            }
+            else -> return false
         }
 
         if (pending.amountMsat <= 0) {

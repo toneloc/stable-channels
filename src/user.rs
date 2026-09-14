@@ -1013,7 +1013,11 @@ impl UserApp {
 
                     // Brief lock to update values
                     if let Ok(mut sc) = sc_arc.lock() {
-                        if !node_arc.list_channels().is_empty() {
+                        if !node_arc.list_channels().is_empty()
+                            && !splice_flag.load(std::sync::atomic::Ordering::Relaxed)
+                            && !stable_channels::stable::has_pending_outbound_lightning_payment(&node_arc)
+                            && !db.has_pending_channel_send().unwrap_or(true)
+                        {
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                             if stable_channels::stable::repair_overbacked_allocation_if_safe(
                                 &node_arc, &mut sc, price,
@@ -1548,9 +1552,29 @@ impl UserApp {
         }
     }
 
+    fn with_settled_channel<T, E: std::fmt::Display>(
+        &self,
+        send: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, String> {
+        // The stability worker holds this same lock through check/send/persist. Keep it until
+        // LDK accepts the spend so a concurrent settlement cannot invalidate our snapshot.
+        let mut sc = self.stable_channel.lock().unwrap();
+        if self.auto_splice_in_progress.load(std::sync::atomic::Ordering::Relaxed)
+            || stable::has_pending_outbound_lightning_payment(&self.node)
+            || self.db.has_pending_channel_send().map_err(|e| e.to_string())?
+        {
+            return Err("Waiting for the previous channel operation to settle. Please try again shortly.".into());
+        }
+        if !update_balances(&self.node, &mut sc).0 {
+            return Err("Could not refresh the channel balance. Please try again shortly.".into());
+        }
+        stable::check_outgoing_allocation(&sc, get_fresh_cached_price_no_fetch())?;
+        send().map_err(|e| e.to_string())
+    }
+
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-            Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
+            Ok(invoice) => match self.with_settled_channel(|| self.node.bolt11_payment().send(&invoice, None)) {
                 Ok(_payment_id) => {
                     let amount_text = invoice
                         .amount_milli_satoshis()
@@ -1623,13 +1647,15 @@ impl UserApp {
                             }
                         }
                     };
-                    let result = if invoice_amount_msat.is_some() {
-                        self.node.bolt11_payment().send(&invoice, None)
-                    } else {
-                        self.node
-                            .bolt11_payment()
-                            .send_using_amount(&invoice, amount_msat, None)
-                    };
+                    let result = self.with_settled_channel(|| {
+                        if invoice_amount_msat.is_some() {
+                            self.node.bolt11_payment().send(&invoice, None)
+                        } else {
+                            self.node
+                                .bolt11_payment()
+                                .send_using_amount(&invoice, amount_msat, None)
+                        }
+                    });
                     match result {
                         Ok(payment_id) => {
                             let (amount_usd, btc_price_opt) = {
@@ -1700,13 +1726,13 @@ impl UserApp {
                             return false;
                         }
                     };
-                    match self.node.bolt12_payment().send_using_amount(
+                    match self.with_settled_channel(|| self.node.bolt12_payment().send_using_amount(
                         &offer,
                         amount_msat,
                         None,
                         None,
                         None,
-                    ) {
+                    )) {
                         Ok(payment_id) => {
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
@@ -1842,16 +1868,20 @@ impl UserApp {
                                 }
                             };
 
-                            match self.node.splice_out(
-                                &ch.user_channel_id,
-                                ch.counterparty_node_id,
-                                &valid_addr,
-                                amount_sats,
-                            ) {
-                                Ok(()) => {
-                                    // Block auto-splice while this splice is in flight
+                            match self.with_settled_channel(|| {
+                                let result = self.node.splice_out(
+                                    &ch.user_channel_id,
+                                    ch.counterparty_node_id,
+                                    &valid_addr,
+                                    amount_sats,
+                                );
+                                if result.is_ok() {
                                     self.auto_splice_in_progress
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            }) {
+                                Ok(()) => {
                                     let onchain_sats_at_start =
                                         self.node.list_balances().total_onchain_balance_sats;
                                     self.auto_splice_onchain_at_start.store(
@@ -12142,9 +12172,6 @@ fn local_sync_backing_sats(
     pending_trade: Option<&db::PendingTradeRow>,
 ) -> Result<u64, &'static str> {
     let expected_usd = stable::normalize_trade_expected_usd(sync.expected_usd);
-    if expected_usd == 0.0 {
-        return Ok(0);
-    }
     if let Some(stored_backing) = pending_trade.and_then(|trade| trade.new_backing_sats) {
         return if stored_backing <= live_receiver_sats {
             Ok(stored_backing)
@@ -12194,7 +12221,7 @@ fn local_sync_backing_sats(
             .saturating_sub(current_target_sats.saturating_sub(new_target_sats))
             .min(live_receiver_sats)
     };
-    (backing_sats > 0)
+    (expected_usd == 0.0 || backing_sats > 0)
         .then_some(backing_sats)
         .ok_or("nonzero sync target has no locally derived backing")
 }
@@ -12544,10 +12571,13 @@ mod tests {
             expected_usd: 0.0,
             ..sync
         };
+        assert_eq!(local_sync_backing_sats(&closed, 10_000, 100_000.0, 10.0, 20_000, None), Ok(10_000));
+        assert_eq!(local_sync_backing_sats(&closed, 10_000, 100_000.0, 0.0, 10_000, None), Ok(10_000));
+
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 60_000, None),
-            Ok(0),
-            "an authenticated full-exit sync needs no local price",
+            Err("no trusted wallet price available"),
+            "clearing a target must price the claim without discarding residual backing",
         );
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 100_001.0, 60.0, 59_999, None,),
