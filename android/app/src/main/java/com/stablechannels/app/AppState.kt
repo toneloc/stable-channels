@@ -1406,40 +1406,24 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             }
             is Event.ChannelReady -> {
-                val sc = _stableChannel.value.copy()
-                // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
-                // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
-                val channelIdChanged = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
-                sc.channelId = event.channelId
-                var pendingSpliceCandidate: String? = null
-                if (sc.userChannelId == event.userChannelId) {
-                    nodeService.refreshChannels()
-                    val channelFundingTxid = nodeService.channels
-                        .firstOrNull { it.userChannelId == event.userChannelId }
-                        ?.fundingTxo?.txid
-                    pendingSpliceCandidate = listOfNotNull(
-                        databaseService?.getPendingSpliceTxid(),
-                        spliceTxid
-                    ).firstOrNull { candidate ->
-                        candidate.isNotEmpty() && candidate == channelFundingTxid
-                    }
+                nodeService.refreshChannels()
+                val db = databaseService ?: throw IllegalStateException("Splice history unavailable")
+                SpliceEventRecorder.record(db, event) { ready ->
+                    nodeService.channels.singleOrNull {
+                        it.userChannelId == ready.userChannelId && it.channelId == ready.channelId
+                    }?.fundingTxo
                 }
-                val isSplice = pendingSpliceCandidate != null || channelIdChanged
-                if (isSplice) {
-                    isSweeping = true
-                    val txid = pendingSpliceCandidate ?: spliceTxid ?: fundingTxid
-                    spliceTxid = txid
-                    if (txid != null && txid.isNotBlank()) {
-                        startSpliceConfirmationMonitor(txid)
-                    }
-
-                    _stableChannel.value = sc
-                    _statusMessage.value = "Move pending confirmation"
-                } else {
-                    _stableChannel.value = sc
+                val liveChannel = nodeService.channels.singleOrNull {
+                    it.userChannelId == event.userChannelId && it.channelId == event.channelId
+                }
+                if (liveChannel != null && _stableChannel.value.userChannelId == event.userChannelId) {
+                    _stableChannel.update { it.copy(channelId = liveChannel.channelId) }
                 }
                 refreshBalances()
-                saveChannelToDB()
+                saveChannelToDB(preserveBacking = true)
+                // ChannelReady can precede on-chain confirmation. Resume only the operation
+                // whose transaction identity was durably attached; never use a funding fallback.
+                resumePendingSpliceConfirmation()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
             }
             is Event.PaymentReceived -> {
@@ -1488,6 +1472,8 @@ class AppState(private val context: Context) : ViewModel() {
                 ))
             }
             is Event.SpliceNegotiated -> {
+                val db = databaseService ?: throw IllegalStateException("Splice history unavailable")
+                SpliceEventRecorder.record(db, event) { null }
                 handleSplicePending(event.channelId, event.userChannelId, "${event.newFundingTxo.txid}:${event.newFundingTxo.vout}")
             }
             is Event.SpliceNegotiationFailed -> {
@@ -2210,32 +2196,16 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun handleSplicePending(channelId: String, userChannelId: String, newFundingTxo: String) {
         val txid = newFundingTxo.split(":").firstOrNull() ?: newFundingTxo
-        // Deliberately not bumping spliceGeneration here: it's established once at operation
-        // creation (beginSpliceOut/sweepToChannel/resumePendingSpliceConfirmation), before this
-        // event can even fire. A replayed/duplicate SpliceNegotiated for the same operation must
-        // not look like a new one, or a stale monitor holding the old generation would never see
-        // its cleanup run on confirmation (isSweeping wedged until process restart).
-        isSweeping = true
-        spliceTxid = txid
-        fundingTxid = txid
-        fundingVout = newFundingTxo.split(":").getOrNull(1)?.toIntOrNull()
-        // Prefer the exact in-memory row. After a process restart the LDK event can be replayed;
-        // the database then accepts only one recent pending candidate and never a failed row.
-        val assignedRowId = databaseService?.assignPendingSpliceTxid(
-            txid = txid,
-            paymentRowId = pendingSplice?.paymentRowId
-        )
-        if (assignedRowId == null) {
+        val row = databaseService?.getSplice(txid)?.takeIf { it.status == "pending" }
+        if (row == null) {
             AuditService.log("SPLICE_TXID_UNMATCHED", mapOf(
-                "channel_id" to channelId,
-                "user_channel_id" to userChannelId,
-                "txid" to txid
+                "channel_id" to channelId, "user_channel_id" to userChannelId, "txid" to txid
             ))
+            return
         }
-        refreshBalances()
-        updateStableBalances()
-        _statusMessage.value = "Move pending confirmation"
-        startSpliceConfirmationMonitor(txid)
+        // The recorder already committed this exact operation. Replayed events must not
+        // replace a newer operation's monitor or reset its generation.
+        resumePendingSpliceConfirmation()
     }
 
     fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
@@ -2245,14 +2215,18 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService
             ?: throw IllegalStateException("Payment history is unavailable — splice not started")
         // Persist before the native call so the operation survives a process restart.
-        val paymentRowId = db.recordPayment(
-            paymentId = null, paymentType = "splice_out", direction = "sent",
+        val paymentRowId = db.recordPendingSplice(
+            paymentType = "splice_out",
+            userChannelId = _stableChannel.value.userChannelId,
+            channelId = _stableChannel.value.channelId,
+            previousFundingTxid = nodeService.channels.singleOrNull {
+                it.userChannelId == _stableChannel.value.userChannelId
+            }?.fundingTxo?.txid ?: fundingTxid,
             amountMsat = amountSats * 1000,
             amountUSD = if (accountingPrice > 0) {
                 (amountSats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice
             } else null,
             btcPrice = accountingPrice.takeIf { it > 0 },
-            status = "pending",
             address = address
         )
         if (paymentRowId <= 0) {
@@ -2279,13 +2253,14 @@ class AppState(private val context: Context) : ViewModel() {
         if (normalizedTxid.isEmpty()) return
         if (spliceConfirmationJob?.isActive == true && monitoredSpliceTxid == normalizedTxid) return
 
+        val monitorPaymentRowId = databaseService?.getSplice(normalizedTxid)
+            ?.takeIf { it.status == "pending" }?.id ?: return
         spliceConfirmationJob?.cancel()
         monitoredSpliceTxid = normalizedTxid
         // Captured once here, not re-read later: completeConfirmedSplice must finalize the row
         // that belonged to THIS operation, never whatever pendingSplice happens to hold by the
         // time confirmation is observed (which could by then belong to a newer operation).
         val monitorGeneration = spliceGeneration.get()
-        val monitorPaymentRowId = pendingSplice?.paymentRowId
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
@@ -2306,8 +2281,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun resumePendingSpliceConfirmation() {
-        if (databaseService?.hasPendingSplice() != true) return
-        val txid = databaseService?.getPendingSpliceTxid() ?: spliceTxid
+        val db = databaseService ?: return
+        SpliceEventRecorder.recoverReadyEvents(db) { userChannelId, channelId ->
+            nodeService.channels.singleOrNull {
+                it.userChannelId == userChannelId && it.channelId == channelId
+            }?.fundingTxo
+        }
+        if (!db.hasPendingSplice()) return
+        // A saved pre-negotiation operation still blocks a second splice after restart,
+        // even while its event/transaction identity has not arrived yet.
+        isSweeping = true
+        val txid = db.getPendingSpliceTxid() ?: return
+        val row = db.getSplice(txid)?.takeIf { it.status == "pending" } ?: return
         // In-process resumption (foreground grace-period reconnect, or startup racing a replayed
         // SpliceNegotiated) of an operation this instance is already actively monitoring is not a
         // new operation — bumping here would advance the counter past the value the still-running
@@ -2323,8 +2308,13 @@ class AppState(private val context: Context) : ViewModel() {
             spliceGeneration.incrementAndGet()
         }
         isSweeping = true
+        pendingSplice = PendingSplice(
+            if (row.paymentType == "splice_out") "out" else "in",
+            row.amountMsat / 1000, row.address, row.id
+        )
         spliceTxid = txid
-        txid?.takeIf { it.isNotBlank() }?.let { startSpliceConfirmationMonitor(it) }
+        _statusMessage.value = "Move pending confirmation"
+        startSpliceConfirmationMonitor(txid)
     }
 
     /**
@@ -2370,28 +2360,23 @@ class AppState(private val context: Context) : ViewModel() {
         expectedGeneration: Long,
         capturedPaymentRowId: Long?
     ): SpliceCompletion {
-        // If SPLICE_TXID_UNMATCHED fired when this splice was negotiated (assignPendingSpliceTxid
-        // found no unambiguous pending row), the DB row's txid is still NULL and completeSplice()
-        // — which requires an exact txid match — can never find it, permanently desyncing Stable
-        // USD from the confirmed on-chain balance. Retry the assignment now that the tx has
-        // confirmed; assignPendingSpliceTxid is a no-op if a row already carries this txid.
-        // Uses the row id captured when this monitor started, NOT the live pendingSplice — by the
-        // time this tx confirms, pendingSplice may already belong to a newer operation, and
-        // reading it here could bind this (older, unrelated) txid to that newer row.
-        databaseService?.assignPendingSpliceTxid(txid, capturedPaymentRowId)
-        // Books first, row second. completeSplice() only matches a row that is still 'pending',
-        // so marking it complete before the deduction is durable turns a crash in between into a
-        // permanently unaccounted withdrawal — nothing revisits a completed row (#311). With the
-        // order reversed, a crash leaves the row pending, the resume path runs this again, and
-        // the reconcile is idempotent (it only ever removes backing above the live balance), so
-        // the deduction lands exactly once either way.
-        val matchesPendingRow = try {
-            databaseService?.hasPendingSpliceFor(txid) == true
+        // Confirmation is evidence about a transaction, not permission to attach it to
+        // whichever NULL-txid history row now exists. Only the recorded operation can finish.
+        val row = try {
+            databaseService?.getSplice(txid)
+                ?.takeIf { capturedPaymentRowId == null || it.id == capturedPaymentRowId }
         } catch (e: Exception) {
-            Log.w("AppState", "Could not check the pending splice row: ${e.message}")
-            false
+            Log.w("AppState", "Could not read the splice operation: ${e.message}")
+            null
         }
+        if (row == null || row.status !in listOf("pending", "completed")) {
+            AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf("txid" to txid, "reason" to "unmatched_operation"))
+            return SpliceCompletion.DEFERRED
+        }
+        val matchesPendingRow = row.status == "pending"
         if (matchesPendingRow) {
+            // Books first, history second: a crash or failed history write leaves the row
+            // pending so restart can retry the idempotent balance reconciliation (#311).
             // One price read decides everything below. Reading it again to gate the row update
             // would let a price that arrived in between complete the row with the books
             // untouched — the exact #311 shape this ordering exists to prevent.
@@ -2419,11 +2404,20 @@ class AppState(private val context: Context) : ViewModel() {
             // the in-memory splice state stay alive, and no "Move confirmed" is shown for a move
             // whose accounting has not happened.
             if (!accounted) return SpliceCompletion.DEFERRED
-            if (databaseService?.completeSplice(txid) == true) {
+            val completed = try {
+                databaseService?.completeSplice(txid) == true
+            } catch (e: Exception) {
+                Log.w("AppState", "Could not complete splice history: ${e.message}")
+                false
+            }
+            if (completed) {
                 // History only reloads when this epoch moves, and the confirmation poller no
                 // longer touches splice rows at all, so without this bump an open History
                 // screen keeps showing "0/1 confirmed" until it is reopened (#304).
                 _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+            } else {
+                // A failed/no-op history write must keep the monitor alive for retry.
+                return SpliceCompletion.DEFERRED
             }
         }
 
@@ -3212,10 +3206,11 @@ class AppState(private val context: Context) : ViewModel() {
         } else null
         // Persist before the native call so SpliceNegotiated always has a row to update,
         // even if the event is delivered before spliceInWithAll returns.
-        val paymentRowId = db.recordPayment(
-            paymentId = null, paymentType = "splice_in", direction = "received",
+        val paymentRowId = db.recordPendingSplice(
+            paymentType = "splice_in", userChannelId = channel.userChannelId, channelId = channel.channelId,
+            previousFundingTxid = channel.fundingTxo?.txid,
             amountMsat = sweepAmount * 1000,
-            amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }, status = "pending"
+            amountUSD = amountUSD, btcPrice = price.takeIf { it > 0 }
         )
         if (paymentRowId <= 0) {
             _statusMessage.value = "Could not save pending move — move not started"

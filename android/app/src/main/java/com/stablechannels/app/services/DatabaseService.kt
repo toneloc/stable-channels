@@ -55,6 +55,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     override fun onCreate(db: SQLiteDatabase) {
+        SpliceEventRecorder.createTables(db)
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
@@ -201,6 +202,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
+        SpliceEventRecorder.createTables(db)
         // IF NOT EXISTS so either process (main app or background service) can create it,
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
@@ -1166,6 +1168,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return writableDatabase.insert("payments", null, cv)
     }
 
+    /** Save the operation's channel identity atomically with its history, before calling LDK. */
+    fun recordPendingSplice(
+        paymentType: String, amountMsat: Long, amountUSD: Double?, btcPrice: Double?,
+        userChannelId: String, channelId: String, address: String? = null,
+        previousFundingTxid: String? = null
+    ): Long = writableDatabase.transaction {
+        require(paymentType == "splice_in" || paymentType == "splice_out")
+        val rowId = recordPayment(null, paymentType,
+            if (paymentType == "splice_out") "sent" else "received", amountMsat,
+            amountUSD, btcPrice, status = "pending", address = address)
+        check(rowId > 0) { "Could not persist pending splice" }
+        SpliceEventRecorder.track(this, rowId, userChannelId, channelId, previousFundingTxid)
+        rowId
+    }
+
     /** The send API returns before settlement. A retry may reuse an existing invoice ID. */
     fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double) {
         val values = ContentValues().apply {
@@ -1790,29 +1807,37 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** Returns true only if a splice row was actually flipped to completed,
-     *  so callers can use the result as the "this ChannelReady was a splice" signal. */
-    /** Whether completeSplice(txid) would match a row — the same pending rows it updates. */
-    fun hasPendingSpliceFor(txid: String): Boolean {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT 1 FROM payments
-            WHERE payment_type IN ('splice_in','splice_out')
-              AND status IN ('pending','failed')
-              AND (txid = ? OR (payment_type = 'splice_in' AND txid IS NULL))
-            LIMIT 1
-            """.trimIndent(),
+    /** Checking and completing use the same pending, exact-txid operation. */
+    fun hasPendingSpliceFor(txid: String): Boolean = getSplice(txid)?.status == "pending"
+
+    fun getSplice(txid: String): PaymentRecord? {
+        val ids = readableDatabase.queryIds(
+            "SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid = ? LIMIT 2",
             arrayOf(txid)
         )
-        return cursor.use { it.moveToFirst() }
+        val rowId = ids.singleOrNull() ?: return null
+        return getPaymentByRowId(rowId)
     }
 
-    fun completeSplice(txid: String): Boolean {
-        val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"
+    private fun getPaymentByRowId(rowId: Long): PaymentRecord? = readableDatabase.rawQuery(
+        "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE id = ?",
+        arrayOf(rowId.toString())
+    ).use { c ->
+        if (!c.moveToFirst()) null else PaymentRecord(
+            id = c.getLong(0), paymentId = c.getStringOrNull(1), paymentType = c.getString(2),
+            direction = c.getString(3), amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+            btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7), status = c.getString(8),
+            createdAt = c.getLong(9), feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+            address = c.getStringOrNull(12), confirmations = c.getInt(13)
         )
-        stmt.bindString(1, txid)
-        return stmt.executeUpdateDelete() > 0
+    }
+
+    fun completeSplice(txid: String): Boolean = writableDatabase.transaction {
+        val row = getSplice(txid)?.takeIf { it.status == "pending" } ?: return@transaction false
+        update("payments", ContentValues().apply {
+            put("status", "completed")
+            put("confirmations", 1)
+        }, "id = ? AND txid = ? AND status = 'pending'", arrayOf(row.id.toString(), txid)) == 1
     }
 
     fun getPendingSpliceTxid(): String? {
@@ -1830,9 +1855,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
         // Keep with-txid rows pending: confirmation can outlive the app process,
         // and the splice confirmation monitor completes them after 1 conf.
+        SpliceEventRecorder.recoverAssignments(this)
         val noTxidCutoff = System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
         writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id)",
             arrayOf(noTxidCutoff)
         )
         val cursor = readableDatabase.rawQuery(
