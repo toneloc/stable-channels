@@ -147,7 +147,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
             } else {
                 LazyColumn {
                     if (selectedSegment == 0) {
-                        itemsIndexed(trades) { index, trade ->
+                        itemsIndexed(trades, key = { _, trade -> trade.id }) { index, trade ->
                             TradeRow(trade) { selectedTrade = trade }
                             if (index < trades.lastIndex) {
                                 HorizontalDivider(
@@ -158,7 +158,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                         }
                     } else {
-                        itemsIndexed(payments) { index, payment ->
+                        itemsIndexed(payments, key = { _, payment -> payment.id }) { index, payment ->
                             PaymentRow(payment, currentPrice) { selectedPayment = payment }
                             if (index < payments.lastIndex) {
                                 HorizontalDivider(

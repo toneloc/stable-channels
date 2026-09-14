@@ -52,6 +52,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
+        internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
     override fun onCreate(db: SQLiteDatabase) {
@@ -156,6 +157,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
         createTradeIndexes(db)
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at)")
+        pruneHistoricalData(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -206,6 +208,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
         createTradeIndexes(db)
+        pruneHistoricalData(db)
     }
 
     private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
@@ -1843,6 +1846,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     // --- Prices ---
+
+    fun pruneHistoricalData(db: SQLiteDatabase = writableDatabase) {
+        db.execSQL(
+            "DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - $PRICE_HISTORY_RETENTION_SECONDS"
+        )
+    }
 
     fun recordPrice(price: Double, source: String?) {
         val cv = ContentValues().apply {
