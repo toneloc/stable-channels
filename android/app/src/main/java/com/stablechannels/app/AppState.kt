@@ -519,6 +519,21 @@ class AppState(private val context: Context) : ViewModel() {
     private val _statusMessage = MutableStateFlow("")
     val statusMessage: StateFlow<String> = _statusMessage
 
+    // Sync/retry status text set while the node is starting/reconnecting. These are only
+    // transient progress indicators, not user-facing payment results, so once the underlying
+    // operation finishes we clear them here rather than leaving them stuck on screen. Guarded
+    // by checking the current value first so we never clobber an unrelated message (e.g. a
+    // payment result) that may have landed in the meantime.
+    private val syncStatusMessages = setOf(
+        "Syncing wallet...",
+        "Network unstable. Retrying wallet sync...",
+        "Finishing background sync..."
+    )
+
+    private fun clearSyncStatusMessage() {
+        _statusMessage.update { current -> if (current in syncStatusMessages) "" else current }
+    }
+
     private val _paymentOutcomes = MutableStateFlow<Map<String, PaymentOutcome>>(emptyMap())
     val paymentOutcomes: StateFlow<Map<String, PaymentOutcome>> = _paymentOutcomes
 
@@ -1172,6 +1187,7 @@ class AppState(private val context: Context) : ViewModel() {
                 connectMempoolWebSocket()
                 updateStableBalances()
                 resumePendingSpliceConfirmation()
+                clearSyncStatusMessage()
                 return@launch
             }
             Log.d("AppState", "Restarting node from foreground")
@@ -1198,6 +1214,7 @@ class AppState(private val context: Context) : ViewModel() {
                 resumePendingSpliceConfirmation()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()
+                clearSyncStatusMessage()
             } catch (e: Exception) {
                 Log.e("AppState", "Node restart failed", e)
                 handleNodeStartFailure(e, "Restart failed")
@@ -1211,6 +1228,7 @@ class AppState(private val context: Context) : ViewModel() {
             _phase.value = Phase.WALLET
             _isSyncing.value = false
             _errorMessage.value = ""
+            clearSyncStatusMessage()
             AuditService.log(
                 "NODE_START_DUPLICATE",
                 mapOf("error" to (e.message ?: fallbackMessage))
