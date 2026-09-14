@@ -42,7 +42,7 @@ class OutgoingLightningAccountingTest {
     }
 
     private fun nodeService() = NodeService(context).also { service ->
-        service.channelSpendGuard = { check(!db.hasPendingChannelSend()) }
+        service.channelSpendGuard = { _, _ -> check(!db.hasPendingChannelSend()) }
         service.channelPaymentRecorder = { id, type, amount, _ ->
             db.recordPendingLightningPayment(id, type, amount, price)
         }
@@ -136,7 +136,7 @@ class OutgoingLightningAccountingTest {
         db.recordPendingLightningPayment("first", "lightning", 15_000_000L, price)
         LightningPaymentRecovery.recordSuccess(db, "first", 0L)
         db.writableDatabase.execSQL("""
-            CREATE TRIGGER fail_accounting BEFORE INSERT ON outgoing_lightning_accounting
+            CREATE TRIGGER fail_accounting BEFORE UPDATE OF completed ON outgoing_lightning_accounting
             WHEN NEW.completed = 1 BEGIN SELECT RAISE(ABORT, 'injected accounting failure'); END
         """)
         assertThrows(Exception::class.java) { reconcile("first", 95_000L) }

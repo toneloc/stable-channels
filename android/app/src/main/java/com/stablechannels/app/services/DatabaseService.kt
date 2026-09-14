@@ -210,11 +210,26 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         createTradeIndexes(db)
     }
 
-    private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) {
+    private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) = db.transaction {
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS outgoing_lightning_accounting (
                 payment_id TEXT PRIMARY KEY,
-                completed INTEGER NOT NULL DEFAULT 0
+                completed INTEGER NOT NULL DEFAULT 0,
+                user_channel_id TEXT
+            )
+        """)
+        val hasChannelId = db.rawQuery("PRAGMA table_info(outgoing_lightning_accounting)", null).use { c ->
+            var found = false
+            while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
+            found
+        }
+        if (!hasChannelId) db.execSQL("ALTER TABLE outgoing_lightning_accounting ADD COLUMN user_channel_id TEXT")
+        db.execSQL("""
+            CREATE TABLE IF NOT EXISTS closed_channel_books (
+                user_channel_id TEXT PRIMARY KEY, channel_id TEXT,
+                expected_usd REAL, stable_sats INTEGER,
+                receiver_sats INTEGER, latest_price REAL,
+                archived_at INTEGER NOT NULL
             )
         """)
     }
@@ -398,15 +413,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         paymentId: String? = null,
         feeMsat: Long = 0L
     ): OutgoingReconcileResult? {
-        if (!price.isFinite() || price <= 0.0) {
-            check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
-            return null
-        }
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
             // A delayed/replayed success must never reconcile against a later send's HTLC.
-            if (paymentId != null && isLightningAccountingComplete(paymentId)) {
+            if (paymentId != null && (isLightningAccountingComplete(paymentId) || hasArchivedLightningAccounting(paymentId))) {
                 db.execSQL("ROLLBACK")
                 return null
             }
@@ -421,6 +432,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             if (currentBacking == 0L || currentBacking <= receiverSats) {
                 if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
                 db.execSQL("COMMIT")
+                return null
+            }
+            if (!price.isFinite() || price <= 0.0) {
+                check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
+                db.execSQL("ROLLBACK")
                 return null
             }
             val overflowSats = currentBacking - receiverSats
@@ -515,8 +531,30 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Closing a channel does not settle its stable books. Archive the last allocation and
+     * unresolved sends atomically before removing the active row. No live balance is invented. */
     fun deleteChannel(userChannelId: String) {
-        writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
+        if (userChannelId.isBlank()) return
+        writableDatabase.transaction {
+            // Adopt pre-upgrade markers only while this is the sole saved active channel.
+            execSQL("""
+                UPDATE outgoing_lightning_accounting SET user_channel_id = ?
+                WHERE user_channel_id IS NULL AND completed = 0
+                  AND (SELECT COUNT(*) FROM channels) = 1
+                  AND EXISTS (SELECT 1 FROM channels WHERE user_channel_id = ?)
+            """, arrayOf(userChannelId, userChannelId))
+            execSQL("""
+                INSERT OR IGNORE INTO closed_channel_books
+                SELECT user_channel_id, channel_id, expected_usd, stable_sats,
+                       receiver_sats, latest_price, strftime('%s','now')
+                FROM channels WHERE user_channel_id = ?
+            """, arrayOf(userChannelId))
+            // A legacy success can outlive the channel row. Null books explicitly mean
+            // unknown, not zero debt; retain the channel identity and unresolved payment.
+            execSQL("""INSERT OR IGNORE INTO closed_channel_books (user_channel_id, archived_at)
+                VALUES (?, strftime('%s','now'))""", arrayOf(userChannelId))
+            delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
+        }
     }
 
     /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
@@ -1193,7 +1231,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     /** The send API returns before settlement. A retry may reuse an existing invoice ID. */
-    fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double) {
+    fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double, userChannelId: String? = null) {
         val values = ContentValues().apply {
             put("payment_type", paymentType)
             put("direction", "sent")
@@ -1216,8 +1254,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 db.insertOrThrow("payments", null, values)
             }
             db.execSQL(
-                "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)",
-                arrayOf(paymentId)
+                "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed, user_channel_id) VALUES (?, 0, ?)",
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() })
             )
             db.setTransactionSuccessful()
         } finally {
@@ -1367,7 +1405,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         """
         SELECT 1 FROM payments p
         LEFT JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
-        WHERE p.direction = 'sent' AND (
+        WHERE p.direction = 'sent'
+          AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
+          AND (
             (p.payment_type IN ('lightning', 'bolt12', 'stability') AND p.status = 'pending') OR
             (p.payment_type IN ('lightning', 'bolt12') AND p.status != 'failed' AND a.completed = 0)
         ) LIMIT 1
@@ -1385,16 +1425,47 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
         WHERE p.direction = 'sent' AND p.payment_type IN ('lightning', 'bolt12')
           AND p.status = 'completed' AND a.completed = 0
+          AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
         ORDER BY p.created_at
         """.trimIndent(), null
     ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
 
+    fun lightningAccountingChannelId(paymentId: String): String? = readableDatabase.rawQuery(
+        "SELECT user_channel_id FROM outgoing_lightning_accounting WHERE payment_id = ?", arrayOf(paymentId)
+    ).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+
+    fun hasArchivedLightningAccounting(paymentId: String): Boolean = readableDatabase.rawQuery(
+        """SELECT 1 FROM outgoing_lightning_accounting a JOIN closed_channel_books c
+           ON c.user_channel_id = a.user_channel_id WHERE a.payment_id = ?""", arrayOf(paymentId)
+    ).use { it.moveToFirst() }
+
+    /** A terminal event can be acknowledged once this commits, even if its books must wait.
+     * Keep the original channel identity on replay; never attach an old send to a new channel. */
+    fun deferLightningAccounting(paymentId: String, userChannelId: String?, feeMsat: Long) {
+        writableDatabase.transaction {
+            execSQL("""INSERT OR IGNORE INTO outgoing_lightning_accounting
+                (payment_id, completed, user_channel_id) VALUES (?, 0, ?)""",
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }))
+            execSQL("""UPDATE outgoing_lightning_accounting SET user_channel_id = ?
+                WHERE payment_id = ? AND user_channel_id IS NULL""",
+                arrayOf(userChannelId?.takeIf { it.isNotBlank() }, paymentId))
+            // Legacy events can outlive their history row. Persist their identity even then.
+            execSQL("""INSERT OR IGNORE INTO payments
+                (payment_id, payment_type, direction, amount_msat, status)
+                SELECT ?, 'lightning', 'sent', 0, 'completed'
+                WHERE NOT EXISTS (SELECT 1 FROM payments WHERE payment_id = ?)""", arrayOf(paymentId, paymentId))
+            val values = ContentValues().apply {
+                put("status", "completed")
+                if (feeMsat > 0L) put("fee_msat", feeMsat)
+            }
+            update("payments", values, "payment_id = ?", arrayOf(paymentId))
+        }
+    }
+
     /** Must commit in the same transaction as the corresponding balance reconciliation. */
     private fun completeLightningAccounting(db: SQLiteDatabase, paymentId: String, feeMsat: Long) {
-        db.execSQL(
-            "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 1)",
-            arrayOf(paymentId)
-        )
+        db.execSQL("INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)", arrayOf(paymentId))
+        db.execSQL("UPDATE outgoing_lightning_accounting SET completed = 1 WHERE payment_id = ?", arrayOf(paymentId))
         val values = ContentValues().apply {
             put("status", "completed")
             if (feeMsat > 0) put("fee_msat", feeMsat)

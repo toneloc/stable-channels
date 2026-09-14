@@ -117,16 +117,23 @@ object StabilityService {
 
     /** Check all channel spends, including their fees, before handing them to LDK.
      *  Callers serialize this with settlement submission and wait for pending sends to finish. */
-    fun checkOutgoingAllocation(sc: StableChannel, price: Double) {
+    fun checkOutgoingAllocation(sc: StableChannel, price: Double, maximumDebitSats: Long? = null) {
         if (sc.expectedUSD.amount == 0.0 && sc.backingSats == 0L) return
-        check(price.isFinite() && price > 0.0) {
-            "Waiting for a fresh price before sending. Please try again shortly."
-        }
+        check(maximumDebitSats == null || maximumDebitSats >= 0L) { "Invalid payment amount" }
         check(sc.expectedUSD.amount.isFinite() && sc.expectedUSD.amount >= 0.0 &&
             sc.backingSats >= 0L && sc.backingSats <= sc.stableReceiverBTC.sats) {
             "Waiting for the channel balance to update. Please try again shortly."
         }
-        val drift = abs(sc.backingSats.toDouble() / Constants.SATS_IN_BTC * price - sc.expectedUSD.amount)
+        // Native is a sat allocation, so neither drift nor a price outage can prevent a
+        // spend whose amount AND bounded fees fit entirely inside it.
+        val nativeSats = sc.stableReceiverBTC.sats - sc.backingSats
+        if (maximumDebitSats != null && maximumDebitSats <= nativeSats) return
+        if (sc.backingSats == 0L) return
+        check(price.isFinite() && price > 0.0) {
+            "Waiting for a fresh price before sending. Please try again shortly."
+        }
+        // A shortfall is owed BY the LSP. It is not unpaid LSP surplus at risk of withdrawal.
+        val drift = sc.backingSats.toDouble() / Constants.SATS_IN_BTC * price - sc.expectedUSD.amount
         val actionable = drift >= Constants.STABILITY_THRESHOLD_USD &&
             (sc.expectedUSD.amount < MINIMUM_STABLE_USD ||
                 drift / sc.expectedUSD.amount * 100.0 >= Constants.STABILITY_THRESHOLD_PERCENT)

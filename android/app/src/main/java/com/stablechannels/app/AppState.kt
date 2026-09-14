@@ -544,7 +544,7 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService ?: throw IllegalStateException("Payment sent; history is unavailable. Check its status before retrying.")
         db.recordPendingLightningPayment(paymentId, paymentType,
             if (amountMsat > 0) amountMsat else nodeService.node?.payment(paymentId)?.amountMsat?.toLong() ?: 0L,
-            price ?: priceService.currentAccountingPrice())
+            price ?: priceService.currentAccountingPrice(), _stableChannel.value.userChannelId)
         // Called under channelOperationLock before another send or event can run. Terminal
         // transport state updates history, but the accounting marker remains until reconciliation.
         val payment = nodeService.node?.payment(paymentId)
@@ -560,7 +560,18 @@ class AppState(private val context: Context) : ViewModel() {
         synchronized(nodeService.channelOperationLock) { reconcilePendingLightningPaymentsLocked() }
     }
 
-    private fun reconcilePendingLightningPaymentsLocked() {
+    private fun reconcilePendingLightningPaymentsLocked(): Boolean = try {
+        recoverPendingLightningPaymentsLocked()
+        true
+    } catch (e: Exception) {
+        if (e is kotlinx.coroutines.CancellationException) throw e
+        // Startup and periodic recovery are independent of the event acknowledgement loop.
+        // Durable markers remain retryable, but a DB/balance failure must not stop the node.
+        AuditService.log("PENDING_LIGHTNING_RECOVERY_DEFERRED", mapOf("error" to (e.message ?: "")))
+        false
+    }
+
+    private fun recoverPendingLightningPaymentsLocked() {
         val db = databaseService ?: return
         val repaired = LightningPaymentRecovery.reconcilePending(db) { paymentId ->
             try {
@@ -578,17 +589,10 @@ class AppState(private val context: Context) : ViewModel() {
         if (repaired > 0) {
             AuditService.log("PENDING_LIGHTNING_RECONCILED", mapOf("count" to repaired))
         }
-        // Background consumers can acknowledge success before the foreground applies the books.
-        // Retry these durable markers even though their history rows already say "completed".
-        if (isSweeping || isChannelClosing || pendingSplice != null || db.hasPendingSplice() ||
-            db.loadPendingSend() != null || hasPendingLdkChannelPayment()) return
-        val price = priceService.currentAccountingPrice()
-        if (!price.isFinite() || price <= 0.0) return
+        // Terminal success is already durable. Recovery must not require a second LDK record
+        // or a price before it can archive accounting for a channel that has closed.
         db.getUnaccountedOutgoingLightningPaymentIds().forEach { paymentId ->
-            val payment = nodeService.node?.payment(paymentId)
-            if (payment?.status == PaymentStatus.SUCCEEDED) {
-                handlePaymentSuccessful(paymentId, "", payment.feePaidMsat?.toLong())
-            }
+            handlePaymentSuccessful(paymentId, "", null)
         }
     }
 
@@ -2045,10 +2049,40 @@ class AppState(private val context: Context) : ViewModel() {
         if (handleStabilityPaymentSuccessful(paymentId, feePaidMsat)) return
 
         val db = databaseService ?: throw IllegalStateException("Payment accounting is unavailable")
-        if (paymentId != null && db.isLightningAccountingComplete(paymentId)) return
-        // Older app versions could overlap sends. Never account a settled send using a balance
-        // temporarily reduced by another pending HTLC; leave this event unacknowledged to retry.
-        check(!hasPendingLdkChannelPayment()) { "Waiting for pending payments before reconciling balances" }
+        val id = paymentId?.takeIf { it.isNotBlank() } ?: paymentHash.takeIf { it.isNotBlank() }
+            ?: throw IllegalStateException("Successful payment has no durable identity")
+        if (db.isLightningAccountingComplete(id)) return
+        // This commit is the acknowledgement boundary. If it fails the event must be retried.
+        db.deferLightningAccounting(id, _stableChannel.value.userChannelId, feePaidMsat ?: 0L)
+        _paymentOutcomes.update { it + (id to PaymentOutcome(true, "Payment sent")) }
+        try {
+            reconcileSuccessfulOrdinaryPayment(id, feePaidMsat)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            // History, the accounting marker and its channel identity are already durable.
+            // Retry from startup/ticks without holding ChannelClosed or later events hostage.
+            AuditService.log("OUTGOING_ACCOUNTING_DEFERRED", mapOf(
+                "payment_id" to id, "error" to (e.message ?: "")))
+        }
+    }
+
+    private fun reconcileSuccessfulOrdinaryPayment(paymentId: String, feePaidMsat: Long?) {
+        val db = databaseService ?: return
+        if (db.hasArchivedLightningAccounting(paymentId)) return
+        val accountingChannelId = db.lightningAccountingChannelId(paymentId) ?: return
+        if (nodeService.node == null) return
+        nodeService.refreshChannels()
+        val matchingChannels = nodeService.channels.filter { it.userChannelId == accountingChannelId }
+        if (matchingChannels.isEmpty()) {
+            // listChannels is authoritative only after the node has started. Preserve the
+            // last books as unresolved closed-channel accounting, never a new channel's debit.
+            if (nodeService.isRunning) db.deleteChannel(accountingChannelId)
+            return
+        }
+        val channel = matchingChannels.singleOrNull() ?: return
+        if (!channel.isChannelReady || _stableChannel.value.userChannelId != accountingChannelId) return
+        if (isSweeping || isChannelClosing || pendingSplice != null || db.hasPendingSplice() ||
+            db.loadPendingSend() != null || hasPendingLdkChannelPayment()) return
 
         // Ordinary (non-trade, non-stability) outgoing payment. Mirrors iOS's
         // handlePaymentSuccessful: reconcile expectedUSD and backingSats together when this
@@ -2068,11 +2102,12 @@ class AppState(private val context: Context) : ViewModel() {
         // BEGIN IMMEDIATE transaction, composing correctly with whatever the timer already wrote.
         refreshBalances()
         updateStableBalances()
+        // refreshBalances lists channels again. Closure between the two observations must
+        // not complete accounting against the stale display balance retained for a missing channel.
+        if (nodeService.channels.singleOrNull { it.userChannelId == accountingChannelId }?.isChannelReady != true) return
         val price = priceService.currentAccountingPrice()
-        check(price.isFinite() && price > 0.0) { "Waiting for a trusted price to reconcile the payment" }
         val channelId = _stableChannel.value.channelId
         val userChannelId = _stableChannel.value.userChannelId
-        check(userChannelId.isNotEmpty() && _hasReadyChannel.value) { "Waiting for the channel balance to reconcile the payment" }
         val note = _stableChannel.value.note
         val latestPrice = _stableChannel.value.latestPrice
         // stableReceiverBTC is refreshed from live channel state just above, not from the
@@ -2097,22 +2132,20 @@ class AppState(private val context: Context) : ViewModel() {
                     feeMsat = feePaidMsat ?: 0L
                 )
             } catch (e: MissingChannelRowException) {
-                // Keep the event and accounting marker until the channel row is available.
+                // The durable accounting marker retries once the channel row is available.
                 AuditService.log("OUTGOING_RECONCILE_SKIPPED", mapOf(
-                    "payment_id" to (paymentId ?: ""),
+                    "payment_id" to paymentId,
                     "reason" to "missing_channel_row",
                     "user_channel_id" to userChannelId
                 ))
                 throw e
             } catch (e: Exception) {
                 // Anything else (SQLite I/O error, disk full, lock timeout) is transient. The
-                // transaction rolled back, so the deduction has NOT been recorded — rethrow so
-                // the event loop leaves this PaymentSuccessful un-acked and LDK redelivers it
-                // with backoff. The accounting marker commits atomically with the books.
-                // Swallowing the error here acked
-                // the payment with the books still wrong (#299 review, P2).
+                // transaction rolled back, so the deduction has NOT been recorded. The caller
+                // keeps the durable accounting marker for retry; completion still commits
+                // atomically with the books.
                 AuditService.log("OUTGOING_RECONCILE_FAILED", mapOf(
-                    "payment_id" to (paymentId ?: ""),
+                    "payment_id" to paymentId,
                     "error" to (e.message ?: e.javaClass.simpleName),
                     "will_retry" to true
                 ))
@@ -2133,26 +2166,23 @@ class AppState(private val context: Context) : ViewModel() {
             result
         }
         var displayVal: String? = null
-        if (paymentId != null) {
-            databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
-            try {
-                val db = databaseService?.readableDatabase
-                val cursor = db?.rawQuery("SELECT amount_msat, amount_usd FROM payments WHERE payment_id = ?", arrayOf(paymentId))
-                cursor?.use {
-                    if (it.moveToFirst()) {
-                        val amountMsat = it.getLong(0)
-                        val amountUsd = if (!it.isNull(1)) it.getDouble(1) else 0.0
-                        val usdVal = if (amountUsd > 0.0) amountUsd else ((amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price)
-                        displayVal = usdVal.usdFormatted()
-                    }
+        try {
+            val db = databaseService?.readableDatabase
+            val cursor = db?.rawQuery("SELECT amount_msat, amount_usd FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+            cursor?.use {
+                if (it.moveToFirst()) {
+                    val amountMsat = it.getLong(0)
+                    val amountUsd = if (!it.isNull(1)) it.getDouble(1) else 0.0
+                    val usdVal = if (amountUsd > 0.0) amountUsd else ((amountMsat.toDouble() / 1000.0 / Constants.SATS_IN_BTC) * price)
+                    displayVal = usdVal.usdFormatted()
                 }
-            } catch (e: Exception) {
-                Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
             }
+        } catch (e: Exception) {
+            Log.w("AppState", "Failed to retrieve amount for status message: ${e.message}")
         }
         if (reconcileResult != null) {
             AuditService.log("OUTGOING_STABLE_DEDUCTED", mapOf(
-                "payment_id" to (paymentId ?: ""),
+                "payment_id" to paymentId,
                 "usd_deducted" to reconcileResult.usdDeducted,
                 "old_expected_usd" to reconcileResult.oldExpectedUSD,
                 "new_expected_usd" to reconcileResult.newExpectedUSD,
@@ -2168,7 +2198,7 @@ class AppState(private val context: Context) : ViewModel() {
         val feeSuffix = feePaidMsat?.let { " (fee: ${(it / 1000).satsFormatted()} sats)" } ?: ""
         val successMsg = if (displayVal != null) "Payment sent: $displayVal$feeSuffix" else "Payment sent$feeSuffix"
         _statusMessage.value = successMsg
-        if (paymentId != null) _paymentOutcomes.update { it + (paymentId to PaymentOutcome(true, successMsg)) }
+        _paymentOutcomes.update { it + (paymentId to PaymentOutcome(true, successMsg)) }
     }
 
     private fun handleStabilityPaymentSuccessful(paymentId: String?, feePaidMsat: Long?): Boolean {
@@ -2276,7 +2306,7 @@ class AppState(private val context: Context) : ViewModel() {
         startSpliceConfirmationMonitor(txid)
     }
 
-    private fun checkChannelSpend(isSplice: Boolean) {
+    private fun checkChannelSpend(isSplice: Boolean, maximumDebitSats: Long? = null) {
         val db = databaseService
             ?: throw IllegalStateException("Channel accounting is not ready. Please try again shortly.")
         check(nodeService.node != null) { "Node is not running" }
@@ -2293,7 +2323,10 @@ class AppState(private val context: Context) : ViewModel() {
         updateStableBalances()
         synchronized(booksLock) {
             publishBooksFromDB(recomputeNative = true)
-            StabilityService.checkOutgoingAllocation(_stableChannel.value, priceService.currentAccountingPrice())
+            check(nodeService.channels.any { it.isChannelReady && it.userChannelId == _stableChannel.value.userChannelId }) {
+                "Waiting for the channel balance to update. Please try again shortly."
+            }
+            StabilityService.checkOutgoingAllocation(_stableChannel.value, priceService.currentAccountingPrice(), maximumDebitSats)
         }
     }
 
@@ -2847,13 +2880,18 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun runStabilityCheck() {
-        synchronized(nodeService.channelOperationLock) { runStabilityCheckLocked() }
+        try {
+            synchronized(nodeService.channelOperationLock) { runStabilityCheckLocked() }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            AuditService.log("STABILITY_CHECK_DEFERRED", mapOf("error" to (e.message ?: "")))
+        }
     }
 
     private fun runStabilityCheckLocked() {
         if (!reconcilePendingOutgoingStabilityPayment()) return
         if (isSweeping || isChannelClosing || pendingSplice != null) return
-        reconcilePendingLightningPaymentsLocked()
+        if (!reconcilePendingLightningPaymentsLocked()) return
         if (databaseService?.hasPendingChannelSend() != false) return
         if (nodeService.node?.listPayments()?.any {
                 it.direction == PaymentDirection.OUTBOUND && it.status == PaymentStatus.PENDING &&
@@ -2862,6 +2900,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         refreshBalances()
         updateStableBalances()
+        if (nodeService.channels.none { it.isChannelReady && it.userChannelId == _stableChannel.value.userChannelId }) return
         // Retry a repair that startup deferred (no trusted price yet, or an operation still in
         // flight). The guard is a free in-memory comparison, so this costs nothing on the tick
         // where the books are already consistent — which is every tick but the broken ones.

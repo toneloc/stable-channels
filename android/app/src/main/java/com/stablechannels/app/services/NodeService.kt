@@ -24,7 +24,7 @@ class NodeService(private val context: Context) {
 
     // Shared with event accounting and the settlement worker through submission and registration.
     internal val channelOperationLock = Any()
-    internal var channelSpendGuard: ((Boolean) -> Unit)? = null
+    internal var channelSpendGuard: ((Boolean, Long?) -> Unit)? = null
     internal var channelPaymentRecorder: ((String, String, Long, Double?) -> Unit)? = null
 
     // Keep registration inside the operation lock: LDK can succeed before send() returns.
@@ -33,7 +33,7 @@ class NodeService(private val context: Context) {
         amountMsat: Long,
         price: Double?,
         send: () -> String
-    ): String = withSettledChannel {
+    ): String = withSettledChannel(maximumDebitSats = maximumLightningDebitSats(amountMsat)) {
         val record = channelPaymentRecorder
             ?: throw IllegalStateException("Payment history is not ready. Please try again shortly.")
         val paymentId = send()
@@ -41,13 +41,30 @@ class NodeService(private val context: Context) {
         paymentId
     }
 
-    private inline fun <T> withSettledChannel(isSplice: Boolean = false, send: () -> T): T =
+    private inline fun <T> withSettledChannel(isSplice: Boolean = false, maximumDebitSats: Long? = null, send: () -> T): T =
         synchronized(channelOperationLock) {
             val guard = channelSpendGuard
                 ?: throw IllegalStateException("Channel accounting is not ready. Please try again shortly.")
-            guard(isSplice)
+            guard(isSplice, maximumDebitSats)
             send()
         }
+
+    // Same fee budget as LDK's default: 1% + 50 sats. Pass it explicitly to both
+    // invoice APIs so the bound used for allocation admission is also enforced by routing.
+    internal fun routingParameters(amountMsat: Long): RouteParametersConfig = RouteParametersConfig(
+        maxTotalRoutingFeeMsat = lightningFeeLimitMsat(amountMsat).toULong(),
+        maxTotalCltvExpiryDelta = 1008u, maxPathCount = 10u,
+        maxChannelSaturationPowerOfHalf = 2u
+    )
+
+    internal fun maximumLightningDebitSats(amountMsat: Long): Long? {
+        if (amountMsat <= 0L) return null // unknown offer amount: backing remains reachable
+        val total = Math.addExact(amountMsat, lightningFeeLimitMsat(amountMsat))
+        return total / 1000L + if (total % 1000L == 0L) 0L else 1L
+    }
+
+    private fun lightningFeeLimitMsat(amountMsat: Long): Long =
+        Math.addExact(amountMsat.coerceAtLeast(0L) / 100L, 50_000L)
 
     var node: Node? = null
         private set
@@ -254,6 +271,8 @@ class NodeService(private val context: Context) {
         n.spliceInWithAll(userChannelId, counterpartyNodeId)
     }
 
+    // LDK does not expose a total splice fee cap. Until it does, the maximum debit is
+    // unknown: even a native-sized output can reach backing through the negotiated fee.
     fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) = withSettledChannel(isSplice = true) {
         val n = node ?: throw NodeServiceError()
         n.spliceOut(userChannelId, counterpartyNodeId, QRCodeUtils.normalizeAddress(address), amountSats.toULong())
@@ -262,25 +281,27 @@ class NodeService(private val context: Context) {
     fun sendPayment(invoice: Bolt11Invoice, price: Double? = null): String =
         sendTrackedLightningPayment("lightning", invoice.amountMilliSatoshis()?.toLong() ?: 0L, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt11Payment().send(invoice, null)
+            n.bolt11Payment().send(invoice, routingParameters(invoice.amountMilliSatoshis()?.toLong() ?: 0L))
         }
 
     fun sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: Long, price: Double? = null): String =
         sendTrackedLightningPayment("lightning", amountMsat, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), null)
+            n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), routingParameters(amountMsat))
         }
 
-    fun sendBolt12(offer: Offer, price: Double? = null): String =
-        sendTrackedLightningPayment("bolt12", 0L, price) {
+    fun sendBolt12(offer: Offer, price: Double? = null): String {
+        val amountMsat = (offer.amount() as? OfferAmount.Bitcoin)?.amountMsats?.toLong() ?: 0L
+        return sendTrackedLightningPayment("bolt12", amountMsat, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt12Payment().send(offer, null, null, null)
+            n.bolt12Payment().send(offer, null, null, routingParameters(amountMsat))
         }
+    }
 
     fun sendBolt12UsingAmount(offer: Offer, amountMsat: Long, price: Double? = null): String =
         sendTrackedLightningPayment("bolt12", amountMsat, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt12Payment().sendUsingAmount(offer, amountMsat.toULong(), null, null, null)
+            n.bolt12Payment().sendUsingAmount(offer, amountMsat.toULong(), null, null, routingParameters(amountMsat))
         }
 
     fun sendKeysend(amountMsat: Long, toNodeId: String): String {

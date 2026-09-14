@@ -213,15 +213,35 @@ class StabilityServiceTest {
     }
 
     @Test
-    fun `channel sends require settled drift and a fresh price`() {
+    fun `spends reaching backing require payable surplus to settle and a fresh price`() {
         val sc = StableChannel(expectedUSD = USD(10.0), backingSats = 10_000,
             stableReceiverBTC = Bitcoin(100_000))
-        for (price in listOf(110_000.0, 90_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+        for (price in listOf(110_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
             assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure)
         }
+        StabilityService.checkOutgoingAllocation(sc, 90_000.0) // LSP owes the shortfall
         StabilityService.checkOutgoingAllocation(sc, 100_000.0)
         StabilityService.checkOutgoingAllocation(sc, 102_000.0) // sub-$0.25 deadband
         StabilityService.checkOutgoingAllocation(StableChannel(), 0.0)
+    }
+
+    @Test
+    fun `native amount including fees is allowed even with surplus or no trusted price`() {
+        val sc = StableChannel(expectedUSD = USD(10.0), backingSats = 10_000,
+            stableReceiverBTC = Bitcoin(100_000))
+        for (price in listOf(110_000.0, 90_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            StabilityService.checkOutgoingAllocation(sc, price, 90_000L)
+        }
+        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) }.isFailure)
+        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) }.isFailure)
+    }
+
+    @Test
+    fun `zero target surplus is protected but native sats remain spendable`() {
+        val sc = StableChannel(expectedUSD = USD(0.0), backingSats = 1_000,
+            stableReceiverBTC = Bitcoin(3_000))
+        StabilityService.checkOutgoingAllocation(sc, 0.0, 2_000L)
+        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) }.isFailure)
     }
 
     // ---------------------------------------------------------------------------
