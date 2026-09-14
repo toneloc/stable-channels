@@ -962,4 +962,17 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         XCTAssertEqual(service.reconnectAttempts, 0)
     }
+
+    // MARK: - ProcessedTxStore Tests
+
+    @MainActor
+    func testProcessedTxStoreRecordsAndEvicts() {
+        let store = ProcessedTxStore(ttl: 60, maxEntries: 10)
+        for idx in 0..<15 {
+            store.recordProcessedTx("tx_\(idx)")
+        }
+        XCTAssertTrue(store.count <= 10)
+        XCTAssertTrue(store.isRecentlyProcessed("tx_14"))
+        XCTAssertFalse(store.isRecentlyProcessed("tx_0"))
+    }
 }
