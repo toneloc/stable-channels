@@ -1759,14 +1759,27 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
-    /** payment_type, direction, and amount_msat for a row by id — used to check whether a just-
-     * completed row was a splice-out (which can raise the on-chain balance if self-sent) without
-     * relying on possibly-stale in-memory splice state. */
-    fun getPaymentTypeDirectionAmountMsat(id: Long): Triple<String, String, Long>? {
+    /** payment_type, direction, amount_msat, and destination address for a row by id — used to
+     * check whether a just-completed row was a splice-out (which can raise the on-chain balance
+     * if self-sent) without relying on possibly-stale in-memory splice state. */
+    data class PaymentAccountingInfo(
+        val paymentType: String,
+        val direction: String,
+        val amountMsat: Long,
+        val address: String?
+    )
+
+    fun getPaymentTypeDirectionAmountMsat(id: Long): PaymentAccountingInfo? {
         return readableDatabase.rawQuery(
-            "SELECT payment_type, direction, amount_msat FROM payments WHERE id = ? LIMIT 1",
+            "SELECT payment_type, direction, amount_msat, address FROM payments WHERE id = ? LIMIT 1",
             arrayOf(id.toString())
-        ).use { c -> if (c.moveToFirst()) Triple(c.getString(0), c.getString(1), c.getLong(2)) else null }
+        ).use { c ->
+            if (c.moveToFirst()) {
+                PaymentAccountingInfo(c.getString(0), c.getString(1), c.getLong(2), c.getStringOrNull(3))
+            } else {
+                null
+            }
+        }
     }
 
     /** True if any row (of any payment_type/status) already claims this txid — used to avoid
@@ -1775,6 +1788,18 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     fun paymentExistsForTxid(txid: String): Boolean {
         return readableDatabase.rawQuery(
             "SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)
+        ).use { it.moveToFirst() }
+    }
+
+    /** True if this address has ever received an on-chain deposit we recorded — i.e. it is one
+     * of our own wallet's addresses, not an arbitrary external destination. Used to gate the
+     * splice-completion baseline advance to genuine self-sends only (#316 review): an external
+     * splice-out never raises our own balance, so advancing the baseline for one anyway would
+     * wrongly consume a concurrent, unrelated deposit's sats instead of surfacing them. */
+    fun isKnownReceiveAddress(address: String): Boolean {
+        return readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? LIMIT 1",
+            arrayOf(address)
         ).use { it.moveToFirst() }
     }
 

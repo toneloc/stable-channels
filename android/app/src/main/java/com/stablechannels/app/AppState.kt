@@ -2403,6 +2403,18 @@ class AppState(private val context: Context) : ViewModel() {
     /** Whether a confirmed splice was fully accounted for, or must be retried. */
     private enum class SpliceCompletion { COMPLETED, DEFERRED }
 
+    /** Whether `address` is one this wallet has itself generated for receiving — either the
+     *  currently displayed receive address, or an older one it has received to before. Used to
+     *  gate the splice-completion baseline advance to genuine self-sends only: an *external*
+     *  splice-out destination never raises our own on-chain balance, so treating it as one would
+     *  misattribute a concurrent, unrelated deposit's sats into the baseline instead of surfacing
+     *  them (#316 review round 3). */
+    private fun isOwnAddress(address: String?): Boolean {
+        if (address.isNullOrBlank()) return false
+        if (address == _onchainReceiveAddress.value) return true
+        return databaseService?.isKnownReceiveAddress(address) == true
+    }
+
     private fun completeConfirmedSplice(
         txid: String,
         expectedGeneration: Long,
@@ -2468,12 +2480,6 @@ class AppState(private val context: Context) : ViewModel() {
         // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
         // it — otherwise this stale monitor tears down the newer operation's state instead.
         if (spliceGeneration.get() == expectedGeneration) {
-            isSweeping = false
-            pendingSplice = null
-            sweepOnchainStart = 0
-            if (spliceTxid == txid) spliceTxid = null
-            monitoredSpliceTxid = null
-            spliceConfirmationJob = null
             // Republish total balance now, with the wallet already synced above, instead of
             // waiting on some unrelated later refresh (which briefly showed a stale total).
             refreshBalances()
@@ -2482,17 +2488,31 @@ class AppState(private val context: Context) : ViewModel() {
             // baseline would see that rise on its next tick and treat it as an unrelated new
             // deposit — for a self-send to an address we aren't currently tracking via websocket,
             // that phantom row can never resolve a txid and lingers permanently (#316 review).
+            // Gated on isOwnAddress(): an *external* splice-out never raises our own balance, so
+            // advancing the baseline for one anyway would misattribute a concurrent, unrelated
+            // deposit's sats into the baseline instead of surfacing them (#316 review round 3).
             // Query the row directly rather than relying on live pendingSplice/generation state,
-            // which may already belong to a newer operation by the time this runs.
+            // which may already belong to a newer operation by the time this runs. Done before
+            // clearing isSweeping/pendingSplice below, closing the window where the stability
+            // tick's detectOnchainDeposit() could otherwise see both flags cleared but the
+            // baseline not yet advanced, and insert a phantom deposit (#316 review round 3).
             capturedPaymentRowId?.let { rowId ->
-                databaseService?.getPaymentTypeDirectionAmountMsat(rowId)?.let { (type, direction, amountMsat) ->
-                    if (type == "splice_out" && direction == "sent") {
+                databaseService?.getPaymentTypeDirectionAmountMsat(rowId)?.let { info ->
+                    if (info.paymentType == "splice_out" && info.direction == "sent" &&
+                        isOwnAddress(info.address)
+                    ) {
                         prevOnchainSats = advanceOnchainBaselineForCompletedSpliceOut(
-                            prevOnchainSats, _onchainBalanceSats.value, amountMsat / 1000
+                            prevOnchainSats, _onchainBalanceSats.value, info.amountMsat / 1000
                         )
                     }
                 }
             }
+            isSweeping = false
+            pendingSplice = null
+            sweepOnchainStart = 0
+            if (spliceTxid == txid) spliceTxid = null
+            monitoredSpliceTxid = null
+            spliceConfirmationJob = null
             _statusMessage.value = "Move confirmed"
             // Unlike "Move pending confirmation" (which the user can dismiss by tapping, or
             // which naturally gets replaced by a later status), "Move confirmed" is terminal —

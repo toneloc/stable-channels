@@ -175,13 +175,17 @@ class SpliceDatabaseServiceTest {
     @Test
     fun getPaymentTypeDirectionAmountMsatReturnsTheRowsFieldsById() {
         val service = DatabaseService(context)
-        val spliceOutId = recordSplice(service, "splice_out")
+        val spliceOutId = service.recordPayment(
+            paymentId = null, paymentType = "splice_out", direction = "sent",
+            amountMsat = 10_000, address = "bc1qourownaddress"
+        )
 
         val row = service.getPaymentTypeDirectionAmountMsat(spliceOutId)
 
-        assertEquals("splice_out", row?.first)
-        assertEquals("sent", row?.second)
-        assertEquals(10_000L, row?.third)
+        assertEquals("splice_out", row?.paymentType)
+        assertEquals("sent", row?.direction)
+        assertEquals(10_000L, row?.amountMsat)
+        assertEquals("bc1qourownaddress", row?.address)
         service.close()
     }
 
@@ -189,6 +193,28 @@ class SpliceDatabaseServiceTest {
     fun getPaymentTypeDirectionAmountMsatReturnsNullForAnUnknownId() {
         val service = DatabaseService(context)
         assertNull(service.getPaymentTypeDirectionAmountMsat(999_999L))
+        service.close()
+    }
+
+    // #316 review round 3: gates the baseline advance to genuine self-sends — an external splice-
+    // out destination never raises our own balance, so advancing for one would misattribute a
+    // concurrent, unrelated deposit's sats into the baseline instead of surfacing them.
+    @Test
+    fun isKnownReceiveAddressIsTrueOnceWeHaveReceivedThere() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_receive_older-tx", paymentType = "onchain", direction = "received",
+            amountMsat = 20_000, status = "completed", txid = "older-tx", address = "bc1qourownaddress"
+        )
+
+        assertTrue(service.isKnownReceiveAddress("bc1qourownaddress"))
+        service.close()
+    }
+
+    @Test
+    fun isKnownReceiveAddressIsFalseForAnAddressWeveNeverReceivedTo() {
+        val service = DatabaseService(context)
+        assertFalse(service.isKnownReceiveAddress("bc1qsomeoneelsesaddress"))
         service.close()
     }
 
