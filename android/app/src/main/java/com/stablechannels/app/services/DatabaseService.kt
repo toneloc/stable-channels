@@ -1556,6 +1556,23 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         true
     }
 
+    /** Called after transport success for a marker that predates channel identity. The old
+     * writer committed completed history and its backing debit together, then cleared the
+     * marker separately. Finish that cleanup without needing an origin or another debit. */
+    fun clearAccountedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (expected.userChannelId != null || expected.paymentId.isBlank() ||
+                expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction false
+            val alreadyAccounted = rawQuery("""SELECT 1 FROM payments WHERE payment_id = ?
+                AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'
+                AND amount_msat = ? LIMIT 1""",
+                arrayOf(expected.paymentId, expected.amountMsat.toString())).use { it.moveToFirst() }
+            if (!alreadyAccounted) return@transaction false
+            // Check the history and the entire claim under the same write lock, so a delayed
+            // recovery cannot clear a newer send. Never assign an unknown origin to a channel.
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
+
     fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean = writableDatabase.transaction {
         if (loadPendingSend() != expected || expected.paymentId.isNotEmpty()) return@transaction false
         setPendingSendPaymentId(paymentId)

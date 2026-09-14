@@ -33,9 +33,10 @@ object OutgoingStabilityPaymentRecovery {
             PaymentStatus.FAILED -> return db.clearPendingSend(pending)
             PaymentStatus.SUCCEEDED -> Unit
         }
-        // Existing markers predate channel identity. A newer active channel cannot establish
-        // their origin, even when there is only one channel now. Preserve them for recovery.
-        val origin = pending.userChannelId?.takeIf { it.isNotBlank() } ?: return false
+        // An old marker may outlive its atomic history/backing commit. Clear only that proven
+        // accounting; otherwise preserve the unknown-origin obligation without guessing a channel.
+        val origin = pending.userChannelId?.takeIf { it.isNotBlank() }
+            ?: return db.clearAccountedLegacyStabilitySend(pending)
         val closed = channelsAuthoritative && node.listChannels().none { it.userChannelId == origin }
         return db.completePendingStabilitySend(pending, channelClosed = closed)
     }
