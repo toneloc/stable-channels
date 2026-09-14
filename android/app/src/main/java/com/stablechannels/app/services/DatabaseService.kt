@@ -1759,6 +1759,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
+    /** payment_type, direction, and amount_msat for a row by id — used to check whether a just-
+     * completed row was a splice-out (which can raise the on-chain balance if self-sent) without
+     * relying on possibly-stale in-memory splice state. */
+    fun getPaymentTypeDirectionAmountMsat(id: Long): Triple<String, String, Long>? {
+        return readableDatabase.rawQuery(
+            "SELECT payment_type, direction, amount_msat FROM payments WHERE id = ? LIMIT 1",
+            arrayOf(id.toString())
+        ).use { c -> if (c.moveToFirst()) Triple(c.getString(0), c.getString(1), c.getLong(2)) else null }
+    }
+
     /** True if any row (of any payment_type/status) already claims this txid — used to avoid
      * inserting a duplicate deposit row for a txid that a splice/close has already reconciled
      * onto its own row (e.g. a self-send whose original receive row was deleted and replaced). */

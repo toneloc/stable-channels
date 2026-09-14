@@ -168,6 +168,30 @@ class SpliceDatabaseServiceTest {
         service.close()
     }
 
+    // #316 review follow-up: completeConfirmedSplice() queries this to decide whether to advance
+    // the deposit detector's baseline (a self-send splice-out to an untracked address otherwise
+    // becomes a permanent, unresolvable phantom pending receive — see
+    // SpliceOutBaselineAdvanceDecisionTest for the baseline arithmetic itself).
+    @Test
+    fun getPaymentTypeDirectionAmountMsatReturnsTheRowsFieldsById() {
+        val service = DatabaseService(context)
+        val spliceOutId = recordSplice(service, "splice_out")
+
+        val row = service.getPaymentTypeDirectionAmountMsat(spliceOutId)
+
+        assertEquals("splice_out", row?.first)
+        assertEquals("sent", row?.second)
+        assertEquals(10_000L, row?.third)
+        service.close()
+    }
+
+    @Test
+    fun getPaymentTypeDirectionAmountMsatReturnsNullForAnUnknownId() {
+        val service = DatabaseService(context)
+        assertNull(service.getPaymentTypeDirectionAmountMsat(999_999L))
+        service.close()
+    }
+
     @Test
     fun completedOnchainReceivedRowSharingTheSpliceTxidIsAlsoReconciled() {
         // The duplicate can already be 'completed' (6+ confirmations) by the time the splice's

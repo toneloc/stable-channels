@@ -139,6 +139,22 @@ class AppState(private val context: Context) : ViewModel() {
             return confirmations != null && confirmations >= required
         }
 
+        /** New baseline for the balance-delta deposit detector once a splice-out completes. A
+         *  splice-out paying one of our own addresses (a self-send) raises the on-chain balance
+         *  by its own settled amount — advancing the baseline by exactly that amount (not to
+         *  [currentSats]) absorbs the splice's own effect without absorbing a genuinely separate
+         *  deposit that happened to land in the same window, which stays visible as whatever
+         *  balance remains above the new baseline. Coerced to never exceed [currentSats] (an
+         *  external-address splice-out doesn't raise on-chain balance at all, and network fees
+         *  can make the actual rise slightly less than [spliceAmountSats]). */
+        fun advanceOnchainBaselineForCompletedSpliceOut(
+            prevOnchainSats: Long,
+            currentSats: Long,
+            spliceAmountSats: Long
+        ): Long {
+            return (prevOnchainSats + spliceAmountSats).coerceAtMost(currentSats)
+        }
+
         object BalanceCacheKey {
             const val PREFS_NAME = "balance_cache"
             const val LIGHTNING = "cached_lightning_sats"
@@ -2461,6 +2477,22 @@ class AppState(private val context: Context) : ViewModel() {
             // Republish total balance now, with the wallet already synced above, instead of
             // waiting on some unrelated later refresh (which briefly showed a stale total).
             refreshBalances()
+            // A splice-out paying one of our own addresses (a self-send) raises the on-chain
+            // balance by its own settled amount. Without this, the deposit detector's frozen
+            // baseline would see that rise on its next tick and treat it as an unrelated new
+            // deposit — for a self-send to an address we aren't currently tracking via websocket,
+            // that phantom row can never resolve a txid and lingers permanently (#316 review).
+            // Query the row directly rather than relying on live pendingSplice/generation state,
+            // which may already belong to a newer operation by the time this runs.
+            capturedPaymentRowId?.let { rowId ->
+                databaseService?.getPaymentTypeDirectionAmountMsat(rowId)?.let { (type, direction, amountMsat) ->
+                    if (type == "splice_out" && direction == "sent") {
+                        prevOnchainSats = advanceOnchainBaselineForCompletedSpliceOut(
+                            prevOnchainSats, _onchainBalanceSats.value, amountMsat / 1000
+                        )
+                    }
+                }
+            }
             _statusMessage.value = "Move confirmed"
             // Unlike "Move pending confirmation" (which the user can dismiss by tapping, or
             // which naturally gets replaced by a later status), "Move confirmed" is terminal —
