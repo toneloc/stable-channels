@@ -651,10 +651,8 @@ class AppState(private val context: Context) : ViewModel() {
      *  Without it, path A can commit+publish between path B's commit and B's publish, and B's
      *  publish (built from B's own transaction result or an earlier snapshot) then overwrites
      *  A's newer books in memory — which is what the stability check reads (#299 review).
-     *
-     *  NOT yet covered (pre-existing, tracked as a follow-up to #299): the trade-sync apply
-     *  paths under processSignedSyncMessage() and completeConfirmedSplice()'s full save. Both
-     *  write these columns from in-memory state without taking this lock. */
+     *  Signed SYNC/trade results, splice reconciliation, and channel saves/reloads share this
+     *  lock too, so a committed correction cannot be overwritten by an older snapshot. */
     private val booksLock = Any()
     private var sendGeneration: Long = 0L
 
@@ -1192,8 +1190,7 @@ class AppState(private val context: Context) : ViewModel() {
                 pollPaymentConfirmations(force = true)
                 connectMempoolWebSocket()
                 updateStableBalances()
-                val sc = StabilityService.reconcileIncoming(_stableChannel.value)
-                _stableChannel.value = sc
+                _stableChannel.update { StabilityService.reconcileIncoming(it) }
                 saveChannelToDB()
                 resumePendingSpliceConfirmation()
                 reregisterPushTokenIfNeeded()
@@ -1393,9 +1390,7 @@ class AppState(private val context: Context) : ViewModel() {
     private fun handleEvent(event: Event) {
         when (event) {
             is Event.ChannelPending -> {
-                val sc = _stableChannel.value.copy()
-                sc.userChannelId = event.userChannelId
-                _stableChannel.value = sc
+                _stableChannel.update { it.copy(userChannelId = event.userChannelId) }
                 fundingTxid = event.fundingTxo.txid
                 fundingVout = event.fundingTxo.vout.toInt()
                 refreshBalances()
@@ -1410,7 +1405,6 @@ class AppState(private val context: Context) : ViewModel() {
                 // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
                 // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
                 val channelIdChanged = sc.userChannelId == event.userChannelId && sc.channelId.isNotEmpty() && sc.channelId != event.channelId
-                sc.channelId = event.channelId
                 var pendingSpliceCandidate: String? = null
                 if (sc.userChannelId == event.userChannelId) {
                     nodeService.refreshChannels()
@@ -1433,11 +1427,9 @@ class AppState(private val context: Context) : ViewModel() {
                         startSpliceConfirmationMonitor(txid)
                     }
 
-                    _stableChannel.value = sc
                     _statusMessage.value = "Move pending confirmation"
-                } else {
-                    _stableChannel.value = sc
                 }
+                _stableChannel.update { it.copy(channelId = event.channelId) }
                 refreshBalances()
                 saveChannelToDB()
                 AuditService.log("CHANNEL_READY", mapOf("channel_id" to event.channelId))
@@ -1811,6 +1803,14 @@ class AppState(private val context: Context) : ViewModel() {
         message: TradeControlMessage,
         paymentHash: String,
         amountMsat: Long
+    ): Boolean = synchronized(booksLock) {
+        processSignedSyncMessageLocked(message, paymentHash, amountMsat)
+    }
+
+    private fun processSignedSyncMessageLocked(
+        message: TradeControlMessage,
+        paymentHash: String,
+        amountMsat: Long
     ): Boolean {
         val db = databaseService
             ?: return deferSyncOrGiveUp(paymentHash, "Trade database unavailable")
@@ -1831,7 +1831,7 @@ class AppState(private val context: Context) : ViewModel() {
                     db.applyCorrelatedTradeAcceptance(message)
                 } else {
                     val price = priceService.currentAccountingPrice()
-                    if (price <= 0.0) {
+                    if (!price.isFinite() || price <= 0.0) {
                         return deferSyncOrGiveUp(paymentHash, "Cannot apply SYNC_V1 without a trusted BTC price")
                     }
                     db.applyUncorrelatedSyncIfNewer(message, price)
@@ -1869,14 +1869,15 @@ class AppState(private val context: Context) : ViewModel() {
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferOrDropForMissingChannel(paymentHash, "Duplicate result channel could not be reloaded")
                 syncRetryTracker.clear(paymentHash)
-                val updated = _stableChannel.value.copy(
-                    channelId = channel.channelId,
-                    expectedUSD = USD(channel.expectedUSD),
-                    backingSats = channel.backingSats,
-                    latestPrice = channel.latestPrice
-                )
-                StabilityService.recomputeNative(updated)
-                _stableChannel.value = updated
+                _stableChannel.update {
+                    it.copy(
+                        channelId = channel.channelId,
+                        expectedUSD = USD(channel.expectedUSD),
+                        backingSats = channel.backingSats,
+                        latestPrice = channel.latestPrice
+                    ).also(StabilityService::recomputeNative)
+                }
+                cacheBalanceForLaunch()
                 return true
             }
             TradeControlApplyStatus.APPLIED -> {
@@ -1898,14 +1899,15 @@ class AppState(private val context: Context) : ViewModel() {
                 val channel = db.loadChannel(_stableChannel.value.userChannelId)
                     ?: return deferOrDropForMissingChannel(paymentHash, "Applied result channel could not be reloaded")
                 syncRetryTracker.clear(paymentHash)
-                val updated = _stableChannel.value.copy(
-                    channelId = channel.channelId,
-                    expectedUSD = USD(channel.expectedUSD),
-                    backingSats = channel.backingSats,
-                    latestPrice = channel.latestPrice
-                )
-                StabilityService.recomputeNative(updated)
-                _stableChannel.value = updated
+                _stableChannel.update {
+                    it.copy(
+                        channelId = channel.channelId,
+                        expectedUSD = USD(channel.expectedUSD),
+                        backingSats = channel.backingSats,
+                        latestPrice = channel.latestPrice
+                    ).also(StabilityService::recomputeNative)
+                }
+                cacheBalanceForLaunch()
                 val divergence = result.localBackingSats != null &&
                     result.peerBackingSats != null &&
                     result.localBackingSats != result.peerBackingSats
@@ -2395,25 +2397,43 @@ class AppState(private val context: Context) : ViewModel() {
             // One price read decides everything below. Reading it again to gate the row update
             // would let a price that arrived in between complete the row with the books
             // untouched — the exact #311 shape this ordering exists to prevent.
-            val accounted = synchronized(booksLock) {
-                refreshBalances()
-                updateStableBalances()
-                val price = priceService.currentAccountingPrice()
-                if (price <= 0.0) {
-                    AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
-                        "txid" to txid, "reason" to "untrusted_price"
-                    ))
-                    false
-                } else {
-                    val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
-                    val reconciled = result.first
-                    if (result.second != null) {
-                        reconciled.lastStabilityPayment = System.currentTimeMillis() / 1000
+            val accounted = try {
+                synchronized(booksLock) {
+                    refreshBalances()
+                    updateStableBalances()
+                    val price = priceService.currentAccountingPrice()
+                    if (!price.isFinite() || price <= 0.0) {
+                        AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
+                            "txid" to txid, "reason" to "untrusted_price"
+                        ))
+                        false
+                    } else {
+                        val db = databaseService ?: return SpliceCompletion.DEFERRED
+                        val sc = _stableChannel.value
+                        // Reconcile against the current row, not a snapshot that may predate a
+                        // signed correction or a background settlement. A retry removes no more
+                        // backing once the row fits the confirmed channel balance.
+                        val result = db.reconcileOutgoingBacking(
+                            channelId = sc.channelId,
+                            userChannelId = sc.userChannelId,
+                            note = sc.note,
+                            receiverSats = sc.stableReceiverBTC.sats,
+                            latestPrice = sc.latestPrice,
+                            price = price
+                        )
+                        publishBooksFromDB(
+                            lastStabilityPayment = if (result != null) System.currentTimeMillis() / 1000 else null,
+                            recomputeNative = true
+                        )
+                        saveChannelToDB(preserveBacking = true)
+                        true
                     }
-                    _stableChannel.value = reconciled
-                    saveChannelToDB()
-                    true
                 }
+            } catch (e: Exception) {
+                AuditService.log("SPLICE_RECONCILE_DEFERRED", mapOf(
+                    "txid" to txid, "reason" to "persistence_failed", "error" to (e.message ?: "")
+                ))
+                false
             }
             // Nothing is finalized on the deferred path: the row stays pending, the monitor and
             // the in-memory splice state stay alive, and no "Move confirmed" is shown for a move
@@ -3531,7 +3551,7 @@ class AppState(private val context: Context) : ViewModel() {
             // default and could target the wrong node for trades/keysends).
             val liveCounterparty = channel.counterpartyNodeId
             if (liveCounterparty.isNotEmpty() && _stableChannel.value.counterparty != liveCounterparty) {
-                _stableChannel.value = _stableChannel.value.copy(counterparty = liveCounterparty)
+                _stableChannel.update { it.copy(counterparty = liveCounterparty) }
             }
         }
         // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
@@ -3659,11 +3679,9 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun updateStableBalances() {
         val price = priceService.currentPrice.value
-        val sc = StabilityService.updateBalances(
-            _stableChannel.value, nodeService.channels,
-            _onchainBalanceSats.value, price
-        )
-        _stableChannel.value = sc
+        _stableChannel.update {
+            StabilityService.updateBalances(it, nodeService.channels, _onchainBalanceSats.value, price)
+        }
     }
 
     private fun currentChannelFundingTxidMatches(txid: String): Boolean {
@@ -3674,6 +3692,10 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun saveChannelToDB(preserveBacking: Boolean = false) {
+        synchronized(booksLock) { saveChannelToDBLocked(preserveBacking) }
+    }
+
+    private fun saveChannelToDBLocked(preserveBacking: Boolean) {
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
         if (preserveBacking) {
@@ -3834,6 +3856,10 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun loadChannelFromDB() {
+        synchronized(booksLock) { loadChannelFromDBLocked() }
+    }
+
+    private fun loadChannelFromDBLocked() {
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return
         val record = databaseService?.loadChannel(sc.userChannelId) ?: return

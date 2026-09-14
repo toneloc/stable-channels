@@ -279,6 +279,43 @@ object TradeProtocol {
         return backing.takeIf { it > 0L && it <= receiverSats }
     }
 
+    /** Reconcile an authenticated target using our allocation and price, bounded by our balance.
+     * Unlike a new trade, a correction must not fail just because its target exceeds capacity.
+     * Zero-target settlement is handled separately by the caller. */
+    fun syncBackingAfterDelta(
+        receiverSats: Long,
+        currentBackingSats: Long,
+        currentExpectedUsd: Double,
+        newExpectedUsd: Double,
+        price: Double
+    ): Long? {
+        if (receiverSats < 0L || currentBackingSats < 0L ||
+            !currentExpectedUsd.isFinite() || currentExpectedUsd < 0.0 ||
+            !newExpectedUsd.isFinite() || newExpectedUsd <= 0.0 ||
+            !price.isFinite() || price <= 0.0
+        ) return null
+        tradeBackingAfterDelta(
+            receiverSats, currentBackingSats, currentExpectedUsd, newExpectedUsd, price
+        )?.let { return it }
+
+        // Use cumulative floors, as trades do, without repricing the existing position or
+        // adopting the peer's backing. This preserves unsettled drift through corrections.
+        val currentTarget = currentExpectedUsd / price * Constants.SATS_IN_BTC.toDouble()
+        val newTarget = newExpectedUsd / price * Constants.SATS_IN_BTC.toDouble()
+        if (!currentTarget.isFinite() || !newTarget.isFinite() ||
+            currentTarget >= Long.MAX_VALUE.toDouble() || newTarget >= Long.MAX_VALUE.toDouble()
+        ) return null
+        val delta = floor(newTarget).toLong() - floor(currentTarget).toLong()
+        val backing = if (delta >= 0L) {
+            // Clamp before adding to avoid overflowing a Long on a large correction.
+            val available = (receiverSats - currentBackingSats).coerceAtLeast(0L)
+            currentBackingSats.coerceAtMost(receiverSats) + delta.coerceAtMost(available)
+        } else {
+            (currentBackingSats + delta).coerceIn(0L, receiverSats)
+        }
+        return backing.takeIf { it > 0L }
+    }
+
     fun parseSignedControl(
         data: ByteArray,
         expectedCounterparty: String,

@@ -1100,7 +1100,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             ) {
                 currentBacking.coerceAtMost(receiverSats)
             } else {
-                TradeProtocol.tradeBackingAfterDelta(
+                TradeProtocol.syncBackingAfterDelta(
                     receiverSats, currentBacking, currentExpected, sync.expectedUsd, trustedPrice
                 ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
             }
