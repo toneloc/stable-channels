@@ -133,6 +133,28 @@ class AppState(private val context: Context) : ViewModel() {
             }
         }
 
+        /** True once the close's own funds hit [required] confirmations, so lastCloseTxid can be
+         *  cleared. [confirmations] is null if the close row isn't resolved yet — must not clear. */
+        fun shouldClearLastCloseTxid(confirmations: Int?, required: Int): Boolean {
+            return confirmations != null && confirmations >= required
+        }
+
+        /** New baseline for the balance-delta deposit detector once a splice-out completes. A
+         *  splice-out paying one of our own addresses (a self-send) raises the on-chain balance
+         *  by its own settled amount — advancing the baseline by exactly that amount (not to
+         *  [currentSats]) absorbs the splice's own effect without absorbing a genuinely separate
+         *  deposit that happened to land in the same window, which stays visible as whatever
+         *  balance remains above the new baseline. Coerced to never exceed [currentSats] (an
+         *  external-address splice-out doesn't raise on-chain balance at all, and network fees
+         *  can make the actual rise slightly less than [spliceAmountSats]). */
+        fun advanceOnchainBaselineForCompletedSpliceOut(
+            prevOnchainSats: Long,
+            currentSats: Long,
+            spliceAmountSats: Long
+        ): Long {
+            return (prevOnchainSats + spliceAmountSats).coerceAtMost(currentSats)
+        }
+
         object BalanceCacheKey {
             const val PREFS_NAME = "balance_cache"
             const val LIGHTNING = "cached_lightning_sats"
@@ -2305,17 +2327,33 @@ class AppState(private val context: Context) : ViewModel() {
         val monitorGeneration = spliceGeneration.get()
         val monitorPaymentRowId = pendingSplice?.paymentRowId
         spliceConfirmationJob = viewModelScope.launch(Dispatchers.IO) {
+            // Sync once per confirmed txid, not every retry — completion can stay DEFERRED for
+            // reasons unrelated to wallet freshness (e.g. no trusted price yet).
+            var walletSyncedForThisTxid = false
             while (isActive) {
                 if (isTxConfirmed(normalizedTxid)) {
-                    // DEFERRED means the books could not be valued yet (no trusted price). Keep
-                    // monitoring and retry on the next tick rather than declaring the move done:
-                    // the row stays 'pending', which also blocks the periodic repair, so nothing
-                    // else would pick it up until the app restarted.
-                    if (completeConfirmedSplice(
-                            normalizedTxid, monitorGeneration, monitorPaymentRowId
-                        ) == SpliceCompletion.COMPLETED
-                    ) {
-                        break
+                    // Sync on-chain wallet before accounting for completion, or the enlarged
+                    // Lightning balance can be read alongside a stale on-chain balance and
+                    // briefly double-count the spliced amount.
+                    if (!walletSyncedForThisTxid) {
+                        walletSyncedForThisTxid = try {
+                            nodeService.syncWallets()
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
+                    }
+                    if (walletSyncedForThisTxid) {
+                        // DEFERRED means the books could not be valued yet (no trusted price).
+                        // Keep monitoring and retry on the next tick rather than declaring the
+                        // move done: the row stays 'pending', which also blocks the periodic
+                        // repair, so nothing else would pick it up until the app restarted.
+                        if (completeConfirmedSplice(
+                                normalizedTxid, monitorGeneration, monitorPaymentRowId
+                            ) == SpliceCompletion.COMPLETED
+                        ) {
+                            break
+                        }
                     }
                 }
                 delay(30_000)
@@ -2383,6 +2421,18 @@ class AppState(private val context: Context) : ViewModel() {
     /** Whether a confirmed splice was fully accounted for, or must be retried. */
     private enum class SpliceCompletion { COMPLETED, DEFERRED }
 
+    /** Whether `address` is one this wallet has itself generated for receiving — either the
+     *  currently displayed receive address, or an older one it has received to before. Used to
+     *  gate the splice-completion baseline advance to genuine self-sends only: an *external*
+     *  splice-out destination never raises our own on-chain balance, so treating it as one would
+     *  misattribute a concurrent, unrelated deposit's sats into the baseline instead of surfacing
+     *  them (#316 review round 3). */
+    private fun isOwnAddress(address: String?): Boolean {
+        if (address.isNullOrBlank()) return false
+        if (address == _onchainReceiveAddress.value) return true
+        return databaseService?.isKnownReceiveAddress(address) == true
+    }
+
     private fun completeConfirmedSplice(
         txid: String,
         expectedGeneration: Long,
@@ -2448,6 +2498,33 @@ class AppState(private val context: Context) : ViewModel() {
         // Only clear the shared in-memory splice state if a newer splice hasn't since replaced
         // it — otherwise this stale monitor tears down the newer operation's state instead.
         if (spliceGeneration.get() == expectedGeneration) {
+            // Republish total balance now, with the wallet already synced above, instead of
+            // waiting on some unrelated later refresh (which briefly showed a stale total).
+            refreshBalances()
+            // A splice-out paying one of our own addresses (a self-send) raises the on-chain
+            // balance by its own settled amount. Without this, the deposit detector's frozen
+            // baseline would see that rise on its next tick and treat it as an unrelated new
+            // deposit — for a self-send to an address we aren't currently tracking via websocket,
+            // that phantom row can never resolve a txid and lingers permanently (#316 review).
+            // Gated on isOwnAddress(): an *external* splice-out never raises our own balance, so
+            // advancing the baseline for one anyway would misattribute a concurrent, unrelated
+            // deposit's sats into the baseline instead of surfacing them (#316 review round 3).
+            // Query the row directly rather than relying on live pendingSplice/generation state,
+            // which may already belong to a newer operation by the time this runs. Done before
+            // clearing isSweeping/pendingSplice below, closing the window where the stability
+            // tick's detectOnchainDeposit() could otherwise see both flags cleared but the
+            // baseline not yet advanced, and insert a phantom deposit (#316 review round 3).
+            capturedPaymentRowId?.let { rowId ->
+                databaseService?.getPaymentTypeDirectionAmountMsat(rowId)?.let { info ->
+                    if (info.paymentType == "splice_out" && info.direction == "sent" &&
+                        isOwnAddress(info.address)
+                    ) {
+                        prevOnchainSats = advanceOnchainBaselineForCompletedSpliceOut(
+                            prevOnchainSats, _onchainBalanceSats.value, info.amountMsat / 1000
+                        )
+                    }
+                }
+            }
             isSweeping = false
             pendingSplice = null
             sweepOnchainStart = 0
@@ -3088,7 +3165,16 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
-        if (currentSats > prevOnchainSats && !isSweeping && pendingSplice == null) {
+        // Deposits are deferred (not dropped) while a splice/close is in flight, since the
+        // on-chain balance can swing for unrelated reasons then. prevOnchainSats is NOT advanced
+        // while deferred, so a deposit landing mid-operation is picked up once it clears instead
+        // of being lost. Not a complete fix if a splice sweeps the whole balance below the frozen
+        // baseline — see #316. The websocket receive path below is the reliable catch-all now;
+        // this is just a backstop.
+        if (isSweeping || pendingSplice != null) {
+            return
+        }
+        if (currentSats > prevOnchainSats) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
                 prevOnchainSats = currentSats
@@ -3109,6 +3195,8 @@ class AppState(private val context: Context) : ViewModel() {
                 trackedClosingFundingTxid?.let { mempoolWebSocketService.untrackTx(it) }
                 trackedClosingFundingTxid = null
                 isChannelClosing = false
+                // Not cleared here — Home card should keep showing "Channel closing..." until
+                // funds are spendable, not just detected. Cleared in refreshBalances() below.
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
@@ -3128,6 +3216,17 @@ class AppState(private val context: Context) : ViewModel() {
                     !it.isNullOrBlank() &&
                         !receiveAddress.isNullOrBlank() &&
                         lastReceiveTxidAddress == receiveAddress
+                }
+
+                // If this txid already belongs to some row (e.g. a splice self-send that
+                // reconciled and deleted the original receive row for this same txid — see
+                // #316), skip: inserting again here would recreate a deposit for funds a splice
+                // already accounted for, as a duplicate, permanent, phantom "Receiving onchain"
+                // entry. A genuinely different deposit always has a different txid, so this
+                // can't suppress a real one.
+                if (!resolvedTxid.isNullOrBlank() && db?.paymentExistsForTxid(resolvedTxid) == true) {
+                    prevOnchainSats = currentSats
+                    return
                 }
 
                 // Always record the deposit, mirroring iOS. When the websocket and this
@@ -3403,9 +3502,12 @@ class AppState(private val context: Context) : ViewModel() {
 
         when (event) {
             is WebSocketEvent.Receive -> {
-                if (isChannelClosing || isSweeping || pendingSplice != null) {
-                    return
-                }
+                // Fires only for our own tracked receive address, so unlike the balance-delta
+                // fallback it can't be confused with a splice/close's own movement — safe to
+                // record regardless of splice/close state (fixes deposits being dropped, #316).
+                // A splice-out self-send shares this same txid; that overlap is reconciled by
+                // assignPendingSpliceTxid() rather than suppressed here, since address alone
+                // can't tell a self-send apart from a genuine external deposit reusing it.
                 if (event.amountSats < 1000) {
                     return
                 }
@@ -3569,6 +3671,17 @@ class AppState(private val context: Context) : ViewModel() {
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
 
+        // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
+        // confirm. Check this close's confirmations specifically, not aggregate spendable
+        // balance (other unrelated funds could already be spendable), or a later deposit could
+        // inherit a stale label for up to 7 days (#316).
+        val closeTxid = lastCloseTxid.value
+        if (closeTxid != null && !isChannelClosing && pendingClosePaymentId == null) {
+            val closeConfirmations = databaseService?.getConfirmationsForCloseTxid(closeTxid)
+            if (shouldClearLastCloseTxid(closeConfirmations, requiredConfirmationsForType("channel_close"))) {
+                setLastCloseTxid(null)
+            }
+        }
 
         // Clear closing flag once lightning balance fully resolves, or if a new channel is opened
         // Don't clear pendingClosePaymentId here — let detectOnchainDeposit()
