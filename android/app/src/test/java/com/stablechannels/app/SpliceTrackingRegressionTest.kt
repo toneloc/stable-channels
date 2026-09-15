@@ -17,6 +17,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import java.io.File
 import java.util.Date
+import java.util.concurrent.atomic.AtomicLong
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -79,6 +80,7 @@ class SpliceTrackingRegressionTest {
         assertNotEquals("Move confirmed", state.statusMessage.value)
         db.writableDatabase.execSQL("DROP TRIGGER reject_completion")
         assertEquals("COMPLETED", complete(state, rowId))
+        assertEquals("Move confirmed", state.statusMessage.value)
         assertEquals("COMPLETED", complete(state, rowId))
         assertEquals(9.0, db.loadChannel("7")!!.expectedUSD, 0.0)
     }
@@ -105,8 +107,9 @@ class SpliceTrackingRegressionTest {
     private fun field(target: Any, name: String): Any = target.javaClass.getDeclaredField(name)
         .apply { isAccessible = true }.get(target)!!
 
+    /** Runs against the live generation, so a completion that reaches the terminal step really shows "Move confirmed". */
     private fun complete(state: AppState, rowId: Long?): String =
         AppState::class.java.getDeclaredMethod("completeConfirmedSplice", String::class.java,
             Long::class.javaPrimitiveType, Long::class.javaObjectType).apply { isAccessible = true }
-            .invoke(state, txid, -1L, rowId)!!.toString()
+            .invoke(state, txid, (field(state, "spliceGeneration") as AtomicLong).get(), rowId)!!.toString()
 }

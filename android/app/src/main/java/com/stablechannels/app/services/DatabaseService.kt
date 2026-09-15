@@ -1807,6 +1807,18 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Marks the negotiated splice carrying this exact txid failed once esplora proved it was never broadcast. */
+    fun failNegotiatedSplice(txid: String, paymentRowId: Long?): Boolean {
+        val values = ContentValues().apply { put("status", "failed") }
+        val rowClause = if (paymentRowId == null) "" else " AND id = ?"
+        val args = listOfNotNull(txid, paymentRowId?.toString()).toTypedArray()
+        return writableDatabase.update(
+            "payments", values,
+            "txid = ? AND status = 'pending' AND payment_type IN ('splice_in','splice_out')$rowClause",
+            args
+        ) == 1
+    }
+
     /** Checking and completing use the same pending, exact-txid operation. */
     fun hasPendingSpliceFor(txid: String): Boolean = getSplice(txid)?.status == "pending"
 
@@ -1857,8 +1869,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // and the splice confirmation monitor completes them after 1 conf.
         SpliceEventRecorder.recoverAssignments(this)
         val noTxidCutoff = System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+        // Only an event whose txid can still be assigned proves negotiation; if assignment keeps refusing the txid, that operation must still expire.
         writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id)",
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id))",
             arrayOf(noTxidCutoff)
         )
         val cursor = readableDatabase.rawQuery(

@@ -99,6 +99,17 @@ class StabilityProcessingService : Service() {
         acknowledge()
     }
 
+    /** A splice failure needs the foreground's esplora-verified bookkeeping; only ack it when nothing is pending. */
+    internal fun deferSpliceFailure(acknowledge: () -> Unit) {
+        val pending = try {
+            DatabaseService(this).use { it.hasPendingSplice() }
+        } catch (e: Exception) {
+            throw BackingUpdateFailed("Cannot check for a pending splice: ${e.message}")
+        }
+        if (pending) throw BackingUpdateFailed("Splice failure needs foreground bookkeeping — leaving for foreground")
+        acknowledge()
+    }
+
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
@@ -456,6 +467,7 @@ class StabilityProcessingService : Service() {
                             }?.fundingTxo
                         }) { node.eventHandled() }
                     }
+                    is Event.SpliceNegotiationFailed -> deferSpliceFailure { node.eventHandled() }
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {
@@ -664,6 +676,7 @@ class StabilityProcessingService : Service() {
                             }?.fundingTxo
                         }) { node.eventHandled() }
                     }
+                    is Event.SpliceNegotiationFailed -> deferSpliceFailure { node.eventHandled() }
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {

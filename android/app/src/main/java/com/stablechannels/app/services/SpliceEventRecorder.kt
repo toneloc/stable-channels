@@ -41,8 +41,7 @@ object SpliceEventRecorder {
         })
     }
 
-    /** Returns false for other event types. A successful return means it is safe to acknowledge.
-     * Unmatched events are retained, but never reassigned to an operation created later. */
+    /** Returns false for other event types; true means the event is committed and safe to acknowledge. Unmatched events are kept but never reassigned to a later operation. */
     fun record(
         service: DatabaseService,
         event: Event,
@@ -63,16 +62,14 @@ object SpliceEventRecorder {
                 kind = "ready"
                 channelId = event.channelId
                 userChannelId = event.userChannelId
-                // A stale or early ready event may not have a live funding lookup yet. Retain
-                // its channel identity and captured operation so foreground recovery can retry.
+                // A stale or early ready event may lack a live funding lookup; keep its identity and captured operation so foreground recovery can retry.
                 funding = event.fundingTxo ?: fundingForReady(event)
             }
             else -> return false
         }
         val db = service.writableDatabase
         db.transaction {
-            // Deduplicate from the event itself, never from a changing live snapshot. Legacy
-            // ready replays without an outpoint must not capture a newer operation later.
+            // Deduplicate from the event itself, never a changing live snapshot, so an outpoint-less legacy ready replay cannot capture a newer operation.
             val identityTxid = when (event) {
                 is Event.ChannelReady -> event.fundingTxo?.txid
                 is Event.SpliceNegotiated -> event.newFundingTxo.txid
@@ -116,9 +113,7 @@ object SpliceEventRecorder {
         }
         if (exact.isNotEmpty()) return exact.singleOrNull()
 
-        // LDK retains the channel ID across a splice. For ChannelReady, additionally prove
-        // that funding changed from the output saved when this operation started; an initial
-        // channel-ready replay must not be mistaken for a new splice.
+        // LDK keeps the channel ID across a splice, so a ready event must also prove funding changed from the saved outpoint, or an initial channel-ready replay would look like a splice.
         val readyClause = if (kind == "ready")
             "AND s.previous_funding_txid IS NOT NULL AND (? = '' OR s.previous_funding_txid != ?)"
         else "AND (s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?)"
@@ -139,8 +134,7 @@ object SpliceEventRecorder {
 
         if (kind != "negotiated") return null
 
-        // Upgrade recovery for rows created before operation identity was persisted. Keep the
-        // existing conservative, single recent candidate rule, scoped to the saved channel.
+        // Upgrade path for rows created before operation identity was persisted: keep the conservative single-recent-candidate rule, scoped to the saved channel.
         val legacy = db.rawQuery("""
             SELECT p.id FROM payments p
             WHERE p.payment_type IN ('splice_in','splice_out') AND p.status = 'pending'
@@ -183,9 +177,7 @@ object SpliceEventRecorder {
         }
     }
 
-    /** Retry only previously captured identities, including after a restart or a txid collision.
-     * The payment's creation time bypasses the pre-negotiation timeout once an event proves
-     * which operation was negotiated. Failed rows remain terminal. */
+    /** Retries only captured identities (after a restart or txid collision); the payment's creation time bypasses the pre-negotiation timeout once an event proved negotiation. Failed rows stay terminal. */
     fun recoverAssignments(service: DatabaseService) {
         service.writableDatabase.transaction {
             val pending = rawQuery("""
