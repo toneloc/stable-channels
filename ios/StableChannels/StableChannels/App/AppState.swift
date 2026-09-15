@@ -790,6 +790,7 @@ class AppState {
         tradeService = nil
         databaseService = nil
         priceHistoryProvider = PriceHistoryService(databaseService: nil)
+        spvHeaderChainService = nil
         txidResolutionService.clearResolvers()
     }
 
