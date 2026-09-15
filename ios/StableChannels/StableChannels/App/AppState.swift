@@ -681,6 +681,7 @@ class AppState {
         nodeService.clearSavedMnemonic()
         tradeService = nil
         databaseService = nil
+        spvHeaderChainService = nil
         txidResolutionService.clearResolvers()
     }
 
