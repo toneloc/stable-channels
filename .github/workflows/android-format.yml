@@ -1,4 +1,4 @@
-name: Android Format
+name: "Mobile: Android Format"
 
 on:
   push:
@@ -22,13 +22,14 @@ jobs:
   format:
     name: ktfmt Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
