@@ -25,7 +25,7 @@ jobs:
     timeout-minutes: 20
 
     env:
-      GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx3g -XX:+UseG1GC"
+      GRADLE_OPTS: "-Xmx3g -XX:+UseG1GC"
 
     defaults:
       run:

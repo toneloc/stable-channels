@@ -26,13 +26,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # ---- Rust cache -------------------------------------------------------
-      - uses: Swatinem/rust-cache@v2
-
       # ---- Rust toolchain ---------------------------------------------------
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      # ---- Rust cache -------------------------------------------------------
+      - uses: Swatinem/rust-cache@v2
 
       # ---- Build ------------------------------------------------------------
       - name: Cargo build (release)
