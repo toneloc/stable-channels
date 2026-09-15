@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'android/**/*.kt'
+      - '.github/workflows/android-format.yml'
   pull_request:
     branches: [main]
     paths:
       - 'android/**/*.kt'
+      - '.github/workflows/android-format.yml'
   workflow_dispatch:
 
 permissions:
@@ -47,8 +49,8 @@ jobs:
             if [ -z "$BASE_REF" ]; then
               BASE_REF="main"
             fi
-            git fetch origin "$BASE_REF" --depth=1
-            CHANGED=$(git diff --name-only "origin/$BASE_REF...HEAD" | grep '^android/.*\.kt$' || true)
+            git fetch origin "$BASE_REF"
+            CHANGED=$(git diff --name-only --diff-filter=ACMR "origin/$BASE_REF...HEAD" | grep '^android/.*\.kt$' || true)
             if [ -z "$CHANGED" ]; then
               echo "No Kotlin files modified."
               exit 0
