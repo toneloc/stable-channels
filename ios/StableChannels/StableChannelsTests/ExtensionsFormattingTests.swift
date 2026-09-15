@@ -45,4 +45,22 @@ final class ExtensionsFormattingTests: XCTestCase {
         XCTAssertEqual(AppFormatters.formatUSD(50.5), "$50.50")
         XCTAssertFalse(AppFormatters.formatShortDate(Date()).isEmpty)
     }
+
+    func testCachedDateFormattersRefreshTimezone() throws {
+        let originalDefault = NSTimeZone.default
+        defer { NSTimeZone.default = originalDefault }
+
+        // Initialize cached formatters in UTC
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        NSTimeZone.default = utc
+        let epochZero = Date(timeIntervalSince1970: 0)
+        let utcShort = epochZero.shortString
+
+        // Switch default timezone to America/Los_Angeles (UTC-8)
+        let la = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        NSTimeZone.default = la
+        let laShort = epochZero.shortString
+
+        XCTAssertNotEqual(utcShort, laShort)
+    }
 }
