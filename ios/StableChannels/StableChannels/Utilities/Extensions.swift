@@ -19,14 +19,14 @@ enum AppFormatters {
 
     private static let sats: NumberFormatter = {
         let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: "en_US")
+        formatter.locale = .autoupdatingCurrent
         formatter.numberStyle = .decimal
         return formatter
     }()
 
     private static let usd: NumberFormatter = {
         let formatter = NumberFormatter()
-        formatter.locale = Locale(identifier: "en_US")
+        formatter.locale = .autoupdatingCurrent
         formatter.numberStyle = .currency
         formatter.currencyCode = "USD"
         formatter.maximumFractionDigits = 2
