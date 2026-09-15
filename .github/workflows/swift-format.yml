@@ -1,4 +1,4 @@
-name: iOS Format
+name: "Mobile: iOS Format"
 
 on:
   push:
@@ -21,9 +21,10 @@ concurrency:
 jobs:
   format:
     name: SwiftFormat Check
-    runs-on: macos-14
+    runs-on: macos-15
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install SwiftFormat
         # Pinned: the runner image ships a pre-installed older brew version, so
@@ -36,4 +37,4 @@ jobs:
 
       - name: Run SwiftFormat
         working-directory: ios
-        run: swiftformat --lint . --strict
+        run: swiftformat --lint . --strict --parallel

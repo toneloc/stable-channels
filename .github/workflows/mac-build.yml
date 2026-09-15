@@ -1,4 +1,4 @@
-name: Desktop Build – Mac
+name: "Desktop: macOS Build"
 
 on:
   push:
@@ -15,14 +15,18 @@ concurrency:
 
 jobs:
   build-macos:
+    name: macOS Universal App
     if: startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, 'build')
-    runs-on: macos-14   # Apple‑silicon runner
+    runs-on: macos-15   # Apple‑silicon runner
+    timeout-minutes: 45
 
     env:
       APP_PATH: "dist/Stable Channels.app"
+      CARGO_NET_RETRY: 10
+      CARGO_TERM_COLOR: always
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -141,7 +145,7 @@ jobs:
         run: |
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" Stable-Channels-mac.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: stable-channels-mac
           path: Stable-Channels-mac.zip
@@ -149,7 +153,7 @@ jobs:
 
       - name: Publish to Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: Stable-Channels-mac.zip
