@@ -176,6 +176,19 @@ class OutgoingLightningAccountingTest {
     }
 
     @Test
+    fun pendingRowUnknownToLdkIsFailedOnlyAfterTheGracePeriod() {
+        db.recordPayment("lost", "lightning", "sent", 5_000_000L, status = "pending")
+        assertEquals(0, LightningPaymentRecovery.reconcilePending(db, { true }) { null })
+        assertTrue(db.hasPendingChannelSend())
+        db.writableDatabase.execSQL("UPDATE payments SET created_at = created_at - ${LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS + 1} WHERE payment_id = 'lost'")
+        assertEquals(0, LightningPaymentRecovery.reconcilePending(db, { false }) { null })
+        assertTrue(db.hasPendingChannelSend())
+        assertEquals(1, LightningPaymentRecovery.reconcilePending(db, { true }) { null })
+        assertFalse(db.hasPendingChannelSend())
+        assertEquals("failed", db.getRecentPayments().single { it.paymentId == "lost" }.status)
+    }
+
+    @Test
     fun operationLockCoversSubmissionThroughHistoryRegistration() {
         val node = nodeService()
         val recording = CountDownLatch(1)

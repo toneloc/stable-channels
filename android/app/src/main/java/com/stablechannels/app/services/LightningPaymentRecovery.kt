@@ -5,6 +5,9 @@ data class LightningPaymentResolution(val succeeded: Boolean, val feeMsat: Long 
 
 /** Shared persistence path for foreground recovery and background event consumers. */
 object LightningPaymentRecovery {
+    /** A row LDK has no record of after this long never left the node and is failed. */
+    const val LOST_LDK_RECORD_TIMEOUT_SECS = 10 * 60L
+
     fun recordSuccess(db: DatabaseService, paymentId: String?, feeMsat: Long?): Boolean {
         if (paymentId.isNullOrEmpty()) return false
         // Trade fees are tracked in the trades table as well as the payment history.
@@ -19,9 +22,11 @@ object LightningPaymentRecovery {
         return true
     }
 
-    /** Reconcile rows whose event may have been consumed while Android was backgrounded. */
+    /** Reconcile rows whose event may have been consumed while Android was backgrounded. A row
+     * LDK no longer knows can never resolve through events; after the grace period it is failed. */
     fun reconcilePending(
         db: DatabaseService,
+        unknownToLdk: (String) -> Boolean = { false },
         lookup: (String) -> LightningPaymentResolution?
     ): Int {
         var repaired = 0
@@ -35,7 +40,11 @@ object LightningPaymentRecovery {
                     }
                     repaired++
                 }
-                null -> Unit
+                null -> if (unknownToLdk(paymentId) &&
+                    db.pendingOutgoingPaymentAgeSecs(paymentId) > LOST_LDK_RECORD_TIMEOUT_SECS) {
+                    PaymentFailureRecorder.record(db, paymentId, "no_ldk_record") { null }
+                    repaired++
+                }
             }
         }
         return repaired

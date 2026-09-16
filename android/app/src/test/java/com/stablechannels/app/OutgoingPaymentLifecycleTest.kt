@@ -5,6 +5,7 @@ import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
 import com.stablechannels.app.push.StabilityProcessingService
+import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.util.Constants
@@ -36,6 +37,8 @@ class OutgoingPaymentLifecycleTest {
     @Before fun setUp() {
         context = RuntimeEnvironment.getApplication()
         context.deleteDatabase(File(Constants.userDataDir(context), "stablechannels.db").absolutePath)
+        auditFile.delete()
+        AuditService.setLogPath(auditFile.path)
         db = DatabaseService(context)
         db.saveChannel("channel", "7", 10.0, 11_000, null, 20_000, 100_000.0)
         restart()
@@ -43,8 +46,12 @@ class OutgoingPaymentLifecycleTest {
 
     @After fun tearDown() {
         db.close()
+        auditFile.delete()
         context.deleteDatabase(File(Constants.userDataDir(context), "stablechannels.db").absolutePath)
     }
+
+    private val auditFile get() = File(context.cacheDir, "lifecycle-audit.log")
+    private fun auditLog() = auditFile.takeIf { it.exists() }?.readText() ?: ""
 
     @Test fun successWithClosedChannelAllowsTheFollowingCloseEventAndArchivesObligation() {
         pending()
@@ -83,6 +90,20 @@ class OutgoingPaymentLifecycleTest {
         call("runStabilityCheck")
         assertArchive(10.0, 11_000L)
         assertFalse(db.hasPendingChannelSend())
+    }
+
+    @Test fun pendingSendUnknownToLdkStopsBlockingSpendsAfterTheGracePeriod() {
+        pending()
+        node.channels = listOf(channel())
+        price(100_000.0)
+        call("reconcilePendingLightningPayments")
+        assertTrue(db.hasPendingChannelSend())
+        db.writableDatabase.execSQL("UPDATE payments SET created_at = created_at - 601 WHERE payment_id = 'send'")
+        call("reconcilePendingLightningPayments")
+        assertFalse(db.hasPendingChannelSend())
+        assertEquals("failed", payment().status)
+        assertEquals("after-release",
+            state.nodeService.sendTrackedLightningPayment("lightning", 1_000_000, null) { "after-release" })
     }
 
     @Test fun archivedSuccessCannotReconcileAgainstNewChannel() {
@@ -377,16 +398,17 @@ class OutgoingPaymentLifecycleTest {
         assertNull(db.loadPendingSend())
     }
 
-    @Test fun stabilityLegacyMarkerWithoutOriginNeverAdoptsTheReplacementChannel() {
+    @Test fun stabilityLegacyMarkerWithoutOriginReleasesWithoutAdoptingTheReplacementChannel() {
         closeWithPendingStabilityAndReplace()
         reopenLegacyStabilityMarker()
         assertNull(db.loadPendingSend()!!.userChannelId)
         event(success)
+        assertNull(db.loadPendingSend())
         call("runStabilityCheck")
-        assertFalse(backgroundRecovery())
-        assertNotNull(db.loadPendingSend())
+        assertTrue(backgroundRecovery())
         assertReplacementUnchanged()
         assertArchive(10.0, 11_000L)
+        assertLegacyPaymentOnRecordWithoutOrigin()
     }
 
     @Test fun stabilityAccountedLegacyMarkerReleasesNativeSpendAfterSuccessEvent() {
@@ -455,13 +477,17 @@ class OutgoingPaymentLifecycleTest {
             "direction = 'received'", "status = 'pending'", "status = 'failed'", "amount_msat = 999000")) {
             db.writableDatabase.execSQL(restore)
             db.writableDatabase.execSQL("UPDATE payments SET $mismatch")
-            assertFalse(mismatch, backgroundRecovery())
+            assertFalse(mismatch, db.clearAccountedLegacyStabilitySend(pending))
             assertEquals(pending, db.loadPendingSend())
             assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
         }
+        // Books already at par reproduce no claim, so an unmatched row is released as
+        // unattributed: the payment stays on record and nothing is debited again.
         db.writableDatabase.execSQL(restore)
+        db.writableDatabase.execSQL("UPDATE payments SET status = 'pending'")
         assertTrue(backgroundRecovery())
         assertLegacyAccountingUnchanged()
+        assertNativeSpendAfterLegacyRecovery()
     }
 
     @Test fun stabilityLegacyCompletedHistoryStillRequiresMatchingTransportSuccess() {
@@ -495,6 +521,114 @@ class OutgoingPaymentLifecycleTest {
         event(success)
         assertNull(db.loadPendingSend())
         assertLegacyAccountingUnchanged()
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerDebitsTheOnlyChannelSavedBeforeTheClaimAfterSuccessEvent() {
+        prepareUnaccountedLegacyStability()
+        event(success)
+        assertLegacyDebitAppliedOnce()
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        event(success)
+        assertLegacyDebitAppliedOnce()
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerDebitsTheOnlyChannelSavedBeforeTheClaimAfterTick() {
+        prepareUnaccountedLegacyStability()
+        call("runStabilityCheck")
+        assertLegacyDebitAppliedOnce()
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        call("runStabilityCheck")
+        assertLegacyDebitAppliedOnce()
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerDebitsTheOnlyChannelSavedBeforeTheClaimInTheBackground() {
+        prepareUnaccountedLegacyStability()
+        assertTrue(backgroundRecovery())
+        assertLegacyDebitAppliedOnce()
+        assertTrue(backgroundRecovery())
+        assertLegacyDebitAppliedOnce()
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerStillRequiresMatchingTransportSuccess() {
+        prepareUnaccountedLegacyStability()
+        val pending = db.loadPendingSend()!!
+        val succeeded = node.payments.single()
+        val unresolved = listOf(null, succeeded.copy(status = PaymentStatus.PENDING),
+            succeeded.copy(id = "another-send"), succeeded.copy(amountMsat = 999_000uL),
+            succeeded.copy(direction = PaymentDirection.INBOUND),
+            succeeded.copy(kind = PaymentKind.Bolt11("hash", null, null, null)))
+        for (payment in unresolved) {
+            node.payments = listOfNotNull(payment)
+            assertFalse(backgroundRecovery())
+            assertEquals(pending, db.loadPendingSend())
+            assertLegacyBooksUntouched()
+        }
+        node.payments = listOf(succeeded)
+        assertTrue(backgroundRecovery())
+        assertLegacyDebitAppliedOnce()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerSurvivesADatabaseFailureAndDebitsOnce() {
+        prepareUnaccountedLegacyStability()
+        val pending = db.loadPendingSend()!!
+        db.writableDatabase.execSQL("CREATE TRIGGER reject_legacy_clear BEFORE DELETE ON pending_stability_send BEGIN SELECT RAISE(ABORT, 'test'); END")
+        event(success)
+        // The proven origin is bound durably even though the debit and clear rolled back.
+        assertEquals(pending.copy(userChannelId = "7"), db.loadPendingSend())
+        assertLegacyBooksUntouched()
+        db.writableDatabase.execSQL("DROP TRIGGER reject_legacy_clear")
+        event(success)
+        assertLegacyDebitAppliedOnce()
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerReleasesWithoutChargingAReplacementOpenedAfterTheClaim() {
+        // Before the archive existed, closing the origin deleted its row; a replacement is always newer than the claim.
+        db.writableDatabase.execSQL("DELETE FROM channels WHERE user_channel_id = '7'")
+        reopenLegacyStabilityMarker(claimAgeSecs = 600)
+        db.saveChannel("new-channel", "8", 5.0, 5_000, null, 5_000, 100_000.0)
+        restart()
+        setBooks(5.0, 5_000, "8", "new-channel")
+        node.channels = listOf(channel("8", "new-channel", 5_000))
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = 1_000_000uL))
+        price(100_000.0)
+        event(success)
+        assertNull(db.loadPendingSend())
+        assertReplacementUnchanged()
+        assertLegacyPaymentOnRecordWithoutOrigin()
+        call("runStabilityCheck")
+        assertTrue(backgroundRecovery())
+        assertReplacementUnchanged()
+        assertLegacyPaymentOnRecordWithoutOrigin()
+        assertEquals("after-release",
+            state.nodeService.sendTrackedLightningPayment("lightning", 1_000_000, null) { "after-release" })
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerWithSeveralOlderChannelsDebitsNeither() {
+        db.saveChannel("other-channel", "9", 0.0, 0, null, 1_000, 0.0)
+        prepareUnaccountedLegacyStability()
+        node.channels = listOf(channel(receiver = 19_000), channel("9", "other-channel", 1_000))
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(0L, db.loadChannel("9")!!.backingSats)
+        assertLegacyPaymentOnRecordWithoutOrigin()
+        assertTrue(auditLog().contains("STABILITY_LEGACY_UNATTRIBUTED"))
+        assertNativeSpendAfterLegacyRecovery()
+    }
+
+    @Test fun stabilityUnaccountedLegacyMarkerDebitsNothingWhenTheBooksDoNotReproduceTheClaim() {
+        // Books worth $11 against a $10 target claim exactly $1; a $2 marker did not come from them.
+        prepareUnaccountedLegacyStability(amountMsat = 2_000_000)
+        event(success)
+        assertNull(db.loadPendingSend())
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(2_000_000L, payment().amountMsat)
+        assertLegacyPaymentOnRecordWithoutOrigin()
         assertNativeSpendAfterLegacyRecovery()
     }
 
@@ -605,11 +739,19 @@ class OutgoingPaymentLifecycleTest {
         assertReplacementUnchanged()
     }
 
-    @Test fun stabilityAmbiguousLostIdDoesNotChooseOneOfSeveralKeysends() {
-        closeWithPendingStabilityAndReplace()
-        db.setPendingSendPaymentId("")
-        val candidate = node.payments.single().copy(latestUpdateTimestamp = (System.currentTimeMillis() / 1000).toULong())
-        node.payments = listOf(candidate, candidate.copy(id = "another-send"))
+    @Test fun stabilityAmbiguousLostIdAdoptsWhenEveryCandidateAgreesOnTheOutcome() {
+        val candidate = ambiguousLostIdCandidate()
+        node.payments = listOf(candidate.copy(id = "later-send", latestUpdateTimestamp = candidate.latestUpdateTimestamp + 5u), candidate)
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 10_000L) // the debit is the same whichever keysend was ours
+        assertReplacementUnchanged()
+        assertEquals("7", db.outgoingStabilityOrigin("send")) // the earliest candidate is adopted
+    }
+
+    @Test fun stabilityAmbiguousLostIdWaitsWhileAnyCandidateIsStillInFlight() {
+        val candidate = ambiguousLostIdCandidate()
+        node.payments = listOf(candidate, candidate.copy(id = "another-send", status = PaymentStatus.PENDING))
         assertFalse(backgroundRecovery())
         assertEquals("", db.loadPendingSend()!!.paymentId)
         assertEquals("7", db.loadPendingSend()!!.userChannelId)
@@ -617,10 +759,52 @@ class OutgoingPaymentLifecycleTest {
         assertReplacementUnchanged()
     }
 
-    private fun reopenLegacyStabilityMarker() {
+    @Test fun stabilityAmbiguousLostIdWithConflictingOutcomesReleasesWithoutADebit() {
+        val candidate = ambiguousLostIdCandidate()
+        node.payments = listOf(candidate, candidate.copy(id = "another-send", status = PaymentStatus.FAILED))
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+        assertNoStabilityOriginRecorded()
+        assertTrue(auditLog().contains("STABILITY_MARKER_RELEASED_AMBIGUOUS"))
+    }
+
+    @Test fun stabilityAmbiguousLostIdNeverAdoptsATradeFeeKeysend() {
+        val candidate = ambiguousLostIdCandidate()
+        recordTradeFeePayment("fee")
+        node.payments = listOf(candidate.copy(id = "fee", latestUpdateTimestamp = candidate.latestUpdateTimestamp - 3u), candidate)
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 10_000L)
+        assertReplacementUnchanged()
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+        assertNull(db.outgoingStabilityOrigin("fee"))
+    }
+
+    @Test fun stabilityLostIdWithOnlyATradeFeeKeysendKeepsWaiting() {
+        val candidate = ambiguousLostIdCandidate()
+        recordTradeFeePayment("fee")
+        node.payments = listOf(candidate.copy(id = "fee"))
+        assertFalse(backgroundRecovery())
+        assertEquals("", db.loadPendingSend()!!.paymentId)
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+    }
+
+    private fun recordTradeFeePayment(paymentId: String) = db.writableDatabase.execSQL(
+        "INSERT INTO trades (action, amount_usd, amount_btc, btc_price, trade_payment_id) VALUES ('buy', 1.0, 0.00001, 100000.0, '$paymentId')")
+
+    private fun ambiguousLostIdCandidate(): PaymentDetails {
+        closeWithPendingStabilityAndReplace()
+        db.setPendingSendPaymentId("")
+        return node.payments.single().copy(latestUpdateTimestamp = (System.currentTimeMillis() / 1000).toULong())
+    }
+
+    private fun reopenLegacyStabilityMarker(claimAgeSecs: Long = 0, amountMsat: Long = 1_000_000) {
         db.writableDatabase.execSQL("DROP TABLE pending_stability_send")
         db.writableDatabase.execSQL("CREATE TABLE pending_stability_send (id INTEGER PRIMARY KEY CHECK (id = 1), payment_id TEXT NOT NULL, amount_msat INTEGER NOT NULL, price REAL NOT NULL, created_at INTEGER NOT NULL)")
-        db.writableDatabase.execSQL("INSERT INTO pending_stability_send VALUES (1, 'send', 1000000, 100000.0, strftime('%s','now'))")
+        db.writableDatabase.execSQL("INSERT INTO pending_stability_send VALUES (1, 'send', $amountMsat, 100000.0, strftime('%s','now') - $claimAgeSecs)")
         db.close()
         db = DatabaseService(context)
         field(state, "databaseService").set(state, db)
@@ -666,6 +850,41 @@ class OutgoingPaymentLifecycleTest {
         // A 1,000-sat send plus its capped fees fits entirely in native BTC.
         assertEquals("native-after-upgrade",
             state.nodeService.sendTrackedLightningPayment("lightning", 1_000_000, null) { "native-after-upgrade" })
+    }
+
+    /** The pre-upgrade writer sent the payment but stopped before committing history and the debit. */
+    private fun prepareUnaccountedLegacyStability(amountMsat: Long = 1_000_000) {
+        reopenLegacyStabilityMarker(amountMsat = amountMsat)
+        restart()
+        setBooks(10.0, 11_000)
+        node.channels = listOf(channel(receiver = 19_000)) // 20,000 sats before the 1,000-sat send
+        node.payments = listOf(terminal().copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = amountMsat.toULong()))
+        price(100_000.0)
+        assertNull(db.loadPendingSend()!!.userChannelId)
+        assertLegacyBooksUntouched()
+    }
+
+    private fun assertLegacyBooksUntouched() {
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(0, db.getRecentPayments().count { it.paymentId == "send" })
+        assertNoStabilityOriginRecorded()
+    }
+
+    private fun assertLegacyDebitAppliedOnce() {
+        assertNull(db.loadPendingSend())
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
+        assertEquals("completed", payment().status)
+        assertEquals(1_000_000L, payment().amountMsat)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    private fun assertLegacyPaymentOnRecordWithoutOrigin() {
+        assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
+        assertEquals("completed", payment().status)
+        assertNoStabilityOriginRecorded()
     }
 
     private fun closeWithPendingStabilityAndReplace() {

@@ -10,6 +10,7 @@ import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.roundToLong
 
 data class PaymentPersistenceResult(
@@ -1441,6 +1442,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getLong(0) else null }
     }
 
+    fun pendingOutgoingPaymentAgeSecs(paymentId: String): Long = readableDatabase.rawQuery(
+        "SELECT strftime('%s','now') - created_at FROM payments WHERE payment_id = ? AND status = 'pending'",
+        arrayOf(paymentId)
+    ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+
     /** Transport success alone is insufficient: ordinary sends must finish their accounting. */
     fun hasPendingChannelSend(): Boolean = readableDatabase.rawQuery(
         """
@@ -1598,6 +1604,57 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             delete("pending_stability_send", "id = 1", null) == 1
         }
 
+    /** Bind a marker that predates channel identity to its origin only on evidence: exactly one
+     * saved channel existed at the claim and its books, frozen under the marker, still reproduce
+     * the claimed amount at the claimed price. A replacement is always newer than the claim,
+     * given a device clock that did not move backwards between the two inserts. */
+    fun adoptLegacyStabilityOrigin(expected: PendingStabilitySend): String? = writableDatabase.transaction {
+        if (expected.userChannelId != null || expected.paymentId.isBlank() ||
+            expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction null
+        val candidates = rawQuery("""SELECT user_channel_id, expected_usd, stable_sats FROM channels
+            WHERE user_channel_id IS NOT NULL AND created_at <= ?""",
+            arrayOf(expected.createdAt.toString())).use { c ->
+            val rows = mutableListOf<Triple<String, Double, Long>>()
+            while (c.moveToNext()) rows.add(Triple(c.getString(0), c.getDouble(1), c.getLong(2)))
+            rows
+        }
+        val (origin, expectedUsd, backing) = candidates.singleOrNull() ?: return@transaction null
+        // Same arithmetic as the pre-upgrade tick: surplus in USD, floored to whole sats.
+        val surplusUsd = backing.toDouble() / Constants.SATS_IN_BTC * expected.price - expectedUsd
+        val claimedSats = (surplusUsd / expected.price * Constants.SATS_IN_BTC * 1000.0).toLong() / 1000L
+        if (surplusUsd <= 0.0 || abs(claimedSats - expected.amountMsat / 1000L) > 1L) return@transaction null
+        execSQL("UPDATE pending_stability_send SET user_channel_id = ? WHERE id = 1", arrayOf(origin))
+        origin
+    }
+
+    /** A succeeded legacy payment whose origin cannot be proven: keep it on record and release
+     * the spend barrier without debiting any channel, since a guess could charge a replacement. */
+    fun recordUnattributedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (expected.userChannelId != null || expected.paymentId.isBlank() ||
+                expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction false
+            recordCompletedStabilityHistory(expected)
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
+
+    fun outgoingStabilityOrigin(paymentId: String): String? = readableDatabase.rawQuery(
+        "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?", arrayOf(paymentId)
+    ).use { if (it.moveToFirst()) it.getString(0) else null }
+
+    private fun SQLiteDatabase.recordCompletedStabilityHistory(pending: PendingStabilitySend) {
+        val values = ContentValues().apply {
+            put("payment_id", pending.paymentId)
+            put("payment_type", "stability")
+            put("direction", "sent")
+            put("amount_msat", pending.amountMsat)
+            put("amount_usd", pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price)
+            put("btc_price", pending.price)
+            put("status", "completed")
+        }
+        if (update("payments", values, "payment_id = ?", arrayOf(pending.paymentId)) == 0)
+            insertOrThrow("payments", null, values)
+    }
+
     fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean = writableDatabase.transaction {
         if (loadPendingSend() != expected || expected.paymentId.isNotEmpty()) return@transaction false
         setPendingSendPaymentId(paymentId)
@@ -1638,19 +1695,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             // Null archived backing means unknown books; record the known payment without
             // fabricating an allocation or borrowing one from a replacement channel.
-            if (!alreadyRecorded) {
-                val values = ContentValues().apply {
-                    put("payment_id", pending.paymentId)
-                    put("payment_type", "stability")
-                    put("direction", "sent")
-                    put("amount_msat", pending.amountMsat)
-                    put("amount_usd", pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price)
-                    put("btc_price", pending.price)
-                    put("status", "completed")
-                }
-                if (update("payments", values, "payment_id = ?", arrayOf(pending.paymentId)) == 0)
-                    insertOrThrow("payments", null, values)
-            }
+            if (!alreadyRecorded) recordCompletedStabilityHistory(pending)
             execSQL("INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
                 arrayOf(pending.paymentId, origin))
             delete("pending_stability_send", "id = 1", null)

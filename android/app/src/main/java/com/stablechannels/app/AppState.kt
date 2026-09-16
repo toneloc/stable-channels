@@ -610,9 +610,14 @@ class AppState(private val context: Context) : ViewModel() {
 
     private fun recoverPendingLightningPaymentsLocked() {
         val db = databaseService ?: return
-        val repaired = LightningPaymentRecovery.reconcilePending(db) { paymentId ->
+        val node = nodeService.node
+        // Only a running node's store can prove that a record is missing.
+        val unknownToLdk = { paymentId: String ->
+            node != null && nodeService.isRunning && try { node.payment(paymentId) == null } catch (_: Exception) { false }
+        }
+        val repaired = LightningPaymentRecovery.reconcilePending(db, unknownToLdk) { paymentId ->
             try {
-                nodeService.node?.payment(paymentId)?.let { payment ->
+                node?.payment(paymentId)?.let { payment ->
                     when (payment.status) {
                         PaymentStatus.SUCCEEDED -> LightningPaymentResolution(true, payment.feePaidMsat?.toLong() ?: 0L)
                         PaymentStatus.FAILED -> LightningPaymentResolution(false)
@@ -3150,8 +3155,10 @@ class AppState(private val context: Context) : ViewModel() {
             val failed = pending.paymentId.isNotBlank() && node.payment(pending.paymentId)?.status == PaymentStatus.FAILED
             synchronized(booksLock) {
                 val resolved = OutgoingStabilityPaymentRecovery.reconcile(db, node, nodeService.isRunning)
-                if (resolved && pending.userChannelId != null && pending.userChannelId == _stableChannel.value.userChannelId &&
-                    db.loadChannel(pending.userChannelId) != null) {
+                // A legacy marker learns its origin only during recovery; the ledger keeps it.
+                val origin = pending.userChannelId ?: db.outgoingStabilityOrigin(pending.paymentId)
+                if (resolved && origin != null && origin == _stableChannel.value.userChannelId &&
+                    db.loadChannel(origin) != null) {
                     // A terminal result for an old channel must never publish over a replacement.
                     publishBooksFromDB()
                     if (failed) _stableChannel.update { it.copy(lastStabilityPayment = 0L) }

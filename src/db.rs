@@ -2411,6 +2411,19 @@ impl Database {
     /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
     /// An optimistic stability debit is not confirmation. Keep user channel spends blocked until
     /// the payment event and its accounting have both reached a terminal state (including restart).
+    /// Sent Lightning rows still `pending`, oldest first, as (payment_id, created_at).
+    pub fn pending_sent_lightning_payments(&self) -> SqliteResult<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, created_at FROM payments
+             WHERE payment_id IS NOT NULL AND payment_id != '' AND direction = 'sent'
+               AND status = 'pending' AND payment_type = 'lightning'
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
     pub fn has_pending_channel_send(&self) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(

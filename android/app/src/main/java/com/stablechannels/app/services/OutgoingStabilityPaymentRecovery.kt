@@ -11,11 +11,22 @@ object OutgoingStabilityPaymentRecovery {
     fun reconcile(db: DatabaseService, node: Node, channelsAuthoritative: Boolean): Boolean {
         var pending = db.loadPendingSend() ?: return true
         if (pending.paymentId.isEmpty()) {
-            val candidates = node.listPayments().filter { matchesUnassigned(pending, it) }
+            // A trade fee keysend is never the stability payment, whatever its amount.
+            val candidates = node.listPayments().filter { matchesUnassigned(pending, it) && !db.tradePaymentExists(it.id) }
             // Amount/time matching is a legacy crash-recovery fallback, not an identity proof.
-            // Never choose arbitrarily among multiple possible sends.
-            if (candidates.size > 1) return false
-            val candidate = candidates.singleOrNull()
+            // Every candidate carries the claimed amount, so one shared terminal outcome gives
+            // the same accounting whichever was ours and the earliest is adopted. Conflicting
+            // outcomes release the barrier without a debit: either guess could be wrong.
+            val candidate = candidates.singleOrNull() ?: when {
+                candidates.isEmpty() -> null
+                candidates.any { it.status == PaymentStatus.PENDING } -> return false
+                candidates.all { it.status == candidates.first().status } ->
+                    candidates.minBy { it.latestUpdateTimestamp }
+                else -> return db.clearPendingSend(pending).also { released ->
+                    if (released) AuditService.log("STABILITY_MARKER_RELEASED_AMBIGUOUS", mapOf(
+                        "amount_msat" to pending.amountMsat, "candidates" to candidates.joinToString(",") { it.id }))
+                }
+            }
             if (candidate == null) {
                 return if (System.currentTimeMillis() / 1000 - pending.createdAt > 120) {
                     db.clearPendingSend(pending)
@@ -33,10 +44,19 @@ object OutgoingStabilityPaymentRecovery {
             PaymentStatus.FAILED -> return db.clearPendingSend(pending)
             PaymentStatus.SUCCEEDED -> Unit
         }
-        // An old marker may outlive its atomic history/backing commit. Clear only that proven
-        // accounting; otherwise preserve the unknown-origin obligation without guessing a channel.
-        val origin = pending.userChannelId?.takeIf { it.isNotBlank() }
-            ?: return db.clearAccountedLegacyStabilitySend(pending)
+        // An old marker may outlive its atomic history/backing commit, or precede it entirely.
+        // Clear proven accounting, debit only a proven origin, and otherwise keep the payment on
+        // record while releasing the barrier: never guess a channel.
+        val origin = pending.userChannelId?.takeIf { it.isNotBlank() } ?: run {
+            if (db.clearAccountedLegacyStabilitySend(pending)) return true
+            val adopted = db.adoptLegacyStabilityOrigin(pending)
+                ?: return db.recordUnattributedLegacyStabilitySend(pending).also { released ->
+                    if (released) AuditService.log("STABILITY_LEGACY_UNATTRIBUTED", mapOf(
+                        "payment_id" to pending.paymentId, "amount_msat" to pending.amountMsat, "price" to pending.price))
+                }
+            pending = pending.copy(userChannelId = adopted)
+            adopted
+        }
         val closed = channelsAuthoritative && node.listChannels().none { it.userChannelId == origin }
         return db.completePendingStabilitySend(pending, channelClosed = closed)
     }

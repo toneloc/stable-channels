@@ -1006,6 +1006,14 @@ impl UserApp {
                     .ok()
                     .filter(|price| *price > 0.0);
 
+                // A stale `pending` row would otherwise hold the spend barrier forever, and a
+                // native-covered send needs no price, so this runs through a price outage too.
+                if let Err(e) = stable_channels::stable::reconcile_pending_sent_lightning(
+                    &db, &node_arc.list_payments(), current_unix_time(),
+                ) {
+                    audit_event("PENDING_SEND_RECOVERY_FAILED", json!({ "error": e.to_string() }));
+                }
+
                 // Automatic stability payments require a freshly validated consensus price.
                 // The last trusted cached price remains available to the UI during an outage.
                 if let Some(price) = price {
@@ -1016,7 +1024,10 @@ impl UserApp {
                         if !node_arc.list_channels().is_empty()
                             && !splice_flag.load(std::sync::atomic::Ordering::Relaxed)
                             && !stable_channels::stable::has_pending_outbound_lightning_payment(&node_arc)
-                            && !db.has_pending_channel_send().unwrap_or(true)
+                            && !db.has_pending_channel_send().unwrap_or_else(|e| {
+                                audit_event("STABILITY_SKIP", json!({ "reason": "pending_send_check_failed", "error": e.to_string() }));
+                                true
+                            })
                         {
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                             if stable_channels::stable::repair_overbacked_allocation_if_safe(
@@ -1554,6 +1565,7 @@ impl UserApp {
 
     fn with_settled_channel<T, E: std::fmt::Display>(
         &self,
+        maximum_debit_sats: Option<u64>,
         send: impl FnOnce() -> Result<T, E>,
     ) -> Result<T, String> {
         // The stability worker holds this same lock through check/send/persist. Keep it until
@@ -1568,13 +1580,19 @@ impl UserApp {
         if !update_balances(&self.node, &mut sc).0 {
             return Err("Could not refresh the channel balance. Please try again shortly.".into());
         }
-        stable::check_outgoing_allocation(&sc, get_fresh_cached_price_no_fetch())?;
+        stable::check_outgoing_allocation(&sc, get_fresh_cached_price_no_fetch(), maximum_debit_sats)?;
         send().map_err(|e| e.to_string())
     }
 
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-            Ok(invoice) => match self.with_settled_channel(|| self.node.bolt11_payment().send(&invoice, None)) {
+            Ok(invoice) => match self.with_settled_channel(
+                stable::maximum_lightning_debit_sats(invoice.amount_milli_satoshis().unwrap_or(0)),
+                || self.node.bolt11_payment().send(
+                    &invoice,
+                    Some(stable::route_parameters(invoice.amount_milli_satoshis().unwrap_or(0))),
+                ),
+            ) {
                 Ok(_payment_id) => {
                     let amount_text = invoice
                         .amount_milli_satoshis()
@@ -1647,13 +1665,14 @@ impl UserApp {
                             }
                         }
                     };
-                    let result = self.with_settled_channel(|| {
+                    let result = self.with_settled_channel(stable::maximum_lightning_debit_sats(amount_msat), || {
+                        let route = Some(stable::route_parameters(amount_msat));
                         if invoice_amount_msat.is_some() {
-                            self.node.bolt11_payment().send(&invoice, None)
+                            self.node.bolt11_payment().send(&invoice, route)
                         } else {
                             self.node
                                 .bolt11_payment()
-                                .send_using_amount(&invoice, amount_msat, None)
+                                .send_using_amount(&invoice, amount_msat, route)
                         }
                     });
                     match result {
@@ -1726,13 +1745,15 @@ impl UserApp {
                             return false;
                         }
                     };
-                    match self.with_settled_channel(|| self.node.bolt12_payment().send_using_amount(
-                        &offer,
-                        amount_msat,
-                        None,
-                        None,
-                        None,
-                    )) {
+                    match self.with_settled_channel(stable::maximum_lightning_debit_sats(amount_msat), || {
+                        self.node.bolt12_payment().send_using_amount(
+                            &offer,
+                            amount_msat,
+                            None,
+                            None,
+                            Some(stable::route_parameters(amount_msat)),
+                        )
+                    }) {
                         Ok(payment_id) => {
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
@@ -1868,7 +1889,8 @@ impl UserApp {
                                 }
                             };
 
-                            match self.with_settled_channel(|| {
+                            // LDK exposes no splice fee bound, so the whole allocation is checked.
+                            match self.with_settled_channel(None, || {
                                 let result = self.node.splice_out(
                                     &ch.user_channel_id,
                                     ch.counterparty_node_id,
@@ -4443,6 +4465,9 @@ impl UserApp {
                                 let _ =
                                     self.db
                                         .update_payment_status(p.payment_db_id, "failed", None);
+                            } else if let Some(pid) = payment_id {
+                                // A restart empties the map; the row must still fail.
+                                let _ = self.db.update_payment_status_by_pid(&format!("{pid}"), "failed", None);
                             }
 
                             audit_event(

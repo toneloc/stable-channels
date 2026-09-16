@@ -1,4 +1,6 @@
 use crate::audit::audit_event;
+use crate::db::Database;
+use rusqlite::Result as SqliteResult;
 use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
     STABILITY_PAYMENT_AUTH_TTL_SECS, STABILITY_PAYMENT_CLOCK_SKEW_SECS,
@@ -7,6 +9,8 @@ use crate::constants::{
 };
 use crate::price_feeds::get_fresh_cached_price_no_fetch;
 use crate::types::{Bitcoin, StableChannel, USD};
+use ldk_node::lightning::routing::router::RouteParametersConfig;
+use ldk_node::payment::{PaymentDetails, PaymentStatus};
 use ldk_node::Node;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -449,15 +453,80 @@ fn allocation_drift_is_actionable(
     drift_usd >= STABILITY_THRESHOLD_USD && drift_percent >= STABILITY_THRESHOLD_PERCENT
 }
 
-/// Admit a channel spend only after actionable drift has settled. Check the complete allocation,
-/// rather than just the requested amount: routing and splice fees also consume channel funds.
-/// The caller must serialize this check with settlement submission and reject pending payments.
-pub fn check_outgoing_allocation(sc: &StableChannel, price: f64) -> Result<(), &'static str> {
+/// A sent row LDK has no record of after this long never left the node and is failed.
+pub const LOST_LDK_RECORD_TIMEOUT_SECS: i64 = 600;
+
+/// Resolve `pending` sent rows against LDK's payment store. A failure delivered to a process
+/// that never sent the payment, or a record LDK has lost, must not block channel spends forever.
+/// Success waits for the redelivered event, which carries the reconciliation.
+pub fn reconcile_pending_sent_lightning(
+    db: &Database,
+    payments: &[PaymentDetails],
+    now_unix: i64,
+) -> SqliteResult<usize> {
+    let mut resolved = 0;
+    for (payment_id, created_at) in db.pending_sent_lightning_payments()? {
+        let status = payments.iter().find(|p| format!("{}", p.id) == payment_id).map(|p| p.status);
+        let reason = match status {
+            Some(PaymentStatus::Failed) => "ldk_failed",
+            None if now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS => "no_ldk_record",
+            _ => continue,
+        };
+        if db.update_payment_status_by_pid(&payment_id, "failed", None)? > 0 {
+            resolved += 1;
+            audit_event(
+                "PENDING_SEND_FAILED_ON_RECOVERY",
+                json!({ "payment_id": payment_id, "reason": reason }),
+            );
+        }
+    }
+    Ok(resolved)
+}
+
+/// Same fee budget as LDK's default, 1% + 50 sats, passed explicitly so routing enforces it.
+pub fn lightning_fee_limit_msat(amount_msat: u64) -> u64 {
+    amount_msat / 100 + 50_000
+}
+
+/// Route with the fee budget the allocation guard admitted the payment under.
+pub fn route_parameters(amount_msat: u64) -> RouteParametersConfig {
+    RouteParametersConfig {
+        max_total_routing_fee_msat: Some(lightning_fee_limit_msat(amount_msat)),
+        ..RouteParametersConfig::default()
+    }
+}
+
+/// The most sats a Lightning send can remove from the channel, bounded fees included.
+pub fn maximum_lightning_debit_sats(amount_msat: u64) -> Option<u64> {
+    if amount_msat == 0 {
+        return None; // unknown amount: backing remains reachable
+    }
+    let total = amount_msat.checked_add(lightning_fee_limit_msat(amount_msat))?;
+    Some(total.div_ceil(1000))
+}
+
+/// A shortfall is owed BY the LSP. It is not unpaid LSP surplus at risk of withdrawal.
+fn payable_surplus_is_actionable(backing_sats: u64, expected_usd: f64, price: f64) -> bool {
+    let surplus_usd = backing_sats as f64 / SATS_IN_BTC as f64 * price - expected_usd;
+    if expected_usd < 0.01 {
+        return surplus_usd >= STABILITY_THRESHOLD_USD;
+    }
+    surplus_usd >= STABILITY_THRESHOLD_USD
+        && surplus_usd / expected_usd * 100.0 >= STABILITY_THRESHOLD_PERCENT
+}
+
+/// Admit a channel spend only after payable surplus has settled. Native is a sat allocation, so
+/// neither drift nor a price outage can block a spend whose amount AND bounded fees fit inside
+/// it. Without a bound (splices), the complete allocation is checked because fees also consume
+/// channel funds. The caller must serialize this check with settlement submission and reject
+/// pending payments.
+pub fn check_outgoing_allocation(
+    sc: &StableChannel,
+    price: f64,
+    maximum_debit_sats: Option<u64>,
+) -> Result<(), &'static str> {
     if sc.expected_usd.0 == 0.0 && sc.backing_sats == 0 {
         return Ok(());
-    }
-    if !price.is_finite() || price <= 0.0 {
-        return Err("Waiting for a fresh price before sending. Please try again shortly.");
     }
     if !sc.expected_usd.0.is_finite()
         || sc.expected_usd.0 < 0.0
@@ -465,7 +534,17 @@ pub fn check_outgoing_allocation(sc: &StableChannel, price: f64) -> Result<(), &
     {
         return Err("Waiting for the channel balance to update. Please try again shortly.");
     }
-    if allocation_drift_is_actionable(sc.backing_sats, sc.expected_usd.0, price) {
+    let native_sats = sc.stable_receiver_btc.sats - sc.backing_sats;
+    if maximum_debit_sats.is_some_and(|debit| debit <= native_sats) {
+        return Ok(());
+    }
+    if sc.backing_sats == 0 {
+        return Ok(());
+    }
+    if !price.is_finite() || price <= 0.0 {
+        return Err("Waiting for a fresh price before sending. Please try again shortly.");
+    }
+    if payable_surplus_is_actionable(sc.backing_sats, sc.expected_usd.0, price) {
         return Err("A stability payment must settle before sending. Please try again shortly.");
     }
     Ok(())
@@ -1145,30 +1224,93 @@ mod tests {
                 assert_eq!(sc.native_channel_btc.sats, 0);
                 assert!(reconcile_outgoing(&mut sc, 100_000.0).is_none());
                 assert!(repair_overbacked_allocation(&mut sc, 100_000.0).is_none());
-                assert!(check_outgoing_allocation(&sc, 100_000.0).is_err());
+                assert!(check_outgoing_allocation(&sc, 100_000.0, None).is_err());
                 assert_eq!(backing_after_user_to_lsp_stability(10_000, 0.0, 100_000.0, 10_000, 0), Some(0));
             }
         }
     }
 
     #[test]
-    fn channel_spends_wait_for_settlement_and_a_trusted_price() {
+    fn channel_spends_wait_for_payable_surplus_to_settle_and_a_trusted_price() {
         let mut sc = test_sc(10.0, 100_000.0, 100_000);
-        for price in [110_000.0, 90_000.0, 0.0, f64::NAN, f64::INFINITY] {
-            assert!(check_outgoing_allocation(&sc, price).is_err());
+        for price in [110_000.0, 0.0, f64::NAN, f64::INFINITY] {
+            assert!(check_outgoing_allocation(&sc, price, None).is_err());
         }
-        assert!(check_outgoing_allocation(&sc, 100_000.0).is_ok());
-        assert!(check_outgoing_allocation(&sc, 102_000.0).is_ok(), "sub-$0.25 deadband remains allowed");
+        assert!(check_outgoing_allocation(&sc, 90_000.0, None).is_ok(), "the LSP owes the shortfall");
+        assert!(check_outgoing_allocation(&sc, 100_000.0, None).is_ok());
+        assert!(check_outgoing_allocation(&sc, 102_000.0, None).is_ok(), "sub-$0.25 deadband remains allowed");
         sc.expected_usd = USD(0.00085);
         sc.backing_sats = 477;
-        assert!(check_outgoing_allocation(&sc, 105_000.0).is_err());
+        assert!(check_outgoing_allocation(&sc, 105_000.0, None).is_err());
         sc.expected_usd = USD(0.0);
         sc.backing_sats = 249;
-        assert!(check_outgoing_allocation(&sc, 100_000.0).is_ok());
+        assert!(check_outgoing_allocation(&sc, 100_000.0, None).is_ok());
         sc.backing_sats = 250;
-        assert!(check_outgoing_allocation(&sc, 100_000.0).is_err());
+        assert!(check_outgoing_allocation(&sc, 100_000.0, None).is_err());
         sc.backing_sats = 0;
-        assert!(check_outgoing_allocation(&sc, 0.0).is_ok(), "native-only wallet needs no settlement price");
+        assert!(check_outgoing_allocation(&sc, 0.0, None).is_ok(), "native-only wallet needs no settlement price");
+    }
+
+    #[test]
+    fn native_spends_including_fees_bypass_surplus_and_price_checks() {
+        // 10,000 backing sats and 90,000 native sats.
+        let sc = test_sc(10.0, 100_000.0, 100_000);
+        for price in [110_000.0, 90_000.0, 0.0, f64::NAN, f64::INFINITY] {
+            assert!(check_outgoing_allocation(&sc, price, Some(90_000)).is_ok());
+        }
+        assert!(check_outgoing_allocation(&sc, 110_000.0, Some(90_001)).is_err());
+        assert!(check_outgoing_allocation(&sc, 0.0, Some(90_001)).is_err());
+        assert_eq!(maximum_lightning_debit_sats(0), None);
+        assert_eq!(maximum_lightning_debit_sats(1_000_000), Some(1_060));
+        assert_eq!(maximum_lightning_debit_sats(1_000_001), Some(1_061));
+        assert_eq!(route_parameters(1_000_000).max_total_routing_fee_msat, Some(60_000));
+    }
+
+    #[test]
+    fn zero_target_surplus_is_protected_but_native_sats_remain_spendable() {
+        let mut sc = test_sc(0.0, 100_000.0, 3_000);
+        sc.backing_sats = 1_000;
+        assert!(check_outgoing_allocation(&sc, 0.0, Some(2_000)).is_ok());
+        assert!(check_outgoing_allocation(&sc, 100_000.0, Some(2_001)).is_err());
+    }
+
+    #[test]
+    fn pending_sent_rows_resolve_against_ldk_after_restart() {
+        use ldk_node::lightning::ln::channelmanager::PaymentId;
+        use ldk_node::lightning::types::payment::PaymentHash;
+        use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+        fn details(id: u8, status: PaymentStatus) -> PaymentDetails {
+            PaymentDetails {
+                id: PaymentId([id; 32]),
+                kind: PaymentKind::Spontaneous { hash: PaymentHash([0; 32]), preimage: None },
+                amount_msat: Some(1_000_000),
+                fee_paid_msat: None,
+                direction: PaymentDirection::Outbound,
+                status,
+                latest_update_timestamp: 0,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Database::open(dir.path()).unwrap();
+        for id in [1u8, 2, 3] {
+            db.record_payment(Some(&format!("{}", PaymentId([id; 32]))), "lightning", "sent",
+                1_000_000, None, None, None, "pending", None, None).unwrap();
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let ldk = [details(1, PaymentStatus::Failed), details(2, PaymentStatus::Pending)];
+        // The failure LDK reports is applied even though this process never sent the payment.
+        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, now).unwrap(), 1);
+        assert!(db.has_pending_channel_send().unwrap(), "in-flight and unknown rows still wait");
+        // A row LDK has no record of is failed only once the grace period has passed.
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, later).unwrap(), 1);
+        assert!(db.has_pending_channel_send().unwrap(), "the in-flight payment keeps blocking");
+        // Success waits for the redelivered event, which carries the reconciliation.
+        let ldk = [details(2, PaymentStatus::Succeeded)];
+        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, later).unwrap(), 0);
+        assert!(db.has_pending_channel_send().unwrap());
+        db.update_payment_status_by_pid(&format!("{}", PaymentId([2; 32])), "completed", None).unwrap();
+        assert!(!db.has_pending_channel_send().unwrap());
     }
 
     #[test]
