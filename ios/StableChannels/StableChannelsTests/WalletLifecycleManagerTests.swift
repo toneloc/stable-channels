@@ -436,6 +436,8 @@ final class BIP39Tests: XCTestCase {
     func testWordListIntegrity() {
         XCTAssertEqual(BIP39WordList.english.count, 2048)
         XCTAssertEqual(BIP39WordList.english.first, "abandon")
+        XCTAssertEqual(BIP39WordList.english.last, "zoo")
+        XCTAssertEqual(BIP39WordList.english, BIP39WordList.english.sorted())
         XCTAssertEqual(Set(BIP39WordList.english).count, 2048)
     }
 }
@@ -515,27 +517,54 @@ final class ResetAndPreflightGuardTests: XCTestCase {
     func testResetClosesAndReplacesDatabaseServicesCleanly() async throws {
         let appState = await AppState()
         try await appState.initializeDatabaseServices()
+        weak var weakDb: DatabaseService?
+        weak var weakSpv: SPVHeaderChainService?
         await MainActor.run {
+            weakDb = appState.databaseService
+            weakSpv = appState.spvHeaderChainService
             XCTAssertNotNil(appState.databaseService, "Database service should be initialized")
+            XCTAssertNotNil(appState.spvHeaderChainService, "SPVHeaderChainService should be initialized")
             XCTAssertNotNil(appState.nodeService.databaseService, "NodeService database service should be set")
             XCTAssertNotNil(appState.tradeService, "TradeService should be set")
 
             // Test teardown: dropDatabaseServices should cleanly release handles
             appState.dropDatabaseServices()
             XCTAssertNil(appState.databaseService, "Database service should be dropped")
+            XCTAssertNil(appState.spvHeaderChainService, "SPVHeaderChainService should be dropped")
             XCTAssertNil(appState.nodeService.databaseService, "NodeService database service should be dropped")
             XCTAssertNil(appState.tradeService, "TradeService should be dropped")
             XCTAssertNil(appState.confirmationPollingService, "ConfirmationPollingService should be dropped")
         }
 
+        XCTAssertNil(weakDb, "DatabaseService handle must be deallocated after dropDatabaseServices")
+        XCTAssertNil(weakSpv, "SPVHeaderChainService handle must be deallocated after dropDatabaseServices")
+
         // Test reinitialization: initializeDatabaseServices should allocate fresh working services
         try await appState.initializeDatabaseServices()
         await MainActor.run {
             XCTAssertNotNil(appState.databaseService, "Database service should be freshly recreated")
+            XCTAssertNotNil(appState.spvHeaderChainService, "SPVHeaderChainService should be freshly recreated")
             XCTAssertNotNil(appState.nodeService.databaseService, "NodeService should have fresh database reference")
             XCTAssertNotNil(appState.tradeService, "TradeService should be freshly recreated")
             // Clean up at end of test
             appState.dropDatabaseServices()
+        }
+    }
+
+    func testStartupStateRejectsUnreadablePlaintextSeed() throws {
+        let seedPhrasePath = tempDirURL.appendingPathComponent("seed_phrase")
+        try testMnemonic.write(to: seedPhrasePath, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: seedPhrasePath.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: seedPhrasePath.path)
+        }
+
+        let state = manager.detectStartupState()
+        switch state {
+        case .storageError:
+            break // Expected: fail closed on unreadable file
+        default:
+            XCTFail("Expected .storageError for unreadable seed_phrase, got \(state)")
         }
     }
 
