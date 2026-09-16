@@ -105,16 +105,31 @@ class AppState {
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
+    let lifecycleManager: WalletLifecycleManager
 
     init(
         nodeService: NodeService? = nil,
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
-        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil
+        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
+        lifecycleManager: WalletLifecycleManager? = nil
     ) {
         self.nodeService = nodeService ?? (NSClassFromString("XCTestCase") != nil ? NodeService() : .shared)
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
+
+        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        AuditService.setLogPath(auditPath)
+
+        self.lifecycleManager = lifecycleManager ?? WalletLifecycleManager(
+            validator: { mnemonic in
+                AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            }
+        )
+
+        WalletKeychainService.onLog = { event, data in
+            AuditService.log(event, data: data)
+        }
     }
 
     // MARK: - State
@@ -731,6 +746,36 @@ class AppState {
             ud?.removeObject(forKey: "restore_in_progress")
             ud?.removeObject(forKey: "node_id")
         }
+    }
+
+    func resetWalletAndStartFresh(lockTimeout: TimeInterval = 35) async throws {
+        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: lockTimeout)) {
+            throw WalletRestoreError.walletBusy
+        }
+
+        stabilityTimer?.cancel()
+        stabilityTimer = nil
+        txidResolutionService.cancelAllLaunchers()
+        nodeService.stop()
+        resetInMemoryWalletState()
+        dropDatabaseServices()
+
+        do {
+            try AppState.wipeAllWalletState(wipePending: true)
+        } catch {
+            NodeDirLock.shared.release()
+            await MainActor.run {
+                phase = .error("Reset failed: \(error.localizedDescription)")
+            }
+            throw error
+        }
+
+        NodeDirLock.shared.release()
+
+        await MainActor.run {
+            phase = .loading
+        }
+        await start()
     }
 
     /// Derive the node_id a mnemonic maps to by building (never starting) a
