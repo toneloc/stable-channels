@@ -4,6 +4,7 @@ import android.content.Context
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,11 +16,12 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
-/** Covers the guards in updatePaymentTxid() that keep concurrent/racing close-txid resolvers
- *  (CloseTxidResolver, the ChannelClosed event handler, and detectOnchainDeposit's close-payout
- *  path) from attaching the same txid to two rows or overwriting an already-resolved row. */
+/**
+ * Covers the guards in updatePaymentTxid() that keep concurrent/racing close-txid resolvers
+ * (CloseTxidResolver, the ChannelClosed event handler, and detectOnchainDeposit's close-payout
+ * path) from attaching the same txid to two rows or overwriting an already-resolved row.
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class OnchainReceiveTxidDatabaseServiceTest {
@@ -42,13 +44,22 @@ class OnchainReceiveTxidDatabaseServiceTest {
     fun txidAlreadyUsedByAnotherRowIsNotReassigned() {
         val service = DatabaseService(context)
         service.recordPayment(
-            paymentId = "row-a", paymentType = "onchain", direction = "received",
-            amountMsat = 100_000, status = "completed", txid = "shared-tx"
+            paymentId = "row-a",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 100_000,
+            status = "completed",
+            txid = "shared-tx",
         )
-        val rowB = service.recordPayment(
-            paymentId = "row-b", paymentType = "onchain", direction = "received",
-            amountMsat = 100_000, status = "pending", txid = null
-        )
+        val rowB =
+            service.recordPayment(
+                paymentId = "row-b",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 100_000,
+                status = "pending",
+                txid = null,
+            )
 
         assertFalse(service.updatePaymentTxid("row-b", "shared-tx"))
         assertNull(payment(service, rowB).txid)
@@ -58,10 +69,15 @@ class OnchainReceiveTxidDatabaseServiceTest {
     @Test
     fun alreadyResolvedRowIsNotOverwritten() {
         val service = DatabaseService(context)
-        val rowId = service.recordPayment(
-            paymentId = "row-a", paymentType = "onchain", direction = "received",
-            amountMsat = 50_000, status = "pending", txid = "original-tx"
-        )
+        val rowId =
+            service.recordPayment(
+                paymentId = "row-a",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "pending",
+                txid = "original-tx",
+            )
 
         assertFalse(service.updatePaymentTxid("row-a", "different-tx"))
         assertEquals("original-tx", payment(service, rowId).txid)
@@ -71,10 +87,16 @@ class OnchainReceiveTxidDatabaseServiceTest {
     @Test
     fun unclaimedTxidIsAssigned() {
         val service = DatabaseService(context)
-        val rowId = service.recordPayment(
-            paymentId = "row-a", paymentType = "onchain", direction = "received",
-            amountMsat = 50_000, status = "pending", txid = null, address = "bc1qtracked"
-        )
+        val rowId =
+            service.recordPayment(
+                paymentId = "row-a",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "pending",
+                txid = null,
+                address = "bc1qtracked",
+            )
 
         assertTrue(service.updatePaymentTxid("row-a", "fresh-tx"))
         val updated = payment(service, rowId)
@@ -92,13 +114,22 @@ class OnchainReceiveTxidDatabaseServiceTest {
         // row's own primary key (`id`), which is never null.
         val service = DatabaseService(context)
         service.recordPayment(
-            paymentId = null, paymentType = "onchain", direction = "received",
-            amountMsat = 75_000, status = "completed", txid = "claimed-tx"
+            paymentId = null,
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 75_000,
+            status = "completed",
+            txid = "claimed-tx",
         )
-        val rowB = service.recordPayment(
-            paymentId = "row-b", paymentType = "onchain", direction = "received",
-            amountMsat = 75_000, status = "pending", txid = null
-        )
+        val rowB =
+            service.recordPayment(
+                paymentId = "row-b",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 75_000,
+                status = "pending",
+                txid = null,
+            )
 
         assertFalse(service.updatePaymentTxid("row-b", "claimed-tx"))
         assertNull(payment(service, rowB).txid)
@@ -109,8 +140,9 @@ class OnchainReceiveTxidDatabaseServiceTest {
         service.getRecentPayments(100).single { it.id == id }
 
     private fun deleteDatabaseFiles() {
-        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
-            .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
+        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
+            if (file.exists()) assertTrue(file.delete())
+        }
         assertFalse(dbFile.exists())
     }
 }

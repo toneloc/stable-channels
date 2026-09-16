@@ -1,34 +1,31 @@
 package com.stablechannels.app.ui.settings
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
-import java.io.File
+import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
-import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
+import com.stablechannels.app.util.ClipboardUtils
+import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.satsFormatted
-import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.stablechannels.app.util.Constants
-import com.stablechannels.app.util.ClipboardUtils
 import org.lightningdevkit.ldknode.Network
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -56,9 +53,10 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
 
     val channels = appState.nodeService.channels
     val hasReadyChannel = channels.any { it.isChannelReady }
-    val stabilityResult = remember(sc, btcPrice) {
-        StabilityService.checkStabilityAction(sc, btcPrice)
-    }
+    val stabilityResult =
+        remember(sc, btcPrice) {
+            StabilityService.checkStabilityAction(sc, btcPrice)
+        }
 
     /** Wipe + restart the node with the entered seed (post restore-guard). */
     fun performRestore(input: String) {
@@ -81,18 +79,13 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(
             text = "Settings",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(16.dp))
 
@@ -103,11 +96,12 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(8.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    val statusColor = if (appState.nodeService.isRunning) Color(0xFF10B981) else Color.Gray
+                    val statusColor =
+                        if (appState.nodeService.isRunning) Color(0xFF10B981) else Color.Gray
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         color = statusColor,
-                        modifier = Modifier.size(8.dp)
+                        modifier = Modifier.size(8.dp),
                     ) {}
                     Spacer(Modifier.width(8.dp))
                     Text(if (appState.nodeService.isRunning) "Running" else "Stopped")
@@ -119,12 +113,16 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Text(
                         text = "${nodeId.take(8)}...${nodeId.takeLast(8)}",
                         fontFamily = FontFamily.Monospace,
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(4.dp))
-                    TextButton(onClick = {
-                        clipboardManager.setText(AnnotatedString(nodeId))
-                    }) { Text("Copy Node ID") }
+                    TextButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(nodeId))
+                        }
+                    ) {
+                        Text("Copy Node ID")
+                    }
                 } else {
                     TextButton(onClick = { showNodeId = true }) { Text("Show Node ID") }
                 }
@@ -149,13 +147,18 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         if (txid.isNotEmpty()) {
                             Spacer(Modifier.height(4.dp))
                             DetailRow("Funding Tx", "${txid.take(8)}...${txid.takeLast(8)}")
-                            TextButton(onClick = {
-                                val intent = android.content.Intent(
-                                    android.content.Intent.ACTION_VIEW,
-                                    android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}")
-                                )
-                                context.startActivity(intent)
-                            }) {
+                            TextButton(
+                                onClick = {
+                                    val intent =
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            android.net.Uri.parse(
+                                                "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                            ),
+                                        )
+                                    context.startActivity(intent)
+                                }
+                            ) {
                                 Text("View on explorer", fontSize = 12.sp)
                             }
                         }
@@ -177,7 +180,10 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     DetailRow("Native BTC", sc.nativeChannelBTC.formatted)
                     DetailRow("Stability", stabilityResult.action.value)
                     if (stabilityResult.percentFromPar > 0) {
-                        DetailRow("% From Par", String.format("%.4f%%", stabilityResult.percentFromPar))
+                        DetailRow(
+                            "% From Par",
+                            String.format("%.4f%%", stabilityResult.percentFromPar),
+                        )
                     }
 
                     Spacer(Modifier.height(4.dp))
@@ -185,7 +191,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Text(
                         "Counterparty: ${cpk.take(8)}...${cpk.takeLast(8)}",
                         style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = FontFamily.Monospace,
                     )
                 }
             }
@@ -197,8 +203,13 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             OutlinedButton(
                 onClick = { showCloseConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-            ) { Text("Close channel") }
+                colors =
+                    ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error
+                    ),
+            ) {
+                Text("Close channel")
+            }
         }
 
         // On-chain
@@ -220,36 +231,54 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Text("Push Notifications", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
 
-                val notifEnabled = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                    androidx.core.content.ContextCompat.checkSelfPermission(
-                        context, android.Manifest.permission.POST_NOTIFICATIONS
-                    ) == androidx.core.content.PermissionChecker.PERMISSION_GRANTED
-                } else true
+                val notifEnabled =
+                    if (
+                        android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU
+                    ) {
+                        androidx.core.content.ContextCompat.checkSelfPermission(
+                            context,
+                            android.Manifest.permission.POST_NOTIFICATIONS,
+                        ) == androidx.core.content.PermissionChecker.PERMISSION_GRANTED
+                    } else true
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Notifications")
                     Text(
                         if (notifEnabled) "Enabled" else "Disabled",
-                        color = if (notifEnabled) Color(0xFF10B981) else MaterialTheme.colorScheme.error
+                        color =
+                            if (notifEnabled) Color(0xFF10B981)
+                            else MaterialTheme.colorScheme.error,
                     )
                 }
 
                 if (!notifEnabled) {
                     Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = {
-                        val intent = android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                            putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    TextButton(
+                        onClick = {
+                            val intent =
+                                android.content
+                                    .Intent(
+                                        android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS
+                                    )
+                                    .apply {
+                                        putExtra(
+                                            android.provider.Settings.EXTRA_APP_PACKAGE,
+                                            context.packageName,
+                                        )
+                                    }
+                            context.startActivity(intent)
                         }
-                        context.startActivity(intent)
-                    }) { Text("Enable in Settings") }
+                    ) {
+                        Text("Enable in Settings")
+                    }
                     Text(
                         "Notifications are required to receive stability payments while the app is closed.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -263,8 +292,10 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(8.dp))
                 Button(
                     onClick = { showSeedWords = !showSeedWords },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words") }
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words")
+                }
                 if (showSeedWords) {
                     val words = appState.nodeService.savedMnemonic
                     if (!words.isNullOrEmpty()) {
@@ -272,14 +303,14 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         Text(
                             "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFD97706)
+                            color = Color(0xFFD97706),
                         )
                         Spacer(Modifier.height(8.dp))
                         words.split(" ").forEachIndexed { index, word ->
                             Text(
                                 "${index + 1}. $word",
                                 fontFamily = FontFamily.Monospace,
-                                style = MaterialTheme.typography.bodyMedium
+                                style = MaterialTheme.typography.bodyMedium,
                             )
                         }
                         Spacer(Modifier.height(8.dp))
@@ -287,20 +318,26 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             onClick = {
                                 showClipboardWarning = true
                             },
-                            modifier = Modifier.fillMaxWidth()
-                        ) { Text(if (seedCopied) "Copied" else "Copy Seed Words") }
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(if (seedCopied) "Copied" else "Copy Seed Words")
+                        }
                     } else {
                         Spacer(Modifier.height(8.dp))
-                        Text("Seed phrase not available for this wallet.",
+                        Text(
+                            "Seed phrase not available for this wallet.",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { showRestore = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Restore from Seed") }
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Restore from Seed")
+                }
             }
         }
 
@@ -316,7 +353,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Text(
                     "Stable Channels is a self-custodial wallet. You control your private keys. No third party can access or freeze your funds.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -331,27 +368,35 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = { Text("Close channel") },
-            text = { Text("This will cooperatively close the channel and return your funds to your onchain wallet after confirmation.") },
+            text = {
+                Text(
+                    "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
+                )
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    showCloseConfirm = false
-                    appState.isChannelClosing = true
-                    appState.setStatus("Closing channel...")
-                    appState.prepareChannelCloseTracking(sc.userChannelId)
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
-                            appState.refreshBalances()
-                        } catch (e: Exception) {
-                            appState.setStatus("Close failed: ${e.message}")
-                            appState.isChannelClosing = false
+                TextButton(
+                    onClick = {
+                        showCloseConfirm = false
+                        appState.isChannelClosing = true
+                        appState.setStatus("Closing channel...")
+                        appState.prepareChannelCloseTracking(sc.userChannelId)
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
+                                appState.refreshBalances()
+                            } catch (e: Exception) {
+                                appState.setStatus("Close failed: ${e.message}")
+                                appState.isChannelClosing = false
+                            }
                         }
                     }
-                }) { Text("Close channel", color = MaterialTheme.colorScheme.error) }
+                ) {
+                    Text("Close channel", color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
                 TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
-            }
+            },
         )
     }
 
@@ -371,7 +416,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Text(
                         "Enter your 12 or 24-word seed phrase to restore a wallet.",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(12.dp))
                     OutlinedTextField(
@@ -379,14 +424,14 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         onValueChange = { restoreMnemonic = it },
                         label = { Text("word1 word2 word3 ...") },
                         modifier = Modifier.fillMaxWidth(),
-                        minLines = 3
+                        minLines = 3,
                     )
                     if (restoreError != null) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             restoreError!!,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                 }
@@ -412,7 +457,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             if (exists == null) {
                                 AuditService.log(
                                     "RESTORE_GUARD_UNAVAILABLE",
-                                    mapOf("node_id" to (nodeId ?: "derive_failed"))
+                                    mapOf("node_id" to (nodeId ?: "derive_failed")),
                                 )
                             }
                             withContext(Dispatchers.Main) {
@@ -421,7 +466,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     true -> {
                                         AuditService.log(
                                             "RESTORE_ACTIVE_CHANNEL_DETECTED",
-                                            mapOf("node_id" to nodeId)
+                                            mapOf("node_id" to nodeId),
                                         )
                                         restoreGuardUnavailable = false
                                         showRestoreForceCloseConfirm = true
@@ -437,16 +482,22 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                         }
                     },
-                    enabled = restoreMnemonic.trim().isNotEmpty() && !isCheckingRestore
-                ) { Text(if (isCheckingRestore) "Checking..." else "Restore") }
+                    enabled = restoreMnemonic.trim().isNotEmpty() && !isCheckingRestore,
+                ) {
+                    Text(if (isCheckingRestore) "Checking..." else "Restore")
+                }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showRestore = false
-                    restoreMnemonic = ""
-                    restoreError = null
-                }) { Text("Cancel") }
-            }
+                TextButton(
+                    onClick = {
+                        showRestore = false
+                        restoreMnemonic = ""
+                        restoreError = null
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 
@@ -479,21 +530,27 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showRestoreForceCloseConfirm = false
-                    performRestore(restoreMnemonic.trim())
-                }) {
+                TextButton(
+                    onClick = {
+                        showRestoreForceCloseConfirm = false
+                        performRestore(restoreMnemonic.trim())
+                    }
+                ) {
                     Text(
                         if (restoreGuardUnavailable) "Continue Anyway" else "Restore Anyway",
-                        color = MaterialTheme.colorScheme.error
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showRestoreForceCloseConfirm = false
-                }) { Text("Cancel") }
-            }
+                TextButton(
+                    onClick = {
+                        showRestoreForceCloseConfirm = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 
@@ -505,19 +562,27 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = { Text("Copy Seed Phrase?") },
-            text = { Text("Clipboard contents may be readable by other apps. Are you sure you want to copy your seed phrase?") },
+            text = {
+                Text(
+                    "Clipboard contents may be readable by other apps. Are you sure you want to copy your seed phrase?"
+                )
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    showClipboardWarning = false
-                    if (!words.isNullOrEmpty()) {
-                        ClipboardUtils.copySensitive(context, "Seed Phrase", words)
-                        seedCopied = true
+                TextButton(
+                    onClick = {
+                        showClipboardWarning = false
+                        if (!words.isNullOrEmpty()) {
+                            ClipboardUtils.copySensitive(context, "Seed Phrase", words)
+                            seedCopied = true
+                        }
                     }
-                }) { Text("Copy") }
+                ) {
+                    Text("Copy")
+                }
             },
             dismissButton = {
                 TextButton(onClick = { showClipboardWarning = false }) { Text("Cancel") }
-            }
+            },
         )
     }
 
@@ -525,7 +590,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showOnchainSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
+            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
         ) {
             OnChainSendScreen(appState) { showOnchainSend = false }
         }
@@ -535,12 +600,14 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
 @Composable
 private fun DetailRow(label: String, value: String) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 2.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(value, style = MaterialTheme.typography.bodySmall)
     }
 }

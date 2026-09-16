@@ -7,7 +7,7 @@ class TransactionMatcher {
         trackedAddresses: Set<String>,
         trackedTxids: Set<String>,
         msg: MempoolWSMessage,
-        tx: MempoolWSTransaction
+        tx: MempoolWSTransaction,
     ): List<MatchResult> {
         val results = mutableListOf<MatchResult>()
 

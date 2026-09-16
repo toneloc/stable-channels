@@ -92,59 +92,61 @@ private val OutlineVariantDark = Color(0xFF2C2C2E)
 
 // ─── Color Schemes ───────────────────────────────────────────────────────────
 
-private val LightColorScheme: ColorScheme = lightColorScheme(
-    primary = PrimaryLight,
-    onPrimary = OnPrimaryLight,
-    primaryContainer = PrimaryContainerLight,
-    onPrimaryContainer = OnPrimaryContainerLight,
-    secondary = SecondaryLight,
-    onSecondary = OnSecondaryLight,
-    secondaryContainer = SecondaryContainerLight,
-    onSecondaryContainer = OnSecondaryContainerLight,
-    tertiary = TertiaryLight,
-    onTertiary = OnTertiaryLight,
-    tertiaryContainer = TertiaryContainerLight,
-    onTertiaryContainer = OnTertiaryContainerLight,
-    error = ErrorLight,
-    onError = OnErrorLight,
-    errorContainer = ErrorContainerLight,
-    onErrorContainer = OnErrorContainerLight,
-    background = BackgroundLight,
-    onBackground = OnBackgroundLight,
-    surface = SurfaceLight,
-    onSurface = OnSurfaceLight,
-    surfaceVariant = SurfaceVariantLight,
-    onSurfaceVariant = OnSurfaceVariantLight,
-    outline = OutlineLight,
-    outlineVariant = OutlineVariantLight,
-)
+private val LightColorScheme: ColorScheme =
+    lightColorScheme(
+        primary = PrimaryLight,
+        onPrimary = OnPrimaryLight,
+        primaryContainer = PrimaryContainerLight,
+        onPrimaryContainer = OnPrimaryContainerLight,
+        secondary = SecondaryLight,
+        onSecondary = OnSecondaryLight,
+        secondaryContainer = SecondaryContainerLight,
+        onSecondaryContainer = OnSecondaryContainerLight,
+        tertiary = TertiaryLight,
+        onTertiary = OnTertiaryLight,
+        tertiaryContainer = TertiaryContainerLight,
+        onTertiaryContainer = OnTertiaryContainerLight,
+        error = ErrorLight,
+        onError = OnErrorLight,
+        errorContainer = ErrorContainerLight,
+        onErrorContainer = OnErrorContainerLight,
+        background = BackgroundLight,
+        onBackground = OnBackgroundLight,
+        surface = SurfaceLight,
+        onSurface = OnSurfaceLight,
+        surfaceVariant = SurfaceVariantLight,
+        onSurfaceVariant = OnSurfaceVariantLight,
+        outline = OutlineLight,
+        outlineVariant = OutlineVariantLight,
+    )
 
-private val DarkColorScheme: ColorScheme = darkColorScheme(
-    primary = PrimaryDark,
-    onPrimary = OnPrimaryDark,
-    primaryContainer = PrimaryContainerDark,
-    onPrimaryContainer = OnPrimaryContainerDark,
-    secondary = SecondaryDark,
-    onSecondary = OnSecondaryDark,
-    secondaryContainer = SecondaryContainerDark,
-    onSecondaryContainer = OnSecondaryContainerDark,
-    tertiary = TertiaryDark,
-    onTertiary = OnTertiaryDark,
-    tertiaryContainer = TertiaryContainerDark,
-    onTertiaryContainer = OnTertiaryContainerDark,
-    error = ErrorDark,
-    onError = OnErrorDark,
-    errorContainer = ErrorContainerDark,
-    onErrorContainer = OnErrorContainerDark,
-    background = BackgroundDark,
-    onBackground = OnBackgroundDark,
-    surface = SurfaceDark,
-    onSurface = OnSurfaceDark,
-    surfaceVariant = SurfaceVariantDark,
-    onSurfaceVariant = OnSurfaceVariantDark,
-    outline = OutlineDark,
-    outlineVariant = OutlineVariantDark,
-)
+private val DarkColorScheme: ColorScheme =
+    darkColorScheme(
+        primary = PrimaryDark,
+        onPrimary = OnPrimaryDark,
+        primaryContainer = PrimaryContainerDark,
+        onPrimaryContainer = OnPrimaryContainerDark,
+        secondary = SecondaryDark,
+        onSecondary = OnSecondaryDark,
+        secondaryContainer = SecondaryContainerDark,
+        onSecondaryContainer = OnSecondaryContainerDark,
+        tertiary = TertiaryDark,
+        onTertiary = OnTertiaryDark,
+        tertiaryContainer = TertiaryContainerDark,
+        onTertiaryContainer = OnTertiaryContainerDark,
+        error = ErrorDark,
+        onError = OnErrorDark,
+        errorContainer = ErrorContainerDark,
+        onErrorContainer = OnErrorContainerDark,
+        background = BackgroundDark,
+        onBackground = OnBackgroundDark,
+        surface = SurfaceDark,
+        onSurface = OnSurfaceDark,
+        surfaceVariant = SurfaceVariantDark,
+        onSurfaceVariant = OnSurfaceVariantDark,
+        outline = OutlineDark,
+        outlineVariant = OutlineVariantDark,
+    )
 
 // ─── Semantic Colors ─────────────────────────────────────────────────────────
 
@@ -158,23 +160,25 @@ data class SemanticColors(
     val info: Color,
 )
 
-private val LightSemanticColors = SemanticColors(
-    success = Color(0xFF059669),    // Emerald-600
-    warning = Color(0xFFD97706),    // Amber-600
-    error = Color(0xFFDC2626),      // Red-600
-    btcNative = Color(0xFFF59E0B),  // Amber-500 (orange)
-    usdStable = Color(0xFF10B981),  // Emerald-500 (distinct from success)
-    info = Color(0xFF2563EB),       // Blue-600
-)
+private val LightSemanticColors =
+    SemanticColors(
+        success = Color(0xFF059669), // Emerald-600
+        warning = Color(0xFFD97706), // Amber-600
+        error = Color(0xFFDC2626), // Red-600
+        btcNative = Color(0xFFF59E0B), // Amber-500 (orange)
+        usdStable = Color(0xFF10B981), // Emerald-500 (distinct from success)
+        info = Color(0xFF2563EB), // Blue-600
+    )
 
-private val DarkSemanticColors = SemanticColors(
-    success = Color(0xFF34D399),    // Emerald-400
-    warning = Color(0xFFFBBF24),    // Amber-400
-    error = Color(0xFFF87171),      // Red-400
-    btcNative = Color(0xFFFBBF24),  // Amber-400 (orange)
-    usdStable = Color(0xFF6EE7B7),  // Emerald-300 (distinct from success)
-    info = Color(0xFF60A5FA),       // Blue-400
-)
+private val DarkSemanticColors =
+    SemanticColors(
+        success = Color(0xFF34D399), // Emerald-400
+        warning = Color(0xFFFBBF24), // Amber-400
+        error = Color(0xFFF87171), // Red-400
+        btcNative = Color(0xFFFBBF24), // Amber-400 (orange)
+        usdStable = Color(0xFF6EE7B7), // Emerald-300 (distinct from success)
+        info = Color(0xFF60A5FA), // Blue-400
+    )
 
 val LocalSemanticColors = staticCompositionLocalOf {
     LightSemanticColors
@@ -203,7 +207,8 @@ enum class ThemePreference(val label: String) {
         }
 
         fun save(context: Context, preference: ThemePreference) {
-            context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            context
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_THEME, preference.name)
                 .apply()
@@ -234,23 +239,23 @@ private fun rememberThemePreference(): ThemePreference {
     return preference
 }
 
-private tailrec fun Context.findActivity(): Activity? = when (this) {
-    is Activity -> this
-    is ContextWrapper -> baseContext.findActivity()
-    else -> null
-}
+private tailrec fun Context.findActivity(): Activity? =
+    when (this) {
+        is Activity -> this
+        is ContextWrapper -> baseContext.findActivity()
+        else -> null
+    }
 
 @Composable
-fun StableChannelsTheme(
-    content: @Composable () -> Unit
-) {
+fun StableChannelsTheme(content: @Composable () -> Unit) {
     val themePreference = rememberThemePreference()
 
-    val darkTheme = when (themePreference) {
-        ThemePreference.LIGHT -> false
-        ThemePreference.DARK -> true
-        ThemePreference.SYSTEM -> isSystemInDarkTheme()
-    }
+    val darkTheme =
+        when (themePreference) {
+            ThemePreference.LIGHT -> false
+            ThemePreference.DARK -> true
+            ThemePreference.SYSTEM -> isSystemInDarkTheme()
+        }
 
     val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
     val semanticColors = if (darkTheme) DarkSemanticColors else LightSemanticColors
@@ -269,11 +274,11 @@ fun StableChannelsTheme(
 
     CompositionLocalProvider(
         LocalSemanticColors provides semanticColors,
-        LocalDarkTheme provides darkTheme
+        LocalDarkTheme provides darkTheme,
     ) {
         MaterialTheme(
             colorScheme = colorScheme,
-            content = content
+            content = content,
         )
     }
 }

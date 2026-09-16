@@ -16,19 +16,17 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.unit.dp
 
 /**
- * A text composable that animates each digit independently,
- * like a mechanical counter or alarm clock.
- * Non-digit characters (commas, dots, spaces) stay static.
+ * A text composable that animates each digit independently, like a mechanical counter or alarm
+ * clock. Non-digit characters (commas, dots, spaces) stay static.
  */
 @Composable
 fun RollingDigitText(
     text: String,
     style: TextStyle,
     color: Color = Color.Unspecified,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     val textMeasurer = rememberTextMeasurer()
     val density = LocalDensity.current
@@ -42,16 +40,20 @@ fun RollingDigitText(
                     AnimatedContent(
                         targetState = char,
                         transitionSpec = {
-                            slideInVertically(animationSpec = tween(400)) { height -> height } togetherWith
-                                slideOutVertically(animationSpec = tween(400)) { height -> -height } using
+                            slideInVertically(animationSpec = tween(400)) { height ->
+                                height
+                            } togetherWith
+                                slideOutVertically(animationSpec = tween(400)) { height ->
+                                    -height
+                                } using
                                 SizeTransform(clip = true)
                         },
-                        label = "digit-${char.hashCode()}"
+                        label = "digit-${char.hashCode()}",
                     ) { targetChar ->
                         Text(
                             text = targetChar.toString(),
                             style = style,
-                            color = color
+                            color = color,
                         )
                     }
                 }
@@ -60,7 +62,7 @@ fun RollingDigitText(
                 Text(
                     text = char.toString(),
                     style = style,
-                    color = color
+                    color = color,
                 )
             }
         }

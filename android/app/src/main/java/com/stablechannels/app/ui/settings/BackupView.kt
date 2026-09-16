@@ -1,7 +1,7 @@
 package com.stablechannels.app.ui.settings
 
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -14,7 +14,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -70,12 +69,7 @@ fun BackupView(appState: AppState) {
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // Show/hide seed words
         Button(
             onClick = {
@@ -84,12 +78,15 @@ fun BackupView(appState: AppState) {
                     showSeedWords = false
                     seedAuthError = null
                 } else {
-                    val requireAuth = com.stablechannels.app.services.AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
+                    val requireAuth =
+                        com.stablechannels.app.services.AppAccessPreferencesManager
+                            .shouldRequireAuthForSeedPhrase(context)
                     if (requireAuth) {
                         // Showing seed words — require biometric auth
                         scope.launch {
                             if (activity != null) {
-                                val authResult = BiometricService.authenticate(activity, "View seed phrase")
+                                val authResult =
+                                    BiometricService.authenticate(activity, "View seed phrase")
                                 if (authResult == BiometricService.AuthResult.SUCCESS) {
                                     showSeedWords = true
                                     seedAuthError = null
@@ -107,17 +104,22 @@ fun BackupView(appState: AppState) {
                 }
             },
             modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF10B981),
-                contentColor = Color.White
-            )
+            colors =
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF10B981),
+                    contentColor = Color.White,
+                ),
         ) {
             Text(if (showSeedWords) "Hide Seed Words" else "Backup Seed Words")
         }
 
         seedAuthError?.let {
             Spacer(Modifier.height(4.dp))
-            Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
 
         if (showSeedWords) {
@@ -127,7 +129,7 @@ fun BackupView(appState: AppState) {
                 Text(
                     "Write these words down on paper and store them in a safe place. Never share them. Anyone with these words can access your funds.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFFD97706)
+                    color = Color(0xFFD97706),
                 )
                 Spacer(Modifier.height(12.dp))
                 val wordList = words.split(" ")
@@ -136,7 +138,7 @@ fun BackupView(appState: AppState) {
                 for (row in 0 until rows) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         for (col in 0 until columns) {
                             val index = row * columns + col
@@ -144,22 +146,23 @@ fun BackupView(appState: AppState) {
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant,
-                                    modifier = Modifier.weight(1f)
+                                    modifier = Modifier.weight(1f),
                                 ) {
                                     Row(
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                        modifier =
+                                            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
                                     ) {
                                         Text(
                                             "${index + 1}.",
                                             style = MaterialTheme.typography.labelSmall,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.width(24.dp)
+                                            modifier = Modifier.width(24.dp),
                                         )
                                         Text(
                                             wordList[index],
                                             fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.bodyMedium
+                                            style = MaterialTheme.typography.bodyMedium,
                                         )
                                     }
                                 }
@@ -178,10 +181,8 @@ fun BackupView(appState: AppState) {
                         showClipboardWarning = true
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = Color(0xFF3B82F6)
-                    ),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6))
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF3B82F6)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
                 ) {
                     Text(if (copied) "Copied" else "Copy Seed Words")
                 }
@@ -197,9 +198,12 @@ fun BackupView(appState: AppState) {
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = Color(0xFFF59E0B).copy(alpha = 0.12f),
-                                modifier = Modifier.size(48.dp)
+                                modifier = Modifier.size(48.dp),
                             ) {
-                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.fillMaxSize(),
+                                ) {
                                     Text("⚠️", style = MaterialTheme.typography.headlineSmall)
                                 }
                             }
@@ -208,14 +212,14 @@ fun BackupView(appState: AppState) {
                             Text(
                                 "Copy Seed Phrase?",
                                 style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.SemiBold
+                                fontWeight = FontWeight.SemiBold,
                             )
                         },
                         text = {
                             Text(
                                 "Clipboard contents may be readable by other apps. The clipboard will be cleared after 60 seconds.",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         },
                         confirmButton = {
@@ -225,17 +229,20 @@ fun BackupView(appState: AppState) {
                                     ClipboardUtils.copySensitive(context, "Seed Phrase", words)
                                     copied = true
                                 },
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = Color(0xFF10B981),
-                                    contentColor = Color.White
-                                )
-                            ) { Text("Copy") }
+                                colors =
+                                    ButtonDefaults.buttonColors(
+                                        containerColor = Color(0xFF10B981),
+                                        contentColor = Color.White,
+                                    ),
+                            ) {
+                                Text("Copy")
+                            }
                         },
                         dismissButton = {
-                            OutlinedButton(
-                                onClick = { showClipboardWarning = false }
-                            ) { Text("Cancel") }
-                        }
+                            OutlinedButton(onClick = { showClipboardWarning = false }) {
+                                Text("Cancel")
+                            }
+                        },
                     )
                 }
             } else {
@@ -243,7 +250,7 @@ fun BackupView(appState: AppState) {
                 Text(
                     "Seed phrase not available for this wallet.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -254,10 +261,8 @@ fun BackupView(appState: AppState) {
         OutlinedButton(
             onClick = { showRestore = true },
             modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.outlinedButtonColors(
-                contentColor = Color(0xFF3B82F6)
-            ),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6))
+            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF3B82F6)),
+            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
         ) {
             Text("Restore from Seed")
         }
@@ -278,19 +283,19 @@ fun BackupView(appState: AppState) {
             title = {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Icon(
                         imageVector = Icons.Default.Restore,
                         contentDescription = "Restore",
                         tint = Color(0xFFF59E0B),
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(48.dp),
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "Restore from Seed",
                         style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
+                        fontWeight = FontWeight.Bold,
                     )
                 }
             },
@@ -301,7 +306,7 @@ fun BackupView(appState: AppState) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
                     )
                     Spacer(Modifier.height(16.dp))
                     OutlinedTextField(
@@ -311,17 +316,18 @@ fun BackupView(appState: AppState) {
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 3,
                         enabled = !isRestoring,
-                        textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        shape = RoundedCornerShape(12.dp)
+                        textStyle =
+                            MaterialTheme.typography.bodyMedium.copy(
+                                fontFamily = FontFamily.Monospace
+                            ),
+                        shape = RoundedCornerShape(12.dp),
                     )
                     if (restoreError != null) {
                         Spacer(Modifier.height(8.dp))
                         Text(
                             restoreError!!,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.error,
                         )
                     }
                     if (isRestoring) {
@@ -329,17 +335,17 @@ fun BackupView(appState: AppState) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.Center,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
+                                strokeWidth = 2.dp,
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 "Restoring wallet...",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -367,7 +373,7 @@ fun BackupView(appState: AppState) {
                             if (exists == null) {
                                 AuditService.log(
                                     "RESTORE_GUARD_UNAVAILABLE",
-                                    mapOf("node_id" to (nodeId ?: "derive_failed"))
+                                    mapOf("node_id" to (nodeId ?: "derive_failed")),
                                 )
                             }
                             withContext(Dispatchers.Main) {
@@ -375,7 +381,7 @@ fun BackupView(appState: AppState) {
                                     true -> {
                                         AuditService.log(
                                             "RESTORE_ACTIVE_CHANNEL_DETECTED",
-                                            mapOf("node_id" to nodeId)
+                                            mapOf("node_id" to nodeId),
                                         )
                                         isRestoring = false
                                         restoreGuardUnavailable = false
@@ -393,12 +399,12 @@ fun BackupView(appState: AppState) {
                             }
                         }
                     },
-                    enabled = restoreMnemonic.trim().isNotEmpty() && !isRestoring
+                    enabled = restoreMnemonic.trim().isNotEmpty() && !isRestoring,
                 ) {
                     if (isRestoring) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            strokeWidth = 2.dp
+                            strokeWidth = 2.dp,
                         )
                     } else {
                         Text("Restore")
@@ -412,9 +418,11 @@ fun BackupView(appState: AppState) {
                         restoreMnemonic = ""
                         restoreError = null
                     },
-                    enabled = !isRestoring
-                ) { Text("Cancel") }
-            }
+                    enabled = !isRestoring,
+                ) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 
@@ -448,21 +456,27 @@ fun BackupView(appState: AppState) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = {
-                    showRestoreForceCloseConfirm = false
-                    performRestore(restoreMnemonic.trim())
-                }) {
+                TextButton(
+                    onClick = {
+                        showRestoreForceCloseConfirm = false
+                        performRestore(restoreMnemonic.trim())
+                    }
+                ) {
                     Text(
                         if (restoreGuardUnavailable) "Continue Anyway" else "Restore Anyway",
-                        color = MaterialTheme.colorScheme.error
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             },
             dismissButton = {
-                TextButton(onClick = {
-                    showRestoreForceCloseConfirm = false
-                }) { Text("Cancel") }
-            }
+                TextButton(
+                    onClick = {
+                        showRestoreForceCloseConfirm = false
+                    }
+                ) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 }

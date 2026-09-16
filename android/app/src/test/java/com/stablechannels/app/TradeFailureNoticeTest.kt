@@ -16,7 +16,7 @@ class TradeFailureNoticeTest {
             TradeFailureNotice.shouldShow(
                 failurePaymentId = "aa".repeat(32),
                 lastShownPaymentId = null,
-                capsuleOccupied = true
+                capsuleOccupied = true,
             )
         )
         // The next launch, with a free capsule, still shows it.
@@ -24,7 +24,7 @@ class TradeFailureNoticeTest {
             TradeFailureNotice.shouldShow(
                 failurePaymentId = "aa".repeat(32),
                 lastShownPaymentId = null,
-                capsuleOccupied = false
+                capsuleOccupied = false,
             )
         )
     }
@@ -36,7 +36,7 @@ class TradeFailureNoticeTest {
             TradeFailureNotice.shouldShow(
                 failurePaymentId = "bb".repeat(32),
                 lastShownPaymentId = "bb".repeat(32),
-                capsuleOccupied = false
+                capsuleOccupied = false,
             )
         )
         // A different, newer failure is still worth surfacing.
@@ -44,7 +44,7 @@ class TradeFailureNoticeTest {
             TradeFailureNotice.shouldShow(
                 failurePaymentId = "cc".repeat(32),
                 lastShownPaymentId = "bb".repeat(32),
-                capsuleOccupied = false
+                capsuleOccupied = false,
             )
         )
     }

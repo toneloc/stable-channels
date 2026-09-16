@@ -12,7 +12,7 @@ object TradeFailureNotice {
     fun shouldShow(
         failurePaymentId: String,
         lastShownPaymentId: String?,
-        capsuleOccupied: Boolean
+        capsuleOccupied: Boolean,
     ): Boolean {
         // Already told them — including when the live trade flow showed it before the relaunch.
         if (failurePaymentId == lastShownPaymentId) return false

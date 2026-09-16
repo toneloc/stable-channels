@@ -8,23 +8,17 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.WindowCompat
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.CallMade
-import androidx.compose.material.icons.automirrored.filled.CallReceived
-import androidx.compose.material.icons.filled.ArrowCircleUp
-import androidx.compose.material.icons.filled.ArrowCircleDown
-import androidx.compose.material.icons.filled.TrendingUp
-import androidx.compose.material.icons.filled.TrendingDown
-import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.ArrowCircleDown
+import androidx.compose.material.icons.filled.ArrowCircleUp
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -32,35 +26,34 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import com.stablechannels.app.ui.theme.LocalDarkTheme
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import com.stablechannels.app.models.TradeRecord
-import com.stablechannels.app.ui.history.OrderDetailBottomSheet
-import com.stablechannels.app.models.PaymentRecord
-import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
+import com.stablechannels.app.models.PaymentRecord
+import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.ui.components.StatusCapsule
+import com.stablechannels.app.ui.history.OrderDetailBottomSheet
+import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.btcSpacedFormatted
-import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -96,9 +89,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var pendingOnchainReceives by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
 
     LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
-        pendingOnchainReceives = withContext(Dispatchers.IO) {
-            appState.databaseService?.getPendingOnchainReceives() ?: emptyList()
-        }
+        pendingOnchainReceives =
+            withContext(Dispatchers.IO) {
+                appState.databaseService?.getPendingOnchainReceives() ?: emptyList()
+            }
     }
 
     // Auto-dismiss receive sheet when payment arrives
@@ -116,9 +110,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                notificationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PermissionChecker.PERMISSION_GRANTED
-                } else true
+                notificationsEnabled =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS,
+                        ) == PermissionChecker.PERMISSION_GRANTED
+                    } else true
                 // Run blocking LDK calls off main thread
                 kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
                     // Pick up backing increments committed by the background stability
@@ -162,54 +160,60 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 isRefreshing = isRefreshing,
                 state = pullRefreshState,
                 color = MaterialTheme.colorScheme.primary,
-                containerColor = MaterialTheme.colorScheme.surfaceVariant
+                containerColor = MaterialTheme.colorScheme.surfaceVariant,
             )
         },
-        modifier = modifier.fillMaxSize()
+        modifier = modifier.fillMaxSize(),
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(scrollState)
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier =
+                Modifier.fillMaxSize()
+                    .verticalScroll(scrollState)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Notification warning
             if (!notificationsEnabled) {
                 Card(
                     onClick = {
-                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                        }
+                        val intent =
+                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            }
                         context.startActivity(intent)
                     },
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
-                    modifier = Modifier.fillMaxWidth()
+                    colors =
+                        CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(
                         modifier = Modifier.padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.onError)
+                        Icon(
+                            Icons.Default.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onError,
+                        )
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 "Notifications Disabled",
                                 color = MaterialTheme.colorScheme.onError,
                                 fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp
+                                fontSize = 14.sp,
                             )
                             Text(
                                 "Enable notifications for stability payments",
                                 color = MaterialTheme.colorScheme.onError.copy(alpha = 0.9f),
-                                fontSize = 12.sp
+                                fontSize = 12.sp,
                             )
                         }
                         Icon(
                             imageVector = Icons.Default.ChevronRight,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onError.copy(alpha = 0.7f),
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(16.dp),
                         )
                     }
                 }
@@ -221,55 +225,56 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Balance (tap to toggle USD/BTC)
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier
-                    .clickable { showBTC = !showBTC }
-                    .paymentFlash(isFlashing)
+                modifier = Modifier.clickable { showBTC = !showBTC }.paymentFlash(isFlashing),
             ) {
                 Text(
                     text = "Total Balance",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(4.dp))
                 if (showBTC) {
                     RollingDigitText(
                         text = totalSats.btcSpacedFormatted() + " BTC",
-                        style = MaterialTheme.typography.headlineLarge.copy(
-                            fontSize = 32.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
-                        )
+                        style =
+                            MaterialTheme.typography.headlineLarge.copy(
+                                fontSize = 32.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            ),
                     )
                 } else {
                     if (btcPrice > 0) {
                         RollingDigitText(
                             text = totalUSD.usdFormatted(),
-                            style = MaterialTheme.typography.headlineLarge.copy(
-                                fontSize = 36.sp,
-                                fontWeight = FontWeight.Bold
-                            )
+                            style =
+                                MaterialTheme.typography.headlineLarge.copy(
+                                    fontSize = 36.sp,
+                                    fontWeight = FontWeight.Bold,
+                                ),
                         )
                     } else if (totalSats > 0) {
                         Text(
                             text = "Fetching price...",
                             fontSize = 24.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     } else {
                         Text(
                             text = "$0.00",
                             fontSize = 36.sp,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                     }
                 }
                 Text(
-                    text = if (showBTC) {
-                        if (btcPrice > 0) totalUSD.usdFormatted() else "—"
-                    } else totalSats.btcSpacedFormatted() + " BTC",
+                    text =
+                        if (showBTC) {
+                            if (btcPrice > 0) totalUSD.usdFormatted() else "—"
+                        } else totalSats.btcSpacedFormatted() + " BTC",
                     fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -282,14 +287,22 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     nativeSats = nativeSatsCached,
                     totalSats = lightningSats,
                     btcPrice = btcPrice,
-                    maxSellUSD = (appState.tradeService?.maxSellCents(sc, appState.priceService.accountingPrice.value) ?: 0L) / 100.0,
+                    maxSellUSD =
+                        (appState.tradeService?.maxSellCents(
+                            sc,
+                            appState.priceService.accountingPrice.value,
+                        ) ?: 0L) / 100.0,
                     showBtcFormat = showBTC,
                     modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
-                    onTradeRequest = if (hasReadyChannel) { direction, amountUSD ->
-                        prefillTradeAmount = amountUSD
-                        if (direction == TradeDirection.BUY) showBuy = true else showSell = true
-                    } else null
+                    onTradeRequest =
+                        if (hasReadyChannel)
+                            { direction, amountUSD ->
+                                prefillTradeAmount = amountUSD
+                                if (direction == TradeDirection.BUY) showBuy = true
+                                else showSell = true
+                            }
+                        else null,
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -299,18 +312,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(14.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary,
                     )
                     Spacer(Modifier.width(8.dp))
                     Text(
                         "Syncing...",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Spacer(Modifier.height(8.dp))
@@ -331,50 +344,65 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
                 // Suffix for the collapsed card header: shows progress for one deposit, or just
                 // a count once there's more than one.
-                val pendingReceiveSummary = when {
-                    pendingReceives.isEmpty() -> ""
-                    pendingReceives.size == 1 && receiveConfirmations != null && receiveRequiredConfirmations != null ->
-                        " ($receiveConfirmations/$receiveRequiredConfirmations)"
-                    pendingReceives.size > 1 -> " \u00b7 ${pendingReceives.size} deposits"
-                    else -> ""
-                }
+                val pendingReceiveSummary =
+                    when {
+                        pendingReceives.isEmpty() -> ""
+                        pendingReceives.size == 1 &&
+                            receiveConfirmations != null &&
+                            receiveRequiredConfirmations != null ->
+                            " ($receiveConfirmations/$receiveRequiredConfirmations)"
+                        pendingReceives.size > 1 -> " \u00b7 ${pendingReceives.size} deposits"
+                        else -> ""
+                    }
                 // Only the "Move" + incoming-deposit combo is busy enough (3 rows) to warrant
                 // collapsing; every other state is already a single compact row like iOS.
-                val isBusyOnchainState = (hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
-                    (isSweeping && hasPendingOnchainReceive)
+                val isBusyOnchainState =
+                    (hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
+                        (isSweeping && hasPendingOnchainReceive)
                 var onchainExpanded by remember { mutableStateOf(false) }
-                val chevronRotation by animateFloatAsState(if (onchainExpanded) 90f else 0f, label = "onchainChevron")
+                val chevronRotation by
+                    animateFloatAsState(if (onchainExpanded) 90f else 0f, label = "onchainChevron")
 
                 Card(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                    colors =
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                 ) {
                     Column(
-                        (if (isBusyOnchainState) Modifier.clickable { onchainExpanded = !onchainExpanded } else Modifier)
+                        (if (isBusyOnchainState)
+                                Modifier.clickable { onchainExpanded = !onchainExpanded }
+                            else Modifier)
                             .padding(horizontal = 16.dp, vertical = 12.dp)
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text("Onchain Account", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Onchain Account",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                            )
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     onchainUSD.usdFormatted(),
                                     style = MaterialTheme.typography.labelMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                                 if (isBusyOnchainState) {
                                     Icon(
                                         Icons.Filled.ChevronRight,
-                                        contentDescription = if (onchainExpanded) "Collapse" else "Expand",
+                                        contentDescription =
+                                            if (onchainExpanded) "Collapse" else "Expand",
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier
-                                            .padding(start = 2.dp)
-                                            .size(18.dp)
-                                            .rotate(chevronRotation)
+                                        modifier =
+                                            Modifier.padding(start = 2.dp)
+                                                .size(18.dp)
+                                                .rotate(chevronRotation),
                                     )
                                 }
                             }
@@ -389,13 +417,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
-                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 )
                             }
                             AnimatedVisibility(
                                 visible = onchainExpanded,
-                                enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                                exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
+                                enter =
+                                    expandVertically(animationSpec = tween(200)) +
+                                        fadeIn(animationSpec = tween(200)),
+                                exit =
+                                    shrinkVertically(animationSpec = tween(200)) +
+                                        fadeOut(animationSpec = tween(150)),
                             ) {
                                 Column {
                                     Spacer(Modifier.height(10.dp))
@@ -404,7 +436,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                         appState.spliceTxid,
                                         context,
                                         amountSats = appState.pendingSplice?.amountSats,
-                                        btcPrice = btcPrice
+                                        btcPrice = btcPrice,
                                     )
                                     pendingReceives.forEach { receive ->
                                         Spacer(Modifier.height(8.dp))
@@ -414,8 +446,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                             context,
                                             amountSats = receive.amountSats,
                                             confirmations = receive.confirmations,
-                                            requiredConfirmations = AppState.requiredConfirmationsForType(receive.paymentType),
-                                            btcPrice = btcPrice
+                                            requiredConfirmations =
+                                                AppState.requiredConfirmationsForType(
+                                                    receive.paymentType
+                                                ),
+                                            btcPrice = btcPrice,
                                         )
                                     }
                                 }
@@ -428,7 +463,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 appState.spliceTxid,
                                 context,
                                 amountSats = appState.pendingSplice?.amountSats,
-                                btcPrice = btcPrice
+                                btcPrice = btcPrice,
                             )
                         } else if (isChannelClosing) {
                             // 2. Channel closing
@@ -447,27 +482,35 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
-                                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        overflow =
+                                            androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                     )
                                 }
                                 AnimatedVisibility(
                                     visible = onchainExpanded,
-                                    enter = expandVertically(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                                    exit = shrinkVertically(animationSpec = tween(200)) + fadeOut(animationSpec = tween(150))
+                                    enter =
+                                        expandVertically(animationSpec = tween(200)) +
+                                            fadeIn(animationSpec = tween(200)),
+                                    exit =
+                                        shrinkVertically(animationSpec = tween(200)) +
+                                            fadeOut(animationSpec = tween(150)),
                                 ) {
                                     Column {
                                         Spacer(Modifier.height(10.dp))
                                         Row(
                                             modifier = Modifier.fillMaxWidth(),
                                             horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                            verticalAlignment = Alignment.CenterVertically,
                                         ) {
                                             Text(
                                                 // Shows exactly what "Move" sweeps, so it's
                                                 // unambiguous when a separate deposit is pending.
-                                                PendingAmountFormatter.moveToLightningLabel(spendableOnchainSats, btcPrice),
+                                                PendingAmountFormatter.moveToLightningLabel(
+                                                    spendableOnchainSats,
+                                                    btcPrice,
+                                                ),
                                                 style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
                                             FilledTonalButton(
                                                 onClick = {
@@ -476,12 +519,25 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                     }
                                                 },
                                                 shape = RoundedCornerShape(12.dp),
-                                                colors = ButtonDefaults.filledTonalButtonColors(
-                                                    containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = if (isSystemInDarkTheme()) 0.15f else 0.15f),
-                                                    contentColor = MaterialTheme.colorScheme.secondary
-                                                ),
-                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                                                modifier = Modifier.height(32.dp)
+                                                colors =
+                                                    ButtonDefaults.filledTonalButtonColors(
+                                                        containerColor =
+                                                            MaterialTheme.colorScheme.secondary
+                                                                .copy(
+                                                                    alpha =
+                                                                        if (isSystemInDarkTheme())
+                                                                            0.15f
+                                                                        else 0.15f
+                                                                ),
+                                                        contentColor =
+                                                            MaterialTheme.colorScheme.secondary,
+                                                    ),
+                                                contentPadding =
+                                                    PaddingValues(
+                                                        horizontal = 12.dp,
+                                                        vertical = 0.dp,
+                                                    ),
+                                                modifier = Modifier.height(32.dp),
                                             ) {
                                                 Text("Move", fontSize = 13.sp)
                                             }
@@ -494,8 +550,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                 context,
                                                 amountSats = receive.amountSats,
                                                 confirmations = receive.confirmations,
-                                                requiredConfirmations = AppState.requiredConfirmationsForType(receive.paymentType),
-                                                btcPrice = btcPrice
+                                                requiredConfirmations =
+                                                    AppState.requiredConfirmationsForType(
+                                                        receive.paymentType
+                                                    ),
+                                                btcPrice = btcPrice,
                                             )
                                         }
                                     }
@@ -506,9 +565,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text("Move to Lightning Account", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(
+                                        "Move to Lightning Account",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
                                     FilledTonalButton(
                                         onClick = {
                                             scope.launch(Dispatchers.IO) {
@@ -516,15 +579,25 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                             }
                                         },
                                         shape = RoundedCornerShape(12.dp),
-                                        colors = ButtonDefaults.filledTonalButtonColors(
-                                            // Same tonal treatment as the Send/Receive buttons below
-                                            // (ActionButton), just tinted with the app's amber "native
-                                            // BTC" accent so this on-chain action still reads as distinct.
-                                            containerColor = MaterialTheme.colorScheme.secondary.copy(alpha = if (isSystemInDarkTheme()) 0.15f else 0.15f),
-                                            contentColor = MaterialTheme.colorScheme.secondary
-                                        ),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(32.dp)
+                                        colors =
+                                            ButtonDefaults.filledTonalButtonColors(
+                                                // Same tonal treatment as the Send/Receive buttons
+                                                // below
+                                                // (ActionButton), just tinted with the app's amber
+                                                // "native
+                                                // BTC" accent so this on-chain action still reads
+                                                // as distinct.
+                                                containerColor =
+                                                    MaterialTheme.colorScheme.secondary.copy(
+                                                        alpha =
+                                                            if (isSystemInDarkTheme()) 0.15f
+                                                            else 0.15f
+                                                    ),
+                                                contentColor = MaterialTheme.colorScheme.secondary,
+                                            ),
+                                        contentPadding =
+                                            PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                        modifier = Modifier.height(32.dp),
                                     ) {
                                         Text("Move", fontSize = 13.sp)
                                     }
@@ -535,17 +608,21 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.height(10.dp))
                             val pendingCloseId = appState.pendingClosePaymentId
                             // Prefer close txid if known — pendingClosePaymentId may already be
-                            // cleared by detectOnchainDeposit even while funds are still unconfirmed.
+                            // cleared by detectOnchainDeposit even while funds are still
+                            // unconfirmed.
                             // lastCloseTxid clears once its funds are spendable, so treating it as
                             // "still relevant" while non-null won't shadow a later receive (#316).
-                            val effectiveTxid = if (lastCloseTxid != null) {
-                                lastCloseTxid
-                            } else {
-                                pendingReceiveTxid ?: lastRxTxid
-                            }
+                            val effectiveTxid =
+                                if (lastCloseTxid != null) {
+                                    lastCloseTxid
+                                } else {
+                                    pendingReceiveTxid ?: lastRxTxid
+                                }
                             val isClosePending = pendingCloseId != null || lastCloseTxid != null
                             if (isClosePending) {
-                                val text = if (effectiveTxid != null) "Channel closing\u2026" else "Channel closed"
+                                val text =
+                                    if (effectiveTxid != null) "Channel closing\u2026"
+                                    else "Channel closed"
                                 PendingRow(text, effectiveTxid, context)
                             } else if (hasPendingOnchainReceive) {
                                 // One row per pending deposit — more than one can be confirming.
@@ -557,8 +634,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                         context,
                                         amountSats = receive.amountSats,
                                         confirmations = receive.confirmations,
-                                        requiredConfirmations = AppState.requiredConfirmationsForType(receive.paymentType),
-                                        btcPrice = btcPrice
+                                        requiredConfirmations =
+                                            AppState.requiredConfirmationsForType(
+                                                receive.paymentType
+                                            ),
+                                        btcPrice = btcPrice,
                                     )
                                 }
                             } else {
@@ -566,16 +646,20 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             }
                             if (!hasReadyChannel) {
                                 Spacer(Modifier.height(4.dp))
-                                Text("Receive a payment over Lightning to activate your account.",
+                                Text(
+                                    "Receive a payment over Lightning to activate your account.",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         } else {
                             // 4. No channel, confirmed deposit — just needs Lightning
                             Spacer(Modifier.height(8.dp))
-                            Text("Receive a payment over Lightning to activate your account.",
+                            Text(
+                                "Receive a payment over Lightning to activate your account.",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 }
@@ -586,38 +670,69 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 PriceChart(
                     appState = appState,
                     databaseService = appState.databaseService,
-                    currentPrice = btcPrice
+                    currentPrice = btcPrice,
                 )
             }
 
             // Hint text when no channel
             if (!hasReadyChannel) {
-                Text("Receive BTC to get started",
+                Text(
+                    "Receive BTC to get started",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Spacer(Modifier.height(4.dp))
             }
 
             // Action buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 val sendColor = if (isSystemInDarkTheme()) Color(0xFF0A84FF) else Color(0xFF007AFF)
-                val receiveColor = if (isSystemInDarkTheme()) Color(0xFF30D158) else Color(0xFF34C759)
-                ActionButton("Send", Icons.Default.ArrowCircleUp, sendColor, Modifier.weight(1f)) { showSend = true }
-                ActionButton("Receive", Icons.Default.ArrowCircleDown, receiveColor, Modifier.weight(1f), pulse = !hasReadyChannel) { showReceive = true }
+                val receiveColor =
+                    if (isSystemInDarkTheme()) Color(0xFF30D158) else Color(0xFF34C759)
+                ActionButton("Send", Icons.Default.ArrowCircleUp, sendColor, Modifier.weight(1f)) {
+                    showSend = true
+                }
+                ActionButton(
+                    "Receive",
+                    Icons.Default.ArrowCircleDown,
+                    receiveColor,
+                    Modifier.weight(1f),
+                    pulse = !hasReadyChannel,
+                ) {
+                    showReceive = true
+                }
             }
 
             Spacer(Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 val buyColor = if (isSystemInDarkTheme()) Color(0xFFFF9F0A) else Color(0xFFFF9500)
                 val sellColor = if (isSystemInDarkTheme()) Color(0xFFBF5AF2) else Color(0xFFAF52DE)
-                ActionButton("USD → BTC", Icons.Default.ArrowCircleUp, buyColor, Modifier.weight(1f), rotation = 45f, enabled = hasReadyChannel) { showBuy = true }
-                ActionButton("BTC → USD", Icons.Default.ArrowCircleDown, sellColor, Modifier.weight(1f), rotation = -45f, enabled = hasReadyChannel) { showSell = true }
+                ActionButton(
+                    "USD → BTC",
+                    Icons.Default.ArrowCircleUp,
+                    buyColor,
+                    Modifier.weight(1f),
+                    rotation = 45f,
+                    enabled = hasReadyChannel,
+                ) {
+                    showBuy = true
+                }
+                ActionButton(
+                    "BTC → USD",
+                    Icons.Default.ArrowCircleDown,
+                    sellColor,
+                    Modifier.weight(1f),
+                    rotation = -45f,
+                    enabled = hasReadyChannel,
+                ) {
+                    showSell = true
+                }
             }
 
             // Status capsule
@@ -626,9 +741,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     message = statusMessage,
                     onClick = {
                         val msg = statusMessage.lowercase()
-                        val isTrade = msg.contains("buy") || msg.contains("sell") || msg.contains("trade") || msg.contains("order")
-                        val isPayment = msg.contains("payment") || msg.contains("swap") || msg.contains("channel") || msg.contains("moving")
-                        
+                        val isTrade =
+                            msg.contains("buy") ||
+                                msg.contains("sell") ||
+                                msg.contains("trade") ||
+                                msg.contains("order")
+                        val isPayment =
+                            msg.contains("payment") ||
+                                msg.contains("swap") ||
+                                msg.contains("channel") ||
+                                msg.contains("moving")
+
                         if (isTrade || isPayment) {
                             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                                 if (isTrade) {
@@ -646,7 +769,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         } else {
                             appState.setStatus("")
                         }
-                    }
+                    },
                 )
             }
             // Bottom padding for nav bar
@@ -660,7 +783,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
@@ -673,7 +796,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showReceive = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
@@ -686,11 +809,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showBuy = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
-                BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) { showBuy = false; prefillTradeAmount = 0.0 }
+                BuyScreen(appState, prefillAmountUSD = prefillTradeAmount) {
+                    showBuy = false
+                    prefillTradeAmount = 0.0
+                }
             }
         }
     }
@@ -699,11 +825,14 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             onDismissRequest = { showSell = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
             containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
-            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) }
+            contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
             Box(modifier = Modifier.fillMaxHeight(0.9f)) {
-                SellScreen(appState, prefillAmountUSD = prefillTradeAmount) { showSell = false; prefillTradeAmount = 0.0 }
+                SellScreen(appState, prefillAmountUSD = prefillTradeAmount) {
+                    showSell = false
+                    prefillTradeAmount = 0.0
+                }
             }
         }
     }
@@ -715,13 +844,22 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         PaymentDetailBottomSheet(
             payment = payment,
             currentPrice = btcPrice,
-            onDismiss = { selectedPayment = null }
+            onDismiss = { selectedPayment = null },
         )
     }
 }
 
 @Composable
-fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modifier = Modifier, rotation: Float = 0f, pulse: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
+fun ActionButton(
+    title: String,
+    icon: ImageVector,
+    color: Color,
+    modifier: Modifier = Modifier,
+    rotation: Float = 0f,
+    pulse: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Box(modifier = modifier.defaultMinSize(minHeight = 52.dp).clip(RoundedCornerShape(12.dp))) {
         FilledTonalButton(
             onClick = onClick,
@@ -729,12 +867,13 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
             shape = RoundedCornerShape(12.dp),
             enabled = enabled,
-            colors = ButtonDefaults.filledTonalButtonColors(
-                containerColor = color.copy(alpha = if (isSystemInDarkTheme()) 0.1f else 0.15f),
-                contentColor = color,
-                disabledContainerColor = color.copy(alpha = 0.05f),
-                disabledContentColor = color.copy(alpha = 0.3f)
-            )
+            colors =
+                ButtonDefaults.filledTonalButtonColors(
+                    containerColor = color.copy(alpha = if (isSystemInDarkTheme()) 0.1f else 0.15f),
+                    contentColor = color,
+                    disabledContainerColor = color.copy(alpha = 0.05f),
+                    disabledContentColor = color.copy(alpha = 0.3f),
+                ),
         ) {
             Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp).rotate(rotation))
             Spacer(Modifier.width(6.dp))
@@ -743,15 +882,19 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
         if (pulse) {
             key(pulse) {
                 val transition = rememberInfiniteTransition(label = "btnPulse")
-                val alpha by transition.animateFloat(
-                    initialValue = 0f,
-                    targetValue = 0.2f,
-                    animationSpec = infiniteRepeatable(animation = tween(800, easing = EaseInOut), repeatMode = RepeatMode.Reverse),
-                    label = "btnAlpha"
-                )
+                val alpha by
+                    transition.animateFloat(
+                        initialValue = 0f,
+                        targetValue = 0.2f,
+                        animationSpec =
+                            infiniteRepeatable(
+                                animation = tween(800, easing = EaseInOut),
+                                repeatMode = RepeatMode.Reverse,
+                            ),
+                        label = "btnAlpha",
+                    )
                 Box(
-                    Modifier
-                        .matchParentSize()
+                    Modifier.matchParentSize()
                         .clip(RoundedCornerShape(12.dp))
                         .background(color.copy(alpha = alpha))
                 )
@@ -760,13 +903,16 @@ fun ActionButton(title: String, icon: ImageVector, color: Color, modifier: Modif
     }
 }
 
-/** Pure formatting for pending on-chain amounts, extracted so it's directly unit-testable
- *  (Compose UI has no unit-test harness here). Falls back to a BTC figure instead of dropping
- *  the amount when the price feed is momentarily unavailable. */
+/**
+ * Pure formatting for pending on-chain amounts, extracted so it's directly unit-testable (Compose
+ * UI has no unit-test harness here). Falls back to a BTC figure instead of dropping the amount when
+ * the price feed is momentarily unavailable.
+ */
 object PendingAmountFormatter {
     fun amountText(amountSats: Long?, btcPrice: Double): String? {
         if (amountSats == null) return null
-        val amountUSD = if (btcPrice > 0) (amountSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
+        val amountUSD =
+            if (btcPrice > 0) (amountSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
         return amountUSD?.usdFormatted() ?: "${amountSats.btcSpacedFormatted()} BTC"
     }
 
@@ -788,20 +934,26 @@ private fun PendingRow(
     amountSats: Long? = null,
     confirmations: Int? = null,
     requiredConfirmations: Int? = null,
-    btcPrice: Double = 0.0
+    btcPrice: Double = 0.0,
 ) {
     // A real confirmation count gives concrete progress ("2/6 confirmations") instead of
     // a static hourglass that never changes for up to an hour on a fresh onchain deposit.
     // Only show progress once a txid is known — before that the confirmation tracker has
     // nothing to count yet, and an empty ring next to "0/6" would read as stalled rather
     // than as not-yet-detected.
-    val progress = if (txid != null && confirmations != null && requiredConfirmations != null && requiredConfirmations > 0) {
-        (confirmations.toFloat() / requiredConfirmations.toFloat()).coerceIn(0f, 1f)
-    } else null
+    val progress =
+        if (
+            txid != null &&
+                confirmations != null &&
+                requiredConfirmations != null &&
+                requiredConfirmations > 0
+        ) {
+            (confirmations.toFloat() / requiredConfirmations.toFloat()).coerceIn(0f, 1f)
+        } else null
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
     ) {
         if (progress != null) {
             CircularProgressIndicator(
@@ -809,7 +961,7 @@ private fun PendingRow(
                 modifier = Modifier.size(14.dp),
                 strokeWidth = 2.dp,
                 color = MaterialTheme.colorScheme.primary,
-                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                trackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
             )
         } else {
             Text("\u231B", fontSize = 14.sp)
@@ -819,33 +971,45 @@ private fun PendingRow(
             Text(
                 text,
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             val amountText = PendingAmountFormatter.amountText(amountSats, btcPrice)
             val amountPrefix = if (amountText != null) "$amountText \u00b7 " else ""
-            val caption = when {
-                progress != null -> "$amountPrefix$confirmations/$requiredConfirmations confirmations"
-                txid == null -> "${amountPrefix}pending confirmation"
-                amountText != null -> amountPrefix.removeSuffix(" \u00b7 ")
-                else -> null
-            }
+            val caption =
+                when {
+                    progress != null ->
+                        "$amountPrefix$confirmations/$requiredConfirmations confirmations"
+                    txid == null -> "${amountPrefix}pending confirmation"
+                    amountText != null -> amountPrefix.removeSuffix(" \u00b7 ")
+                    else -> null
+                }
             if (caption != null) {
-                Text(caption, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f))
+                Text(
+                    caption,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                )
             }
         }
         if (txid != null) {
             IconButton(
                 onClick = {
-                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
+                    val intent =
+                        android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse(
+                                "https://mempool.space/tx/${txid.substringBefore(":")}"
+                            ),
+                        )
                     context.startActivity(intent)
                 },
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(28.dp),
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.OpenInNew,
                     contentDescription = "View on explorer",
                     modifier = Modifier.size(16.dp),
-                    tint = MaterialTheme.colorScheme.primary
+                    tint = MaterialTheme.colorScheme.primary,
                 )
             }
         }
@@ -886,7 +1050,7 @@ private fun SheetEdgeToEdgeEffect() {
             }
             window.setLayout(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
             )
         }
         onDispose {}

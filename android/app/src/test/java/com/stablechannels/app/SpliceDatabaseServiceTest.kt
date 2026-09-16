@@ -4,6 +4,7 @@ import android.content.Context
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,7 +16,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -72,7 +72,7 @@ class SpliceDatabaseServiceTest {
         assertNull(service.assignPendingSpliceTxid("new-tx", failedId))
         service.writableDatabase.execSQL(
             "UPDATE payments SET txid = ? WHERE id = ?",
-            arrayOf<Any>("failed-tx", failedId)
+            arrayOf<Any>("failed-tx", failedId),
         )
         assertFalse(service.completeSplice("failed-tx"))
         assertEquals("failed", payment(service, failedId).status)
@@ -88,8 +88,8 @@ class SpliceDatabaseServiceTest {
             "UPDATE payments SET created_at = ? WHERE id = ?",
             arrayOf<Any>(
                 now - DatabaseService.PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS - 1,
-                expiredId
-            )
+                expiredId,
+            ),
         )
 
         assertNull(service.assignPendingSpliceTxid("late-tx", expiredId, now))
@@ -107,7 +107,7 @@ class SpliceDatabaseServiceTest {
             paymentType = "onchain",
             direction = "sent",
             amountMsat = 1_000,
-            txid = "used-tx"
+            txid = "used-tx",
         )
         val pendingId = recordSplice(service, "splice_out")
 
@@ -127,11 +127,16 @@ class SpliceDatabaseServiceTest {
     @Test
     fun selfSendOnchainReceivedRowSharingTheSpliceTxidIsReconciledAndReplaced() {
         val service = DatabaseService(context)
-        val duplicateRowId = service.recordPayment(
-            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
-            direction = "received", amountMsat = 50_000, status = "pending",
-            txid = "self-send-tx", address = "bc1qourtrackedaddress"
-        )
+        val duplicateRowId =
+            service.recordPayment(
+                paymentId = "onchain_receive_self-send-tx",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "pending",
+                txid = "self-send-tx",
+                address = "bc1qourtrackedaddress",
+            )
         val spliceId = recordSplice(service, "splice_out")
 
         assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
@@ -152,8 +157,12 @@ class SpliceDatabaseServiceTest {
     fun paymentExistsForTxidPreventsDetectorFromRecreatingAReconciledSelfSend() {
         val service = DatabaseService(context)
         service.recordWebSocketReceive(
-            paymentId = "onchain_receive_self-send-tx", amountMsat = 50_000_000,
-            amountUSD = null, btcPrice = null, txid = "self-send-tx", address = "bc1qourtrackedaddress"
+            paymentId = "onchain_receive_self-send-tx",
+            amountMsat = 50_000_000,
+            amountUSD = null,
+            btcPrice = null,
+            txid = "self-send-tx",
+            address = "bc1qourtrackedaddress",
         )
         val spliceId = recordSplice(service, "splice_out")
         assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
@@ -163,7 +172,7 @@ class SpliceDatabaseServiceTest {
         assertTrue(service.paymentExistsForTxid("self-send-tx"))
         assertEquals(
             1,
-            service.getRecentPayments(100).count { it.txid == "self-send-tx" }
+            service.getRecentPayments(100).count { it.txid == "self-send-tx" },
         )
         service.close()
     }
@@ -175,10 +184,14 @@ class SpliceDatabaseServiceTest {
     @Test
     fun getPaymentTypeDirectionAmountMsatReturnsTheRowsFieldsById() {
         val service = DatabaseService(context)
-        val spliceOutId = service.recordPayment(
-            paymentId = null, paymentType = "splice_out", direction = "sent",
-            amountMsat = 10_000, address = "bc1qourownaddress"
-        )
+        val spliceOutId =
+            service.recordPayment(
+                paymentId = null,
+                paymentType = "splice_out",
+                direction = "sent",
+                amountMsat = 10_000,
+                address = "bc1qourownaddress",
+            )
 
         val row = service.getPaymentTypeDirectionAmountMsat(spliceOutId)
 
@@ -203,8 +216,13 @@ class SpliceDatabaseServiceTest {
     fun isKnownReceiveAddressIsTrueOnceWeHaveReceivedThere() {
         val service = DatabaseService(context)
         service.recordPayment(
-            paymentId = "onchain_receive_older-tx", paymentType = "onchain", direction = "received",
-            amountMsat = 20_000, status = "completed", txid = "older-tx", address = "bc1qourownaddress"
+            paymentId = "onchain_receive_older-tx",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 20_000,
+            status = "completed",
+            txid = "older-tx",
+            address = "bc1qourownaddress",
         )
 
         assertTrue(service.isKnownReceiveAddress("bc1qourownaddress"))
@@ -224,11 +242,15 @@ class SpliceDatabaseServiceTest {
         // own 1-conf threshold triggers this assignment — status must not matter, only that it's
         // a plain onchain/received row.
         val service = DatabaseService(context)
-        val duplicateRowId = service.recordPayment(
-            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
-            direction = "received", amountMsat = 50_000, status = "completed",
-            txid = "self-send-tx"
-        )
+        val duplicateRowId =
+            service.recordPayment(
+                paymentId = "onchain_receive_self-send-tx",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "completed",
+                txid = "self-send-tx",
+            )
         val spliceId = recordSplice(service, "splice_out")
 
         assertEquals(spliceId, service.assignPendingSpliceTxid("self-send-tx", spliceId))
@@ -244,8 +266,12 @@ class SpliceDatabaseServiceTest {
         // of conflict entirely and must still block assignment rather than being deleted.
         val service = DatabaseService(context)
         service.recordPayment(
-            paymentId = "sent-row", paymentType = "onchain", direction = "sent",
-            amountMsat = 50_000, status = "completed", txid = "shared-tx"
+            paymentId = "sent-row",
+            paymentType = "onchain",
+            direction = "sent",
+            amountMsat = 50_000,
+            status = "completed",
+            txid = "shared-tx",
         )
         val spliceId = recordSplice(service, "splice_out")
 
@@ -263,11 +289,15 @@ class SpliceDatabaseServiceTest {
     @Test
     fun ambiguousSpliceCandidateLeavesConflictingReceiveRowIntact() {
         val service = DatabaseService(context)
-        val duplicateRowId = service.recordPayment(
-            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
-            direction = "received", amountMsat = 50_000, status = "pending",
-            txid = "self-send-tx"
-        )
+        val duplicateRowId =
+            service.recordPayment(
+                paymentId = "onchain_receive_self-send-tx",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "pending",
+                txid = "self-send-tx",
+            )
         recordSplice(service, "splice_out")
         recordSplice(service, "splice_out")
 
@@ -283,18 +313,22 @@ class SpliceDatabaseServiceTest {
     fun expiredSpliceCandidateLeavesConflictingReceiveRowIntact() {
         val service = DatabaseService(context)
         val now = 2_000_000L
-        val duplicateRowId = service.recordPayment(
-            paymentId = "onchain_receive_self-send-tx", paymentType = "onchain",
-            direction = "received", amountMsat = 50_000, status = "pending",
-            txid = "self-send-tx"
-        )
+        val duplicateRowId =
+            service.recordPayment(
+                paymentId = "onchain_receive_self-send-tx",
+                paymentType = "onchain",
+                direction = "received",
+                amountMsat = 50_000,
+                status = "pending",
+                txid = "self-send-tx",
+            )
         val spliceId = recordSplice(service, "splice_out")
         service.writableDatabase.execSQL(
             "UPDATE payments SET created_at = ? WHERE id = ?",
             arrayOf<Any>(
                 now - DatabaseService.PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS - 1,
-                spliceId
-            )
+                spliceId,
+            ),
         )
 
         assertNull(service.assignPendingSpliceTxid("self-send-tx", spliceId, now))
@@ -359,7 +393,8 @@ class SpliceDatabaseServiceTest {
         // Models a monitor resumed after a process restart (pendingSplice was never
         // reconstructed, so its captured paymentRowId is null) whose confirmation resolves after
         // a second, genuinely new pending splice has also been created — assignPendingSpliceTxid
-        // must refuse to guess between them rather than binding the confirmed txid to the wrong row.
+        // must refuse to guess between them rather than binding the confirmed txid to the wrong
+        // row.
         val oldId = recordSplice(service, "splice_out")
         val newId = recordSplice(service, "splice_out")
 
@@ -387,21 +422,23 @@ class SpliceDatabaseServiceTest {
     private fun recordSplice(
         service: DatabaseService,
         type: String,
-        status: String = "pending"
-    ): Long = service.recordPayment(
-        paymentId = null,
-        paymentType = type,
-        direction = if (type == "splice_out") "sent" else "received",
-        amountMsat = 10_000,
-        status = status
-    )
+        status: String = "pending",
+    ): Long =
+        service.recordPayment(
+            paymentId = null,
+            paymentType = type,
+            direction = if (type == "splice_out") "sent" else "received",
+            amountMsat = 10_000,
+            status = status,
+        )
 
     private fun payment(service: DatabaseService, id: Long): PaymentRecord =
         service.getRecentPayments(100).single { it.id == id }
 
     private fun deleteDatabaseFiles() {
-        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
-            .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
+        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
+            if (file.exists()) assertTrue(file.delete())
+        }
         assertFalse(dbFile.exists())
     }
 }

@@ -1,5 +1,6 @@
 package com.stablechannels.app.services
 
+import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -8,7 +9,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
-import java.util.concurrent.TimeUnit
 
 class SpliceBroadcastCheckerTest {
 
@@ -17,11 +17,12 @@ class SpliceBroadcastCheckerTest {
 
     @Before
     fun setUp() {
-        httpClient = OkHttpClient.Builder()
-            .connectTimeout(500, TimeUnit.MILLISECONDS)
-            .readTimeout(500, TimeUnit.MILLISECONDS)
-            .callTimeout(1, TimeUnit.SECONDS)
-            .build()
+        httpClient =
+            OkHttpClient.Builder()
+                .connectTimeout(500, TimeUnit.MILLISECONDS)
+                .readTimeout(500, TimeUnit.MILLISECONDS)
+                .callTimeout(1, TimeUnit.SECONDS)
+                .build()
     }
 
     @After
@@ -30,10 +31,20 @@ class SpliceBroadcastCheckerTest {
         servers.clear()
     }
 
-    private fun newServer(): MockWebServer = MockWebServer().also { it.start(); servers.add(it) }
+    private fun newServer(): MockWebServer =
+        MockWebServer().also {
+            it.start()
+            servers.add(it)
+        }
 
     private fun checker(retries: Int = 3, retryDelayMs: Long = 0L) =
-        SpliceBroadcastChecker(httpClient, retries = retries, retryDelayMs = retryDelayMs, sleep = {}, logWarning = {})
+        SpliceBroadcastChecker(
+            httpClient,
+            retries = retries,
+            retryDelayMs = retryDelayMs,
+            sleep = {},
+            logWarning = {},
+        )
 
     @Test
     fun `single endpoint 200 returns EXISTS`() {
@@ -92,10 +103,12 @@ class SpliceBroadcastCheckerTest {
         val notFoundServer = newServer()
         notFoundServer.enqueue(MockResponse().setResponseCode(404))
 
-        val result = checker().checkStatus(
-            "abc",
-            listOf(notFoundServer.url("/").toString(), existsServer.url("/").toString())
-        )
+        val result =
+            checker()
+                .checkStatus(
+                    "abc",
+                    listOf(notFoundServer.url("/").toString(), existsServer.url("/").toString()),
+                )
 
         assertEquals(TxBroadcastStatus.EXISTS, result)
     }
@@ -107,10 +120,12 @@ class SpliceBroadcastCheckerTest {
         val errorServer = newServer()
         errorServer.enqueue(MockResponse().setResponseCode(500))
 
-        val result = checker().checkStatus(
-            "abc",
-            listOf(notFoundServer.url("/").toString(), errorServer.url("/").toString())
-        )
+        val result =
+            checker()
+                .checkStatus(
+                    "abc",
+                    listOf(notFoundServer.url("/").toString(), errorServer.url("/").toString()),
+                )
 
         assertEquals(TxBroadcastStatus.INCONCLUSIVE, result)
     }

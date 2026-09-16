@@ -3,6 +3,7 @@ package com.stablechannels.app
 import android.content.Context
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -12,14 +13,15 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
-/** Covers getPendingOnchainReceives() (#316 follow-up): a deposit can arrive while another is
- *  still confirming, or while a splice/close is in flight, so the Home card must be able to show
- *  more than one pending row. The query used to select the OLDEST rows first (ORDER BY
- *  created_at ASC LIMIT n) — a handful of stuck/never-confirming rows could then starve a
- *  genuinely new deposit out of the list entirely, hiding it from the user. It now selects the
- *  NEWEST rows first internally, then re-sorts that selection back to oldest-first for display. */
+/**
+ * Covers getPendingOnchainReceives() (#316 follow-up): a deposit can arrive while another is still
+ * confirming, or while a splice/close is in flight, so the Home card must be able to show more than
+ * one pending row. The query used to select the OLDEST rows first (ORDER BY created_at ASC LIMIT n)
+ * — a handful of stuck/never-confirming rows could then starve a genuinely new deposit out of the
+ * list entirely, hiding it from the user. It now selects the NEWEST rows first internally, then
+ * re-sorts that selection back to oldest-first for display.
+ */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class OnchainReceivePendingListDatabaseServiceTest {
@@ -67,11 +69,12 @@ class OnchainReceivePendingListDatabaseServiceTest {
         // of the list entirely.
         val service = DatabaseService(context)
         val limit = 3
-        val stuckIds = (1..5).map { i ->
-            val id = recordPendingReceive(service, "stuck-$i")
-            setCreatedAt(service, id, i.toLong() * 1_000)
-            id
-        }
+        val stuckIds =
+            (1..5).map { i ->
+                val id = recordPendingReceive(service, "stuck-$i")
+                setCreatedAt(service, id, i.toLong() * 1_000)
+                id
+            }
         val freshId = recordPendingReceive(service, "fresh")
         setCreatedAt(service, freshId, 999_999L)
 
@@ -88,16 +91,25 @@ class OnchainReceivePendingListDatabaseServiceTest {
         val service = DatabaseService(context)
         recordPendingReceive(service, "pending-one")
         service.recordPayment(
-            paymentId = "completed-onchain", paymentType = "onchain", direction = "received",
-            amountMsat = 50_000, status = "completed"
+            paymentId = "completed-onchain",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 50_000,
+            status = "completed",
         )
         service.recordPayment(
-            paymentId = "pending-splice", paymentType = "splice_in", direction = "received",
-            amountMsat = 50_000, status = "pending"
+            paymentId = "pending-splice",
+            paymentType = "splice_in",
+            direction = "received",
+            amountMsat = 50_000,
+            status = "pending",
         )
         service.recordPayment(
-            paymentId = "pending-sent", paymentType = "onchain", direction = "sent",
-            amountMsat = 50_000, status = "pending"
+            paymentId = "pending-sent",
+            paymentType = "onchain",
+            direction = "sent",
+            amountMsat = 50_000,
+            status = "pending",
         )
 
         val rows = service.getPendingOnchainReceives()
@@ -113,11 +125,12 @@ class OnchainReceivePendingListDatabaseServiceTest {
         // selection and the oldest-first display must both fall back to id to keep the boundary
         // deterministic, rather than depending on unspecified SQLite tie-break order.
         val service = DatabaseService(context)
-        val ids = (1..4).map { i ->
-            val id = recordPendingReceive(service, "same-second-$i")
-            setCreatedAt(service, id, 5_000L) // identical timestamp for all rows
-            id
-        }
+        val ids =
+            (1..4).map { i ->
+                val id = recordPendingReceive(service, "same-second-$i")
+                setCreatedAt(service, id, 5_000L) // identical timestamp for all rows
+                id
+            }
 
         val rows = service.getPendingOnchainReceives(limit = 3)
         // Newest-N by (created_at DESC, id DESC) keeps the 3 highest ids; oldest-first display
@@ -128,19 +141,23 @@ class OnchainReceivePendingListDatabaseServiceTest {
 
     private fun recordPendingReceive(service: DatabaseService, paymentId: String): Long =
         service.recordPayment(
-            paymentId = paymentId, paymentType = "onchain", direction = "received",
-            amountMsat = 100_000, status = "pending"
+            paymentId = paymentId,
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 100_000,
+            status = "pending",
         )
 
     private fun setCreatedAt(service: DatabaseService, rowId: Long, createdAt: Long) {
         service.writableDatabase.execSQL(
             "UPDATE payments SET created_at = ? WHERE id = ?",
-            arrayOf<Any>(createdAt, rowId)
+            arrayOf<Any>(createdAt, rowId),
         )
     }
 
     private fun deleteDatabaseFiles() {
-        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
-            .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
+        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
+            if (file.exists()) assertTrue(file.delete())
+        }
     }
 }

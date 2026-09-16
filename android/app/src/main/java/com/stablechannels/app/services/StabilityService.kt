@@ -4,11 +4,10 @@ import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
 import com.stablechannels.app.util.Constants
-import org.lightningdevkit.ldknode.ChannelDetails
 import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.min
 import kotlin.math.roundToLong
+import org.lightningdevkit.ldknode.ChannelDetails
 
 object StabilityService {
 
@@ -19,7 +18,7 @@ object StabilityService {
         STABLE("STABLE"),
         HIGH_RISK_NO_ACTION("HIGH_RISK_NO_ACTION"),
         CHECK_ONLY("CHECK_ONLY"),
-        PAY("PAY")
+        PAY("PAY"),
     }
 
     data class StabilityCheckResult(
@@ -27,7 +26,7 @@ object StabilityService {
         val percentFromPar: Double,
         val stableUSDValue: Double,
         val targetUSD: Double,
-        val dollarsFromPar: Double
+        val dollarsFromPar: Double,
     )
 
     fun reconcileOutgoing(sc: StableChannel, price: Double): Pair<StableChannel, Double?> {
@@ -77,7 +76,7 @@ object StabilityService {
     fun deductOutgoing(sc: StableChannel, amountSats: Long, price: Double): Double? {
         if (sc.expectedUSD.amount < 0.01 || price <= 0.0) return null
         val nativeSats = sc.nativeChannelBTC.sats
-        if (amountSats <= nativeSats) return null  // Fully covered by native balance
+        if (amountSats <= nativeSats) return null // Fully covered by native balance
         val overflowSats = amountSats - nativeSats
         val usdToDeduct = overflowSats.toDouble() / Constants.SATS_IN_BTC * price
         val newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
@@ -108,22 +107,30 @@ object StabilityService {
         val dollarsFromPar = stableUSDValue - targetUSD
         val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
 
-        val action = when {
-            percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT
-                || abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD -> StabilityAction.STABLE
-            sc.riskLevel > Constants.MAX_RISK_LEVEL -> StabilityAction.HIGH_RISK_NO_ACTION
-            sc.isStableReceiver && stableUSDValue < targetUSD -> StabilityAction.CHECK_ONLY
-            else -> StabilityAction.PAY
-        }
+        val action =
+            when {
+                percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT ||
+                    abs(dollarsFromPar) < Constants.STABILITY_THRESHOLD_USD ->
+                    StabilityAction.STABLE
+                sc.riskLevel > Constants.MAX_RISK_LEVEL -> StabilityAction.HIGH_RISK_NO_ACTION
+                sc.isStableReceiver && stableUSDValue < targetUSD -> StabilityAction.CHECK_ONLY
+                else -> StabilityAction.PAY
+            }
 
-        return StabilityCheckResult(action, percentFromPar, stableUSDValue, targetUSD, dollarsFromPar)
+        return StabilityCheckResult(
+            action,
+            percentFromPar,
+            stableUSDValue,
+            targetUSD,
+            dollarsFromPar,
+        )
     }
 
     fun updateBalances(
         sc: StableChannel,
         channels: List<ChannelDetails>,
         onchainBalanceSats: Long,
-        price: Double
+        price: Double,
     ): StableChannel {
         val updated = sc.copy()
         updated.latestPrice = price
@@ -131,11 +138,12 @@ object StabilityService {
         updated.onchainUSD = USD((onchainBalanceSats.toDouble() / Constants.SATS_IN_BTC) * price)
 
         // Find matching channel
-        val channel = if (updated.userChannelId.isNotEmpty()) {
-            channels.find { it.userChannelId == updated.userChannelId }
-        } else {
-            channels.firstOrNull()
-        }
+        val channel =
+            if (updated.userChannelId.isNotEmpty()) {
+                channels.find { it.userChannelId == updated.userChannelId }
+            } else {
+                channels.firstOrNull()
+            }
 
         if (channel == null) return updated
 
@@ -150,8 +158,9 @@ object StabilityService {
         // Skip balance update if channel not ready (outbound=0 during pending)
         if (!channel.isChannelReady) return updated
 
-        val ourBalanceSats = (channel.outboundCapacityMsat / 1000u).toLong() +
-            (channel.unspendablePunishmentReserve?.toLong() ?: 0)
+        val ourBalanceSats =
+            (channel.outboundCapacityMsat / 1000u).toLong() +
+                (channel.unspendablePunishmentReserve?.toLong() ?: 0)
         val channelValueSats = channel.channelValueSats.toLong()
         val theirBalanceSats = channelValueSats - ourBalanceSats
 

@@ -2,22 +2,22 @@ package com.stablechannels.app.services
 
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.util.Constants
-import org.json.JSONObject
-import java.security.MessageDigest
-import java.security.SecureRandom
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.security.MessageDigest
+import java.security.SecureRandom
 import kotlin.math.abs
 import kotlin.math.floor
+import org.json.JSONObject
 
 /**
- * Why a trade could not be prepared locally. Distinct from a [TradeControlMessage.Rejected]
- * reason code: these are decided on this device, before anything is signed or sent, so no fee
- * has been spent and there is nothing to reconcile with the LSP.
+ * Why a trade could not be prepared locally. Distinct from a [TradeControlMessage.Rejected] reason
+ * code: these are decided on this device, before anything is signed or sent, so no fee has been
+ * spent and there is nothing to reconcile with the LSP.
  *
- * Issue #272: these refusals all returned a bare `null` and shared one caller-supplied string.
- * The stabilization limit already reports itself precisely via [StabilizationPolicy]; this gives
- * the remaining ones the same treatment instead of describing every one of them as a settlement
+ * Issue #272: these refusals all returned a bare `null` and shared one caller-supplied string. The
+ * stabilization limit already reports itself precisely via [StabilizationPolicy]; this gives the
+ * remaining ones the same treatment instead of describing every one of them as a settlement
  * problem.
  */
 enum class TradeFailure {
@@ -28,27 +28,31 @@ enum class TradeFailure {
     ALLOCATION_UNAVAILABLE;
 
     /** Fixed local copy: what happened, and where the user can act, what to do about it. */
-    fun userMessage(): String = when (this) {
-        INVALID_CHANNEL -> "This channel is not ready to trade yet."
-        INVALID_AMOUNT -> "Enter a valid amount and try again."
-        FEE_UNAVAILABLE -> "The trade fee could not be calculated. Refresh the price and try again."
-        FEE_EXCEEDS_BALANCE -> "Your balance cannot cover this trade and its fee. Reduce the amount."
-        ALLOCATION_UNAVAILABLE ->
-            "This trade cannot preserve the current channel allocation safely. " +
-                "Settle the stability adjustment and retry."
-    }
+    fun userMessage(): String =
+        when (this) {
+            INVALID_CHANNEL -> "This channel is not ready to trade yet."
+            INVALID_AMOUNT -> "Enter a valid amount and try again."
+            FEE_UNAVAILABLE ->
+                "The trade fee could not be calculated. Refresh the price and try again."
+            FEE_EXCEEDS_BALANCE ->
+                "Your balance cannot cover this trade and its fee. Reduce the amount."
+            ALLOCATION_UNAVAILABLE ->
+                "This trade cannot preserve the current channel allocation safely. " +
+                    "Settle the stability adjustment and retry."
+        }
 }
 
 /** The outcome of [TradeProtocol.prepareOrFailure]: a ready trade, or why there isn't one. */
 sealed interface TradePreparation {
     data class Success(val trade: PreparedTrade) : TradePreparation
+
     data class Failure(val reason: TradeFailure) : TradePreparation
 }
 
 data class TradeCorrelation(
     val tradeId: String,
     val tradePaymentId: String,
-    val requestHash: String
+    val requestHash: String,
 )
 
 sealed interface TradeControlMessage {
@@ -58,14 +62,14 @@ sealed interface TradeControlMessage {
         val expectedUsd: Double,
         val backingSats: Long,
         val syncVersion: Long,
-        val correlation: TradeCorrelation?
+        val correlation: TradeCorrelation?,
     ) : TradeControlMessage
 
     data class Rejected(
         val channelId: String,
         val correlation: TradeCorrelation,
         val reasonCode: String,
-        val decidedAt: Long
+        val decidedAt: Long,
     ) : TradeControlMessage
 }
 
@@ -85,7 +89,7 @@ data class PreparedTrade(
     val newBackingSats: Long,
     val quotePrice: Double,
     val createdAt: Long,
-    val expiresAt: Long
+    val expiresAt: Long,
 )
 
 object TradeProtocol {
@@ -93,44 +97,51 @@ object TradeProtocol {
     const val RESULT_CONTROL_AMOUNT_MSAT = 1L
     const val RESULT_TIMEOUT_SECS = 15L * 60L
     const val RESPONSE_RETRY_WINDOW_SECS = 14L * 24L * 60L * 60L
-    private val rejectionReasons = setOf(
-        "invalid_amount",
-        "stale_request",
-        "invalid_fee",
-        "invalid_quote",
-        "quote_deviation",
-        "insufficient_capacity",
-        "settlement_required",
-        "unsafe_allocation",
-        "internal_failure"
-    )
+    private val rejectionReasons =
+        setOf(
+            "invalid_amount",
+            "stale_request",
+            "invalid_fee",
+            "invalid_quote",
+            "quote_deviation",
+            "insufficient_capacity",
+            "settlement_required",
+            "unsafe_allocation",
+            "internal_failure",
+        )
 
     fun normalizeExpectedUsd(value: Double): Double =
         if (value.isFinite() && value >= 0.0 && value < 0.01) 0.0 else value
 
-    fun requestHash(payload: ByteArray): String = MessageDigest
-        .getInstance("SHA-256")
-        .digest(payload)
-        .joinToString("") { "%02x".format(it) }
+    fun requestHash(payload: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(payload).joinToString("") { "%02x".format(it) }
 
     fun expectedTradeFeeMsat(
         oldExpectedUsd: Double,
         newExpectedUsd: Double,
-        quotePrice: Double
+        quotePrice: Double,
     ): Long? {
         val feeRate = Constants.STABLE_CHANNEL_TRADE_FEE_RATE
-        if (!oldExpectedUsd.isFinite() || oldExpectedUsd < 0.0 ||
-            !newExpectedUsd.isFinite() || newExpectedUsd < 0.0 ||
-            !quotePrice.isFinite() || quotePrice <= 0.0 ||
-            !feeRate.isFinite() || feeRate < 0.0 || feeRate >= 1.0
-        ) return null
+        if (
+            !oldExpectedUsd.isFinite() ||
+                oldExpectedUsd < 0.0 ||
+                !newExpectedUsd.isFinite() ||
+                newExpectedUsd < 0.0 ||
+                !quotePrice.isFinite() ||
+                quotePrice <= 0.0 ||
+                !feeRate.isFinite() ||
+                feeRate < 0.0 ||
+                feeRate >= 1.0
+        )
+            return null
 
         val targetDelta = abs(newExpectedUsd - oldExpectedUsd)
-        val grossUsd = if (newExpectedUsd > oldExpectedUsd) {
-            targetDelta / (1.0 - feeRate)
-        } else {
-            targetDelta
-        }
+        val grossUsd =
+            if (newExpectedUsd > oldExpectedUsd) {
+                targetDelta / (1.0 - feeRate)
+            } else {
+                targetDelta
+            }
         val feeSats = grossUsd * feeRate / quotePrice * Constants.SATS_IN_BTC.toDouble()
         if (!feeSats.isFinite() || feeSats < 0.0 || feeSats > Long.MAX_VALUE / 1000.0) {
             return null
@@ -149,13 +160,22 @@ object TradeProtocol {
         newExpectedUsd: Double,
         quotePrice: Double,
         now: Long = System.currentTimeMillis() / 1000L,
-        tradeId: String = randomIdentifier()
-    ): PreparedTrade? = (
-        prepareOrFailure(
-            sc, spendableSats, action, amountUsd, amountBtc, feeUsd, newExpectedUsd,
-            quotePrice, now, tradeId
-        ) as? TradePreparation.Success
-        )?.trade
+        tradeId: String = randomIdentifier(),
+    ): PreparedTrade? =
+        (prepareOrFailure(
+                sc,
+                spendableSats,
+                action,
+                amountUsd,
+                amountBtc,
+                feeUsd,
+                newExpectedUsd,
+                quotePrice,
+                now,
+                tradeId,
+            )
+                as? TradePreparation.Success)
+            ?.trade
 
     /**
      * Builds a trade, or names the check that refused it. The stabilization cap still throws
@@ -172,65 +192,94 @@ object TradeProtocol {
         newExpectedUsd: Double,
         quotePrice: Double,
         now: Long = System.currentTimeMillis() / 1000L,
-        tradeId: String = randomIdentifier()
+        tradeId: String = randomIdentifier(),
     ): TradePreparation {
         val normalizedExpected = normalizeExpectedUsd(newExpectedUsd)
-        if (!isCanonicalIdentifier(sc.channelId) || sc.userChannelId.isBlank() ||
-            !isCanonicalIdentifier(tradeId)
-        ) return TradePreparation.Failure(TradeFailure.INVALID_CHANNEL)
-        if (!amountUsd.isFinite() || amountUsd <= 0.0 ||
-            !amountBtc.isFinite() || amountBtc < 0.0 || !feeUsd.isFinite() || feeUsd < 0.0
-        ) return TradePreparation.Failure(TradeFailure.INVALID_AMOUNT)
-        val feeMsat = expectedTradeFeeMsat(sc.expectedUSD.amount, normalizedExpected, quotePrice)
-            ?: return TradePreparation.Failure(TradeFailure.FEE_UNAVAILABLE)
+        if (
+            !isCanonicalIdentifier(sc.channelId) ||
+                sc.userChannelId.isBlank() ||
+                !isCanonicalIdentifier(tradeId)
+        )
+            return TradePreparation.Failure(TradeFailure.INVALID_CHANNEL)
+        if (
+            !amountUsd.isFinite() ||
+                amountUsd <= 0.0 ||
+                !amountBtc.isFinite() ||
+                amountBtc < 0.0 ||
+                !feeUsd.isFinite() ||
+                feeUsd < 0.0
+        )
+            return TradePreparation.Failure(TradeFailure.INVALID_AMOUNT)
+        val feeMsat =
+            expectedTradeFeeMsat(sc.expectedUSD.amount, normalizedExpected, quotePrice)
+                ?: return TradePreparation.Failure(TradeFailure.FEE_UNAVAILABLE)
         val feeSats = feeMsat / 1000L
         val postFeeReceiver = sc.stableReceiverBTC.sats - feeSats
         if (postFeeReceiver < 0L) return TradePreparation.Failure(TradeFailure.FEE_EXCEEDS_BALANCE)
-        val backing = tradeBackingAfterDelta(
-            receiverSats = postFeeReceiver,
-            currentBackingSats = sc.backingSats,
-            currentExpectedUsd = sc.expectedUSD.amount,
-            newExpectedUsd = normalizedExpected,
-            price = quotePrice
-        ) ?: return TradePreparation.Failure(TradeFailure.ALLOCATION_UNAVAILABLE)
+        val backing =
+            tradeBackingAfterDelta(
+                receiverSats = postFeeReceiver,
+                currentBackingSats = sc.backingSats,
+                currentExpectedUsd = sc.expectedUSD.amount,
+                newExpectedUsd = normalizedExpected,
+                price = quotePrice,
+            ) ?: return TradePreparation.Failure(TradeFailure.ALLOCATION_UNAVAILABLE)
 
         // Trade-entry only. Accepted syncs and settlements may legitimately exceed this cap.
         if (action == "sell" || normalizedExpected > sc.expectedUSD.amount) {
-            val snapshot = StabilizationSnapshot(sc.stableReceiverBTC.sats, spendableSats,
-                sc.backingSats, sc.expectedUSD.amount, quotePrice)
-            val limit = if (spendableSats >= feeSats) StabilizationPolicy.clientLimit(spendableSats - feeSats) else null
-            if (limit == null || backing > limit || !snapshot.accepts(floor(amountUsd * 100 + 1e-7).toLong())) {
-                throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
+            val snapshot =
+                StabilizationSnapshot(
+                    sc.stableReceiverBTC.sats,
+                    spendableSats,
+                    sc.backingSats,
+                    sc.expectedUSD.amount,
+                    quotePrice,
+                )
+            val limit =
+                if (spendableSats >= feeSats)
+                    StabilizationPolicy.clientLimit(spendableSats - feeSats)
+                else null
+            if (
+                limit == null ||
+                    backing > limit ||
+                    !snapshot.accepts(floor(amountUsd * 100 + 1e-7).toLong())
+            ) {
+                throw TradeValidationException(
+                    StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents())
+                )
             }
         }
 
-        val payload = JSONObject().apply {
-            put("type", Constants.TRADE_MESSAGE_TYPE)
-            put("channel_id", sc.channelId)
-            put("user_channel_id", sc.userChannelId)
-            put("trade_id", tradeId)
-            put("expected_usd", normalizedExpected)
-            put("quote_price", quotePrice)
-            put("ts", now)
-        }.toString()
+        val payload =
+            JSONObject()
+                .apply {
+                    put("type", Constants.TRADE_MESSAGE_TYPE)
+                    put("channel_id", sc.channelId)
+                    put("user_channel_id", sc.userChannelId)
+                    put("trade_id", tradeId)
+                    put("expected_usd", normalizedExpected)
+                    put("quote_price", quotePrice)
+                    put("ts", now)
+                }
+                .toString()
         return TradePreparation.Success(
             PreparedTrade(
-            channelId = sc.channelId,
-            userChannelId = sc.userChannelId,
-            tradeId = tradeId,
-            requestHash = requestHash(payload.toByteArray(Charsets.UTF_8)),
-            requestPayload = payload,
-            action = action,
-            amountUsd = amountUsd,
-            amountBtc = amountBtc,
-            feeUsd = feeUsd,
-            feeMsat = feeMsat,
-            oldExpectedUsd = sc.expectedUSD.amount,
-            newExpectedUsd = normalizedExpected,
-            newBackingSats = backing,
-            quotePrice = quotePrice,
-            createdAt = now,
-            expiresAt = now + RESULT_TIMEOUT_SECS
+                channelId = sc.channelId,
+                userChannelId = sc.userChannelId,
+                tradeId = tradeId,
+                requestHash = requestHash(payload.toByteArray(Charsets.UTF_8)),
+                requestPayload = payload,
+                action = action,
+                amountUsd = amountUsd,
+                amountBtc = amountBtc,
+                feeUsd = feeUsd,
+                feeMsat = feeMsat,
+                oldExpectedUsd = sc.expectedUSD.amount,
+                newExpectedUsd = normalizedExpected,
+                newBackingSats = backing,
+                quotePrice = quotePrice,
+                createdAt = now,
+                expiresAt = now + RESULT_TIMEOUT_SECS,
             )
         )
     }
@@ -240,40 +289,61 @@ object TradeProtocol {
         currentBackingSats: Long,
         currentExpectedUsd: Double,
         newExpectedUsd: Double,
-        price: Double
+        price: Double,
     ): Long? {
         val normalizedExpected = normalizeExpectedUsd(newExpectedUsd)
-        if (receiverSats < 0L || currentBackingSats < 0L ||
-            !currentExpectedUsd.isFinite() || currentExpectedUsd < 0.0 ||
-            !normalizedExpected.isFinite() || normalizedExpected < 0.0 ||
-            !price.isFinite() || price <= 0.0
-        ) return null
+        if (
+            receiverSats < 0L ||
+                currentBackingSats < 0L ||
+                !currentExpectedUsd.isFinite() ||
+                currentExpectedUsd < 0.0 ||
+                !normalizedExpected.isFinite() ||
+                normalizedExpected < 0.0 ||
+                !price.isFinite() ||
+                price <= 0.0
+        )
+            return null
         val receiverUsd = receiverSats.toDouble() / Constants.SATS_IN_BTC.toDouble() * price
         if (normalizedExpected > receiverUsd) return null
         if (normalizedExpected == 0.0) {
-            return if (!allocationDriftIsActionable(currentBackingSats, currentExpectedUsd, price)) 0L else null
+            return if (!allocationDriftIsActionable(currentBackingSats, currentExpectedUsd, price))
+                0L
+            else null
         }
 
         val currentTarget = currentExpectedUsd / price * Constants.SATS_IN_BTC.toDouble()
         val newTarget = normalizedExpected / price * Constants.SATS_IN_BTC.toDouble()
-        if (!currentTarget.isFinite() || !newTarget.isFinite() ||
-            currentTarget < 0.0 || newTarget < 0.0 ||
-            currentTarget >= Long.MAX_VALUE.toDouble() || newTarget >= Long.MAX_VALUE.toDouble()
-        ) return null
+        if (
+            !currentTarget.isFinite() ||
+                !newTarget.isFinite() ||
+                currentTarget < 0.0 ||
+                newTarget < 0.0 ||
+                currentTarget >= Long.MAX_VALUE.toDouble() ||
+                newTarget >= Long.MAX_VALUE.toDouble()
+        )
+            return null
         val currentTargetSats = floor(currentTarget).toLong()
         val newTargetSats = floor(newTarget).toLong()
-        var backing = try {
-            if (normalizedExpected >= currentExpectedUsd) {
-                Math.addExact(currentBackingSats, Math.subtractExact(newTargetSats, currentTargetSats))
-            } else {
-                Math.subtractExact(currentBackingSats, Math.subtractExact(currentTargetSats, newTargetSats))
+        var backing =
+            try {
+                if (normalizedExpected >= currentExpectedUsd) {
+                    Math.addExact(
+                        currentBackingSats,
+                        Math.subtractExact(newTargetSats, currentTargetSats),
+                    )
+                } else {
+                    Math.subtractExact(
+                        currentBackingSats,
+                        Math.subtractExact(currentTargetSats, newTargetSats),
+                    )
+                }
+            } catch (_: ArithmeticException) {
+                return null
             }
-        } catch (_: ArithmeticException) {
-            return null
-        }
         if (backing < 0L) return null
         if (currentExpectedUsd < 0.01 && currentBackingSats == 0L && backing <= receiverSats) {
-            val nativeUsd = (receiverSats - backing).toDouble() / Constants.SATS_IN_BTC.toDouble() * price
+            val nativeUsd =
+                (receiverSats - backing).toDouble() / Constants.SATS_IN_BTC.toDouble() * price
             if (nativeUsd < 0.01) backing = receiverSats
         }
         return backing.takeIf { it > 0L && it <= receiverSats }
@@ -282,24 +352,34 @@ object TradeProtocol {
     fun parseSignedControl(
         data: ByteArray,
         expectedCounterparty: String,
-        verifySignature: (ByteArray, String, String) -> Boolean
+        verifySignature: (ByteArray, String, String) -> Boolean,
     ): TradeControlMessage? {
         if (data.size > MAX_CONTROL_TLV_BYTES) return null
         return try {
-            val raw = Charsets.UTF_8.newDecoder()
-                .onMalformedInput(CodingErrorAction.REPORT)
-                .onUnmappableCharacter(CodingErrorAction.REPORT)
-                .decode(ByteBuffer.wrap(data)).toString()
+            val raw =
+                Charsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(data))
+                    .toString()
             val envelope = JSONObject(raw)
             val payloadStr = envelope.opt("payload") as? String ?: return null
             val signature = envelope.opt("signature") as? String ?: return null
             val payload = JSONObject(payloadStr)
-            val message = when (payload.optString("type")) {
-                Constants.SYNC_MESSAGE_TYPE -> parseSync(payload)
-                Constants.TRADE_REJECTED_MESSAGE_TYPE -> parseRejection(payload)
-                else -> null
-            } ?: return null
-            if (!verifySignature(payloadStr.toByteArray(Charsets.UTF_8), signature, expectedCounterparty)) return null
+            val message =
+                when (payload.optString("type")) {
+                    Constants.SYNC_MESSAGE_TYPE -> parseSync(payload)
+                    Constants.TRADE_REJECTED_MESSAGE_TYPE -> parseRejection(payload)
+                    else -> null
+                } ?: return null
+            if (
+                !verifySignature(
+                    payloadStr.toByteArray(Charsets.UTF_8),
+                    signature,
+                    expectedCounterparty,
+                )
+            )
+                return null
             message
         } catch (_: Exception) {
             null
@@ -309,65 +389,94 @@ object TradeProtocol {
     private fun parseSync(payload: JSONObject): TradeControlMessage.Sync? {
         val channelId = payload.optString("channel_id")
         val userChannelId = payload.optString("user_channel_id")
-        val expectedUsd = jsonDouble(payload, "expected_usd")?.let(::normalizeExpectedUsd)
-            ?: return null
+        val expectedUsd =
+            jsonDouble(payload, "expected_usd")?.let(::normalizeExpectedUsd) ?: return null
         val backingSats = jsonInteger(payload, "backing_sats") ?: return null
         val syncVersion = jsonInteger(payload, "sync_version") ?: return null
-        if (!isCanonicalIdentifier(channelId) || userChannelId.isBlank() ||
-            !expectedUsd.isFinite() || expectedUsd < 0.0 || backingSats < 0L || syncVersion <= 0L
-        ) return null
+        if (
+            !isCanonicalIdentifier(channelId) ||
+                userChannelId.isBlank() ||
+                !expectedUsd.isFinite() ||
+                expectedUsd < 0.0 ||
+                backingSats < 0L ||
+                syncVersion <= 0L
+        )
+            return null
 
         val correlationKeys = listOf("trade_id", "trade_payment_id", "request_hash")
         val present = correlationKeys.count { payload.has(it) && !payload.isNull(it) }
-        val correlation = when (present) {
-            0 -> null
-            3 -> TradeCorrelation(
-                payload.getString("trade_id"),
-                payload.getString("trade_payment_id"),
-                payload.getString("request_hash")
-            ).takeIf {
-                isCanonicalIdentifier(it.tradeId) && isCanonicalIdentifier(it.tradePaymentId) &&
-                    isCanonicalIdentifier(it.requestHash)
-            } ?: return null
-            else -> return null
-        }
+        val correlation =
+            when (present) {
+                0 -> null
+                3 ->
+                    TradeCorrelation(
+                            payload.getString("trade_id"),
+                            payload.getString("trade_payment_id"),
+                            payload.getString("request_hash"),
+                        )
+                        .takeIf {
+                            isCanonicalIdentifier(it.tradeId) &&
+                                isCanonicalIdentifier(it.tradePaymentId) &&
+                                isCanonicalIdentifier(it.requestHash)
+                        } ?: return null
+                else -> return null
+            }
         return TradeControlMessage.Sync(
-            channelId, userChannelId, expectedUsd, backingSats, syncVersion, correlation
+            channelId,
+            userChannelId,
+            expectedUsd,
+            backingSats,
+            syncVersion,
+            correlation,
         )
     }
 
     private fun parseRejection(payload: JSONObject): TradeControlMessage.Rejected? {
-        val allowed = setOf(
-            "type", "channel_id", "trade_id", "trade_payment_id", "request_hash",
-            "reason_code", "decided_at"
-        )
+        val allowed =
+            setOf(
+                "type",
+                "channel_id",
+                "trade_id",
+                "trade_payment_id",
+                "request_hash",
+                "reason_code",
+                "decided_at",
+            )
         if (payload.keys().asSequence().any { it !in allowed }) return null
         val channelId = payload.getString("channel_id")
-        val correlation = TradeCorrelation(
-            payload.getString("trade_id"),
-            payload.getString("trade_payment_id"),
-            payload.getString("request_hash")
-        )
+        val correlation =
+            TradeCorrelation(
+                payload.getString("trade_id"),
+                payload.getString("trade_payment_id"),
+                payload.getString("request_hash"),
+            )
         val reason = payload.getString("reason_code")
         val decidedAt = jsonInteger(payload, "decided_at") ?: return null
-        if (!isCanonicalIdentifier(channelId) || !isCanonicalIdentifier(correlation.tradeId) ||
-            !isCanonicalIdentifier(correlation.tradePaymentId) ||
-            !isCanonicalIdentifier(correlation.requestHash) || reason !in rejectionReasons || decidedAt < 0L
-        ) return null
+        if (
+            !isCanonicalIdentifier(channelId) ||
+                !isCanonicalIdentifier(correlation.tradeId) ||
+                !isCanonicalIdentifier(correlation.tradePaymentId) ||
+                !isCanonicalIdentifier(correlation.requestHash) ||
+                reason !in rejectionReasons ||
+                decidedAt < 0L
+        )
+            return null
         return TradeControlMessage.Rejected(channelId, correlation, reason, decidedAt)
     }
 
-    fun rejectionMessage(reason: String): String = when (reason) {
-        "invalid_amount" -> "The amount is invalid. Review the amount and retry."
-        "stale_request" -> "The quote expired before it could be accepted. Refresh and retry."
-        "invalid_fee" -> "The fee was invalid. Refresh the quote before retrying."
-        "invalid_quote" -> "A valid market quote is required. Refresh and retry."
-        "quote_deviation" -> "The market moved outside the quote range. Refresh and retry."
-        "insufficient_capacity" -> "The channel does not have enough capacity. Reduce the amount."
-        "settlement_required" -> "Settle the current stability adjustment before retrying."
-        "unsafe_allocation" -> "Cannot preserve the current channel allocation safely."
-        else -> "The provider could not process. Try again later."
-    }
+    fun rejectionMessage(reason: String): String =
+        when (reason) {
+            "invalid_amount" -> "The amount is invalid. Review the amount and retry."
+            "stale_request" -> "The quote expired before it could be accepted. Refresh and retry."
+            "invalid_fee" -> "The fee was invalid. Refresh the quote before retrying."
+            "invalid_quote" -> "A valid market quote is required. Refresh and retry."
+            "quote_deviation" -> "The market moved outside the quote range. Refresh and retry."
+            "insufficient_capacity" ->
+                "The channel does not have enough capacity. Reduce the amount."
+            "settlement_required" -> "Settle the current stability adjustment before retrying."
+            "unsafe_allocation" -> "Cannot preserve the current channel allocation safely."
+            else -> "The provider could not process. Try again later."
+        }
 
     fun isCanonicalIdentifier(value: String): Boolean =
         value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
@@ -386,7 +495,11 @@ object TradeProtocol {
         }
     }
 
-    private fun allocationDriftIsActionable(backingSats: Long, expectedUsd: Double, price: Double): Boolean {
+    private fun allocationDriftIsActionable(
+        backingSats: Long,
+        expectedUsd: Double,
+        price: Double,
+    ): Boolean {
         val currentValue = backingSats.toDouble() / Constants.SATS_IN_BTC.toDouble() * price
         val driftUsd = abs(currentValue - expectedUsd)
         if (expectedUsd < 0.01) return driftUsd >= Constants.STABILITY_THRESHOLD_USD
@@ -395,7 +508,6 @@ object TradeProtocol {
             driftPercent >= Constants.STABILITY_THRESHOLD_PERCENT
     }
 
-    private fun randomIdentifier(): String = ByteArray(32)
-        .also { SecureRandom().nextBytes(it) }
-        .joinToString("") { "%02x".format(it) }
+    private fun randomIdentifier(): String =
+        ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
 }
