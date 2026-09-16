@@ -467,7 +467,12 @@ class NotificationService: UNNotificationServiceExtension {
         }
 
         let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+        let plaintextExists = FileManager.default.fileExists(atPath: seedPhrasePath.path)
         let plaintextWords = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
+        if plaintextExists &&
+            (plaintextWords == nil || plaintextWords!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+            return .indeterminate("Legacy seed backup exists but could not be read")
+        }
         let hasPlaintext = plaintextWords != nil && !plaintextWords!.trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty
 
