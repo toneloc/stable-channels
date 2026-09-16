@@ -3,8 +3,8 @@ package com.stablechannels.app.util
 import android.content.Context
 
 /**
- * Persists the most recent accepted oracle price so the background stability service can apply
- * the same large-move circuit breaker as the foreground app. Port of the iOS app-group
+ * Persists the most recent accepted oracle price so the background stability service can apply the
+ * same large-move circuit breaker as the foreground app. Port of the iOS app-group
  * `PriceOracleAnchorStore`: without an anchor, `PriceOracle.resolve` receives a null
  * `lastTrustedPrice` and a manipulated-but-internally-consistent price would be accepted.
  */
@@ -25,13 +25,13 @@ object PriceOracleAnchorStore {
     }
 
     fun freshPrice(context: Context, nowMs: Long = System.currentTimeMillis()): Double? {
-        val prefs = context.applicationContext
-            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs =
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (!prefs.contains(PRICE_BITS_KEY) || !prefs.contains(ACCEPTED_AT_MS_KEY)) return null
         return freshPrice(
             Double.fromBits(prefs.getLong(PRICE_BITS_KEY, 0L)),
             prefs.getLong(ACCEPTED_AT_MS_KEY, 0L),
-            nowMs
+            nowMs,
         )
     }
 

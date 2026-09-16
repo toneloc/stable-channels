@@ -23,32 +23,34 @@ import androidx.compose.ui.unit.dp
 fun StatusCapsule(
     message: String,
     modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null
+    onClick: (() -> Unit)? = null,
 ) {
     AnimatedVisibility(
         visible = message.isNotEmpty(),
-        enter = slideInVertically(
-            initialOffsetY = { it / 2 },
-            animationSpec = tween(durationMillis = 300)
-        ) + fadeIn(animationSpec = tween(durationMillis = 300)),
-        exit = slideOutVertically(
-            targetOffsetY = { it / 2 },
-            animationSpec = tween(durationMillis = 300)
-        ) + fadeOut(animationSpec = tween(durationMillis = 300)),
-        modifier = modifier
+        enter =
+            slideInVertically(
+                initialOffsetY = { it / 2 },
+                animationSpec = tween(durationMillis = 300),
+            ) + fadeIn(animationSpec = tween(durationMillis = 300)),
+        exit =
+            slideOutVertically(
+                targetOffsetY = { it / 2 },
+                animationSpec = tween(durationMillis = 300),
+            ) + fadeOut(animationSpec = tween(durationMillis = 300)),
+        modifier = modifier,
     ) {
         Surface(
             shape = RoundedCornerShape(50),
             tonalElevation = 3.dp,
             color = MaterialTheme.colorScheme.surface,
             onClick = { onClick?.invoke() },
-            modifier = if (onClick != null) Modifier else Modifier
+            modifier = if (onClick != null) Modifier else Modifier,
         ) {
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             )
         }
     }

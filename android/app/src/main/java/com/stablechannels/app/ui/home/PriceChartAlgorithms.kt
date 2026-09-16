@@ -9,22 +9,18 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-/**
- * Mathematical and sampling helpers for price chart rendering.
- */
+/** Mathematical and sampling helpers for price chart rendering. */
 object PriceChartAlgorithms {
 
     /**
-     * Binary search for the first index where record.timestamp >= cutoffSec.
-     * Assumes records are chronologically sorted.
+     * Binary search for the first index where record.timestamp >= cutoffSec. Assumes records are
+     * chronologically sorted.
      */
     fun lowerBound(records: List<PriceRecord>, cutoffSec: Long): Int {
         return records.lowerBound(cutoffSec) { it.timestamp }
     }
 
-    /**
-     * Single-pass calculation of minimum and maximum prices with 2% margin padding.
-     */
+    /** Single-pass calculation of minimum and maximum prices with 2% margin padding. */
     fun minMaxPrices(records: List<PriceRecord>): Pair<Double, Double> {
         if (records.isEmpty()) return 0.0 to 100.0
         var lo = Double.POSITIVE_INFINITY
@@ -39,8 +35,8 @@ object PriceChartAlgorithms {
     }
 
     /**
-     * Largest Triangle Three Buckets (LTTB) downsampling.
-     * Preserves local visual extrema (peaks and valleys).
+     * Largest Triangle Three Buckets (LTTB) downsampling. Preserves local visual extrema (peaks and
+     * valleys).
      */
     fun lttbDownsample(records: List<PriceRecord>, targetCount: Int): List<PriceRecord> {
         if (records.size <= targetCount || targetCount <= 2) {
@@ -88,7 +84,11 @@ object PriceChartAlgorithms {
                 val currentX = records[j].timestamp.toDouble()
                 val currentY = records[j].price
 
-                val area = abs((pointAX - avgX) * (currentY - pointAY) - (pointAX - currentX) * (avgY - pointAY)) * 0.5
+                val area =
+                    abs(
+                        (pointAX - avgX) * (currentY - pointAY) -
+                            (pointAX - currentX) * (avgY - pointAY)
+                    ) * 0.5
 
                 if (area > maxArea) {
                     maxArea = area
@@ -104,9 +104,7 @@ object PriceChartAlgorithms {
         return sampled
     }
 
-    /**
-     * Build cubic Bezier line path through projected coordinates.
-     */
+    /** Build cubic Bezier line path through projected coordinates. */
     fun buildSplinePath(points: List<Offset>): Path {
         val path = Path()
         if (points.isEmpty()) return path
@@ -134,9 +132,7 @@ object PriceChartAlgorithms {
         return path
     }
 
-    /**
-     * Build closed area path below the spline line for gradient fill.
-     */
+    /** Build closed area path below the spline line for gradient fill. */
     fun buildAreaPath(linePath: Path, width: Float, height: Float): Path {
         return Path().apply {
             addPath(linePath)

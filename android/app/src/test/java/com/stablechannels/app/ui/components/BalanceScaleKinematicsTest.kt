@@ -1,20 +1,21 @@
 package com.stablechannels.app.ui.components
 
+import kotlin.math.abs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
 class BalanceScaleKinematicsTest {
     private val kinematics = BalanceScaleKinematics()
 
     @Test
     fun testInitialStageIsResting() {
-        val stage = kinematics.evaluate(
-            elapsedSinceStart = 0.10f,
-            isSyncComplete = false,
-            settleElapsed = null
-        )
+        val stage =
+            kinematics.evaluate(
+                elapsedSinceStart = 0.10f,
+                isSyncComplete = false,
+                settleElapsed = null,
+            )
         assertEquals(BalanceScaleKinematics.Stage.Resting, stage)
     }
 

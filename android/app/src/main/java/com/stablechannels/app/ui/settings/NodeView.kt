@@ -24,36 +24,34 @@ fun NodeView(appState: AppState) {
     var showNodeId by remember { mutableStateOf(false) }
     var copiedNodeId by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // Status section
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text("Status", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
-                        modifier = Modifier.size(8.dp)
+                        modifier = Modifier.size(8.dp),
                     ) {}
                     Text(
                         text = if (isRunning) "Running" else "Stopped",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium,
-                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444)
+                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
                     )
                 }
             }
@@ -73,26 +71,28 @@ fun NodeView(appState: AppState) {
             },
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Node ID", style = MaterialTheme.typography.bodyLarge)
                     if (showNodeId) {
                         Text(
                             text = if (copiedNodeId) "Copied ✓" else "Tap to copy",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (copiedNodeId) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                            color =
+                                if (copiedNodeId) Color(0xFF10B981)
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     } else {
                         Text(
                             text = "Tap to reveal",
                             style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF3B82F6)
+                            color = Color(0xFF3B82F6),
                         )
                     }
                 }
@@ -102,7 +102,7 @@ fun NodeView(appState: AppState) {
                         text = appState.nodeService.nodeId,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -116,11 +116,15 @@ fun NodeView(appState: AppState) {
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 12.dp)
+            modifier = Modifier.padding(bottom = 12.dp),
         )
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Network", style = MaterialTheme.typography.bodyLarge)
-            Text(Constants.DEFAULT_NETWORK, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+            Text(
+                Constants.DEFAULT_NETWORK,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+            )
         }
         Spacer(Modifier.height(12.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -128,7 +132,7 @@ fun NodeView(appState: AppState) {
             Text(
                 Constants.PRIMARY_CHAIN_URL.removePrefix("https://").take(20),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }

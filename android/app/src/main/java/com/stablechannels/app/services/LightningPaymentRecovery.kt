@@ -22,7 +22,7 @@ object LightningPaymentRecovery {
     /** Reconcile rows whose event may have been consumed while Android was backgrounded. */
     fun reconcilePending(
         db: DatabaseService,
-        lookup: (String) -> LightningPaymentResolution?
+        lookup: (String) -> LightningPaymentResolution?,
     ): Int {
         var repaired = 0
         db.getPendingOutgoingLightningPaymentIds().forEach { paymentId ->

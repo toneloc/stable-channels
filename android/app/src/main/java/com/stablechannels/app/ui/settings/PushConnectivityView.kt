@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.settings
 
-import android.content.Context
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,11 +16,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.util.relativeString
+import java.util.Date
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.Date
-import com.stablechannels.app.util.relativeString
 
 @Composable
 fun PushConnectivityView() {
@@ -40,12 +39,7 @@ fun PushConnectivityView() {
 
     val lastHeartbeat = prefs.getLong("main_app_last_active", 0L)
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // FCM Token card
         Surface(
             onClick = {
@@ -56,41 +50,44 @@ fun PushConnectivityView() {
             },
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("FCM Token", style = MaterialTheme.typography.bodyLarge)
                     if (fcmToken != null) {
                         Text(
                             text = if (copiedToken) "Copied ✓" else "Tap to copy",
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (copiedToken) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant
+                            color =
+                                if (copiedToken) Color(0xFF10B981)
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
                 Spacer(Modifier.height(8.dp))
                 if (fcmToken != null) {
-                    val truncated = if (fcmToken!!.length > 24) {
-                        "${fcmToken!!.take(16)}...${fcmToken!!.takeLast(8)}"
-                    } else {
-                        fcmToken!!
-                    }
+                    val truncated =
+                        if (fcmToken!!.length > 24) {
+                            "${fcmToken!!.take(16)}...${fcmToken!!.takeLast(8)}"
+                        } else {
+                            fcmToken!!
+                        }
                     Text(
                         text = truncated,
                         fontFamily = FontFamily.Monospace,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
                     Text(
                         text = "No token available",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -102,20 +99,23 @@ fun PushConnectivityView() {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Registration", style = MaterialTheme.typography.bodyLarge)
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 Surface(
                     shape = MaterialTheme.shapes.small,
                     color = if (isRegistered) Color(0xFF10B981) else Color(0xFFEF4444),
-                    modifier = Modifier.size(8.dp)
+                    modifier = Modifier.size(8.dp),
                 ) {}
                 Text(
                     text = if (isRegistered) "Registered" else "Unregistered",
                     style = MaterialTheme.typography.bodyLarge,
                     fontWeight = FontWeight.Medium,
-                    color = if (isRegistered) Color(0xFF10B981) else Color(0xFFEF4444)
+                    color = if (isRegistered) Color(0xFF10B981) else Color(0xFFEF4444),
                 )
             }
         }
@@ -126,17 +126,18 @@ fun PushConnectivityView() {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Last Heartbeat", style = MaterialTheme.typography.bodyLarge)
             Text(
-                text = if (lastHeartbeat > 0) {
-                    Date(lastHeartbeat * 1000).relativeString()
-                } else {
-                    "No heartbeat recorded"
-                },
+                text =
+                    if (lastHeartbeat > 0) {
+                        Date(lastHeartbeat * 1000).relativeString()
+                    } else {
+                        "No heartbeat recorded"
+                    },
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -149,9 +150,10 @@ fun PushConnectivityView() {
                 retryError = null
                 scope.launch {
                     try {
-                        val token = withTimeoutOrNull(10_000L) {
-                            FirebaseMessaging.getInstance().token.await()
-                        }
+                        val token =
+                            withTimeoutOrNull(10_000L) {
+                                FirebaseMessaging.getInstance().token.await()
+                            }
                         if (token != null) {
                             FCMService.saveToken(context, token)
                             fcmToken = token
@@ -169,16 +171,17 @@ fun PushConnectivityView() {
             },
             modifier = Modifier.fillMaxWidth(),
             enabled = !isRetrying,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF10B981),
-                contentColor = Color.White
-            )
+            colors =
+                ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF10B981),
+                    contentColor = Color.White,
+                ),
         ) {
             if (isRetrying) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(16.dp),
                     strokeWidth = 2.dp,
-                    color = Color.White
+                    color = Color.White,
                 )
                 Spacer(Modifier.width(8.dp))
             }
@@ -190,7 +193,7 @@ fun PushConnectivityView() {
             Text(
                 text = retryError!!,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error
+                color = MaterialTheme.colorScheme.error,
             )
         }
     }

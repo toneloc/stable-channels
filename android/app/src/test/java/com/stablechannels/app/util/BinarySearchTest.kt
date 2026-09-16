@@ -1,10 +1,10 @@
 package com.stablechannels.app.util
 
+import kotlin.math.abs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import kotlin.math.abs
 
 class BinarySearchTest {
 
@@ -33,12 +33,13 @@ class BinarySearchTest {
 
     @Test
     fun `binarySearchNearest on points list`() {
-        val points = listOf(
-            SamplePoint(100.0, 1.0),
-            SamplePoint(200.0, 2.0),
-            SamplePoint(300.0, 3.0),
-            SamplePoint(400.0, 4.0)
-        )
+        val points =
+            listOf(
+                SamplePoint(100.0, 1.0),
+                SamplePoint(200.0, 2.0),
+                SamplePoint(300.0, 3.0),
+                SamplePoint(400.0, 4.0),
+            )
 
         assertEquals(100.0, points.binarySearchNearest(50.0) { it.x }?.x ?: 0.0, 0.001)
         assertEquals(100.0, points.binarySearchNearest(140.0) { it.x }?.x ?: 0.0, 0.001)
@@ -50,11 +51,12 @@ class BinarySearchTest {
     @Test
     fun `binarySearchNearest on dates list`() {
         data class TimedEvent(val date: java.util.Date, val id: Int)
-        val events = listOf(
-            TimedEvent(java.util.Date(100), 1),
-            TimedEvent(java.util.Date(200), 2),
-            TimedEvent(java.util.Date(300), 3)
-        )
+        val events =
+            listOf(
+                TimedEvent(java.util.Date(100), 1),
+                TimedEvent(java.util.Date(200), 2),
+                TimedEvent(java.util.Date(300), 3),
+            )
         assertEquals(1, events.binarySearchNearest(java.util.Date(140)) { it.date }?.id)
         assertEquals(2, events.binarySearchNearest(java.util.Date(160)) { it.date }?.id)
     }
@@ -62,26 +64,38 @@ class BinarySearchTest {
     @Test
     fun `binarySearchNearest with custom distance function`() {
         data class Item(val name: String, val length: Int)
-        val items = listOf(
-            Item("a", 1),
-            Item("ccc", 3),
-            Item("ffffff", 6)
-        )
+        val items =
+            listOf(
+                Item("a", 1),
+                Item("ccc", 3),
+                Item("ffffff", 6),
+            )
         val nearest = items.binarySearchNearest(4, { it.length }) { a: Int, b: Int -> abs(a - b) }
         assertEquals(3, nearest?.length)
     }
 
     @Test
     fun `binarySearchNearest on Long integers beyond Double precision`() {
-        // Values above 2^53 (9_007_199_254_740_992L) where Double loses unit precision for odd integers
-        val values = listOf(
-            9_007_199_254_740_993L,
+        // Values above 2^53 (9_007_199_254_740_992L) where Double loses unit precision for odd
+        // integers
+        val values =
+            listOf(
+                9_007_199_254_740_993L,
+                9_007_199_254_740_995L,
+                9_007_199_254_740_997L,
+            )
+        assertEquals(
             9_007_199_254_740_995L,
-            9_007_199_254_740_997L
+            values.binarySearchNearest(9_007_199_254_740_995L) { it },
         )
-        assertEquals(9_007_199_254_740_995L, values.binarySearchNearest(9_007_199_254_740_995L) { it })
-        assertEquals(9_007_199_254_740_997L, values.binarySearchNearest(9_007_199_254_740_997L) { it })
-        assertEquals(9_007_199_254_740_993L, values.binarySearchNearest(9_007_199_254_740_994L) { it })
+        assertEquals(
+            9_007_199_254_740_997L,
+            values.binarySearchNearest(9_007_199_254_740_997L) { it },
+        )
+        assertEquals(
+            9_007_199_254_740_993L,
+            values.binarySearchNearest(9_007_199_254_740_994L) { it },
+        )
     }
 
     @Test
@@ -144,7 +158,8 @@ class BinarySearchTest {
         assertEquals(10L, list.binarySearchNearest(-100L) { it })
         assertEquals(30L, list.binarySearchNearest(1000L) { it })
 
-        // Equidistant tie-breaking should return one of the adjacent values deterministically without crashing
+        // Equidistant tie-breaking should return one of the adjacent values deterministically
+        // without crashing
         val pair = listOf(10L, 20L)
         val nearest = pair.binarySearchNearest(15L) { it }
         assertTrue(nearest == 10L || nearest == 20L)

@@ -4,6 +4,7 @@ import android.content.Context
 import com.stablechannels.app.models.DailyPriceRecord
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -14,7 +15,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -38,8 +38,9 @@ class PriceDatabaseServiceTest {
     }
 
     private fun deleteDatabaseFiles() {
-        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
-            .forEach { file -> if (file.exists()) file.delete() }
+        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
+            if (file.exists()) file.delete()
+        }
     }
 
     @Test
@@ -59,11 +60,12 @@ class PriceDatabaseServiceTest {
     fun testBackfillHourlyPricesDeduplicationAndRowCount() {
         val now = System.currentTimeMillis() / 1000
         val baseTs = now - 24 * 3600
-        val candles = listOf(
-            baseTs to 50000.0,
-            baseTs + 3600 to 51000.0,
-            baseTs + 7200 to 52000.0
-        )
+        val candles =
+            listOf(
+                baseTs to 50000.0,
+                baseTs + 3600 to 51000.0,
+                baseTs + 7200 to 52000.0,
+            )
 
         val inserted = service.backfillHourlyPrices(candles)
         assertEquals(3, inserted)
@@ -88,19 +90,19 @@ class PriceDatabaseServiceTest {
 
     @Test
     fun testBackfillDailyPricesNewDateAccounting() {
-        val candles = listOf(
-            DailyPriceRecord("2026-09-08", 55000.0, 56000.0, 54000.0, 55500.0, 100.0),
-            DailyPriceRecord("2026-09-09", 55500.0, 57000.0, 55000.0, 56500.0, 150.0),
-            DailyPriceRecord("2026-09-10", 56500.0, 58000.0, 56000.0, 57500.0, 200.0)
-        )
+        val candles =
+            listOf(
+                DailyPriceRecord("2026-09-08", 55000.0, 56000.0, 54000.0, 55500.0, 100.0),
+                DailyPriceRecord("2026-09-09", 55500.0, 57000.0, 55000.0, 56500.0, 150.0),
+                DailyPriceRecord("2026-09-10", 56500.0, 58000.0, 56000.0, 57500.0, 200.0),
+            )
 
         val inserted = service.backfillDailyPrices(candles)
         assertEquals(3, inserted)
 
         // Re-inserting existing dates with updated close price returns 0 newly inserted dates
-        val updatedCandles = listOf(
-            DailyPriceRecord("2026-09-10", 56500.0, 58500.0, 56000.0, 58200.0, 250.0)
-        )
+        val updatedCandles =
+            listOf(DailyPriceRecord("2026-09-10", 56500.0, 58500.0, 56000.0, 58200.0, 250.0))
         val updatedCount = service.backfillDailyPrices(updatedCandles)
         assertEquals(0, updatedCount)
 
@@ -111,9 +113,8 @@ class PriceDatabaseServiceTest {
         assertEquals(58200.0, sep10!!.close, 0.001)
 
         // Inserting a new date returns 1
-        val newDay = listOf(
-            DailyPriceRecord("2026-09-11", 58200.0, 59000.0, 58000.0, 58800.0, 180.0)
-        )
+        val newDay =
+            listOf(DailyPriceRecord("2026-09-11", 58200.0, 59000.0, 58000.0, 58800.0, 180.0))
         val newDayCount = service.backfillDailyPrices(newDay)
         assertEquals(1, newDayCount)
     }
@@ -143,4 +144,3 @@ class PriceDatabaseServiceTest {
         assertEquals(60000.0, history.first().price, 0.001)
     }
 }
-

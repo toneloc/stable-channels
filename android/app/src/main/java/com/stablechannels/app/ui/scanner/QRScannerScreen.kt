@@ -14,6 +14,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
@@ -26,12 +27,9 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -39,11 +37,10 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.foundation.Canvas
 import androidx.core.content.ContextCompat
+import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.common.InputImage
 import com.stablechannels.app.util.QRCodeUtils
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 fun QRScannerScreen(
     onResult: (String) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -77,16 +74,15 @@ fun QRScannerScreen(
     }
 
     // Permission launcher
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            permissionGranted = true
-            permissionDenied = false
-        } else {
-            permissionDenied = true
+    val permissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) {
+                permissionGranted = true
+                permissionDenied = false
+            } else {
+                permissionDenied = true
+            }
         }
-    }
 
     // Request permission if not granted and not yet denied
     LaunchedEffect(permissionGranted, permissionDenied) {
@@ -95,11 +91,7 @@ fun QRScannerScreen(
         }
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-    ) {
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         when {
             permissionGranted -> {
                 // Camera preview with barcode analysis
@@ -113,7 +105,7 @@ fun QRScannerScreen(
                         view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
 
                         onResult(cleaned)
-                    }
+                    },
                 )
 
                 // Viewfinder square overlay
@@ -126,12 +118,15 @@ fun QRScannerScreen(
                     val strokeWidth = 4f
 
                     // Semi-transparent overlay outside the square
-                    val cutoutPath = Path().apply {
-                        addRoundRect(RoundRect(
-                            rect = Rect(left, top, left + squareSize, top + squareSize),
-                            cornerRadius = CornerRadius(cornerRadius, cornerRadius)
-                        ))
-                    }
+                    val cutoutPath =
+                        Path().apply {
+                            addRoundRect(
+                                RoundRect(
+                                    rect = Rect(left, top, left + squareSize, top + squareSize),
+                                    cornerRadius = CornerRadius(cornerRadius, cornerRadius),
+                                )
+                            )
+                        }
                     clipPath(cutoutPath, clipOp = ClipOp.Difference) {
                         drawRect(Color.Black.copy(alpha = 0.5f))
                     }
@@ -139,17 +134,57 @@ fun QRScannerScreen(
                     // Corner brackets (white)
                     val bracketColor = Color.White
                     // Top-left
-                    drawLine(bracketColor, Offset(left, top + cornerRadius), Offset(left, top + cornerLength), strokeWidth)
-                    drawLine(bracketColor, Offset(left + cornerRadius, top), Offset(left + cornerLength, top), strokeWidth)
+                    drawLine(
+                        bracketColor,
+                        Offset(left, top + cornerRadius),
+                        Offset(left, top + cornerLength),
+                        strokeWidth,
+                    )
+                    drawLine(
+                        bracketColor,
+                        Offset(left + cornerRadius, top),
+                        Offset(left + cornerLength, top),
+                        strokeWidth,
+                    )
                     // Top-right
-                    drawLine(bracketColor, Offset(left + squareSize, top + cornerRadius), Offset(left + squareSize, top + cornerLength), strokeWidth)
-                    drawLine(bracketColor, Offset(left + squareSize - cornerRadius, top), Offset(left + squareSize - cornerLength, top), strokeWidth)
+                    drawLine(
+                        bracketColor,
+                        Offset(left + squareSize, top + cornerRadius),
+                        Offset(left + squareSize, top + cornerLength),
+                        strokeWidth,
+                    )
+                    drawLine(
+                        bracketColor,
+                        Offset(left + squareSize - cornerRadius, top),
+                        Offset(left + squareSize - cornerLength, top),
+                        strokeWidth,
+                    )
                     // Bottom-left
-                    drawLine(bracketColor, Offset(left, top + squareSize - cornerRadius), Offset(left, top + squareSize - cornerLength), strokeWidth)
-                    drawLine(bracketColor, Offset(left + cornerRadius, top + squareSize), Offset(left + cornerLength, top + squareSize), strokeWidth)
+                    drawLine(
+                        bracketColor,
+                        Offset(left, top + squareSize - cornerRadius),
+                        Offset(left, top + squareSize - cornerLength),
+                        strokeWidth,
+                    )
+                    drawLine(
+                        bracketColor,
+                        Offset(left + cornerRadius, top + squareSize),
+                        Offset(left + cornerLength, top + squareSize),
+                        strokeWidth,
+                    )
                     // Bottom-right
-                    drawLine(bracketColor, Offset(left + squareSize, top + squareSize - cornerRadius), Offset(left + squareSize, top + squareSize - cornerLength), strokeWidth)
-                    drawLine(bracketColor, Offset(left + squareSize - cornerRadius, top + squareSize), Offset(left + squareSize - cornerLength, top + squareSize), strokeWidth)
+                    drawLine(
+                        bracketColor,
+                        Offset(left + squareSize, top + squareSize - cornerRadius),
+                        Offset(left + squareSize, top + squareSize - cornerLength),
+                        strokeWidth,
+                    )
+                    drawLine(
+                        bracketColor,
+                        Offset(left + squareSize - cornerRadius, top + squareSize),
+                        Offset(left + squareSize - cornerLength, top + squareSize),
+                        strokeWidth,
+                    )
                 }
 
                 // Hint text at bottom
@@ -158,41 +193,41 @@ fun QRScannerScreen(
                     color = Color.White,
                     style = MaterialTheme.typography.bodyMedium,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 100.dp)
-                        .padding(horizontal = 32.dp)
+                    modifier =
+                        Modifier.align(Alignment.BottomCenter)
+                            .padding(bottom = 100.dp)
+                            .padding(horizontal = 32.dp),
                 )
             }
 
             permissionDenied -> {
                 // Permission denied - show settings prompt
                 Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(32.dp),
+                    modifier = Modifier.fillMaxSize().padding(32.dp),
                     verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
                         text = "Camera access needed",
                         style = MaterialTheme.typography.headlineSmall,
                         color = Color.White,
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(12.dp))
                     Text(
-                        text = "Camera access is needed to scan QR codes. Please enable it in Settings.",
+                        text =
+                            "Camera access is needed to scan QR codes. Please enable it in Settings.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.White.copy(alpha = 0.7f),
-                        textAlign = TextAlign.Center
+                        textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(24.dp))
                     Button(
                         onClick = {
-                            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                                data = Uri.fromParts("package", context.packageName, null)
-                            }
+                            val intent =
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                    data = Uri.fromParts("package", context.packageName, null)
+                                }
                             context.startActivity(intent)
                         }
                     ) {
@@ -205,7 +240,7 @@ fun QRScannerScreen(
                 // Waiting for permission response
                 Box(
                     modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
+                    contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator(color = Color.White)
                 }
@@ -215,16 +250,13 @@ fun QRScannerScreen(
         // Cancel button - always visible
         IconButton(
             onClick = onCancel,
-            modifier = Modifier
-                .align(Alignment.TopStart)
-                .padding(16.dp)
-                .statusBarsPadding()
+            modifier = Modifier.align(Alignment.TopStart).padding(16.dp).statusBarsPadding(),
         ) {
             Icon(
                 imageVector = Icons.Default.Close,
                 contentDescription = "Cancel",
                 tint = Color.White,
-                modifier = Modifier.size(28.dp)
+                modifier = Modifier.size(28.dp),
             )
         }
     }
@@ -233,63 +265,73 @@ fun QRScannerScreen(
 @Composable
 private fun CameraPreviewWithAnalysis(
     hasDetected: AtomicBoolean,
-    onBarcodeDetected: (String) -> Unit
+    onBarcodeDetected: (String) -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
     // ML Kit barcode scanner options - QR codes only
     val scannerOptions = remember {
-        BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-            .build()
+        BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()
     }
     val barcodeScanner = remember { BarcodeScanning.getClient(scannerOptions) }
 
     AndroidView(
         factory = { ctx ->
-            val previewView = PreviewView(ctx).apply {
-                layoutParams = ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
-                )
-                scaleType = PreviewView.ScaleType.FILL_CENTER
-            }
+            val previewView =
+                PreviewView(ctx).apply {
+                    layoutParams =
+                        ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                        )
+                    scaleType = PreviewView.ScaleType.FILL_CENTER
+                }
 
             val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
+            cameraProviderFuture.addListener(
+                {
+                    val cameraProvider = cameraProviderFuture.get()
 
-                val preview = Preview.Builder().build().also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+                    val preview =
+                        Preview.Builder().build().also {
+                            it.surfaceProvider = previewView.surfaceProvider
+                        }
 
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
+                    val imageAnalysis =
+                        ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
 
-                imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
-                    processImageProxy(imageProxy, barcodeScanner, hasDetected, onBarcodeDetected)
-                }
+                    imageAnalysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy ->
+                        processImageProxy(
+                            imageProxy,
+                            barcodeScanner,
+                            hasDetected,
+                            onBarcodeDetected,
+                        )
+                    }
 
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        cameraSelector,
-                        preview,
-                        imageAnalysis
-                    )
-                } catch (_: Exception) {
-                    // Camera binding failed - silently handle
-                }
-            }, ContextCompat.getMainExecutor(ctx))
+                    try {
+                        cameraProvider.unbindAll()
+                        cameraProvider.bindToLifecycle(
+                            lifecycleOwner,
+                            cameraSelector,
+                            preview,
+                            imageAnalysis,
+                        )
+                    } catch (_: Exception) {
+                        // Camera binding failed - silently handle
+                    }
+                },
+                ContextCompat.getMainExecutor(ctx),
+            )
 
             previewView
         },
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize(),
     )
 }
 
@@ -298,7 +340,7 @@ private fun processImageProxy(
     imageProxy: ImageProxy,
     barcodeScanner: com.google.mlkit.vision.barcode.BarcodeScanner,
     hasDetected: AtomicBoolean,
-    onBarcodeDetected: (String) -> Unit
+    onBarcodeDetected: (String) -> Unit,
 ) {
     // Skip if already detected
     if (hasDetected.get()) {
@@ -314,7 +356,8 @@ private fun processImageProxy(
 
     val inputImage = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
 
-    barcodeScanner.process(inputImage)
+    barcodeScanner
+        .process(inputImage)
         .addOnSuccessListener { barcodes ->
             for (barcode in barcodes) {
                 val rawValue = barcode.rawValue

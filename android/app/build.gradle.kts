@@ -48,7 +48,10 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             signingConfig = signingConfigs.findByName("upload")
         }
     }
@@ -78,7 +81,9 @@ dependencies {
     // mirroring how iOS pulls the xcframework through SwiftPM.
     implementation("org.lightningdevkit:ldk-node-android:0.7.5@aar")
     // The @aar dependency carries no POM, so its transitive deps are declared explicitly:
-    implementation("net.java.dev.jna:jna:5.17.0@aar") // loads libldk_node.so via JNA; 5.17+ is 16 KB page aligned (Play requirement)
+    implementation(
+        "net.java.dev.jna:jna:5.17.0@aar"
+    ) // loads libldk_node.so via JNA; 5.17+ is 16 KB page aligned (Play requirement)
     implementation("org.slf4j:slf4j-api:1.7.30")
     implementation("androidx.appcompat:appcompat:1.4.0")
 
