@@ -18,10 +18,13 @@ class LdkBackgroundService : Service() {
         private const val TAG = "LdkBackgroundService"
         private const val NOTIFICATION_ID = 2002
         private const val CHANNEL_ID = "ldk_background_channel"
+        const val EXTRA_REASON = "reason"
+        const val REASON_PAYMENT = "payment"
+        const val REASON_SPLICE = "splice"
 
-        fun start(context: Context) {
-            Log.d(TAG, "Starting LdkBackgroundService")
-            val intent = Intent(context, LdkBackgroundService::class.java)
+        fun start(context: Context, reason: String = REASON_PAYMENT) {
+            Log.d(TAG, "Starting LdkBackgroundService (reason=$reason)")
+            val intent = Intent(context, LdkBackgroundService::class.java).putExtra(EXTRA_REASON, reason)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -42,9 +45,13 @@ class LdkBackgroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val contentText = when (intent?.getStringExtra(EXTRA_REASON)) {
+            REASON_SPLICE -> "Stable Channels is completing your on-chain move..."
+            else -> "Stable Channels is waiting for your payment to complete..."
+        }
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Keeping connection active")
-            .setContentText("Stable Channels is waiting for your payment to complete...")
+            .setContentText(contentText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_HIGH)

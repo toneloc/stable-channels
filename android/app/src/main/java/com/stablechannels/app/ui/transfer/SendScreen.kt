@@ -724,7 +724,6 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                         if (hasChannel) {
-                                            if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                             val sc = appState.stableChannel.value
                                             appState.beginSpliceOut(sats, trimmed, accountingPrice)
                                             try {
