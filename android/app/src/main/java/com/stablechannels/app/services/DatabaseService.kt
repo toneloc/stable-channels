@@ -33,6 +33,11 @@ data class TradeControlApplyResult(
 class MissingChannelRowException(userChannelId: String) :
     IllegalStateException("No channel row for user_channel_id=$userChannelId")
 
+/** Rollback signal for [DatabaseService.assignPendingSpliceTxid]: thrown to roll back the whole
+ *  transaction (including any conflicting-row delete) if the final txid assignment doesn't land.
+ *  Never escapes the function — always caught internally. */
+private object SpliceTxidAssignmentAbortedException : Exception()
+
 /** Durable marker for an in-flight outgoing stability payment (single row, id = 1).
  *  An empty paymentId means the keysend outcome is not yet known. */
 data class PendingStabilitySend(
@@ -54,9 +59,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
+        internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
     override fun onCreate(db: SQLiteDatabase) {
+        SpliceEventRecorder.createTables(db)
         db.execSQL("""
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
@@ -159,6 +166,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
         createTradeIndexes(db)
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_onchain_txs_created ON onchain_txs(created_at)")
+        pruneHistoricalData(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -204,12 +212,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     override fun onOpen(db: SQLiteDatabase) {
         super.onOpen(db)
+        SpliceEventRecorder.createTables(db)
         // IF NOT EXISTS so either process (main app or background service) can create it,
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
         createOutgoingLightningAccountingTable(db)
         createTradeIndexes(db)
+        pruneHistoricalData(db)
     }
 
     private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) = db.transaction {
@@ -1246,6 +1256,21 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return writableDatabase.insert("payments", null, cv)
     }
 
+    /** Save the operation's channel identity atomically with its history, before calling LDK. */
+    fun recordPendingSplice(
+        paymentType: String, amountMsat: Long, amountUSD: Double?, btcPrice: Double?,
+        userChannelId: String, channelId: String, address: String? = null,
+        previousFundingTxid: String? = null
+    ): Long = writableDatabase.transaction {
+        require(paymentType == "splice_in" || paymentType == "splice_out")
+        val rowId = recordPayment(null, paymentType,
+            if (paymentType == "splice_out") "sent" else "received", amountMsat,
+            amountUSD, btcPrice, status = "pending", address = address)
+        check(rowId > 0) { "Could not persist pending splice" }
+        SpliceEventRecorder.track(this, rowId, userChannelId, channelId, previousFundingTxid)
+        rowId
+    }
+
     /** The send API returns before settlement. A retry may reuse an existing invoice ID. */
     fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double, userChannelId: String? = null) {
         val values = ContentValues().apply {
@@ -1654,6 +1679,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
+    /** Confirmations for a specific channel-close txid, so a caller can check whether THIS
+     * close's funds are settled instead of inferring it from aggregate spendable balance. */
+    fun getConfirmationsForCloseTxid(txid: String): Int? {
+        return readableDatabase.rawQuery(
+            "SELECT confirmations FROM payments WHERE txid = ? AND payment_type = 'channel_close' LIMIT 1",
+            arrayOf(txid)
+        ).use { c -> if (c.moveToFirst()) c.getInt(0) else null }
+    }
+
+    /** Kept for other callers — returns the single most-recently-created pending receive,
+     * matching this function's original (pre-list) semantics. */
     fun latestPendingOnchainReceive(): PaymentRecord? {
         val cursor = readableDatabase.rawQuery(
             """
@@ -1678,6 +1714,44 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
                 address = c.getStringOrNull(12), confirmations = c.getInt(13)
             )
+        }
+    }
+
+    /** All pending on-chain receives, oldest first — more than one can exist if a deposit
+     * arrives while another is confirming or a splice/close is in flight. Inner query keeps the
+     * newest rows (old stuck ones can't starve out a new deposit); outer query re-sorts them
+     * oldest-first for display. */
+    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> {
+        val cursor = readableDatabase.rawQuery(
+            """
+            SELECT * FROM (
+                SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+                FROM payments
+                WHERE payment_type = 'onchain'
+                  AND direction = 'received'
+                  AND status = 'pending'
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+            ) ORDER BY created_at ASC, id ASC
+            """.trimIndent(),
+            arrayOf(limit.toString())
+        )
+        return cursor.use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    add(
+                        PaymentRecord(
+                            id = c.getLong(0), paymentId = c.getStringOrNull(1),
+                            paymentType = c.getString(2), direction = c.getString(3),
+                            amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+                            btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
+                            status = c.getString(8), createdAt = c.getLong(9),
+                            feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+                            address = c.getStringOrNull(12), confirmations = c.getInt(13)
+                        )
+                    )
+                }
+            }
         }
     }
 
@@ -1959,6 +2033,50 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
+    /** payment_type, direction, amount_msat, and destination address for a row by id — used to
+     * check whether a just-completed row was a splice-out (which can raise the on-chain balance
+     * if self-sent) without relying on possibly-stale in-memory splice state. */
+    data class PaymentAccountingInfo(
+        val paymentType: String,
+        val direction: String,
+        val amountMsat: Long,
+        val address: String?
+    )
+
+    fun getPaymentTypeDirectionAmountMsat(id: Long): PaymentAccountingInfo? {
+        return readableDatabase.rawQuery(
+            "SELECT payment_type, direction, amount_msat, address FROM payments WHERE id = ? LIMIT 1",
+            arrayOf(id.toString())
+        ).use { c ->
+            if (c.moveToFirst()) {
+                PaymentAccountingInfo(c.getString(0), c.getString(1), c.getLong(2), c.getStringOrNull(3))
+            } else {
+                null
+            }
+        }
+    }
+
+    /** True if any row (of any payment_type/status) already claims this txid — used to avoid
+     * inserting a duplicate deposit row for a txid that a splice/close has already reconciled
+     * onto its own row (e.g. a self-send whose original receive row was deleted and replaced). */
+    fun paymentExistsForTxid(txid: String): Boolean {
+        return readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)
+        ).use { it.moveToFirst() }
+    }
+
+    /** True if this address has ever received an on-chain deposit we recorded — i.e. it is one
+     * of our own wallet's addresses, not an arbitrary external destination. Used to gate the
+     * splice-completion baseline advance to genuine self-sends only (#316 review): an external
+     * splice-out never raises our own balance, so advancing the baseline for one anyway would
+     * wrongly consume a concurrent, unrelated deposit's sats instead of surfacing them. */
+    fun isKnownReceiveAddress(address: String): Boolean {
+        return readableDatabase.rawQuery(
+            "SELECT 1 FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? LIMIT 1",
+            arrayOf(address)
+        ).use { it.moveToFirst() }
+    }
+
     private fun SQLiteDatabase.queryIds(sql: String, args: Array<String>): List<Long> =
         rawQuery(sql, args).use { cursor ->
             buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }
@@ -1993,35 +2111,60 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val normalizedTxid = txid.trim()
         if (normalizedTxid.isEmpty()) return null
 
-        return writableDatabase.transaction {
-            val existing = queryIds(
-                "SELECT id FROM payments WHERE txid = ? AND payment_type IN ('splice_in','splice_out') AND status = 'pending' LIMIT 2",
-                arrayOf(normalizedTxid)
-            )
-            if (existing.isNotEmpty()) {
-                return@transaction existing.singleOrNull()
-                    ?.takeIf { paymentRowId == null || it == paymentRowId }
-            }
-            val txidInUse = rawQuery(
-                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
-                arrayOf(normalizedTxid)
-            ).use { it.moveToFirst() }
-            if (txidInUse) return@transaction null
+        return try {
+            writableDatabase.transaction {
+                val existing = queryIds(
+                    "SELECT id FROM payments WHERE txid = ? AND payment_type IN ('splice_in','splice_out') AND status = 'pending' LIMIT 2",
+                    arrayOf(normalizedTxid)
+                )
+                if (existing.isNotEmpty()) {
+                    return@transaction existing.singleOrNull()
+                        ?.takeIf { paymentRowId == null || it == paymentRowId }
+                }
 
-            val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
-            val candidates = recentPendingSpliceIds(paymentRowId, cutoff)
-            val candidateId = candidates.singleOrNull() ?: return@transaction null
-            val values = ContentValues().apply { put("txid", normalizedTxid) }
-            val updated = update(
-                "payments",
-                values,
-                """
-                id = ? AND status = 'pending' AND txid IS NULL
-                  AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)
-                """.trimIndent(),
-                arrayOf(candidateId.toString(), normalizedTxid, candidateId.toString())
-            )
-            if (updated == 1) candidateId else null
+                // Resolve the splice candidate before touching any conflicting row: if this txid
+                // can't be assigned to a single, unambiguous, non-expired splice, nothing here
+                // may mutate the DB — a conflicting row found below must survive intact.
+                val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+                val candidateId = recentPendingSpliceIds(paymentRowId, cutoff).singleOrNull()
+                    ?: return@transaction null
+
+                val txidInUse = rawQuery(
+                    "SELECT id, payment_type, direction FROM payments WHERE txid = ? LIMIT 1",
+                    arrayOf(normalizedTxid)
+                ).use { c ->
+                    if (c.moveToFirst()) Triple(c.getLong(0), c.getString(1), c.getString(2)) else null
+                }
+                if (txidInUse != null) {
+                    val (conflictingId, conflictingType, conflictingDirection) = txidInUse
+                    // Callers always pass the splice's own observed txid, so a collision here
+                    // means the conflicting row describes the SAME transaction — a splice-out
+                    // paying our own tracked receive address, recorded as a plain onchain deposit
+                    // by the unconditional websocket receive handler (#316) before this splice's
+                    // txid could be assigned. Reclaim it for the splice row and drop the
+                    // now-redundant duplicate.
+                    if (conflictingType != "onchain" || conflictingDirection != "received") {
+                        return@transaction null
+                    }
+                    delete("payments", "id = ?", arrayOf(conflictingId.toString()))
+                }
+
+                val values = ContentValues().apply { put("txid", normalizedTxid) }
+                val updated = update(
+                    "payments",
+                    values,
+                    """
+                    id = ? AND status = 'pending' AND txid IS NULL
+                      AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)
+                    """.trimIndent(),
+                    arrayOf(candidateId.toString(), normalizedTxid, candidateId.toString())
+                )
+                // If the update didn't land, roll back so a just-deleted conflicting row isn't
+                // lost for an assignment that ultimately failed.
+                if (updated == 1) candidateId else throw SpliceTxidAssignmentAbortedException
+            }
+        } catch (_: SpliceTxidAssignmentAbortedException) {
+            null
         }
     }
 
@@ -2044,29 +2187,49 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** Returns true only if a splice row was actually flipped to completed,
-     *  so callers can use the result as the "this ChannelReady was a splice" signal. */
-    /** Whether completeSplice(txid) would match a row — the same pending rows it updates. */
-    fun hasPendingSpliceFor(txid: String): Boolean {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT 1 FROM payments
-            WHERE payment_type IN ('splice_in','splice_out')
-              AND status IN ('pending','failed')
-              AND (txid = ? OR (payment_type = 'splice_in' AND txid IS NULL))
-            LIMIT 1
-            """.trimIndent(),
-            arrayOf(txid)
-        )
-        return cursor.use { it.moveToFirst() }
+    /** Marks the negotiated splice carrying this exact txid failed once esplora proved it was never broadcast. */
+    fun failNegotiatedSplice(txid: String, paymentRowId: Long?): Boolean {
+        val values = ContentValues().apply { put("status", "failed") }
+        val rowClause = if (paymentRowId == null) "" else " AND id = ?"
+        val args = listOfNotNull(txid, paymentRowId?.toString()).toTypedArray()
+        return writableDatabase.update(
+            "payments", values,
+            "txid = ? AND status = 'pending' AND payment_type IN ('splice_in','splice_out')$rowClause",
+            args
+        ) == 1
     }
 
-    fun completeSplice(txid: String): Boolean {
-        val stmt = writableDatabase.compileStatement(
-            "UPDATE payments SET status = 'completed', confirmations = 1 WHERE payment_type IN ('splice_in','splice_out') AND txid = ? AND status = 'pending'"
+    /** Checking and completing use the same pending, exact-txid operation. */
+    fun hasPendingSpliceFor(txid: String): Boolean = getSplice(txid)?.status == "pending"
+
+    fun getSplice(txid: String): PaymentRecord? {
+        val ids = readableDatabase.queryIds(
+            "SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid = ? LIMIT 2",
+            arrayOf(txid)
         )
-        stmt.bindString(1, txid)
-        return stmt.executeUpdateDelete() > 0
+        val rowId = ids.singleOrNull() ?: return null
+        return getPaymentByRowId(rowId)
+    }
+
+    private fun getPaymentByRowId(rowId: Long): PaymentRecord? = readableDatabase.rawQuery(
+        "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE id = ?",
+        arrayOf(rowId.toString())
+    ).use { c ->
+        if (!c.moveToFirst()) null else PaymentRecord(
+            id = c.getLong(0), paymentId = c.getStringOrNull(1), paymentType = c.getString(2),
+            direction = c.getString(3), amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
+            btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7), status = c.getString(8),
+            createdAt = c.getLong(9), feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
+            address = c.getStringOrNull(12), confirmations = c.getInt(13)
+        )
+    }
+
+    fun completeSplice(txid: String): Boolean = writableDatabase.transaction {
+        val row = getSplice(txid)?.takeIf { it.status == "pending" } ?: return@transaction false
+        update("payments", ContentValues().apply {
+            put("status", "completed")
+            put("confirmations", 1)
+        }, "id = ? AND txid = ? AND status = 'pending'", arrayOf(row.id.toString(), txid)) == 1
     }
 
     fun getPendingSpliceTxid(): String? {
@@ -2084,9 +2247,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
         // Keep with-txid rows pending: confirmation can outlive the app process,
         // and the splice confirmation monitor completes them after 1 conf.
+        SpliceEventRecorder.recoverAssignments(this)
         val noTxidCutoff = System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+        // Only an event whose txid can still be assigned proves negotiation; if assignment keeps refusing the txid, that operation must still expire.
         writableDatabase.execSQL(
-            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ?",
+            "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id))",
             arrayOf(noTxidCutoff)
         )
         val cursor = readableDatabase.rawQuery(
@@ -2097,6 +2262,12 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     // --- Prices ---
+
+    fun pruneHistoricalData(db: SQLiteDatabase = writableDatabase) {
+        db.execSQL(
+            "DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - $PRICE_HISTORY_RETENTION_SECONDS"
+        )
+    }
 
     fun recordPrice(price: Double, source: String?) {
         val cv = ContentValues().apply {

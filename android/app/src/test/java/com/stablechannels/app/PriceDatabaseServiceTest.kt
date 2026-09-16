@@ -117,4 +117,30 @@ class PriceDatabaseServiceTest {
         val newDayCount = service.backfillDailyPrices(newDay)
         assertEquals(1, newDayCount)
     }
+
+    @Test
+    fun testPruneHistoricalDataPurgesStalePriceHistory() {
+        val now = System.currentTimeMillis() / 1000
+        val freshTimestamp = now - 3600 // 1 hour ago
+        val staleTimestamp = now - 10_000_000 // > 90 days ago (90 days = 7,776,000 sec)
+
+        val db = service.writableDatabase
+        db.execSQL(
+            "INSERT INTO price_history (price, source, timestamp) VALUES (?, ?, ?)",
+            arrayOf<Any>(60000.0, "test_fresh", freshTimestamp),
+        )
+        db.execSQL(
+            "INSERT INTO price_history (price, source, timestamp) VALUES (?, ?, ?)",
+            arrayOf<Any>(50000.0, "test_stale", staleTimestamp),
+        )
+
+        // Close and re-open to trigger onOpen prune
+        service.close()
+        service = DatabaseService(context)
+
+        val history = service.getPriceHistory(hours = 24 * 365) // Query 1 year
+        assertEquals(1, history.size)
+        assertEquals(60000.0, history.first().price, 0.001)
+    }
 }
+

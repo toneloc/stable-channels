@@ -345,7 +345,6 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     val sats = accountingSatsFromUSD(usd, accountingPrice)
                                         ?: throw Exception("A trusted BTC/USD price is required")
                                     if (hasChannel) {
-                                        if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                         val sc = appState.stableChannel.value
                                         appState.beginSpliceOut(sats, addr, accountingPrice)
                                         try {

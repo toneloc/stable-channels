@@ -50,6 +50,7 @@ import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -531,7 +532,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     Text(it.usdFormatted(), style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
                 }
                 Text(
-                    displaySats.btcSpacedFormatted(),
+                    displaySats.btcSpacedFormatted() + " BTC",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -587,7 +588,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     BasicTextField(
                         value = amountUSDStr,
                         onValueChange = { 
-                            amountUSDStr = it.filter { c -> c.isDigit() || c == '.' }
+                            amountUSDStr = InputSanitizer.decimal(it)
                             isSendMax = false
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -622,7 +623,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 if (manualAmountSats > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        manualAmountSats.btcSpacedFormatted(),
+                        manualAmountSats.btcSpacedFormatted() + " BTC",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -716,7 +717,6 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
                                         if (hasChannel) {
-                                            if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                             val sc = appState.stableChannel.value
                                             appState.beginSpliceOut(sats, trimmed, accountingPrice)
                                             try {

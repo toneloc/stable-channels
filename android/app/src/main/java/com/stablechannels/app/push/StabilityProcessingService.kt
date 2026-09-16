@@ -12,6 +12,7 @@ import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.LightningPaymentRecovery
 import com.stablechannels.app.services.OutgoingStabilityPaymentRecovery
+import com.stablechannels.app.services.SpliceEventRecorder
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
@@ -81,6 +82,33 @@ class StabilityProcessingService : Service() {
         } finally {
             db.close()
         }
+    }
+
+    /** Both background loops commit splice details before removing the event from LDK. */
+    internal fun persistSpliceEvent(
+        event: Event,
+        fundingForReady: (Event.ChannelReady) -> OutPoint?,
+        acknowledge: () -> Unit
+    ) {
+        try {
+            DatabaseService(this).use { db ->
+                check(SpliceEventRecorder.record(db, event, fundingForReady))
+            }
+        } catch (e: Exception) {
+            throw BackingUpdateFailed("Cannot persist splice event: ${e.message}")
+        }
+        acknowledge()
+    }
+
+    /** A splice failure needs the foreground's esplora-verified bookkeeping; only ack it when nothing is pending. */
+    internal fun deferSpliceFailure(acknowledge: () -> Unit) {
+        val pending = try {
+            DatabaseService(this).use { it.hasPendingSplice() }
+        } catch (e: Exception) {
+            throw BackingUpdateFailed("Cannot check for a pending splice: ${e.message}")
+        }
+        if (pending) throw BackingUpdateFailed("Splice failure needs foreground bookkeeping — leaving for foreground")
+        acknowledge()
     }
 
     companion object {
@@ -433,6 +461,14 @@ class StabilityProcessingService : Service() {
                         persistPaymentSuccess(event)
                         node.eventHandled()
                     }
+                    is Event.SpliceNegotiated, is Event.ChannelReady -> {
+                        persistSpliceEvent(event, { ready ->
+                            node.listChannels().singleOrNull {
+                                it.userChannelId == ready.userChannelId && it.channelId == ready.channelId
+                            }?.fundingTxo
+                        }) { node.eventHandled() }
+                    }
+                    is Event.SpliceNegotiationFailed -> deferSpliceFailure { node.eventHandled() }
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {
@@ -634,6 +670,14 @@ class StabilityProcessingService : Service() {
                         persistPaymentSuccess(event)
                         node.eventHandled()
                     }
+                    is Event.SpliceNegotiated, is Event.ChannelReady -> {
+                        persistSpliceEvent(event, { ready ->
+                            node.listChannels().singleOrNull {
+                                it.userChannelId == ready.userChannelId && it.channelId == ready.channelId
+                            }?.fundingTxo
+                        }) { node.eventHandled() }
+                    }
+                    is Event.SpliceNegotiationFailed -> deferSpliceFailure { node.eventHandled() }
                     else -> node.eventHandled()
                 }
             } catch (e: Exception) {

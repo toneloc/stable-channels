@@ -1,4 +1,4 @@
-name: Mobile Build – Android
+name: "Mobile: Android Build"
 
 on:
   push:
@@ -15,29 +15,36 @@ concurrency:
 
 jobs:
   build-android:
+    name: Build Android APK
     if: startsWith(github.ref, 'refs/tags/') || contains(github.event.head_commit.message, 'build')
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      GRADLE_OPTS: "-Xmx3g -XX:+UseG1GC"
 
     defaults:
       run:
         working-directory: android
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v6
 
       # Debug APK: auto-signed with the debug keystore so it installs directly.
       # (release build type has no signingConfig -> assembleRelease is unsigned.)
@@ -54,7 +61,7 @@ jobs:
           echo "Found: $APK"
           cp "$APK" "$GITHUB_WORKSPACE/stable-channels-android.apk"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: stable-channels-android
           path: stable-channels-android.apk
@@ -62,7 +69,7 @@ jobs:
 
       - name: Publish to Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           files: ${{ github.workspace }}/stable-channels-android.apk
