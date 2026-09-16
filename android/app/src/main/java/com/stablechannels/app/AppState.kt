@@ -1062,7 +1062,8 @@ class AppState(private val context: Context) : ViewModel() {
         get() = pendingSplice != null && spliceTxid == null
 
     fun stopNodeForBackground() {
-        if (!isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
+        val negotiatingSplice = isNegotiatingSplice
+        if (!isWaitingForPayment && !isPickingMedia && !negotiatingSplice) {
             // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
             // full LDK restart + chain resync on every return. If the user stays away past the
             // window, the deferred stop below runs and the node is torn down as normal.
@@ -1080,7 +1081,7 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Start Foreground Service to keep CPU and network active
         try {
-            val reason = if (isNegotiatingSplice) LdkBackgroundService.REASON_SPLICE else LdkBackgroundService.REASON_PAYMENT
+            val reason = if (negotiatingSplice) LdkBackgroundService.REASON_SPLICE else LdkBackgroundService.REASON_PAYMENT
             LdkBackgroundService.start(context, reason)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to start LdkBackgroundService", e)

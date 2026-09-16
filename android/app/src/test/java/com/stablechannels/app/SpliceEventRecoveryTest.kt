@@ -572,6 +572,10 @@ class SpliceEventRecoveryTest {
         assertNull(keepAliveReason())
         state.beginSpliceOut(1_000, "addr", 100_000.0)
         assertEquals(LdkBackgroundService.REASON_SPLICE, keepAliveReason())
+        // Alongside a payment wait the move still wins: it is the hold that dies with the node.
+        state.isWaitingForPayment = true
+        assertEquals(LdkBackgroundService.REASON_SPLICE, keepAliveReason())
+        state.isWaitingForPayment = false
         // Once the transaction is negotiated, confirmation survives a node stop; nothing to hold.
         state.spliceTxid = txid
         assertNull(keepAliveReason())
@@ -597,8 +601,8 @@ class SpliceEventRecoveryTest {
             val notification = shadowOf(controller.get()).lastForegroundNotification
             return notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString()
         }
-        assertTrue(notificationText(LdkBackgroundService.REASON_SPLICE).contains("on-chain move"))
-        assertTrue(notificationText(LdkBackgroundService.REASON_PAYMENT).contains("payment"))
-        assertTrue(notificationText(null).contains("payment"))
+        assertEquals("Stable Channels is completing your on-chain move...", notificationText(LdkBackgroundService.REASON_SPLICE))
+        assertEquals("Stable Channels is waiting for your payment to complete...", notificationText(LdkBackgroundService.REASON_PAYMENT))
+        assertEquals("Stable Channels is waiting for your payment to complete...", notificationText(null))
     }
 }
