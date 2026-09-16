@@ -39,6 +39,9 @@ enum NodeStarterError: Error {
     /// Secure Keychain seed does not match plaintext seed file. Fail closed
     /// instead of running with inconsistent identity state.
     case seedStorageMismatch
+    /// Legacy seed backup exists but cannot be read. Fail closed instead of
+    /// falling through to keys_seed and creating identity ambiguity.
+    case unreadablePlaintextSeed
 }
 
 /// Concrete implementation of NodeStarter
@@ -111,12 +114,13 @@ final class DefaultNodeStarter: NodeStarter {
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
         } catch WalletKeychainError.keyNotFound {
             // Mnemonic not in Keychain: fallback check legacy plaintext file or keys_seed
-            if let plaintextWords = try? String(
-                contentsOfFile: dataDir.appendingPathComponent("seed_phrase").path,
-                encoding: .utf8
-            ),
-                !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let trimmed = plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines)
+            let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
+            let plaintextExists = FileManager.default.fileExists(atPath: seedPhrasePath.path)
+            let plaintextWords = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
+
+            if let words = plaintextWords,
+               !words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard let canonicalWords = BIP39.validatedCanonicalMnemonic(trimmed) else {
                     logger.log("ERROR: SEED_INVALID_BIP39 - plaintext")
                     throw NodeStarterError.invalidStoredMnemonic
@@ -126,6 +130,9 @@ final class DefaultNodeStarter: NodeStarter {
                     mnemonic: canonicalWords,
                     passphrase: nil
                 )
+            } else if plaintextExists {
+                logger.log("ERROR: PLAINTEXT_SEED_UNREADABLE - seed_phrase exists but could not be read")
+                throw NodeStarterError.unreadablePlaintextSeed
             } else {
                 let keySeedPath = dataDir.appendingPathComponent("keys_seed")
                 // fromSeedPath is read-OR-GENERATE: with the file absent it would
