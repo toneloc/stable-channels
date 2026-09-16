@@ -16,6 +16,7 @@ import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
 import com.stablechannels.app.services.StabilityPaymentProtocol
+import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
@@ -424,7 +425,7 @@ class StabilityProcessingService : Service() {
                                 InsertResult.INSERTED, InsertResult.DUPLICATE -> {
                                     node.eventHandled()
                                     if (result == InsertResult.INSERTED) {
-                                        Log.d(TAG, "Updated backingSats += $amountSats (delta)")
+                                        Log.d(TAG, "Applied incoming stability payment at the local target")
                                     }
                                 }
                                 InsertResult.MISSING_CHANNEL ->
@@ -545,20 +546,29 @@ class StabilityProcessingService : Service() {
                         throw Exception("Backing delta requested without user_channel_id — rolling back")
                     }
                     val backingCursor = db.rawQuery(
-                        "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                        "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
                         arrayOf(userChannelId)
                     )
-                    val currentBacking = backingCursor.use { if (it.moveToFirst()) it.getLong(0) else null }
-                    if (currentBacking == null) {
+                    val books = backingCursor.use {
+                        if (it.moveToFirst()) it.getLong(0) to it.getDouble(1) else null
+                    }
+                    if (books == null) {
                         Log.e(TAG, "recordPaymentAtomicInDB: no channel row for user_channel_id=$userChannelId — rolling back")
                         db.execSQL("ROLLBACK")
                         db.close()
                         return InsertResult.MISSING_CHANNEL
                     }
-                    // Clamp instead of refusing: this runs after the payment already settled, so
-                    // the sats truly moved — a floor of 0 keeps the ledger recordable.
-                    val newBacking = maxOf(0L, currentBacking + backingDeltaSats)
-                    if (currentBacking + backingDeltaSats < 0) {
+                    val (currentBacking, expectedUSD) = books
+                    val incomingStability = paymentType == "stability" && direction == "received"
+                    val newBacking = if (incomingStability) {
+                        StabilityService.backingAfterIncomingStability(
+                            currentBacking, expectedUSD, btcPrice, backingDeltaSats
+                        ) ?: throw IllegalStateException("Incoming stability allocation unavailable")
+                    } else {
+                        // Outgoing sats already moved; retain the existing debit clamp.
+                        maxOf(0L, currentBacking + backingDeltaSats)
+                    }
+                    if (!incomingStability && currentBacking + backingDeltaSats < 0) {
                         Log.w(TAG, "BACKING_CLAMPED: current=$currentBacking delta=$backingDeltaSats clamped_to=$newBacking user_channel_id=$userChannelId")
                     }
                     val updateStmt = db.compileStatement(
