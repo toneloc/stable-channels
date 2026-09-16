@@ -64,13 +64,20 @@ final class WalletLifecycleManager {
         }
 
         // Detect seed storage mismatch between secure Keychain and plaintext seed_phrase
-        if let kcSeed = keychainSeed,
-           let plaintext = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8) {
-            let canonicalPlaintext = MnemonicMigrator.canonicalizeMnemonic(plaintext)
-            let canonicalKeychain = MnemonicMigrator.canonicalizeMnemonic(kcSeed)
-            if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
-                AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
-                return .seedStorageMismatch
+        if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
+            do {
+                let plaintext = try String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
+                if let kcSeed = keychainSeed {
+                    let canonicalPlaintext = MnemonicMigrator.canonicalizeMnemonic(plaintext)
+                    let canonicalKeychain = MnemonicMigrator.canonicalizeMnemonic(kcSeed)
+                    if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
+                        AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
+                        return .seedStorageMismatch
+                    }
+                }
+            } catch {
+                AuditService.log("STARTUP_PLAINTEXT_READ_ERROR", data: ["error": error.localizedDescription])
+                return .storageError("Failed to read seed backup: \(error.localizedDescription)")
             }
         }
 
