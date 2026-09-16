@@ -1,6 +1,8 @@
 package com.stablechannels.app
 
+import android.app.Notification
 import android.content.Context
+import android.content.Intent
 import android.database.sqlite.SQLiteException
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.LdkBackgroundService
@@ -560,25 +562,43 @@ class SpliceEventRecoveryTest {
         val state = appState()
         setChannel(state, "7")
         val app = RuntimeEnvironment.getApplication()
-        fun backgroundStartsService(): Boolean {
+        fun keepAliveReason(): String? {
             state.stopNodeForBackground()
             val started = shadowOf(app).nextStartedService
             (read(state, "backgroundStopJob") as? Job)?.cancel()
-            return started?.component?.className == LdkBackgroundService::class.java.name
+            if (started?.component?.className != LdkBackgroundService::class.java.name) return null
+            return started.getStringExtra(LdkBackgroundService.EXTRA_REASON)
         }
-        assertFalse(backgroundStartsService())
+        assertNull(keepAliveReason())
         state.beginSpliceOut(1_000, "addr", 100_000.0)
-        assertTrue(backgroundStartsService())
+        assertEquals(LdkBackgroundService.REASON_SPLICE, keepAliveReason())
         // Once the transaction is negotiated, confirmation survives a node stop; nothing to hold.
         state.spliceTxid = txid
-        assertFalse(backgroundStartsService())
+        assertNull(keepAliveReason())
         state.spliceTxid = null
         state.cancelPendingSpliceStart()
-        assertFalse(backgroundStartsService())
+        assertNull(keepAliveReason())
         // A lock restored after a restart guards a negotiation that died with the old process.
         pending()
         resume(state)
         assertTrue(state.isSpliceInFlight)
-        assertFalse(backgroundStartsService())
+        assertNull(keepAliveReason())
+        // A payment wait still keeps its own notification text.
+        state.isWaitingForPayment = true
+        assertEquals(LdkBackgroundService.REASON_PAYMENT, keepAliveReason())
+    }
+
+    @Test fun theKeepAliveNotificationNamesTheSpliceWhenThatIsWhatHoldsTheNode() {
+        val app = RuntimeEnvironment.getApplication()
+        fun notificationText(reason: String?): String {
+            val intent = Intent(app, LdkBackgroundService::class.java)
+            if (reason != null) intent.putExtra(LdkBackgroundService.EXTRA_REASON, reason)
+            val controller = Robolectric.buildService(LdkBackgroundService::class.java, intent).create().startCommand(0, 1)
+            val notification = shadowOf(controller.get()).lastForegroundNotification
+            return notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString()
+        }
+        assertTrue(notificationText(LdkBackgroundService.REASON_SPLICE).contains("on-chain move"))
+        assertTrue(notificationText(LdkBackgroundService.REASON_PAYMENT).contains("payment"))
+        assertTrue(notificationText(null).contains("payment"))
     }
 }

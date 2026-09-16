@@ -1080,7 +1080,8 @@ class AppState(private val context: Context) : ViewModel() {
 
         // Start Foreground Service to keep CPU and network active
         try {
-            LdkBackgroundService.start(context)
+            val reason = if (isNegotiatingSplice) LdkBackgroundService.REASON_SPLICE else LdkBackgroundService.REASON_PAYMENT
+            LdkBackgroundService.start(context, reason)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to start LdkBackgroundService", e)
         }
