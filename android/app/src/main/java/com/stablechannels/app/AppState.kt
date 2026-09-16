@@ -1055,8 +1055,12 @@ class AppState(private val context: Context) : ViewModel() {
         nodeService.stop()
     }
 
+    /** A move whose transaction is not yet negotiated dies with the node; once it has a txid, confirmation survives a stop. */
+    private val isNegotiatingSplice: Boolean
+        get() = pendingSplice != null && spliceTxid == null
+
     fun stopNodeForBackground() {
-        if (!isWaitingForPayment && !isPickingMedia) {
+        if (!isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
             // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
             // full LDK restart + chain resync on every return. If the user stays away past the
             // window, the deferred stop below runs and the node is torn down as normal.
@@ -1065,8 +1069,8 @@ class AppState(private val context: Context) : ViewModel() {
             return
         }
 
-        // A payment wait or an open in-app picker both route through the existing bounded 60s
-        // grace path rather than skipping the stop outright — so a stuck-true isPickingMedia
+        // A payment wait, an open in-app picker, or a negotiating splice all route through the
+        // existing bounded 60s grace path rather than skipping the stop outright — so a stuck-true isPickingMedia
         // (e.g. launch() threw, or the composition was disposed) degrades to "stop after 60s"
         // instead of "never stop the node again".
         Log.d("AppState", "Scheduling node stop after 60s grace period")
@@ -2787,6 +2791,8 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun runStabilityCheck() {
+        // An abandoned move's lock must heal while the app stays open, not only at the next restart.
+        releaseStaleSpliceLock()
         if (!reconcilePendingOutgoingStabilityPayment()) return
 
         refreshBalances()
@@ -3771,7 +3777,6 @@ class AppState(private val context: Context) : ViewModel() {
      * balance for as long as it is pending and would read as an overflow.
      */
     private fun repairBooksAboveLiveBalance() {
-        releaseStaleSpliceLock()
         val db = databaseService ?: return
         val sc = _stableChannel.value
         if (sc.userChannelId.isEmpty()) return

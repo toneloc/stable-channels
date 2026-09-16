@@ -3,6 +3,7 @@ package com.stablechannels.app
 import android.content.Context
 import android.database.sqlite.SQLiteException
 import com.stablechannels.app.push.StabilityProcessingService
+import com.stablechannels.app.services.LdkBackgroundService
 import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.models.StableChannel
@@ -32,6 +33,7 @@ import org.lightningdevkit.ldknode.Event
 import org.lightningdevkit.ldknode.OutPoint
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
 import java.util.Date
@@ -470,7 +472,7 @@ class SpliceEventRecoveryTest {
         resume(state)
         assertTrue(state.isSpliceInFlight)
         expire(id)
-        AppState::class.java.getDeclaredMethod("repairBooksAboveLiveBalance")
+        AppState::class.java.getDeclaredMethod("runStabilityCheck")
             .apply { isAccessible = true }.invoke(state)
         assertFalse(state.isSpliceInFlight)
         assertEquals("failed", payment(id).status)
@@ -531,5 +533,26 @@ class SpliceEventRecoveryTest {
             runBlocking { job?.cancelAndJoin() }
             server.shutdown()
         }
+    }
+
+    @Test fun backgroundingKeepsTheNodeAliveOnlyWhileASpliceIsStillNegotiating() {
+        val state = appState()
+        setChannel(state, "7")
+        val app = RuntimeEnvironment.getApplication()
+        fun backgroundStartsService(): Boolean {
+            state.stopNodeForBackground()
+            val started = shadowOf(app).nextStartedService
+            (read(state, "backgroundStopJob") as? Job)?.cancel()
+            return started?.component?.className == LdkBackgroundService::class.java.name
+        }
+        assertFalse(backgroundStartsService())
+        state.beginSpliceOut(1_000, "addr", 100_000.0)
+        assertTrue(backgroundStartsService())
+        // Once the transaction is negotiated, confirmation survives a node stop; nothing to hold.
+        state.spliceTxid = txid
+        assertFalse(backgroundStartsService())
+        state.spliceTxid = null
+        state.cancelPendingSpliceStart()
+        assertFalse(backgroundStartsService())
     }
 }
