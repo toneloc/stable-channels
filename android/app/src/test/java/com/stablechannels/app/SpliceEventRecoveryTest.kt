@@ -78,6 +78,10 @@ class SpliceEventRecoveryTest {
         AppState::class.java.getDeclaredMethod("handleEvent", Event::class.java)
             .apply { isAccessible = true }.invoke(state, event)
     }
+    private fun tick(state: AppState) {
+        AppState::class.java.getDeclaredMethod("runStabilityCheck")
+            .apply { isAccessible = true }.invoke(state)
+    }
     private fun resume(state: AppState) {
         AppState::class.java.getDeclaredMethod("resumePendingSpliceConfirmation")
             .apply { isAccessible = true }.invoke(state)
@@ -472,8 +476,25 @@ class SpliceEventRecoveryTest {
         resume(state)
         assertTrue(state.isSpliceInFlight)
         expire(id)
-        AppState::class.java.getDeclaredMethod("runStabilityCheck")
-            .apply { isAccessible = true }.invoke(state)
+        // A claimed send makes the tick bail out right after the release, so the release must come first.
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0))
+        tick(state)
+        assertFalse(state.isSpliceInFlight)
+        assertEquals("failed", payment(id).status)
+    }
+
+    @Test fun aFailingStaleLockCheckOnTheTickNeitherCrashesNorReleasesTheLock() {
+        val id = pending()
+        val state = appState()
+        setChannel(state, "7")
+        resume(state)
+        expire(id)
+        db.writableDatabase.execSQL("CREATE TRIGGER refuse_expiry BEFORE UPDATE OF status ON payments BEGIN SELECT RAISE(ABORT, 'test'); END")
+        tick(state)
+        assertTrue(state.isSpliceInFlight)
+        assertEquals("pending", payment(id).status)
+        db.writableDatabase.execSQL("DROP TRIGGER refuse_expiry")
+        tick(state)
         assertFalse(state.isSpliceInFlight)
         assertEquals("failed", payment(id).status)
     }
@@ -553,6 +574,11 @@ class SpliceEventRecoveryTest {
         assertFalse(backgroundStartsService())
         state.spliceTxid = null
         state.cancelPendingSpliceStart()
+        assertFalse(backgroundStartsService())
+        // A lock restored after a restart guards a negotiation that died with the old process.
+        pending()
+        resume(state)
+        assertTrue(state.isSpliceInFlight)
         assertFalse(backgroundStartsService())
     }
 }

@@ -753,6 +753,7 @@ class AppState(private val context: Context) : ViewModel() {
     private fun refreshAllTradeOutcomes(paymentIds: Collection<String>) {
         paymentIds.forEach { refreshTradeOutcome(it) }
     }
+    @Volatile
     var pendingSplice: PendingSplice? = null
     private val _isOpeningChannel = MutableStateFlow(false)
     val isOpeningChannelFlow: StateFlow<Boolean> = _isOpeningChannel
@@ -789,6 +790,7 @@ class AppState(private val context: Context) : ViewModel() {
     // no longer matches when an async check resolves, a genuinely newer operation has since
     // started and none of this handler's in-memory cleanup may run against it.
     private val spliceGeneration = AtomicLong(0L)
+    @Volatile
     var spliceTxid: String? = null
     var fundingTxid: String? = null
         set(value) {
@@ -2286,7 +2288,14 @@ class AppState(private val context: Context) : ViewModel() {
     /** A lock restored for a pre-negotiation row outlives that row's expiry only in memory; drop it once the row is gone. */
     private fun releaseStaleSpliceLock() {
         if (!isSweeping || spliceTxid != null || spliceConfirmationJob?.isActive == true) return
-        if (databaseService?.hasPendingSplice() != false) return
+        // The stability tick has no exception handler, and a failed check must read as "still pending".
+        val pending = try {
+            databaseService?.hasPendingSplice()
+        } catch (e: Exception) {
+            Log.w("AppState", "Stale splice check failed: ${e.message}")
+            return
+        }
+        if (pending != false) return
         isSweeping = false
         pendingSplice = null
     }
