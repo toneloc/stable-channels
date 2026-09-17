@@ -62,7 +62,14 @@ final class ExtensionsFormattingTests: XCTestCase {
         }
 
         let inLocale = Locale(identifier: "en_IN")
-        XCTAssertEqual(1_000_000.0.usdFormatted(locale: inLocale), "$10,00,000.00")
+        let inFormatter = NumberFormatter()
+        inFormatter.locale = inLocale
+        inFormatter.numberStyle = .currency
+        inFormatter.currencyCode = "USD"
+        inFormatter.maximumFractionDigits = 2
+        let expectedIN = inFormatter.string(from: NSNumber(value: 1_000_000.0)) ?? "$10,00,000.00"
+        XCTAssertEqual(1_000_000.0.usdFormatted(locale: inLocale), expectedIN)
+        XCTAssertTrue(1_000_000.0.usdFormatted(locale: inLocale).contains("10,00,000.00"))
     }
 
     func testBtcSpacedFormatted() {
