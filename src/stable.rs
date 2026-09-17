@@ -1,5 +1,5 @@
 use crate::audit::audit_event;
-use crate::db::Database;
+use crate::db::{Database, StabilityPaymentRollback};
 use rusqlite::Result as SqliteResult;
 use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
@@ -9,7 +9,9 @@ use crate::constants::{
 };
 use crate::price_feeds::get_fresh_cached_price_no_fetch;
 use crate::types::{Bitcoin, StableChannel, USD};
+use ldk_node::lightning::ln::channelmanager::PaymentId;
 use ldk_node::lightning::routing::router::RouteParametersConfig;
+use ldk_node::lightning::types::payment::{PaymentHash, PaymentPreimage};
 use ldk_node::payment::{PaymentDetails, PaymentStatus};
 use ldk_node::Node;
 use rand::RngCore;
@@ -465,7 +467,7 @@ pub fn reconcile_pending_sent_lightning(
     now_unix: i64,
 ) -> SqliteResult<usize> {
     let mut resolved = 0;
-    for (payment_id, created_at) in db.pending_sent_lightning_payments()? {
+    for (payment_id, created_at) in db.pending_sent_payments("lightning")? {
         let status = payments.iter().find(|p| format!("{}", p.id) == payment_id).map(|p| p.status);
         let reason = match status {
             Some(PaymentStatus::Failed) => "ldk_failed",
@@ -481,6 +483,119 @@ pub fn reconcile_pending_sent_lightning(
         }
     }
     Ok(resolved)
+}
+
+/// A stability claim LDK fails, or never heard of because the process stopped between the claim
+/// and the send, is rolled back; the caller mirrors each rollback into the live channel.
+pub fn reconcile_lost_stability_claims(
+    db: &Database,
+    payments: &[PaymentDetails],
+    now_unix: i64,
+) -> SqliteResult<Vec<StabilityPaymentRollback>> {
+    let mut rollbacks = Vec::new();
+    for (payment_id, created_at) in db.pending_sent_payments("stability")? {
+        let status = payments.iter().find(|p| format!("{}", p.id) == payment_id).map(|p| p.status);
+        let reason = match status {
+            Some(PaymentStatus::Failed) => "ldk_failed",
+            None if now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS => "no_ldk_record",
+            _ => continue,
+        };
+        if let Some(rollback) = db.fail_pending_stability_payment(&payment_id)? {
+            audit_event(
+                "STABILITY_CLAIM_ROLLED_BACK_ON_RECOVERY",
+                json!({ "payment_id": payment_id, "reason": reason, "restored": rollback.restored }),
+            );
+            rollbacks.push(rollback);
+        }
+    }
+    Ok(rollbacks)
+}
+
+/// Undo a failed stability payment's optimistic debit in memory, only while it is still in place.
+pub fn apply_stability_rollback(sc: &mut StableChannel, rollback: &StabilityPaymentRollback) -> bool {
+    let (Some(uid), Some(before), Some(after)) = (
+        rollback.user_channel_id.as_deref(),
+        rollback.backing_sats_before,
+        rollback.backing_sats_after,
+    ) else {
+        return false;
+    };
+    if !rollback.restored || format!("{}", sc.user_channel_id) != uid || sc.backing_sats != after {
+        return false;
+    }
+    sc.backing_sats = before;
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(before);
+    recompute_native(sc);
+    sc.last_stability_payment = 0;
+    sc.payment_made = false;
+    true
+}
+
+/// LDK derives a spontaneous payment's id from its preimage, so choosing the preimage fixes the id.
+pub fn stability_payment_id(preimage: &PaymentPreimage) -> PaymentId {
+    PaymentId(PaymentHash::from(*preimage).0)
+}
+
+/// Persist the claim, then send. LDK can emit a terminal event before `send` returns, so the row
+/// that classifies this payment and rolls it back must already be durable; without it nothing is sent.
+pub fn send_claimed_stability_payment<T, E: std::fmt::Display>(
+    db: &Database,
+    sc: &mut StableChannel,
+    info: StabilityPaymentInfo,
+    now: i64,
+    send: impl FnOnce() -> Result<T, E>,
+) -> Option<StabilityPaymentInfo> {
+    let amount_usd = info.amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * info.btc_price;
+    if let Err(e) = db.record_pending_stability_payment(
+        &info.payment_id,
+        info.amount_msat,
+        Some(amount_usd),
+        info.btc_price,
+        &info.counterparty,
+        &sc.channel_id.to_string(),
+        &format!("{}", sc.user_channel_id),
+        sc.expected_usd.0,
+        info.backing_sats_before,
+        info.backing_sats_after,
+        sc.native_sats,
+        sc.note.as_deref(),
+    ) {
+        audit_event(
+            "STABILITY_PAYMENT_CLAIM_FAILED",
+            json!({
+                "payment_id": info.payment_id,
+                "user_channel_id": format!("{}", sc.user_channel_id),
+                "error": e.to_string(),
+            }),
+        );
+        return None;
+    }
+    match send() {
+        Ok(_) => {
+            sc.payment_made = true;
+            sc.last_stability_payment = now;
+            // Native is recomputed on the next balance refresh: the HTLC is still in flight.
+            sc.backing_sats = info.backing_sats_after;
+            Some(info)
+        }
+        Err(e) => {
+            audit_event(
+                "STABILITY_PAYMENT_FAILED",
+                json!({
+                    "amount_msats": info.amount_msat,
+                    "error": format!("{e}"),
+                    "counterparty": info.counterparty,
+                }),
+            );
+            if let Err(e) = db.fail_pending_stability_payment(&info.payment_id) {
+                audit_event(
+                    "STABILITY_PAYMENT_FAILURE_PERSIST_FAILED",
+                    json!({ "payment_id": info.payment_id, "error": e.to_string() }),
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Same fee budget as LDK's default, 1% + 50 sats, passed explicitly so routing enforces it.
@@ -906,6 +1021,7 @@ pub fn lightning_sync_is_fresh(
 /// Returns Some(StabilityPaymentInfo) if a payment was sent, None otherwise.
 pub fn check_stability(
     node: &Node,
+    db: &Database,
     sc: &mut StableChannel,
     price: f64,
 ) -> Option<StabilityPaymentInfo> {
@@ -1158,52 +1274,39 @@ pub fn check_stability(
         type_num: crate::constants::SIGNED_STABILITY_TLV_TYPE,
         value: signed_envelope.into_bytes(),
     };
-    match node.spontaneous_payment().send_with_custom_tlvs(
-        amt,
-        sc.counterparty,
-        None,
-        vec![signed_record],
-    ) {
-        Ok(payment_id) => {
-            sc.payment_made = true;
-            sc.last_stability_payment = now;
-
-            // Debit only the whole sats actually sent, preserving any rounding residue.
-            // Don't recompute native_sats here — receiver balance hasn't updated yet
-            // (HTLC still in flight). Native will be recomputed on next balance refresh.
-            let previous_backing = sc.backing_sats;
-            let new_backing = previous_backing.saturating_sub(amt / 1000);
-            sc.backing_sats = new_backing;
-
-            let payment_id_str = payment_id.to_string();
-            let counterparty_str = sc.counterparty.to_string();
-            Some(StabilityPaymentInfo {
-                settlement_id,
-                payment_id: payment_id_str,
-                amount_msat: amt,
-                counterparty: counterparty_str,
-                btc_price: sc.latest_price,
-                backing_sats_before: previous_backing,
-                backing_sats_after: new_backing,
-            })
-        }
-        Err(e) => {
-            audit_event(
-                "STABILITY_PAYMENT_FAILED",
-                json!({
-                    "amount_msats": amt,
-                    "error": format!("{e}"),
-                    "counterparty": sc.counterparty.to_string()
-                }),
-            );
-            None
-        }
-    }
+    // The id comes from a preimage chosen here, so the durable claim carries it before LDK
+    // sees the payment and could emit a terminal event for it.
+    let mut preimage = [0u8; 32];
+    rand::rng().fill_bytes(&mut preimage);
+    let preimage = PaymentPreimage(preimage);
+    let counterparty = sc.counterparty;
+    let previous_backing = sc.backing_sats;
+    let info = StabilityPaymentInfo {
+        settlement_id,
+        payment_id: stability_payment_id(&preimage).to_string(),
+        amount_msat: amt,
+        counterparty: counterparty.to_string(),
+        btc_price: sc.latest_price,
+        backing_sats_before: previous_backing,
+        // Debit only the whole sats actually sent, preserving any rounding residue.
+        backing_sats_after: previous_backing.saturating_sub(amt / 1000),
+    };
+    send_claimed_stability_payment(db, sc, info, now, || {
+        node.spontaneous_payment().send_with_preimage_and_custom_tlvs(
+            amt,
+            counterparty,
+            vec![signed_record],
+            preimage,
+            None,
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ldk_node::lightning::ln::channelmanager::PaymentId;
+    use ldk_node::lightning::types::payment::PaymentPreimage;
 
     #[test]
     fn final_claim_spends_preserve_lsp_surplus_in_every_reconciliation_path() {
@@ -1274,22 +1377,118 @@ mod tests {
         assert!(check_outgoing_allocation(&sc, 100_000.0, Some(2_001)).is_err());
     }
 
+    fn details(id: u8, status: PaymentStatus) -> PaymentDetails {
+        use ldk_node::lightning::types::payment::PaymentHash;
+        use ldk_node::payment::{PaymentDirection, PaymentKind};
+        PaymentDetails {
+            id: PaymentId([id; 32]),
+            kind: PaymentKind::Spontaneous { hash: PaymentHash([0; 32]), preimage: None },
+            amount_msat: Some(1_000_000),
+            fee_paid_msat: None,
+            direction: PaymentDirection::Outbound,
+            status,
+            latest_update_timestamp: 0,
+        }
+    }
+
+    /// Books worth $11 against a $10 target on channel 7, saved, with a $1 claim prepared.
+    fn claimed_channel(db: &Database, payment_id: &str) -> (StableChannel, StabilityPaymentInfo) {
+        let mut sc = test_sc(10.0, 100_000.0, 20_000);
+        sc.user_channel_id = 7;
+        sc.backing_sats = 11_000;
+        sc.native_sats = 9_000;
+        db.save_channel(&sc.channel_id.to_string(), "7", 10.0, 11_000, 9_000, None).unwrap();
+        let info = StabilityPaymentInfo {
+            settlement_id: "11".repeat(32),
+            payment_id: payment_id.to_string(),
+            amount_msat: 1_000_000,
+            counterparty: sc.counterparty.to_string(),
+            btc_price: 100_000.0,
+            backing_sats_before: 11_000,
+            backing_sats_after: 10_000,
+        };
+        (sc, info)
+    }
+
+    #[test]
+    fn stability_payment_id_is_known_before_the_send() {
+        // LDK derives the id the same way: sha256 of the preimage.
+        assert_eq!(
+            stability_payment_id(&PaymentPreimage([0u8; 32])).to_string(),
+            "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925"
+        );
+    }
+
+    #[test]
+    fn stability_claim_is_durable_before_the_send_and_rolls_back_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let (mut sc, info) = claimed_channel(&db, &"aa".repeat(32));
+
+        // A claim that cannot be persisted never reaches LDK.
+        let unpersistable = StabilityPaymentInfo { backing_sats_before: u64::MAX, ..info.clone() };
+        let reached_ldk = std::cell::Cell::new(false);
+        assert!(send_claimed_stability_payment(&db, &mut sc, unpersistable, 1, || {
+            reached_ldk.set(true);
+            Ok::<(), String>(())
+        })
+        .is_none());
+        assert!(!reached_ldk.get());
+        assert_eq!(sc.backing_sats, 11_000);
+
+        // LDK can emit a terminal event before `send` returns: the row must already classify it.
+        assert!(send_claimed_stability_payment(&db, &mut sc, info.clone(), 1, || {
+            assert!(db.is_stability_payment(&info.payment_id).unwrap());
+            Err::<(), _>("route not found")
+        })
+        .is_none());
+        assert_eq!(sc.backing_sats, 11_000);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+        assert!(!db.has_pending_channel_send().unwrap(), "a synchronous failure rolls the claim back");
+
+        let accepted = StabilityPaymentInfo { payment_id: "bb".repeat(32), ..info };
+        let sent = send_claimed_stability_payment(&db, &mut sc, accepted, 42, || Ok::<(), String>(()));
+        assert_eq!(sent.unwrap().payment_id, "bb".repeat(32));
+        assert_eq!(sc.backing_sats, 10_000);
+        assert_eq!(sc.last_stability_payment, 42);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert!(db.is_stability_payment(&"bb".repeat(32)).unwrap());
+        assert!(db.has_pending_channel_send().unwrap());
+    }
+
+    #[test]
+    fn lost_stability_claims_roll_back_after_the_grace_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok::<(), String>(())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+
+        // A crash between the claim and the send leaves a row LDK never heard of.
+        assert!(reconcile_lost_stability_claims(&db, &[], now).unwrap().is_empty());
+        assert!(reconcile_lost_stability_claims(&db, &[details(9, PaymentStatus::Pending)], later)
+            .unwrap()
+            .is_empty());
+        assert!(reconcile_lost_stability_claims(&db, &[details(9, PaymentStatus::Succeeded)], later)
+            .unwrap()
+            .is_empty());
+        assert!(db.has_pending_channel_send().unwrap());
+
+        let rollbacks = reconcile_lost_stability_claims(&db, &[], later).unwrap();
+        assert_eq!(rollbacks.len(), 1);
+        assert!(rollbacks[0].restored);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+        assert!(!db.has_pending_channel_send().unwrap());
+        assert!(apply_stability_rollback(&mut sc, &rollbacks[0]));
+        assert_eq!(sc.backing_sats, 11_000);
+        assert_eq!(sc.last_stability_payment, 0);
+        assert!(!apply_stability_rollback(&mut sc, &rollbacks[0]), "only the optimistic allocation is undone");
+    }
+
     #[test]
     fn pending_sent_rows_resolve_against_ldk_after_restart() {
-        use ldk_node::lightning::ln::channelmanager::PaymentId;
-        use ldk_node::lightning::types::payment::PaymentHash;
-        use ldk_node::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-        fn details(id: u8, status: PaymentStatus) -> PaymentDetails {
-            PaymentDetails {
-                id: PaymentId([id; 32]),
-                kind: PaymentKind::Spontaneous { hash: PaymentHash([0; 32]), preimage: None },
-                amount_msat: Some(1_000_000),
-                fee_paid_msat: None,
-                direction: PaymentDirection::Outbound,
-                status,
-                latest_update_timestamp: 0,
-            }
-        }
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::Database::open(dir.path()).unwrap();
         for id in [1u8, 2, 3] {

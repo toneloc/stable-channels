@@ -2,11 +2,25 @@ mod common;
 
 use ldk_node::bitcoin::Amount;
 use stable_channels::stable::{
-    apply_trade, check_stability, reconcile_forwarded, reconcile_incoming, reconcile_outgoing,
-    update_balances,
+    apply_trade, reconcile_forwarded, reconcile_incoming, reconcile_outgoing, update_balances,
 };
 
 use common::*;
+
+/// A stability payment is claimed durably before it is sent; these tests share one scratch database.
+fn check_stability(
+    node: &ldk_node::Node,
+    sc: &mut stable_channels::types::StableChannel,
+    price: f64,
+) -> Option<stable_channels::stable::StabilityPaymentInfo> {
+    static DB: std::sync::OnceLock<stable_channels::db::Database> = std::sync::OnceLock::new();
+    let db = DB.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("sc-regtest-claims-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        stable_channels::db::Database::open(&dir).unwrap()
+    });
+    stable_channels::stable::check_stability(node, db, sc, price)
+}
 
 // ==================================================================
 // Test 1: Price drop — LSP pays user to maintain stability

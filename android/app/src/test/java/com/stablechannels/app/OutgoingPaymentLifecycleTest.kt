@@ -7,6 +7,7 @@ import com.stablechannels.app.models.USD
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.services.LightningPaymentRecovery
 import com.stablechannels.app.util.Constants
 import java.io.File
 import java.lang.reflect.InvocationTargetException
@@ -902,7 +903,7 @@ class OutgoingPaymentLifecycleTest {
     }
 
     @Test
-    fun stabilityMissingLdkRecordKeepsItsOriginalUnresolvedClaim() {
+    fun stabilityMissingLdkRecordKeepsItsClaimWhileTheGracePeriodRuns() {
         closeWithPendingStabilityAndReplace()
         node.payments = emptyList()
         assertFalse(backgroundRecovery())
@@ -910,6 +911,44 @@ class OutgoingPaymentLifecycleTest {
         assertArchive(10.0, 11_000L)
         assertReplacementUnchanged()
     }
+
+    @Test
+    fun stabilityMissingLdkRecordReleasesTheBarrierAfterTheGracePeriod() {
+        closeWithPendingStabilityAndReplace()
+        node.payments = emptyList()
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L) // nothing proves the payment left, so nothing is debited
+        assertReplacementUnchanged()
+        assertNoStabilityOriginRecorded()
+        assertTrue(auditLog().contains("STABILITY_MARKER_RELEASED_NO_LDK_RECORD"))
+        assertEquals(
+            "after-release",
+            state.nodeService.sendTrackedLightningPayment("lightning", 1_000_000, null) {
+                "after-release"
+            },
+        )
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    @Test
+    fun stabilityMissingLdkRecordIsNeverReleasedByANodeThatIsNotRunning() {
+        closeWithPendingStabilityAndReplace()
+        node.payments = emptyList()
+        ageStabilityMarker()
+        (field(state.nodeService, "_isRunning").get(state.nodeService) as MutableStateFlow<Boolean>)
+            .value = false
+        call("runStabilityCheck")
+        assertEquals("7", db.loadPendingSend()!!.userChannelId)
+        assertArchive(10.0, 11_000L)
+    }
+
+    private fun ageStabilityMarker() =
+        db.writableDatabase.execSQL(
+            "UPDATE pending_stability_send SET created_at = created_at - " +
+                "${LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS + 1}"
+        )
 
     @Test
     fun stabilityAmbiguousLostIdAdoptsWhenEveryCandidateAgreesOnTheOutcome() {

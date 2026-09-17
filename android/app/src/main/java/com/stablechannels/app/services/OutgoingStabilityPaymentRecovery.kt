@@ -48,7 +48,9 @@ object OutgoingStabilityPaymentRecovery {
             pending = pending.copy(paymentId = candidate.id)
         }
 
-        val payment = node.payment(pending.paymentId) ?: return false
+        val payment =
+            node.payment(pending.paymentId)
+                ?: return releaseLostRecord(db, pending, channelsAuthoritative)
         if (
             payment.kind !is PaymentKind.Spontaneous ||
                 payment.direction != PaymentDirection.OUTBOUND ||
@@ -87,6 +89,25 @@ object OutgoingStabilityPaymentRecovery {
         val closed =
             channelsAuthoritative && node.listChannels().none { it.userChannelId == origin }
         return db.completePendingStabilitySend(pending, channelClosed = closed)
+    }
+
+    // Only a running node's store can prove a record is missing. Nothing can then resolve the
+    // marker, so after the grace period it is released without a debit instead of blocking spends.
+    private fun releaseLostRecord(
+        db: DatabaseService,
+        pending: PendingStabilitySend,
+        storeAuthoritative: Boolean,
+    ): Boolean {
+        val ageSecs = System.currentTimeMillis() / 1000 - pending.createdAt
+        if (!storeAuthoritative || ageSecs <= LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS)
+            return false
+        return db.clearPendingSend(pending).also { released ->
+            if (released)
+                AuditService.log(
+                    "STABILITY_MARKER_RELEASED_NO_LDK_RECORD",
+                    mapOf("payment_id" to pending.paymentId, "amount_msat" to pending.amountMsat),
+                )
+        }
     }
 
     internal fun matchesUnassigned(

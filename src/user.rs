@@ -1008,10 +1008,25 @@ impl UserApp {
 
                 // A stale `pending` row would otherwise hold the spend barrier forever, and a
                 // native-covered send needs no price, so this runs through a price outage too.
+                let ldk_payments = node_arc.list_payments();
                 if let Err(e) = stable_channels::stable::reconcile_pending_sent_lightning(
-                    &db, &node_arc.list_payments(), current_unix_time(),
+                    &db, &ldk_payments, current_unix_time(),
                 ) {
                     audit_event("PENDING_SEND_RECOVERY_FAILED", json!({ "error": e.to_string() }));
+                }
+                // A stability claim whose send never reached LDK is rolled back the same way.
+                match stable_channels::stable::reconcile_lost_stability_claims(
+                    &db, &ldk_payments, current_unix_time(),
+                ) {
+                    Ok(rollbacks) if !rollbacks.is_empty() => {
+                        if let Ok(mut sc) = sc_arc.lock() {
+                            for rollback in &rollbacks {
+                                stable_channels::stable::apply_stability_rollback(&mut sc, rollback);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => audit_event("STABILITY_CLAIM_RECOVERY_FAILED", json!({ "error": e.to_string() })),
                 }
 
                 // Automatic stability payments require a freshly validated consensus price.
@@ -1053,38 +1068,10 @@ impl UserApp {
                                 }
                             }
 
-                            if let Some(payment_info) =
-                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            // The pending row is claimed durably inside, before LDK sees the send.
+                            if stable_channels::stable::check_stability(&node_arc, &db, &mut sc, price)
+                                .is_some()
                             {
-                                // Record sent stability payment as pending (confirmed on PaymentSuccessful)
-                                let amount_usd =
-                                    (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-                                        * payment_info.btc_price;
-                                if let Err(e) = db.record_pending_stability_payment(
-                                    &payment_info.payment_id,
-                                    payment_info.amount_msat,
-                                    Some(amount_usd),
-                                    payment_info.btc_price,
-                                    &payment_info.counterparty,
-                                    &sc.channel_id.to_string(),
-                                    &format!("{}", sc.user_channel_id),
-                                    sc.expected_usd.0,
-                                    payment_info.backing_sats_before,
-                                    payment_info.backing_sats_after,
-                                    sc.native_sats,
-                                    sc.note.as_deref(),
-                                ) {
-                                    audit_event(
-                                        "STABILITY_PAYMENT_PERSIST_FAILED",
-                                        json!({
-                                            "payment_id": payment_info.payment_id,
-                                            "user_channel_id": format!("{}", sc.user_channel_id),
-                                            "backing_sats_before": payment_info.backing_sats_before,
-                                            "backing_sats_after": payment_info.backing_sats_after,
-                                            "error": e.to_string(),
-                                        }),
-                                    );
-                                }
                                 payment_sent = true;
                             }
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
@@ -4356,25 +4343,10 @@ impl UserApp {
                         match self.db.fail_pending_stability_payment(&format!("{pid}")) {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
-                                if rollback.restored {
-                                    if let (Some(uid), Some(before), Some(after)) = (
-                                        rollback.user_channel_id.as_deref(),
-                                        rollback.backing_sats_before,
-                                        rollback.backing_sats_after,
-                                    ) {
-                                        let mut sc = self.stable_channel.lock().unwrap();
-                                        if format!("{}", sc.user_channel_id) == uid
-                                            && sc.backing_sats == after
-                                        {
-                                            sc.backing_sats = before;
-                                            sc.native_sats =
-                                                sc.stable_receiver_btc.sats.saturating_sub(before);
-                                            stable::recompute_native(&mut sc);
-                                            sc.last_stability_payment = 0;
-                                            sc.payment_made = false;
-                                        }
-                                    }
-                                }
+                                stable::apply_stability_rollback(
+                                    &mut self.stable_channel.lock().unwrap(),
+                                    &rollback,
+                                );
                                 self.status_message = if rollback.restored {
                                     "Stability payment failed; allocation restored".to_string()
                                 } else {
