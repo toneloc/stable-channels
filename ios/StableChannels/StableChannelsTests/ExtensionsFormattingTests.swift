@@ -72,6 +72,17 @@ final class ExtensionsFormattingTests: XCTestCase {
         XCTAssertTrue(1_000_000.0.usdFormatted(locale: inLocale).contains("10,00,000.00"))
     }
 
+    func testPercentFormattedExplicitLocale() {
+        let usLocale = Locale(identifier: "en_US")
+        XCTAssertEqual(0.0.percentFormatted(locale: usLocale), "+0.00%")
+        XCTAssertEqual(12.34.percentFormatted(locale: usLocale), "+12.34%")
+        XCTAssertEqual((-2.5).percentFormatted(locale: usLocale), "-2.50%")
+        XCTAssertEqual(1234.56.percentFormatted(locale: usLocale), "+1,234.56%")
+
+        let inLocale = Locale(identifier: "en_IN")
+        XCTAssertEqual(1234567.89.percentFormatted(locale: inLocale), "+12,34,567.89%")
+    }
+
     func testBtcSpacedFormatted() {
         let sats: UInt64 = 19_0079
         XCTAssertEqual(sats.btcSpacedFormatted, "0.00\u{2009}190\u{2009}079")
