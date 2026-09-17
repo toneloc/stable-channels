@@ -536,14 +536,23 @@ pub fn stability_payment_id(preimage: &PaymentPreimage) -> PaymentId {
     PaymentId(PaymentHash::from(*preimage).0)
 }
 
+/// Why LDK returned no payment id for a claimed stability payment.
+#[derive(Debug)]
+pub enum StabilitySendError {
+    /// LDK rejected the payment before dispatching it.
+    NotSent(String),
+    /// LDK writes its payment store after dispatching, so the HTLC may already be in flight.
+    OutcomeUnknown(String),
+}
+
 /// Persist the claim, then send. LDK can emit a terminal event before `send` returns, so the row
 /// that classifies this payment and rolls it back must already be durable; without it nothing is sent.
-pub fn send_claimed_stability_payment<T, E: std::fmt::Display>(
+pub fn send_claimed_stability_payment(
     db: &Database,
     sc: &mut StableChannel,
-    info: StabilityPaymentInfo,
+    mut info: StabilityPaymentInfo,
     now: i64,
-    send: impl FnOnce() -> Result<T, E>,
+    send: impl FnOnce() -> Result<String, StabilitySendError>,
 ) -> Option<StabilityPaymentInfo> {
     let amount_usd = info.amount_msat as f64 / 1000.0 / SATS_IN_BTC as f64 * info.btc_price;
     if let Err(e) = db.record_pending_stability_payment(
@@ -571,19 +580,34 @@ pub fn send_claimed_stability_payment<T, E: std::fmt::Display>(
         return None;
     }
     match send() {
-        Ok(_) => {
-            sc.payment_made = true;
-            sc.last_stability_payment = now;
-            // Native is recomputed on the next balance refresh: the HTLC is still in flight.
-            sc.backing_sats = info.backing_sats_after;
-            Some(info)
+        Ok(ldk_id) if ldk_id != info.payment_id => {
+            // The claim is keyed by an id derived the way LDK derives it; never let that drift silently.
+            audit_event(
+                "STABILITY_PAYMENT_ID_MISMATCH",
+                json!({ "claimed_payment_id": info.payment_id, "ldk_payment_id": ldk_id }),
+            );
+            match db.rekey_pending_stability_payment(&info.payment_id, &ldk_id) {
+                Ok(_) => info.payment_id = ldk_id,
+                Err(e) => audit_event(
+                    "STABILITY_PAYMENT_REKEY_FAILED",
+                    json!({ "ldk_payment_id": ldk_id, "error": e.to_string() }),
+                ),
+            }
         }
-        Err(e) => {
+        Ok(_) => {}
+        Err(StabilitySendError::OutcomeUnknown(error)) => {
+            // Keep the claim: a terminal event resolves it, and the lost-claim recovery covers no event.
+            audit_event(
+                "STABILITY_PAYMENT_OUTCOME_UNKNOWN",
+                json!({ "payment_id": info.payment_id, "error": error }),
+            );
+        }
+        Err(StabilitySendError::NotSent(error)) => {
             audit_event(
                 "STABILITY_PAYMENT_FAILED",
                 json!({
                     "amount_msats": info.amount_msat,
-                    "error": format!("{e}"),
+                    "error": error,
                     "counterparty": info.counterparty,
                 }),
             );
@@ -593,9 +617,14 @@ pub fn send_claimed_stability_payment<T, E: std::fmt::Display>(
                     json!({ "payment_id": info.payment_id, "error": e.to_string() }),
                 );
             }
-            None
+            return None;
         }
     }
+    sc.payment_made = true;
+    sc.last_stability_payment = now;
+    // Native is recomputed on the next balance refresh: the HTLC is still in flight.
+    sc.backing_sats = info.backing_sats_after;
+    Some(info)
 }
 
 /// Same fee budget as LDK's default, 1% + 50 sats, passed explicitly so routing enforces it.
@@ -1292,13 +1321,13 @@ pub fn check_stability(
         backing_sats_after: previous_backing.saturating_sub(amt / 1000),
     };
     send_claimed_stability_payment(db, sc, info, now, || {
-        node.spontaneous_payment().send_with_preimage_and_custom_tlvs(
-            amt,
-            counterparty,
-            vec![signed_record],
-            preimage,
-            None,
-        )
+        node.spontaneous_payment()
+            .send_with_preimage_and_custom_tlvs(amt, counterparty, vec![signed_record], preimage, None)
+            .map(|payment_id| payment_id.to_string())
+            .map_err(|e| match e {
+                ldk_node::NodeError::PersistenceFailed => StabilitySendError::OutcomeUnknown(e.to_string()),
+                _ => StabilitySendError::NotSent(e.to_string()),
+            })
     })
 }
 
@@ -1430,7 +1459,7 @@ mod tests {
         let reached_ldk = std::cell::Cell::new(false);
         assert!(send_claimed_stability_payment(&db, &mut sc, unpersistable, 1, || {
             reached_ldk.set(true);
-            Ok::<(), String>(())
+            Ok("aa".repeat(32))
         })
         .is_none());
         assert!(!reached_ldk.get());
@@ -1439,7 +1468,7 @@ mod tests {
         // LDK can emit a terminal event before `send` returns: the row must already classify it.
         assert!(send_claimed_stability_payment(&db, &mut sc, info.clone(), 1, || {
             assert!(db.is_stability_payment(&info.payment_id).unwrap());
-            Err::<(), _>("route not found")
+            Err(StabilitySendError::NotSent("route not found".into()))
         })
         .is_none());
         assert_eq!(sc.backing_sats, 11_000);
@@ -1447,7 +1476,7 @@ mod tests {
         assert!(!db.has_pending_channel_send().unwrap(), "a synchronous failure rolls the claim back");
 
         let accepted = StabilityPaymentInfo { payment_id: "bb".repeat(32), ..info };
-        let sent = send_claimed_stability_payment(&db, &mut sc, accepted, 42, || Ok::<(), String>(()));
+        let sent = send_claimed_stability_payment(&db, &mut sc, accepted, 42, || Ok("bb".repeat(32)));
         assert_eq!(sent.unwrap().payment_id, "bb".repeat(32));
         assert_eq!(sc.backing_sats, 10_000);
         assert_eq!(sc.last_stability_payment, 42);
@@ -1457,12 +1486,42 @@ mod tests {
     }
 
     #[test]
+    fn a_send_error_after_dispatch_keeps_the_claim_and_the_debit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let (mut sc, info) = claimed_channel(&db, &"cc".repeat(32));
+        // LDK writes its payment store after dispatching, so this error does not mean "not sent".
+        let sent = send_claimed_stability_payment(&db, &mut sc, info, 7, || {
+            Err(StabilitySendError::OutcomeUnknown("Failed to persist data.".into()))
+        });
+        assert_eq!(sent.unwrap().payment_id, "cc".repeat(32));
+        assert_eq!(sc.backing_sats, 10_000);
+        assert_eq!(sc.last_stability_payment, 7);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert!(db.has_pending_channel_send().unwrap(), "the terminal event must still find its row");
+        assert!(db.complete_pending_stability_payment(&"cc".repeat(32), "", None).unwrap());
+    }
+
+    #[test]
+    fn a_payment_id_ldk_did_not_derive_our_way_rekeys_the_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let (mut sc, info) = claimed_channel(&db, &"dd".repeat(32));
+        let sent = send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok("ee".repeat(32)));
+        // Events carry LDK's id, so the row that classifies them must carry it too.
+        assert_eq!(sent.unwrap().payment_id, "ee".repeat(32));
+        assert!(db.is_stability_payment(&"ee".repeat(32)).unwrap());
+        assert!(!db.is_stability_payment(&"dd".repeat(32)).unwrap());
+        assert_eq!(sc.backing_sats, 10_000);
+    }
+
+    #[test]
     fn lost_stability_claims_roll_back_after_the_grace_period() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path()).unwrap();
         let id = format!("{}", PaymentId([9; 32]));
         let (mut sc, info) = claimed_channel(&db, &id);
-        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok::<(), String>(())).is_some());
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
 

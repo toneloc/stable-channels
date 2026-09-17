@@ -931,6 +931,28 @@ class OutgoingPaymentLifecycleTest {
         )
     }
 
+    @Test
+    fun stabilityLateSuccessAfterALostRecordReleaseIsNeverAnOrdinarySend() {
+        closeWithPendingStabilityAndReplace()
+        val succeeded = node.payments.single()
+        node.payments = emptyList()
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        // The released id stays on record as a stability payment whose outcome is unknown.
+        assertTrue(db.isOutgoingStabilityPayment("send"))
+        assertEquals("failed", payment().status)
+        assertEquals(1_000_000L, payment().amountMsat)
+        // A balance below backing would make an ordinary-send reconcile cut the USD target.
+        node.channels = listOf(channel("8", "new-channel", 4_000))
+        node.payments = listOf(succeeded)
+        event(success)
+        assertEquals("completed", payment().status)
+        assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
+        assertEquals(5.0, db.loadChannel("8")!!.expectedUSD, 0.0)
+        assertEquals(5_000L, db.loadChannel("8")!!.backingSats)
+        assertArchive(10.0, 11_000L)
+    }
+
     @Suppress("UNCHECKED_CAST")
     @Test
     fun stabilityMissingLdkRecordIsNeverReleasedByANodeThatIsNotRunning() {

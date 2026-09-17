@@ -101,7 +101,7 @@ object OutgoingStabilityPaymentRecovery {
         val ageSecs = System.currentTimeMillis() / 1000 - pending.createdAt
         if (!storeAuthoritative || ageSecs <= LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS)
             return false
-        return db.clearPendingSend(pending).also { released ->
+        return db.releaseLostStabilitySend(pending).also { released ->
             if (released)
                 AuditService.log(
                     "STABILITY_MARKER_RELEASED_NO_LDK_RECORD",

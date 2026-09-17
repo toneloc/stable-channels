@@ -2407,10 +2407,16 @@ impl Database {
         committed
     }
 
-    /// Record a payment
-    /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
-    /// An optimistic stability debit is not confirmation. Keep user channel spends blocked until
-    /// the payment event and its accounting have both reached a terminal state (including restart).
+    /// Re-key a pending stability claim to the id LDK actually assigned, which its events carry.
+    pub fn rekey_pending_stability_payment(&self, claimed_id: &str, ldk_id: &str) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE payments SET payment_id = ?2 WHERE payment_id = ?1
+               AND payment_type = 'stability' AND direction = 'sent' AND status = 'pending'",
+            params![claimed_id, ldk_id],
+        )
+    }
+
     /// Sent rows of one type still `pending`, oldest first, as (payment_id, created_at).
     pub fn pending_sent_payments(&self, payment_type: &str) -> SqliteResult<Vec<(String, i64)>> {
         let conn = self.conn.lock().unwrap();
@@ -2424,6 +2430,8 @@ impl Database {
         rows.collect()
     }
 
+    /// An optimistic stability debit is not confirmation. Keep user channel spends blocked until
+    /// the payment event and its accounting have both reached a terminal state (including restart).
     pub fn has_pending_channel_send(&self) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -2433,6 +2441,8 @@ impl Database {
         )
     }
 
+    /// Record a payment
+    /// payment_type: "stability", "lightning", "splice_in", "splice_out", or "manual"
     pub fn record_payment(
         &self,
         payment_id: Option<&str>,

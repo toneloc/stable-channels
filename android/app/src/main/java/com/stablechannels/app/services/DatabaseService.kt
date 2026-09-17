@@ -2057,23 +2057,40 @@ class DatabaseService(context: Context) :
             )
             .use { if (it.moveToFirst()) it.getString(0) else null }
 
+    private fun stabilityHistoryValues(pending: PendingStabilitySend, status: String) =
+        ContentValues().apply {
+            put("payment_id", pending.paymentId)
+            put("payment_type", "stability")
+            put("direction", "sent")
+            put("amount_msat", pending.amountMsat)
+            put(
+                "amount_usd",
+                pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price,
+            )
+            put("btc_price", pending.price)
+            put("status", status)
+        }
+
     private fun SQLiteDatabase.recordCompletedStabilityHistory(pending: PendingStabilitySend) {
-        val values =
-            ContentValues().apply {
-                put("payment_id", pending.paymentId)
-                put("payment_type", "stability")
-                put("direction", "sent")
-                put("amount_msat", pending.amountMsat)
-                put(
-                    "amount_usd",
-                    pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price,
-                )
-                put("btc_price", pending.price)
-                put("status", "completed")
-            }
+        val values = stabilityHistoryValues(pending, "completed")
         if (update("payments", values, "payment_id = ?", arrayOf(pending.paymentId)) == 0)
             insertOrThrow("payments", null, values)
     }
+
+    /**
+     * LDK has lost this payment's record, so its outcome is unknown. Keep the id on record as a
+     * stability payment, so a late event is never reconciled as an ordinary send, then release.
+     */
+    fun releaseLostStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (expected.paymentId.isBlank() || loadPendingSend() != expected)
+                return@transaction false
+            val known =
+                rawQuery("SELECT 1 FROM payments WHERE payment_id = ?", arrayOf(expected.paymentId))
+                    .use { it.moveToFirst() }
+            if (!known) insertOrThrow("payments", null, stabilityHistoryValues(expected, "failed"))
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
 
     fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean =
         writableDatabase.transaction {
