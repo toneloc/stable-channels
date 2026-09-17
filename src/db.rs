@@ -633,6 +633,17 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
             [],
         );
+        // Ordinary SYNC attempts are ordered by the signed version, so an older payment's
+        // terminal event cannot supersede the delivery status of a newer correction.
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN sync_version INTEGER",
+            [],
+        );
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settlement_sync_version
+             ON settlement_payments(user_channel_id, sync_version) WHERE kind = 'sync'",
+            [],
+        )?;
 
         // Authenticated stability-payment inbox. The settlement id prevents the same signed
         // authorization being reused with another keysend, while payment_id makes LDK event
@@ -3585,6 +3596,68 @@ impl Database {
         Ok(())
     }
 
+    /// Track an accepted ordinary SYNC send until its terminal delivery outcome is known.
+    pub fn record_sync_payment(
+        &self,
+        payment_id: &str,
+        user_channel_id: &str,
+        sync_version: u64,
+    ) -> SqliteResult<()> {
+        if payment_id.is_empty() || user_channel_id.is_empty()
+            || sync_version == 0 || sync_version > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid SYNC attempt".into(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settlement_payments (payment_id, kind, user_channel_id, sync_version)
+             VALUES (?1, 'sync', ?2, ?3)",
+            params![payment_id, user_channel_id, sync_version as i64],
+        )?;
+        Ok(())
+    }
+
+    /// A failed ordinary SYNC remains a durable retry obligation. Other protocol payments and
+    /// already consumed outcomes are untouched; successful delivery cannot be downgraded.
+    pub fn mark_sync_payment_failed(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE settlement_payments SET outcome = 'failed'
+             WHERE payment_id = ?1 AND kind = 'sync' AND outcome = 'pending'",
+            params![payment_id],
+        )? == 1)
+    }
+
+    pub fn list_pending_sync_payment_ids(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id FROM settlement_payments WHERE kind = 'sync' AND outcome = 'pending'",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    /// Only the newest ordinary SYNC attempt can require a retry. A newer pending or delivered
+    /// correction supersedes older failures. Pre-migration sends are superseded by any versioned
+    /// attempt; startup reconciliation sends a fresh version after an upgrade or restart.
+    pub fn list_failed_sync_channels(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT s.user_channel_id FROM settlement_payments s
+             JOIN channels c ON c.user_channel_id = s.user_channel_id AND c.closed_at IS NULL
+             WHERE s.kind = 'sync' AND s.outcome = 'failed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM settlement_payments newer
+                 WHERE newer.kind = 'sync' AND newer.user_channel_id = s.user_channel_id
+                   AND COALESCE(newer.sync_version, 0) > COALESCE(s.sync_version, 0)
+               )",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     /// Durably register signed stability metadata before changing channel accounting.
     /// Replays must match the original payment and complete signed envelope exactly.
     #[allow(clippy::too_many_arguments)]
@@ -4703,6 +4776,49 @@ mod tests {
         // plain record_settlement leaves user_channel_id as NULL (returns None)
         db.record_settlement("pmt2", "sync").unwrap();
         assert_eq!(db.get_settlement_channel("pmt2").unwrap(), None);
+    }
+
+    #[test]
+    fn sync_delivery_migration_preserves_history_and_isolates_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DB_FILENAME);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settlement_payments (
+                payment_id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                recorded_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                user_channel_id TEXT, outcome TEXT NOT NULL DEFAULT 'pending'
+             );
+             INSERT INTO settlement_payments (payment_id, kind, user_channel_id)
+             VALUES ('legacy-sync', 'sync', '7');",
+        ).unwrap();
+        drop(conn);
+
+        let db = Database::open(dir.path()).unwrap();
+        db.save_channel("channel-seven", "7", 25.0, 31_250, 0, None).unwrap();
+        db.save_channel("channel-eight", "8", 25.0, 31_250, 0, None).unwrap();
+        assert_eq!(db.list_pending_sync_payment_ids().unwrap(), vec!["legacy-sync"]);
+        assert!(db.mark_sync_payment_failed("legacy-sync").unwrap());
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"]);
+
+        db.record_sync_payment("new-sync", "7", 1).unwrap();
+        assert!(db.list_failed_sync_channels().unwrap().is_empty());
+        db.record_sync_payment("other-channel-sync", "8", 9).unwrap();
+        db.mark_sync_payment_failed("new-sync").unwrap();
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"],
+            "higher versions on another channel must not suppress this retry");
+        assert!(db.record_sync_payment("", "7", 2).is_err());
+        assert!(db.record_sync_payment("duplicate", "7", 0).is_err());
+        assert!(db.record_sync_payment("new-sync", "7", 2).is_err());
+        drop(db);
+
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"]);
+        assert_eq!(db.list_settlements().unwrap().len(), 3);
+        db.record_sync_payment("retry", "7", 3).unwrap();
+        db.mark_settlement_succeeded("retry", Some(1), None, Some("outbound")).unwrap();
+        assert!(!db.mark_sync_payment_failed("retry").unwrap());
+        assert!(db.list_failed_sync_channels().unwrap().is_empty());
     }
 
     #[test]
