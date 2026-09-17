@@ -4,10 +4,10 @@ import android.content.Context
 import android.content.SharedPreferences
 
 /**
- * Stores a user-supplied "custom LSP" pubkey/address override in SharedPreferences.
- * Falls back to [Constants.DEFAULT_LSP_PUBKEY] / [Constants.DEFAULT_LSP_ADDRESS]
- * (stablechannels.com) when no override has been saved, keeping the app decentralized-by-default
- * while allowing advanced users to point at their own LSP.
+ * Stores a user-supplied "custom LSP" pubkey/address override in SharedPreferences. Falls back to
+ * [Constants.DEFAULT_LSP_PUBKEY] / [Constants.DEFAULT_LSP_ADDRESS] (stablechannels.com) when no
+ * override has been saved, keeping the app decentralized-by-default while allowing advanced users
+ * to point at their own LSP.
  */
 object LspPreferencesManager {
     private const val PREFS_NAME = "lsp_preferences"
@@ -42,8 +42,8 @@ object LspPreferencesManager {
     fun isValidAddress(address: String): Boolean = ADDRESS_REGEX.matches(address.trim())
 
     /**
-     * Validates and persists a custom LSP pubkey/address.
-     * Returns `null` on success, or a human-readable error message on validation failure.
+     * Validates and persists a custom LSP pubkey/address. Returns `null` on success, or a
+     * human-readable error message on validation failure.
      */
     fun saveCustomLsp(context: Context, pubkey: String, address: String): String? {
         val trimmedPubkey = pubkey.trim()
@@ -56,7 +56,8 @@ object LspPreferencesManager {
             return "Address must be in host:port format (e.g. domain.com:9735)."
         }
 
-        prefs(context).edit()
+        prefs(context)
+            .edit()
             .putString(KEY_CUSTOM_PUBKEY, trimmedPubkey)
             .putString(KEY_CUSTOM_ADDRESS, trimmedAddress)
             .apply()
@@ -65,9 +66,6 @@ object LspPreferencesManager {
 
     /** Clears the custom override, restoring the default stablechannels.com LSP. */
     fun resetToDefault(context: Context) {
-        prefs(context).edit()
-            .remove(KEY_CUSTOM_PUBKEY)
-            .remove(KEY_CUSTOM_ADDRESS)
-            .apply()
+        prefs(context).edit().remove(KEY_CUSTOM_PUBKEY).remove(KEY_CUSTOM_ADDRESS).apply()
     }
 }

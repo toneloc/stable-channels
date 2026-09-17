@@ -24,7 +24,8 @@ class LdkBackgroundService : Service() {
 
         fun start(context: Context, reason: String = REASON_PAYMENT) {
             Log.d(TAG, "Starting LdkBackgroundService (reason=$reason)")
-            val intent = Intent(context, LdkBackgroundService::class.java).putExtra(EXTRA_REASON, reason)
+            val intent =
+                Intent(context, LdkBackgroundService::class.java).putExtra(EXTRA_REASON, reason)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(intent)
             } else {
@@ -45,20 +46,26 @@ class LdkBackgroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val contentText = when (intent?.getStringExtra(EXTRA_REASON)) {
-            REASON_SPLICE -> "Stable Channels is completing your on-chain move..."
-            else -> "Stable Channels is waiting for your payment to complete..."
-        }
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Keeping connection active")
-            .setContentText(contentText)
-            .setSmallIcon(R.mipmap.ic_launcher)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        val contentText =
+            when (intent?.getStringExtra(EXTRA_REASON)) {
+                REASON_SPLICE -> "Stable Channels is completing your on-chain move..."
+                else -> "Stable Channels is waiting for your payment to complete..."
+            }
+        val notification =
+            NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("Keeping connection active")
+                .setContentText(contentText)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -70,13 +77,16 @@ class LdkBackgroundService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "LDK Background Sync",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Keeps LDK network connection active to receive background payments"
-            }
+            val channel =
+                NotificationChannel(
+                        CHANNEL_ID,
+                        "LDK Background Sync",
+                        NotificationManager.IMPORTANCE_HIGH,
+                    )
+                    .apply {
+                        description =
+                            "Keeps LDK network connection active to receive background payments"
+                    }
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
         }

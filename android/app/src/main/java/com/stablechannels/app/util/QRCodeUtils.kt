@@ -1,8 +1,8 @@
 package com.stablechannels.app.util
 
 /**
- * Utility functions for processing QR code payloads containing
- * Lightning invoices, Bolt12 offers, and Bitcoin addresses.
+ * Utility functions for processing QR code payloads containing Lightning invoices, Bolt12 offers,
+ * and Bitcoin addresses.
  */
 object QRCodeUtils {
 
@@ -10,8 +10,8 @@ object QRCodeUtils {
     private const val LIGHTNING_SCHEME = "lightning:"
 
     /**
-     * Strips URI scheme prefixes (bitcoin:, lightning:, BITCOIN:, LIGHTNING:)
-     * and query parameters (everything after '?') from a raw QR code string.
+     * Strips URI scheme prefixes (bitcoin:, lightning:, BITCOIN:, LIGHTNING:) and query parameters
+     * (everything after '?') from a raw QR code string.
      *
      * @param raw The raw decoded QR code string
      * @return The cleaned payment payload
@@ -39,9 +39,9 @@ object QRCodeUtils {
     }
 
     /**
-     * Normalizes a Bitcoin address according to BIP-173 / BIP-350 specifications.
-     * Native SegWit and Taproot (bc1, tb1, bcrt1) addresses are converted to lowercase.
-     * Base58 addresses (1, 3, 2, m, n) retain their exact case.
+     * Normalizes a Bitcoin address according to BIP-173 / BIP-350 specifications. Native SegWit and
+     * Taproot (bc1, tb1, bcrt1) addresses are converted to lowercase. Base58 addresses (1, 3, 2, m,
+     * n) retain their exact case.
      */
     fun normalizeAddress(raw: String): String {
         val trimmed = raw.trim()
@@ -57,9 +57,10 @@ object QRCodeUtils {
         }
         if (!hasUpper) return trimmed
 
-        val isBech32 = trimmed.startsWith("bc1", ignoreCase = true) ||
-            trimmed.startsWith("tb1", ignoreCase = true) ||
-            trimmed.startsWith("bcrt1", ignoreCase = true)
+        val isBech32 =
+            trimmed.startsWith("bc1", ignoreCase = true) ||
+                trimmed.startsWith("tb1", ignoreCase = true) ||
+                trimmed.startsWith("bcrt1", ignoreCase = true)
 
         return if (isBech32) {
             trimmed.lowercase()
@@ -68,9 +69,7 @@ object QRCodeUtils {
         }
     }
 
-    /**
-     * Generates a BIP-21 URI with normalized address and optional amount.
-     */
+    /** Generates a BIP-21 URI with normalized address and optional amount. */
     fun generateBitcoinUri(address: String, amount: String? = null): String {
         val normalized = normalizeAddress(address)
         return if (amount.isNullOrBlank()) {
@@ -91,7 +90,14 @@ object QRCodeUtils {
         val trimmed = value.trim()
         if (trimmed.isEmpty()) return false
         val firstChar = trimmed[0]
-        if (firstChar == '1' || firstChar == '3' || firstChar == '2' || firstChar == 'm' || firstChar == 'n') return true
+        if (
+            firstChar == '1' ||
+                firstChar == '3' ||
+                firstChar == '2' ||
+                firstChar == 'm' ||
+                firstChar == 'n'
+        )
+            return true
 
         return trimmed.startsWith("bc1", ignoreCase = true) ||
             trimmed.startsWith("tb1", ignoreCase = true) ||

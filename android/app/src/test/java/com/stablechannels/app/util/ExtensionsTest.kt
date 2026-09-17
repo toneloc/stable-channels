@@ -1,9 +1,9 @@
 package com.stablechannels.app.util
 
+import java.util.Date
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.util.Date
 
 class ExtensionsTest {
 

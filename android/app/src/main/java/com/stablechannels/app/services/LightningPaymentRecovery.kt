@@ -22,12 +22,14 @@ object LightningPaymentRecovery {
         return true
     }
 
-    /** Reconcile rows whose event may have been consumed while Android was backgrounded. A row
-     * LDK no longer knows can never resolve through events; after the grace period it is failed. */
+    /**
+     * Reconcile rows whose event may have been consumed while Android was backgrounded. A row LDK
+     * no longer knows can never resolve through events; after the grace period it is failed.
+     */
     fun reconcilePending(
         db: DatabaseService,
         unknownToLdk: (String) -> Boolean = { false },
-        lookup: (String) -> LightningPaymentResolution?
+        lookup: (String) -> LightningPaymentResolution?,
     ): Int {
         var repaired = 0
         db.getPendingOutgoingLightningPaymentIds().forEach { paymentId ->
@@ -40,11 +42,15 @@ object LightningPaymentRecovery {
                     }
                     repaired++
                 }
-                null -> if (unknownToLdk(paymentId) &&
-                    db.pendingOutgoingPaymentAgeSecs(paymentId) > LOST_LDK_RECORD_TIMEOUT_SECS) {
-                    PaymentFailureRecorder.record(db, paymentId, "no_ldk_record") { null }
-                    repaired++
-                }
+                null ->
+                    if (
+                        unknownToLdk(paymentId) &&
+                            db.pendingOutgoingPaymentAgeSecs(paymentId) >
+                                LOST_LDK_RECORD_TIMEOUT_SECS
+                    ) {
+                        PaymentFailureRecorder.record(db, paymentId, "no_ldk_record") { null }
+                        repaired++
+                    }
             }
         }
         return repaired

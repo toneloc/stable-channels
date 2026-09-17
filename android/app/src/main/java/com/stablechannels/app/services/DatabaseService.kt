@@ -11,14 +11,18 @@ import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
 import kotlin.math.abs
-import kotlin.math.roundToLong
 
 data class PaymentPersistenceResult(
     val isNewPayment: Boolean,
-    val backingSats: Long?
+    val backingSats: Long?,
 )
 
-enum class TradeControlApplyStatus { APPLIED, DUPLICATE, INVALID, RETRY }
+enum class TradeControlApplyStatus {
+    APPLIED,
+    DUPLICATE,
+    INVALID,
+    RETRY,
+}
 
 data class TradeControlApplyResult(
     val status: TradeControlApplyStatus,
@@ -26,36 +30,44 @@ data class TradeControlApplyResult(
     val peerBackingSats: Long? = null,
     val paymentId: String? = null,
     val action: String? = null,
-    val allocationApplied: Boolean? = null
+    val allocationApplied: Boolean? = null,
 )
 
-/** A backing update targeted a user_channel_id with no channels row. Callers can recreate the
- *  row from in-memory state and retry, unlike generic persistence failures. */
+/**
+ * A backing update targeted a user_channel_id with no channels row. Callers can recreate the row
+ * from in-memory state and retry, unlike generic persistence failures.
+ */
 class MissingChannelRowException(userChannelId: String) :
     IllegalStateException("No channel row for user_channel_id=$userChannelId")
 
-/** Rollback signal for [DatabaseService.assignPendingSpliceTxid]: thrown to roll back the whole
- *  transaction (including any conflicting-row delete) if the final txid assignment doesn't land.
- *  Never escapes the function — always caught internally. */
+/**
+ * Rollback signal for [DatabaseService.assignPendingSpliceTxid]: thrown to roll back the whole
+ * transaction (including any conflicting-row delete) if the final txid assignment doesn't land.
+ * Never escapes the function — always caught internally.
+ */
 private object SpliceTxidAssignmentAbortedException : Exception()
 
-/** Durable marker for an in-flight outgoing stability payment (single row, id = 1).
- *  An empty paymentId means the keysend outcome is not yet known. */
+/**
+ * Durable marker for an in-flight outgoing stability payment (single row, id = 1). An empty
+ * paymentId means the keysend outcome is not yet known.
+ */
 data class PendingStabilitySend(
     val paymentId: String,
     val amountMsat: Long,
     val price: Double,
     val createdAt: Long,
-    // Nullable only for legacy markers. A missing origin must never be inferred from the active channel.
-    val userChannelId: String?
+    // Nullable only for legacy markers. A missing origin must never be inferred from the active
+    // channel.
+    val userChannelId: String?,
 )
 
-class DatabaseService(context: Context) : SQLiteOpenHelper(
-    context,
-    File(Constants.userDataDir(context), DB_FILENAME).absolutePath,
-    null,
-    DB_VERSION
-) {
+class DatabaseService(context: Context) :
+    SQLiteOpenHelper(
+        context,
+        File(Constants.userDataDir(context), DB_FILENAME).absolutePath,
+        null,
+        DB_VERSION,
+    ) {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
@@ -65,7 +77,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     override fun onCreate(db: SQLiteDatabase) {
         SpliceEventRecorder.createTables(db)
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS channels (
                 channel_id TEXT PRIMARY KEY,
                 user_channel_id TEXT UNIQUE,
@@ -78,9 +91,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 created_at INTEGER DEFAULT (strftime('%s','now')),
                 updated_at INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel_id TEXT,
@@ -108,9 +123,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 resolved_at INTEGER,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS payments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 payment_id TEXT,
@@ -127,18 +144,22 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 confirmations INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS price_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 price REAL NOT NULL,
                 source TEXT,
                 timestamp INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS daily_prices (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT UNIQUE,
@@ -146,9 +167,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 volume REAL,
                 source TEXT
             )
-        """)
+        """
+        )
 
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS onchain_txs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 txid TEXT, direction TEXT, amount_sats INTEGER,
@@ -156,13 +179,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 confirmations INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
 
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
         createOutgoingLightningAccountingTable(db)
 
-        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)"
+        )
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
         db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at)")
         createTradeIndexes(db)
@@ -178,36 +204,43 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         if (oldVersion < 3) {
             db.execSQL("ALTER TABLE channels ADD COLUMN sync_version INTEGER NOT NULL DEFAULT 0")
             listOf(
-                "user_channel_id TEXT",
-                "trade_id TEXT",
-                "request_hash TEXT",
-                "request_payload TEXT",
-                "trade_payment_id TEXT",
-                "old_expected_usd REAL",
-                "new_expected_usd REAL",
-                "new_backing_sats INTEGER",
-                "quote_price REAL",
-                "fee_msat INTEGER NOT NULL DEFAULT 0",
-                "expires_at INTEGER",
-                "outcome TEXT",
-                "reason_code TEXT",
-                "uncertainty_reason TEXT",
-                "resolved_at INTEGER"
-            ).forEach { column -> db.execSQL("ALTER TABLE trades ADD COLUMN $column") }
+                    "user_channel_id TEXT",
+                    "trade_id TEXT",
+                    "request_hash TEXT",
+                    "request_payload TEXT",
+                    "trade_payment_id TEXT",
+                    "old_expected_usd REAL",
+                    "new_expected_usd REAL",
+                    "new_backing_sats INTEGER",
+                    "quote_price REAL",
+                    "fee_msat INTEGER NOT NULL DEFAULT 0",
+                    "expires_at INTEGER",
+                    "outcome TEXT",
+                    "reason_code TEXT",
+                    "uncertainty_reason TEXT",
+                    "resolved_at INTEGER",
+                )
+                .forEach { column -> db.execSQL("ALTER TABLE trades ADD COLUMN $column") }
             createTradeIndexes(db)
         }
         if (oldVersion < 4) {
-            db.execSQL("""
+            db.execSQL(
+                """
                 CREATE TABLE IF NOT EXISTS price_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     price REAL NOT NULL,
                     source TEXT,
                     timestamp INTEGER DEFAULT (strftime('%s','now'))
                 )
-            """)
-            db.execSQL("DELETE FROM price_history WHERE id NOT IN (SELECT MIN(id) FROM price_history GROUP BY timestamp)")
+            """
+            )
+            db.execSQL(
+                "DELETE FROM price_history WHERE id NOT IN (SELECT MIN(id) FROM price_history GROUP BY timestamp)"
+            )
             db.execSQL("DROP INDEX IF EXISTS idx_price_history_ts")
-            db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)")
+            db.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)"
+            )
         }
     }
 
@@ -224,31 +257,38 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) = db.transaction {
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS outgoing_lightning_accounting (
                 payment_id TEXT PRIMARY KEY,
                 completed INTEGER NOT NULL DEFAULT 0,
                 user_channel_id TEXT
             )
-        """)
-        val hasChannelId = db.rawQuery("PRAGMA table_info(outgoing_lightning_accounting)", null).use { c ->
-            var found = false
-            while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
-            found
-        }
-        if (!hasChannelId) db.execSQL("ALTER TABLE outgoing_lightning_accounting ADD COLUMN user_channel_id TEXT")
-        db.execSQL("""
+        """
+        )
+        val hasChannelId =
+            db.rawQuery("PRAGMA table_info(outgoing_lightning_accounting)", null).use { c ->
+                var found = false
+                while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
+                found
+            }
+        if (!hasChannelId)
+            db.execSQL("ALTER TABLE outgoing_lightning_accounting ADD COLUMN user_channel_id TEXT")
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS closed_channel_books (
                 user_channel_id TEXT PRIMARY KEY, channel_id TEXT,
                 expected_usd REAL, stable_sats INTEGER,
                 receiver_sats INTEGER, latest_price REAL,
                 archived_at INTEGER NOT NULL
             )
-        """)
+        """
+        )
     }
 
     private fun createPendingStabilitySendTable(db: SQLiteDatabase) = db.transaction {
-        execSQL("""
+        execSQL(
+            """
             CREATE TABLE IF NOT EXISTS pending_stability_send (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 payment_id TEXT NOT NULL,
@@ -257,55 +297,81 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 created_at INTEGER NOT NULL,
                 user_channel_id TEXT
             )
-        """)
-        val hasOrigin = rawQuery("PRAGMA table_info(pending_stability_send)", null).use { c ->
-            var found = false
-            while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
-            found
-        }
-        if (!hasOrigin) execSQL("ALTER TABLE pending_stability_send ADD COLUMN user_channel_id TEXT")
+        """
+        )
+        val hasOrigin =
+            rawQuery("PRAGMA table_info(pending_stability_send)", null).use { c ->
+                var found = false
+                while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
+                found
+            }
+        if (!hasOrigin)
+            execSQL("ALTER TABLE pending_stability_send ADD COLUMN user_channel_id TEXT")
         // Keep the origin after the in-flight marker is cleared, including payments applied
         // to archived books. The row commits atomically with the debit and payment history.
-        execSQL("""
+        execSQL(
+            """
             CREATE TABLE IF NOT EXISTS outgoing_stability_accounting (
                 payment_id TEXT PRIMARY KEY, user_channel_id TEXT NOT NULL
             )
-        """)
+        """
+        )
     }
 
-    /** Applied inbound STABILITY_PAYMENT_V1 settlement ids — replay guard so a signed
-     *  settlement can never credit backing twice, even under a re-sent keysend. */
+    /**
+     * Applied inbound STABILITY_PAYMENT_V1 settlement ids — replay guard so a signed settlement can
+     * never credit backing twice, even under a re-sent keysend.
+     */
     private fun createStabilitySettlementsTable(db: SQLiteDatabase) {
-        db.execSQL("""
+        db.execSQL(
+            """
             CREATE TABLE IF NOT EXISTS stability_settlements (
                 settlement_id TEXT PRIMARY KEY,
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )
-        """)
+        """
+        )
     }
 
     private fun createTradeIndexes(db: SQLiteDatabase) {
-        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_trade_id_unique ON trades(trade_id) WHERE trade_id IS NOT NULL")
-        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_request_hash_unique ON trades(request_hash) WHERE request_hash IS NOT NULL")
-        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_payment_id_unique ON trades(trade_payment_id) WHERE trade_payment_id IS NOT NULL")
-        db.execSQL("CREATE INDEX IF NOT EXISTS idx_trades_unresolved_channel ON trades(channel_id, status)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_trade_id_unique ON trades(trade_id) WHERE trade_id IS NOT NULL"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_request_hash_unique ON trades(request_hash) WHERE request_hash IS NOT NULL"
+        )
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_payment_id_unique ON trades(trade_payment_id) WHERE trade_payment_id IS NOT NULL"
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_trades_unresolved_channel ON trades(channel_id, status)"
+        )
     }
 
     // --- Channels ---
 
-    fun saveChannel(channelId: String, userChannelId: String, expectedUSD: Double, backingSats: Long, note: String?, receiverSats: Long = 0, latestPrice: Double = 0.0) {
+    fun saveChannel(
+        channelId: String,
+        userChannelId: String,
+        expectedUSD: Double,
+        backingSats: Long,
+        note: String?,
+        receiverSats: Long = 0,
+        latestPrice: Double = 0.0,
+    ) {
         val db = writableDatabase
         val now = System.currentTimeMillis() / 1000
-        val cv = ContentValues().apply {
-            put("channel_id", channelId)
-            put("user_channel_id", userChannelId)
-            put("expected_usd", expectedUSD)
-            put("stable_sats", backingSats)
-            put("note", note)
-            put("receiver_sats", receiverSats)
-            put("latest_price", latestPrice)
-            put("updated_at", now)
-        }
+        val cv =
+            ContentValues().apply {
+                put("channel_id", channelId)
+                put("user_channel_id", userChannelId)
+                put("expected_usd", expectedUSD)
+                put("stable_sats", backingSats)
+                put("note", note)
+                put("receiver_sats", receiverSats)
+                put("latest_price", latestPrice)
+                put("updated_at", now)
+            }
         val updated = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
         if (updated == 0) {
             cv.put("created_at", now)
@@ -319,7 +385,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val usdDeducted: Double,
         val oldExpectedUSD: Double,
         val newExpectedUSD: Double,
-        val newBackingSats: Long
+        val newBackingSats: Long,
     )
 
     /**
@@ -331,15 +397,15 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      * sats from the USD target, so this converges instead of oscillating. Idempotent by
      * construction: afterwards backing == receiver, so a second call finds nothing to do.
      *
-     * The caller must only pass a [receiverSats] that reflects settled channel state — an
-     * in-flight HTLC lowers the receiver balance temporarily and would look like an overflow.
+     * The caller must only pass a [receiverSats] that reflects settled channel state — an in-flight
+     * HTLC lowers the receiver balance temporarily and would look like an overflow.
      *
      * Returns null when the books are already consistent.
      */
     fun clampBackingToLiveReceiver(
         userChannelId: String,
         receiverSats: Long,
-        price: Double
+        price: Double,
     ): BackingClampResult? {
         // receiverSats == 0 is legitimate — a full splice-out empties the channel and the
         // position must be allowed to close. Only a negative balance is nonsense.
@@ -357,14 +423,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 db.execSQL("ROLLBACK")
                 return null
             }
-            val cursor = db.rawQuery(
-                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
-                arrayOf(userChannelId)
-            )
-            val (currentExpected, currentBacking) = cursor.use {
-                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
-                it.getDouble(0) to it.getLong(1)
-            }
+            val cursor =
+                db.rawQuery(
+                    "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                    arrayOf(userChannelId),
+                )
+            val (currentExpected, currentBacking) =
+                cursor.use {
+                    if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                    it.getDouble(0) to it.getLong(1)
+                }
             if (currentBacking <= receiverSats) {
                 db.execSQL("ROLLBACK")
                 return null
@@ -374,13 +442,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
             // Retain any final settlement backing even when the USD claim is cleared.
             val newBacking = receiverSats
-            val cv = ContentValues().apply {
-                put("expected_usd", newExpected)
-                put("stable_sats", newBacking)
-                put("receiver_sats", receiverSats)
-                put("latest_price", price)
-                put("updated_at", System.currentTimeMillis() / 1000)
-            }
+            val cv =
+                ContentValues().apply {
+                    put("expected_usd", newExpected)
+                    put("stable_sats", newBacking)
+                    put("receiver_sats", receiverSats)
+                    put("latest_price", price)
+                    put("updated_at", System.currentTimeMillis() / 1000)
+                }
             val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
             if (rows != 1) {
                 throw IllegalStateException(
@@ -389,10 +458,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             db.execSQL("COMMIT")
             return BackingClampResult(
-                overflowSats, usdDeducted, currentExpected, newExpected, newBacking
+                overflowSats,
+                usdDeducted,
+                currentExpected,
+                newExpected,
+                newBacking,
             )
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
@@ -402,33 +477,32 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val usdDeducted: Double,
         val oldExpectedUSD: Double,
         val newExpectedUSD: Double,
-        val newBackingSats: Long
+        val newBackingSats: Long,
     )
 
     /**
      * Atomically reconciles an ordinary outgoing send against the row's *current, freshly-read*
-     * expected_usd/stable_sats — mirroring StabilityService.reconcileOutgoing()'s math exactly,
-     * but performed entirely inside one BEGIN IMMEDIATE transaction instead of being computed
-     * ahead of time against an in-memory snapshot.
+     * expected_usd/stable_sats — mirroring StabilityService.reconcileOutgoing()'s math exactly, but
+     * performed entirely inside one BEGIN IMMEDIATE transaction instead of being computed ahead of
+     * time against an in-memory snapshot.
      *
      * This has to read-and-compute in one transaction, not read-precompute-then-apply-a-delta:
-     * reconcileOutgoing()'s result (both the USD deducted and the resulting backing) is a
-     * function of the backing value it's given. If that input is a snapshot taken before the
-     * stability timer's own concurrent debit (runStabilityCheck(), a separate in-process
-     * coroutine that commits its debit straight to this table via
-     * recordPaymentAndMaybeUpdateBacking()), the computed reduction implicitly assumes the old,
-     * pre-debit backing — so applying it as a delta on top of the DB's already-debited row
-     * double-counts the difference. Recomputing fresh, inside the same transaction that writes
-     * the result, uses only one read of backing and composes correctly with whatever the timer
-     * already committed.
+     * reconcileOutgoing()'s result (both the USD deducted and the resulting backing) is a function
+     * of the backing value it's given. If that input is a snapshot taken before the stability
+     * timer's own concurrent debit (runStabilityCheck(), a separate in-process coroutine that
+     * commits its debit straight to this table via recordPaymentAndMaybeUpdateBacking()), the
+     * computed reduction implicitly assumes the old, pre-debit backing — so applying it as a delta
+     * on top of the DB's already-debited row double-counts the difference. Recomputing fresh,
+     * inside the same transaction that writes the result, uses only one read of backing and
+     * composes correctly with whatever the timer already committed.
      *
      * [receiverSats] must be the live, already-fresh post-send receiver balance (from
-     * refreshBalances()/updateStableBalances()) — that value reflects real channel state
-     * directly and isn't subject to the same race as the in-memory backingSats copy.
+     * refreshBalances()/updateStableBalances()) — that value reflects real channel state directly
+     * and isn't subject to the same race as the in-memory backingSats copy.
      *
-     * With [paymentId], also commits accounting completion and transport success atomically,
-     * even for a native-only send. Completed ids skip balance reconciliation on replay.
-     * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
+     * With [paymentId], also commits accounting completion and transport success atomically, even
+     * for a native-only send. Completed ids skip balance reconciliation on replay. Returns null if
+     * there was nothing to reconcile at the DB's current state (no overflow).
      */
     fun reconcileOutgoingBacking(
         channelId: String,
@@ -438,24 +512,30 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         latestPrice: Double,
         price: Double,
         paymentId: String? = null,
-        feeMsat: Long = 0L
+        feeMsat: Long = 0L,
     ): OutgoingReconcileResult? {
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
             // A delayed/replayed success must never reconcile against a later send's HTLC.
-            if (paymentId != null && (isLightningAccountingComplete(paymentId) || hasArchivedLightningAccounting(paymentId))) {
+            if (
+                paymentId != null &&
+                    (isLightningAccountingComplete(paymentId) ||
+                        hasArchivedLightningAccounting(paymentId))
+            ) {
                 db.execSQL("ROLLBACK")
                 return null
             }
-            val cursor = db.rawQuery(
-                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
-                arrayOf(userChannelId)
-            )
-            val (currentExpected, currentBacking) = cursor.use {
-                if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
-                it.getDouble(0) to it.getLong(1)
-            }
+            val cursor =
+                db.rawQuery(
+                    "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                    arrayOf(userChannelId),
+                )
+            val (currentExpected, currentBacking) =
+                cursor.use {
+                    if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
+                    it.getDouble(0) to it.getLong(1)
+                }
             if (currentBacking == 0L || currentBacking <= receiverSats) {
                 if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
                 db.execSQL("COMMIT")
@@ -477,15 +557,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
             // A cleared claim can still leave a final settlement owed to the LSP.
             val newBacking = receiverSats
-            val cv = ContentValues().apply {
-                put("channel_id", channelId)
-                put("expected_usd", newExpected)
-                put("stable_sats", newBacking)
-                put("note", note)
-                put("receiver_sats", receiverSats)
-                put("latest_price", latestPrice)
-                put("updated_at", System.currentTimeMillis() / 1000)
-            }
+            val cv =
+                ContentValues().apply {
+                    put("channel_id", channelId)
+                    put("expected_usd", newExpected)
+                    put("stable_sats", newBacking)
+                    put("note", note)
+                    put("receiver_sats", receiverSats)
+                    put("latest_price", latestPrice)
+                    put("updated_at", System.currentTimeMillis() / 1000)
+                }
             val rows = db.update("channels", cv, "user_channel_id = ?", arrayOf(userChannelId))
             if (rows != 1) {
                 throw IllegalStateException(
@@ -496,7 +577,9 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             db.execSQL("COMMIT")
             return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
@@ -513,22 +596,24 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         expectedUSD: Double,
         note: String?,
         receiverSats: Long = 0,
-        latestPrice: Double = 0.0
+        latestPrice: Double = 0.0,
     ) {
-        val cv = ContentValues().apply {
-            put("channel_id", channelId)
-            put("expected_usd", expectedUSD)
-            put("note", note)
-            put("receiver_sats", receiverSats)
-            put("latest_price", latestPrice)
-            put("updated_at", System.currentTimeMillis() / 1000)
-        }
-        val rows = writableDatabase.update(
-            "channels",
-            cv,
-            "user_channel_id = ?",
-            arrayOf(userChannelId)
-        )
+        val cv =
+            ContentValues().apply {
+                put("channel_id", channelId)
+                put("expected_usd", expectedUSD)
+                put("note", note)
+                put("receiver_sats", receiverSats)
+                put("latest_price", latestPrice)
+                put("updated_at", System.currentTimeMillis() / 1000)
+            }
+        val rows =
+            writableDatabase.update(
+                "channels",
+                cv,
+                "user_channel_id = ?",
+                arrayOf(userChannelId),
+            )
         if (rows != 1) {
             throw IllegalStateException(
                 "channel metadata UPDATE affected $rows rows for user_channel_id=$userChannelId"
@@ -538,10 +623,11 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
     fun loadChannel(userChannelId: String): ChannelRecord? {
         val db = readableDatabase
-        val cursor = db.rawQuery(
-            "SELECT channel_id, user_channel_id, expected_usd, note, stable_sats, receiver_sats, latest_price, sync_version FROM channels WHERE user_channel_id = ?",
-            arrayOf(userChannelId)
-        )
+        val cursor =
+            db.rawQuery(
+                "SELECT channel_id, user_channel_id, expected_usd, note, stable_sats, receiver_sats, latest_price, sync_version FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId),
+            )
         return cursor.use {
             if (it.moveToFirst()) {
                 ChannelRecord(
@@ -552,34 +638,45 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     backingSats = it.getLong(4),
                     receiverSats = it.getLong(5),
                     latestPrice = it.getDouble(6),
-                    syncVersion = it.getLong(7)
+                    syncVersion = it.getLong(7),
                 )
             } else null
         }
     }
 
-    /** Closing a channel does not settle its stable books. Archive the last allocation and
-     * unresolved sends atomically before removing the active row. No live balance is invented. */
+    /**
+     * Closing a channel does not settle its stable books. Archive the last allocation and
+     * unresolved sends atomically before removing the active row. No live balance is invented.
+     */
     fun deleteChannel(userChannelId: String) {
         if (userChannelId.isBlank()) return
         writableDatabase.transaction {
             // Adopt pre-upgrade markers only while this is the sole saved active channel.
-            execSQL("""
+            execSQL(
+                """
                 UPDATE outgoing_lightning_accounting SET user_channel_id = ?
                 WHERE user_channel_id IS NULL AND completed = 0
                   AND (SELECT COUNT(*) FROM channels) = 1
                   AND EXISTS (SELECT 1 FROM channels WHERE user_channel_id = ?)
-            """, arrayOf(userChannelId, userChannelId))
-            execSQL("""
+            """,
+                arrayOf(userChannelId, userChannelId),
+            )
+            execSQL(
+                """
                 INSERT OR IGNORE INTO closed_channel_books
                 SELECT user_channel_id, channel_id, expected_usd, stable_sats,
                        receiver_sats, latest_price, strftime('%s','now')
                 FROM channels WHERE user_channel_id = ?
-            """, arrayOf(userChannelId))
+            """,
+                arrayOf(userChannelId),
+            )
             // A legacy success can outlive the channel row. Null books explicitly mean
             // unknown, not zero debt; retain the channel identity and unresolved payment.
-            execSQL("""INSERT OR IGNORE INTO closed_channel_books (user_channel_id, archived_at)
-                VALUES (?, strftime('%s','now'))""", arrayOf(userChannelId))
+            execSQL(
+                """INSERT OR IGNORE INTO closed_channel_books (user_channel_id, archived_at)
+                VALUES (?, strftime('%s','now'))""",
+                arrayOf(userChannelId),
+            )
             delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
         }
     }
@@ -593,36 +690,53 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     // --- Trades ---
 
     fun recordTrade(
-        channelId: String, action: String, amountUSD: Double, amountBTC: Double,
-        btcPrice: Double, feeUSD: Double, paymentId: String?, status: String = "pending"
+        channelId: String,
+        action: String,
+        amountUSD: Double,
+        amountBTC: Double,
+        btcPrice: Double,
+        feeUSD: Double,
+        paymentId: String?,
+        status: String = "pending",
     ): Long {
-        val cv = ContentValues().apply {
-            put("channel_id", channelId)
-            put("action", action)
-            put("amount_usd", amountUSD)
-            put("amount_btc", amountBTC)
-            put("btc_price", btcPrice)
-            put("fee_usd", feeUSD)
-            put("payment_id", paymentId)
-            put("status", status)
-        }
+        val cv =
+            ContentValues().apply {
+                put("channel_id", channelId)
+                put("action", action)
+                put("amount_usd", amountUSD)
+                put("amount_btc", amountBTC)
+                put("btc_price", btcPrice)
+                put("fee_usd", feeUSD)
+                put("payment_id", paymentId)
+                put("status", status)
+            }
         return writableDatabase.insert("trades", null, cv)
     }
 
     fun getRecentTrades(limit: Int = 50): List<TradeRecord> {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status, created_at, reason_code FROM trades ORDER BY created_at DESC LIMIT ?",
-            arrayOf(limit.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT id, channel_id, action, amount_usd, amount_btc, btc_price, fee_usd, payment_id, status, created_at, reason_code FROM trades ORDER BY created_at DESC LIMIT ?",
+                arrayOf(limit.toString()),
+            )
         return cursor.use { c ->
             val list = mutableListOf<TradeRecord>()
             while (c.moveToNext()) {
-                list.add(TradeRecord(
-                    id = c.getLong(0), channelId = c.getString(1), action = c.getString(2),
-                    amountUSD = c.getDouble(3), amountBTC = c.getDouble(4), btcPrice = c.getDouble(5),
-                    feeUSD = c.getDouble(6), paymentId = c.getStringOrNull(7),
-                    status = c.getString(8), createdAt = c.getLong(9), reasonCode = c.getStringOrNull(10)
-                ))
+                list.add(
+                    TradeRecord(
+                        id = c.getLong(0),
+                        channelId = c.getString(1),
+                        action = c.getString(2),
+                        amountUSD = c.getDouble(3),
+                        amountBTC = c.getDouble(4),
+                        btcPrice = c.getDouble(5),
+                        feeUSD = c.getDouble(6),
+                        paymentId = c.getStringOrNull(7),
+                        status = c.getString(8),
+                        createdAt = c.getLong(9),
+                        reasonCode = c.getStringOrNull(10),
+                    )
+                )
             }
             list
         }
@@ -637,129 +751,161 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val unresolved = db.rawQuery(
-                "SELECT 1 FROM trades WHERE channel_id = ? AND status IN ('prepared','sent','fee_paid','uncertain') LIMIT 1",
-                arrayOf(trade.channelId)
-            ).use { it.moveToFirst() }
-            if (unresolved) throw IllegalStateException("A previous trade is still awaiting its signed result")
-            val cv = ContentValues().apply {
-                put("channel_id", trade.channelId)
-                put("user_channel_id", trade.userChannelId)
-                put("action", trade.action)
-                put("amount_usd", trade.amountUsd)
-                put("amount_btc", trade.amountBtc)
-                put("btc_price", trade.quotePrice)
-                put("fee_usd", trade.feeUsd)
-                put("status", "prepared")
-                put("trade_id", trade.tradeId)
-                put("request_hash", trade.requestHash)
-                put("request_payload", trade.requestPayload)
-                put("old_expected_usd", trade.oldExpectedUsd)
-                put("new_expected_usd", trade.newExpectedUsd)
-                put("new_backing_sats", trade.newBackingSats)
-                put("quote_price", trade.quotePrice)
-                put("fee_msat", trade.feeMsat)
-                put("expires_at", trade.expiresAt)
-                put("created_at", trade.createdAt)
-            }
+            val unresolved =
+                db.rawQuery(
+                        "SELECT 1 FROM trades WHERE channel_id = ? AND status IN ('prepared','sent','fee_paid','uncertain') LIMIT 1",
+                        arrayOf(trade.channelId),
+                    )
+                    .use { it.moveToFirst() }
+            if (unresolved)
+                throw IllegalStateException("A previous trade is still awaiting its signed result")
+            val cv =
+                ContentValues().apply {
+                    put("channel_id", trade.channelId)
+                    put("user_channel_id", trade.userChannelId)
+                    put("action", trade.action)
+                    put("amount_usd", trade.amountUsd)
+                    put("amount_btc", trade.amountBtc)
+                    put("btc_price", trade.quotePrice)
+                    put("fee_usd", trade.feeUsd)
+                    put("status", "prepared")
+                    put("trade_id", trade.tradeId)
+                    put("request_hash", trade.requestHash)
+                    put("request_payload", trade.requestPayload)
+                    put("old_expected_usd", trade.oldExpectedUsd)
+                    put("new_expected_usd", trade.newExpectedUsd)
+                    put("new_backing_sats", trade.newBackingSats)
+                    put("quote_price", trade.quotePrice)
+                    put("fee_msat", trade.feeMsat)
+                    put("expires_at", trade.expiresAt)
+                    put("created_at", trade.createdAt)
+                }
             val id = db.insertOrThrow("trades", null, cv)
             db.execSQL("COMMIT")
             return id
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
 
     fun attachTradePaymentId(tradeDbId: Long, paymentId: String): Boolean {
         if (!TradeProtocol.isCanonicalIdentifier(paymentId)) return false
-        val cv = ContentValues().apply {
-            put("payment_id", paymentId)
-            put("trade_payment_id", paymentId)
-            put("status", "sent")
-        }
+        val cv =
+            ContentValues().apply {
+                put("payment_id", paymentId)
+                put("trade_payment_id", paymentId)
+                put("status", "sent")
+            }
         return writableDatabase.update(
-            "trades", cv, "id = ? AND status = 'prepared'", arrayOf(tradeDbId.toString())
+            "trades",
+            cv,
+            "id = ? AND status = 'prepared'",
+            arrayOf(tradeDbId.toString()),
         ) == 1
     }
 
     fun markTradeFeePaid(paymentId: String): Boolean {
         val cv = ContentValues().apply { put("status", "fee_paid") }
         return writableDatabase.update(
-            "trades", cv,
+            "trades",
+            cv,
             "trade_payment_id = ? AND status IN ('prepared','sent','uncertain')",
-            arrayOf(paymentId)
+            arrayOf(paymentId),
         ) == 1
     }
 
     fun markKnownTradeFeePaid(tradeDbId: Long, paymentId: String): Boolean {
         if (!TradeProtocol.isCanonicalIdentifier(paymentId)) return false
-        val cv = ContentValues().apply {
-            put("payment_id", paymentId)
-            put("trade_payment_id", paymentId)
-            put("status", "fee_paid")
-        }
+        val cv =
+            ContentValues().apply {
+                put("payment_id", paymentId)
+                put("trade_payment_id", paymentId)
+                put("status", "fee_paid")
+            }
         return writableDatabase.update(
-            "trades", cv,
+            "trades",
+            cv,
             "id = ? AND status IN ('prepared','sent','uncertain') AND (trade_payment_id IS NULL OR trade_payment_id = ?)",
-            arrayOf(tradeDbId.toString(), paymentId)
+            arrayOf(tradeDbId.toString(), paymentId),
         ) == 1
     }
 
-    fun tradePaymentExists(paymentId: String): Boolean = readableDatabase.rawQuery(
-        "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1",
-        arrayOf(paymentId)
-    ).use { it.moveToFirst() }
+    fun tradePaymentExists(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
 
-    fun tradeIsUnresolved(tradeDbId: Long): Boolean = readableDatabase.rawQuery(
-        "SELECT 1 FROM trades WHERE id = ? AND status IN ('prepared','sent','fee_paid','uncertain') LIMIT 1",
-        arrayOf(tradeDbId.toString())
-    ).use { it.moveToFirst() }
+    fun tradeIsUnresolved(tradeDbId: Long): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM trades WHERE id = ? AND status IN ('prepared','sent','fee_paid','uncertain') LIMIT 1",
+                arrayOf(tradeDbId.toString()),
+            )
+            .use { it.moveToFirst() }
 
-    fun hasUnattachedPreparedTrade(): Boolean = readableDatabase.rawQuery(
-        "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
-        null
-    ).use { it.moveToFirst() }
+    fun hasUnattachedPreparedTrade(): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
+                null,
+            )
+            .use { it.moveToFirst() }
 
     fun adoptUnattachedPreparedTrade(paymentId: String, amountMsat: Long): PendingTradePayment? {
         if (!TradeProtocol.isCanonicalIdentifier(paymentId) || amountMsat < 0L) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val cutoff = System.currentTimeMillis() / 1000L - TradeProtocol.RESPONSE_RETRY_WINDOW_SECS
+            val cutoff =
+                System.currentTimeMillis() / 1000L - TradeProtocol.RESPONSE_RETRY_WINDOW_SECS
             val rows = mutableListOf<Array<Any>>()
             db.rawQuery(
-                """
-                SELECT id, new_expected_usd, quote_price, action
-                FROM trades
-                WHERE trade_payment_id IS NULL AND status = 'prepared'
-                  AND fee_msat = ? AND created_at >= ?
-                ORDER BY id DESC LIMIT 2
-                """.trimIndent(),
-                arrayOf(amountMsat.toString(), cutoff.toString())
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    rows.add(arrayOf(
-                        cursor.getLong(0), cursor.getDouble(1),
-                        cursor.getDouble(2), cursor.getString(3)
-                    ))
+                    """
+                    SELECT id, new_expected_usd, quote_price, action
+                    FROM trades
+                    WHERE trade_payment_id IS NULL AND status = 'prepared'
+                      AND fee_msat = ? AND created_at >= ?
+                    ORDER BY id DESC LIMIT 2
+                    """
+                        .trimIndent(),
+                    arrayOf(amountMsat.toString(), cutoff.toString()),
+                )
+                .use { cursor ->
+                    while (cursor.moveToNext()) {
+                        rows.add(
+                            arrayOf(
+                                cursor.getLong(0),
+                                cursor.getDouble(1),
+                                cursor.getDouble(2),
+                                cursor.getString(3),
+                            )
+                        )
+                    }
                 }
-            }
             if (rows.size != 1) {
                 db.execSQL("ROLLBACK")
                 return null
             }
             val row = rows.single()
             val tradeDbId = row[0] as Long
-            val cv = ContentValues().apply {
-                put("payment_id", paymentId)
-                put("trade_payment_id", paymentId)
-                put("status", "fee_paid")
-            }
-            if (db.update(
-                    "trades", cv,
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("trade_payment_id", paymentId)
+                    put("status", "fee_paid")
+                }
+            if (
+                db.update(
+                    "trades",
+                    cv,
                     "id = ? AND trade_payment_id IS NULL AND status = 'prepared'",
-                    arrayOf(tradeDbId.toString())
+                    arrayOf(tradeDbId.toString()),
                 ) != 1
             ) {
                 db.execSQL("ROLLBACK")
@@ -771,56 +917,72 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 price = row[2] as Double,
                 tradeDbId = tradeDbId,
                 action = row[3] as String,
-                status = "fee_paid"
+                status = "fee_paid",
             )
         } catch (error: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw error
         }
     }
 
-    fun failUnattachedPreparedTrade(paymentId: String, amountMsat: Long, reasonCode: String? = null): PendingTradePayment? {
+    fun failUnattachedPreparedTrade(
+        paymentId: String,
+        amountMsat: Long,
+        reasonCode: String? = null,
+    ): PendingTradePayment? {
         if (!TradeProtocol.isCanonicalIdentifier(paymentId) || amountMsat < 0L) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val cutoff = System.currentTimeMillis() / 1000L - TradeProtocol.RESPONSE_RETRY_WINDOW_SECS
+            val cutoff =
+                System.currentTimeMillis() / 1000L - TradeProtocol.RESPONSE_RETRY_WINDOW_SECS
             val rows = mutableListOf<Array<Any>>()
             db.rawQuery(
-                """
-                SELECT id, new_expected_usd, quote_price, action
-                FROM trades
-                WHERE trade_payment_id IS NULL AND status = 'prepared'
-                  AND fee_msat = ? AND created_at >= ?
-                ORDER BY id DESC LIMIT 2
-                """.trimIndent(),
-                arrayOf(amountMsat.toString(), cutoff.toString())
-            ).use { cursor ->
-                while (cursor.moveToNext()) {
-                    rows.add(arrayOf(
-                        cursor.getLong(0), cursor.getDouble(1),
-                        cursor.getDouble(2), cursor.getString(3)
-                    ))
+                    """
+                    SELECT id, new_expected_usd, quote_price, action
+                    FROM trades
+                    WHERE trade_payment_id IS NULL AND status = 'prepared'
+                      AND fee_msat = ? AND created_at >= ?
+                    ORDER BY id DESC LIMIT 2
+                    """
+                        .trimIndent(),
+                    arrayOf(amountMsat.toString(), cutoff.toString()),
+                )
+                .use { cursor ->
+                    while (cursor.moveToNext()) {
+                        rows.add(
+                            arrayOf(
+                                cursor.getLong(0),
+                                cursor.getDouble(1),
+                                cursor.getDouble(2),
+                                cursor.getString(3),
+                            )
+                        )
+                    }
                 }
-            }
             if (rows.size != 1) {
                 db.execSQL("ROLLBACK")
                 return null
             }
             val row = rows.single()
             val tradeDbId = row[0] as Long
-            val cv = ContentValues().apply {
-                put("payment_id", paymentId)
-                put("trade_payment_id", paymentId)
-                put("status", "send_failed")
-                put("outcome", "send_failed")
-                put("reason_code", reasonCode)
-                put("resolved_at", System.currentTimeMillis() / 1000L)
-            }
-            if (db.update(
-                    "trades", cv,
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("trade_payment_id", paymentId)
+                    put("status", "send_failed")
+                    put("outcome", "send_failed")
+                    put("reason_code", reasonCode)
+                    put("resolved_at", System.currentTimeMillis() / 1000L)
+                }
+            if (
+                db.update(
+                    "trades",
+                    cv,
                     "id = ? AND trade_payment_id IS NULL AND status = 'prepared'",
-                    arrayOf(tradeDbId.toString())
+                    arrayOf(tradeDbId.toString()),
                 ) != 1
             ) {
                 db.execSQL("ROLLBACK")
@@ -832,120 +994,148 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 price = row[2] as Double,
                 tradeDbId = tradeDbId,
                 action = row[3] as String,
-                status = "send_failed"
+                status = "send_failed",
             )
         } catch (error: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw error
         }
     }
 
     fun markTradeSendFailed(tradeDbId: Long, reasonCode: String? = null): Boolean {
-        val cv = ContentValues().apply {
-            put("status", "send_failed")
-            put("outcome", "send_failed")
-            put("reason_code", reasonCode)
-            put("resolved_at", System.currentTimeMillis() / 1000L)
-        }
+        val cv =
+            ContentValues().apply {
+                put("status", "send_failed")
+                put("outcome", "send_failed")
+                put("reason_code", reasonCode)
+                put("resolved_at", System.currentTimeMillis() / 1000L)
+            }
         return writableDatabase.update(
-            "trades", cv, "id = ? AND status IN ('prepared','sent','uncertain')",
-            arrayOf(tradeDbId.toString())
+            "trades",
+            cv,
+            "id = ? AND status IN ('prepared','sent','uncertain')",
+            arrayOf(tradeDbId.toString()),
         ) == 1
     }
 
-    /** Terminal outcome for a trade's fee payment id, straight from SQLite — the source
-     *  of truth that BOTH the foreground handler and the background service write. The
-     *  in-memory outcome map alone misses results committed while the app was backgrounded
-     *  or before a restart. A failed fee send is also terminal. */
+    /**
+     * Terminal outcome for a trade's fee payment id, straight from SQLite — the source of truth
+     * that BOTH the foreground handler and the background service write. The in-memory outcome map
+     * alone misses results committed while the app was backgrounded or before a restart. A failed
+     * fee send is also terminal.
+     */
     /** A terminal trade outcome plus when it resolved, for the startup resurfacing check. */
-    data class RecentTradeFailure(val paymentId: String, val outcome: TradeOutcome, val resolvedAt: Long)
+    data class RecentTradeFailure(
+        val paymentId: String,
+        val outcome: TradeOutcome,
+        val resolvedAt: Long,
+    )
 
     /**
      * The most recent trade FAILURE (rejected or send-failed) resolved within [withinSecs].
      *
      * A rejection that lands while the app is backgrounded is committed here, but the sheet that
-     * would have shown it does not survive the cold start that follows — so nothing tells the
-     * user their order was refused. AppState resurfaces this once on launch.
+     * would have shown it does not survive the cold start that follows — so nothing tells the user
+     * their order was refused. AppState resurfaces this once on launch.
      */
     fun mostRecentTradeFailure(withinSecs: Long): RecentTradeFailure? {
         val cutoff = System.currentTimeMillis() / 1000L - withinSecs
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT trade_payment_id, status, reason_code, resolved_at
-            FROM trades
-            WHERE status IN ('rejected','send_failed')
-              AND trade_payment_id IS NOT NULL
-              AND resolved_at IS NOT NULL AND resolved_at >= ?
-            ORDER BY resolved_at DESC, id DESC
-            LIMIT 1
-            """.trimIndent(),
-            arrayOf(cutoff.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                """
+                SELECT trade_payment_id, status, reason_code, resolved_at
+                FROM trades
+                WHERE status IN ('rejected','send_failed')
+                  AND trade_payment_id IS NOT NULL
+                  AND resolved_at IS NOT NULL AND resolved_at >= ?
+                ORDER BY resolved_at DESC, id DESC
+                LIMIT 1
+                """
+                    .trimIndent(),
+                arrayOf(cutoff.toString()),
+            )
         return cursor.use { c ->
             if (!c.moveToFirst()) return@use null
             val paymentId = c.getString(0) ?: return@use null
-            val outcome = TradeOutcome.fromStored(c.getString(1), c.getStringOrNull(2)) ?: return@use null
+            val outcome =
+                TradeOutcome.fromStored(c.getString(1), c.getStringOrNull(2)) ?: return@use null
             RecentTradeFailure(paymentId, outcome, c.getLong(3))
         }
     }
 
     fun terminalTradeOutcome(paymentId: String): TradeOutcome? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected','send_failed') ORDER BY id DESC LIMIT 1",
-            arrayOf(paymentId)
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT status, reason_code FROM trades WHERE trade_payment_id = ? AND status IN ('accepted','rejected','send_failed') ORDER BY id DESC LIMIT 1",
+                arrayOf(paymentId),
+            )
         return cursor.use { c ->
-            if (c.moveToFirst()) TradeOutcome.fromStored(c.getString(0), c.getStringOrNull(1)) else null
+            if (c.moveToFirst()) TradeOutcome.fromStored(c.getString(0), c.getStringOrNull(1))
+            else null
         }
     }
 
     /** Resolve by durable payment ID even if the event beats the UI or follows a restart. */
     fun markTradePaymentFailed(paymentId: String, reasonCode: String?): Boolean {
-        val values = ContentValues().apply {
-            put("status", "send_failed")
-            put("outcome", "send_failed")
-            put("reason_code", reasonCode)
-            put("resolved_at", System.currentTimeMillis() / 1000L)
-        }
-        return writableDatabase.update("trades", values,
+        val values =
+            ContentValues().apply {
+                put("status", "send_failed")
+                put("outcome", "send_failed")
+                put("reason_code", reasonCode)
+                put("resolved_at", System.currentTimeMillis() / 1000L)
+            }
+        return writableDatabase.update(
+            "trades",
+            values,
             "trade_payment_id = ? AND status IN ('prepared','sent','uncertain')",
-            arrayOf(paymentId)) == 1
+            arrayOf(paymentId),
+        ) == 1
     }
 
     fun unresolvedTradePayments(): Map<String, PendingTradePayment> {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT trade_payment_id, new_expected_usd, quote_price, id, action, status
-            FROM trades
-            WHERE trade_payment_id IS NOT NULL
-              AND status IN ('sent','fee_paid','uncertain')
-            ORDER BY id
-            """.trimIndent(), null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                """
+                SELECT trade_payment_id, new_expected_usd, quote_price, id, action, status
+                FROM trades
+                WHERE trade_payment_id IS NOT NULL
+                  AND status IN ('sent','fee_paid','uncertain')
+                ORDER BY id
+                """
+                    .trimIndent(),
+                null,
+            )
         return cursor.use { c ->
             buildMap {
                 while (c.moveToNext()) {
-                    put(c.getString(0), PendingTradePayment(
-                        newExpectedUSD = c.getDouble(1),
-                        price = c.getDouble(2),
-                        tradeDbId = c.getLong(3),
-                        action = c.getString(4),
-                        status = c.getString(5)
-                    ))
+                    put(
+                        c.getString(0),
+                        PendingTradePayment(
+                            newExpectedUSD = c.getDouble(1),
+                            price = c.getDouble(2),
+                            tradeDbId = c.getLong(3),
+                            action = c.getString(4),
+                            status = c.getString(5),
+                        ),
+                    )
                 }
             }
         }
     }
 
     fun markExpiredTradesUncertain(now: Long = System.currentTimeMillis() / 1000L): Int {
-        val cv = ContentValues().apply {
-            put("status", "uncertain")
-            put("uncertainty_reason", "no_response")
-        }
+        val cv =
+            ContentValues().apply {
+                put("status", "uncertain")
+                put("uncertainty_reason", "no_response")
+            }
         return writableDatabase.update(
-            "trades", cv,
+            "trades",
+            cv,
             "expires_at IS NOT NULL AND expires_at <= ? AND status IN ('prepared','sent','fee_paid')",
-            arrayOf(now.toString())
+            arrayOf(now.toString()),
         )
     }
 
@@ -962,45 +1152,66 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 correlation = message.correlation
             }
         }
-        val cv = ContentValues().apply {
-            put("status", "uncertain")
-            put("uncertainty_reason", "response_not_committable")
-        }
+        val cv =
+            ContentValues().apply {
+                put("status", "uncertain")
+                put("uncertainty_reason", "response_not_committable")
+            }
         return writableDatabase.update(
-            "trades", cv,
+            "trades",
+            cv,
             """
             channel_id = ? AND trade_id = ? AND request_hash = ?
               AND (trade_payment_id = ? OR trade_payment_id IS NULL)
               AND status IN ('prepared','sent','fee_paid','uncertain')
-            """.trimIndent(),
+            """
+                .trimIndent(),
             arrayOf(
-                channelId, correlation.tradeId, correlation.requestHash,
-                correlation.tradePaymentId
-            )
+                channelId,
+                correlation.tradeId,
+                correlation.requestHash,
+                correlation.tradePaymentId,
+            ),
         ) == 1
     }
 
     fun applyCorrelatedTradeAcceptance(sync: TradeControlMessage.Sync): TradeControlApplyResult {
-        val correlation = sync.correlation ?: return TradeControlApplyResult(TradeControlApplyStatus.INVALID)
+        val correlation =
+            sync.correlation ?: return TradeControlApplyResult(TradeControlApplyStatus.INVALID)
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val trade = db.rawQuery(
-                """
-                SELECT id, channel_id, user_channel_id, trade_payment_id, new_expected_usd,
-                       new_backing_sats, status, action
-                FROM trades
-                WHERE trade_id = ? AND request_hash = ?
-                  AND (trade_payment_id = ? OR trade_payment_id IS NULL)
-                LIMIT 1
-                """.trimIndent(),
-                arrayOf(correlation.tradeId, correlation.requestHash, correlation.tradePaymentId)
-            ).use { c ->
-                if (!c.moveToFirst()) null else arrayOf<Any?>(
-                    c.getLong(0), c.getString(1), c.getString(2), c.getStringOrNull(3),
-                    c.getDouble(4), c.getLong(5), c.getString(6), c.getString(7)
-                )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            val trade =
+                db.rawQuery(
+                        """
+                        SELECT id, channel_id, user_channel_id, trade_payment_id, new_expected_usd,
+                               new_backing_sats, status, action
+                        FROM trades
+                        WHERE trade_id = ? AND request_hash = ?
+                          AND (trade_payment_id = ? OR trade_payment_id IS NULL)
+                        LIMIT 1
+                        """
+                            .trimIndent(),
+                        arrayOf(
+                            correlation.tradeId,
+                            correlation.requestHash,
+                            correlation.tradePaymentId,
+                        ),
+                    )
+                    .use { c ->
+                        if (!c.moveToFirst()) null
+                        else
+                            arrayOf<Any?>(
+                                c.getLong(0),
+                                c.getString(1),
+                                c.getString(2),
+                                c.getStringOrNull(3),
+                                c.getDouble(4),
+                                c.getLong(5),
+                                c.getString(6),
+                                c.getString(7),
+                            )
+                    } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val tradeId = trade[0] as Long
             val tradeChannelId = trade[1] as String
             val tradeUserChannelId = trade[2] as String
@@ -1009,30 +1220,44 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val storedBacking = trade[5] as Long
             val status = trade[6] as String
             val action = trade[7] as String
-            if (tradeChannelId != sync.channelId || tradeUserChannelId != sync.userChannelId ||
-                storedPaymentId != null && storedPaymentId != correlation.tradePaymentId ||
-                kotlin.math.abs(storedExpected - sync.expectedUsd) > 0.000000001
-            ) return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            if (
+                tradeChannelId != sync.channelId ||
+                    tradeUserChannelId != sync.userChannelId ||
+                    storedPaymentId != null && storedPaymentId != correlation.tradePaymentId ||
+                    kotlin.math.abs(storedExpected - sync.expectedUsd) > 0.000000001
+            )
+                return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (status == "accepted") {
                 db.execSQL("ROLLBACK")
                 return TradeControlApplyResult(
-                    TradeControlApplyStatus.DUPLICATE, storedBacking, sync.backingSats,
-                    correlation.tradePaymentId, action
+                    TradeControlApplyStatus.DUPLICATE,
+                    storedBacking,
+                    sync.backingSats,
+                    correlation.tradePaymentId,
+                    action,
                 )
             }
             if (status == "rejected" || status == "send_failed") {
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
-            val channel = db.rawQuery(
-                "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
-                arrayOf(sync.userChannelId)
-            ).use { c ->
-                if (!c.moveToFirst()) null else arrayOf<Any>(
-                    c.getString(0), c.getLong(1), c.getLong(2), c.getLong(3)
-                )
-            } // A missing row means the channel has since closed (deleteChannel runs on close) —
-              // that's permanent, not a transient race, so give up rather than retry forever.
-                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            val channel =
+                db.rawQuery(
+                        "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
+                        arrayOf(sync.userChannelId),
+                    )
+                    .use { c ->
+                        if (!c.moveToFirst()) null
+                        else
+                            arrayOf<Any>(
+                                c.getString(0),
+                                c.getLong(1),
+                                c.getLong(2),
+                                c.getLong(3),
+                            )
+                    } // A missing row means the channel has since closed (deleteChannel runs on
+                    // close) —
+                    // that's permanent, not a transient race, so give up rather than retry forever.
+                    ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (channel[0] as String != sync.channelId) {
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
@@ -1044,27 +1269,32 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 if (storedBacking < 0L || storedBacking > receiverSats) {
                     return rollbackResult(db, TradeControlApplyStatus.RETRY)
                 }
-                val channelValues = ContentValues().apply {
-                    put("expected_usd", sync.expectedUsd)
-                    put("stable_sats", storedBacking)
-                    put("sync_version", sync.syncVersion)
-                    put("updated_at", System.currentTimeMillis() / 1000L)
-                }
-                if (db.update(
-                        "channels", channelValues,
+                val channelValues =
+                    ContentValues().apply {
+                        put("expected_usd", sync.expectedUsd)
+                        put("stable_sats", storedBacking)
+                        put("sync_version", sync.syncVersion)
+                        put("updated_at", System.currentTimeMillis() / 1000L)
+                    }
+                if (
+                    db.update(
+                        "channels",
+                        channelValues,
                         "user_channel_id = ? AND channel_id = ? AND sync_version < ?",
-                        arrayOf(sync.userChannelId, sync.channelId, sync.syncVersion.toString())
+                        arrayOf(sync.userChannelId, sync.channelId, sync.syncVersion.toString()),
                     ) != 1
-                ) return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                )
+                    return rollbackResult(db, TradeControlApplyStatus.RETRY)
             }
-            val tradeValues = ContentValues().apply {
-                put("payment_id", correlation.tradePaymentId)
-                put("trade_payment_id", correlation.tradePaymentId)
-                put("status", "accepted")
-                put("outcome", "accepted")
-                put("resolved_at", System.currentTimeMillis() / 1000L)
-                putNull("uncertainty_reason")
-            }
+            val tradeValues =
+                ContentValues().apply {
+                    put("payment_id", correlation.tradePaymentId)
+                    put("trade_payment_id", correlation.tradePaymentId)
+                    put("status", "accepted")
+                    put("outcome", "accepted")
+                    put("resolved_at", System.currentTimeMillis() / 1000L)
+                    putNull("uncertainty_reason")
+                }
             if (db.update("trades", tradeValues, "id = ?", arrayOf(tradeId.toString())) != 1) {
                 return rollbackResult(db, TradeControlApplyStatus.RETRY)
             }
@@ -1073,10 +1303,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 TradeControlApplyStatus.APPLIED,
                 if (allocationApplied) storedBacking else currentBacking,
                 sync.backingSats,
-                correlation.tradePaymentId, action, allocationApplied
+                correlation.tradePaymentId,
+                action,
+                allocationApplied,
             )
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
@@ -1085,50 +1319,62 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val row = db.rawQuery(
-                """
-                SELECT id, channel_id, trade_payment_id, status, action
-                FROM trades WHERE trade_id = ? AND request_hash = ?
-                  AND (trade_payment_id = ? OR trade_payment_id IS NULL) LIMIT 1
-                """.trimIndent(),
-                arrayOf(
-                    rejection.correlation.tradeId,
-                    rejection.correlation.requestHash,
-                    rejection.correlation.tradePaymentId
-                )
-            ).use { c ->
-                if (!c.moveToFirst()) null else arrayOf<Any?>(
-                    c.getLong(0), c.getString(1), c.getStringOrNull(2), c.getString(3), c.getString(4)
-                )
-            } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            val row =
+                db.rawQuery(
+                        """
+                        SELECT id, channel_id, trade_payment_id, status, action
+                        FROM trades WHERE trade_id = ? AND request_hash = ?
+                          AND (trade_payment_id = ? OR trade_payment_id IS NULL) LIMIT 1
+                        """
+                            .trimIndent(),
+                        arrayOf(
+                            rejection.correlation.tradeId,
+                            rejection.correlation.requestHash,
+                            rejection.correlation.tradePaymentId,
+                        ),
+                    )
+                    .use { c ->
+                        if (!c.moveToFirst()) null
+                        else
+                            arrayOf<Any?>(
+                                c.getLong(0),
+                                c.getString(1),
+                                c.getStringOrNull(2),
+                                c.getString(3),
+                                c.getString(4),
+                            )
+                    } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val id = row[0] as Long
             val channelId = row[1] as String
             val storedPayment = row[2] as String?
             val status = row[3] as String
             val action = row[4] as String
-            if (channelId != rejection.channelId ||
-                storedPayment != null && storedPayment != rejection.correlation.tradePaymentId
-            ) return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            if (
+                channelId != rejection.channelId ||
+                    storedPayment != null && storedPayment != rejection.correlation.tradePaymentId
+            )
+                return rollbackResult(db, TradeControlApplyStatus.INVALID)
             if (status == "rejected") {
                 db.execSQL("ROLLBACK")
                 return TradeControlApplyResult(
                     TradeControlApplyStatus.DUPLICATE,
                     paymentId = rejection.correlation.tradePaymentId,
-                    action = action
+                    action = action,
                 )
             }
             if (status == "accepted" || status == "send_failed") {
                 return rollbackResult(db, TradeControlApplyStatus.INVALID)
             }
-            val cv = ContentValues().apply {
-                put("payment_id", rejection.correlation.tradePaymentId)
-                put("trade_payment_id", rejection.correlation.tradePaymentId)
-                put("status", "rejected")
-                put("outcome", "rejected")
-                put("reason_code", rejection.reasonCode)
-                put("resolved_at", rejection.decidedAt)
-                putNull("uncertainty_reason")
-            }
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", rejection.correlation.tradePaymentId)
+                    put("trade_payment_id", rejection.correlation.tradePaymentId)
+                    put("status", "rejected")
+                    put("outcome", "rejected")
+                    put("reason_code", rejection.reasonCode)
+                    put("resolved_at", rejection.decidedAt)
+                    putNull("uncertainty_reason")
+                }
             if (db.update("trades", cv, "id = ?", arrayOf(id.toString())) != 1) {
                 return rollbackResult(db, TradeControlApplyStatus.RETRY)
             }
@@ -1136,17 +1382,19 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             return TradeControlApplyResult(
                 TradeControlApplyStatus.APPLIED,
                 paymentId = rejection.correlation.tradePaymentId,
-                action = action
+                action = action,
             )
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
 
     fun applyUncorrelatedSyncIfNewer(
         sync: TradeControlMessage.Sync,
-        trustedPrice: Double
+        trustedPrice: Double,
     ): TradeControlApplyResult {
         if (sync.correlation != null || !trustedPrice.isFinite() || trustedPrice <= 0.0) {
             return TradeControlApplyResult(TradeControlApplyStatus.INVALID)
@@ -1161,18 +1409,29 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             // That left the LSP's authoritative state unable to reach the wallet at all, which is
             // what made the #311 books divergence unrecoverable. channel_id is the identifier
             // both sides agree on. iOS fixed the same bug in #303.
-            val row = db.rawQuery(
-                """
-                SELECT user_channel_id, expected_usd, stable_sats, receiver_sats, sync_version
-                FROM channels WHERE channel_id = ?
-                """.trimIndent(), arrayOf(sync.channelId)
-            ).use { c ->
-                if (!c.moveToFirst()) null else arrayOf<Any>(
-                    c.getString(0), c.getDouble(1), c.getLong(2), c.getLong(3), c.getLong(4)
-                )
-            } // A missing row means the channel has since closed (deleteChannel runs on close) —
-              // that's permanent, not a transient race, so give up rather than retry forever.
-                ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
+            val row =
+                db.rawQuery(
+                        """
+                        SELECT user_channel_id, expected_usd, stable_sats, receiver_sats, sync_version
+                        FROM channels WHERE channel_id = ?
+                        """
+                            .trimIndent(),
+                        arrayOf(sync.channelId),
+                    )
+                    .use { c ->
+                        if (!c.moveToFirst()) null
+                        else
+                            arrayOf<Any>(
+                                c.getString(0),
+                                c.getDouble(1),
+                                c.getLong(2),
+                                c.getLong(3),
+                                c.getLong(4),
+                            )
+                    } // A missing row means the channel has since closed (deleteChannel runs on
+                    // close) —
+                    // that's permanent, not a transient race, so give up rather than retry forever.
+                    ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val localUserChannelId = row[0] as String
             val currentVersion = row[4] as Long
             if (sync.syncVersion <= currentVersion) {
@@ -1182,112 +1441,158 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             val currentExpected = row[1] as Double
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
-            val localBacking = if (sync.expectedUsd == 0.0) {
-                StabilityService.backingAfterTargetClear(
-                    currentBacking, currentExpected, receiverSats, trustedPrice
-                ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
-            } else if (
-                currentBacking > 0L && sync.expectedUsd == currentExpected
-            ) {
-                currentBacking.coerceAtMost(receiverSats)
-            } else {
-                TradeProtocol.tradeBackingAfterDelta(
-                    receiverSats, currentBacking, currentExpected, sync.expectedUsd, trustedPrice
-                ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
-            }
-            val cv = ContentValues().apply {
-                put("expected_usd", sync.expectedUsd)
-                put("stable_sats", localBacking)
-                put("sync_version", sync.syncVersion)
-                put("latest_price", trustedPrice)
-                put("updated_at", System.currentTimeMillis() / 1000L)
-            }
-            if (db.update(
-                    "channels", cv,
+            val localBacking =
+                if (sync.expectedUsd == 0.0) {
+                    StabilityService.backingAfterTargetClear(
+                        currentBacking,
+                        currentExpected,
+                        receiverSats,
+                        trustedPrice,
+                    ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
+                    currentBacking.coerceAtMost(receiverSats)
+                } else {
+                    TradeProtocol.tradeBackingAfterDelta(
+                        receiverSats,
+                        currentBacking,
+                        currentExpected,
+                        sync.expectedUsd,
+                        trustedPrice,
+                    ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                }
+            val cv =
+                ContentValues().apply {
+                    put("expected_usd", sync.expectedUsd)
+                    put("stable_sats", localBacking)
+                    put("sync_version", sync.syncVersion)
+                    put("latest_price", trustedPrice)
+                    put("updated_at", System.currentTimeMillis() / 1000L)
+                }
+            if (
+                db.update(
+                    "channels",
+                    cv,
                     "user_channel_id = ? AND channel_id = ? AND sync_version < ?",
-                    arrayOf(localUserChannelId, sync.channelId, sync.syncVersion.toString())
+                    arrayOf(localUserChannelId, sync.channelId, sync.syncVersion.toString()),
                 ) != 1
-            ) return rollbackResult(db, TradeControlApplyStatus.RETRY)
+            )
+                return rollbackResult(db, TradeControlApplyStatus.RETRY)
             db.execSQL("COMMIT")
             return TradeControlApplyResult(
-                TradeControlApplyStatus.APPLIED, localBacking, sync.backingSats
+                TradeControlApplyStatus.APPLIED,
+                localBacking,
+                sync.backingSats,
             )
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
 
     private fun rollbackResult(
         db: SQLiteDatabase,
-        status: TradeControlApplyStatus
+        status: TradeControlApplyStatus,
     ): TradeControlApplyResult {
-        try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+        try {
+            db.execSQL("ROLLBACK")
+        } catch (_: Exception) {}
         return TradeControlApplyResult(status)
     }
 
     // --- Payments ---
 
     fun recordPayment(
-        paymentId: String?, paymentType: String, direction: String, amountMsat: Long,
-        amountUSD: Double? = null, btcPrice: Double? = null, counterparty: String? = null,
-        status: String = "completed", txid: String? = null, address: String? = null
+        paymentId: String?,
+        paymentType: String,
+        direction: String,
+        amountMsat: Long,
+        amountUSD: Double? = null,
+        btcPrice: Double? = null,
+        counterparty: String? = null,
+        status: String = "completed",
+        txid: String? = null,
+        address: String? = null,
     ): Long {
         // Dedup: skip if payment_id already exists
         if (!paymentId.isNullOrEmpty()) {
-            val cursor = readableDatabase.rawQuery(
-                "SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId)
-            )
+            val cursor =
+                readableDatabase.rawQuery(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
             val exists = cursor.use { it.moveToFirst() }
             if (exists) return -1
         }
 
-        val cv = ContentValues().apply {
-            put("payment_id", paymentId)
-            put("payment_type", paymentType)
-            put("direction", direction)
-            put("amount_msat", amountMsat)
-            put("amount_usd", amountUSD)
-            put("btc_price", btcPrice)
-            put("counterparty", counterparty)
-            put("status", status)
-            put("txid", txid)
-            put("address", address)
-        }
+        val cv =
+            ContentValues().apply {
+                put("payment_id", paymentId)
+                put("payment_type", paymentType)
+                put("direction", direction)
+                put("amount_msat", amountMsat)
+                put("amount_usd", amountUSD)
+                put("btc_price", btcPrice)
+                put("counterparty", counterparty)
+                put("status", status)
+                put("txid", txid)
+                put("address", address)
+            }
         return writableDatabase.insert("payments", null, cv)
     }
 
     /** Save the operation's channel identity atomically with its history, before calling LDK. */
     fun recordPendingSplice(
-        paymentType: String, amountMsat: Long, amountUSD: Double?, btcPrice: Double?,
-        userChannelId: String, channelId: String, address: String? = null,
-        previousFundingTxid: String? = null
+        paymentType: String,
+        amountMsat: Long,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        userChannelId: String,
+        channelId: String,
+        address: String? = null,
+        previousFundingTxid: String? = null,
     ): Long = writableDatabase.transaction {
         require(paymentType == "splice_in" || paymentType == "splice_out")
-        val rowId = recordPayment(null, paymentType,
-            if (paymentType == "splice_out") "sent" else "received", amountMsat,
-            amountUSD, btcPrice, status = "pending", address = address)
+        val rowId =
+            recordPayment(
+                null,
+                paymentType,
+                if (paymentType == "splice_out") "sent" else "received",
+                amountMsat,
+                amountUSD,
+                btcPrice,
+                status = "pending",
+                address = address,
+            )
         check(rowId > 0) { "Could not persist pending splice" }
         SpliceEventRecorder.track(this, rowId, userChannelId, channelId, previousFundingTxid)
         rowId
     }
 
     /** The send API returns before settlement. A retry may reuse an existing invoice ID. */
-    fun recordPendingLightningPayment(paymentId: String, paymentType: String, amountMsat: Long, price: Double, userChannelId: String? = null) {
-        val values = ContentValues().apply {
-            put("payment_type", paymentType)
-            put("direction", "sent")
-            put("amount_msat", amountMsat)
-            put("status", "pending")
-            put("fee_msat", 0L)
-            if (price > 0.0) {
-                put("amount_usd", amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * price)
-                put("btc_price", price)
-            } else {
-                putNull("amount_usd")
-                putNull("btc_price")
+    fun recordPendingLightningPayment(
+        paymentId: String,
+        paymentType: String,
+        amountMsat: Long,
+        price: Double,
+        userChannelId: String? = null,
+    ) {
+        val values =
+            ContentValues().apply {
+                put("payment_type", paymentType)
+                put("direction", "sent")
+                put("amount_msat", amountMsat)
+                put("status", "pending")
+                put("fee_msat", 0L)
+                if (price > 0.0) {
+                    put("amount_usd", amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * price)
+                    put("btc_price", price)
+                } else {
+                    putNull("amount_usd")
+                    putNull("btc_price")
+                }
             }
-        }
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -1297,7 +1602,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             db.execSQL(
                 "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed, user_channel_id) VALUES (?, 0, ?)",
-                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() })
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }),
             )
             db.setTransactionSuccessful()
         } finally {
@@ -1306,16 +1611,18 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     fun getPendingOutgoingLightningPaymentIds(limit: Int = 100): List<String> {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT payment_id FROM payments
-            WHERE payment_id IS NOT NULL AND payment_id != ''
-              AND payment_type IN ('lightning', 'bolt12')
-              AND direction = 'sent' AND status = 'pending'
-            ORDER BY created_at ASC LIMIT ?
-            """.trimIndent(),
-            arrayOf(limit.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                """
+                SELECT payment_id FROM payments
+                WHERE payment_id IS NOT NULL AND payment_id != ''
+                  AND payment_type IN ('lightning', 'bolt12')
+                  AND direction = 'sent' AND status = 'pending'
+                ORDER BY created_at ASC LIMIT ?
+                """
+                    .trimIndent(),
+                arrayOf(limit.toString()),
+            )
         return cursor.use { c ->
             buildList {
                 while (c.moveToNext()) add(c.getString(0))
@@ -1323,8 +1630,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** Insert a payment and atomically update channel backing sats in one SQLite transaction.
-     *  Returns whether the payment was new and the authoritative backing value, when applicable. */
+    /**
+     * Insert a payment and atomically update channel backing sats in one SQLite transaction.
+     * Returns whether the payment was new and the authoritative backing value, when applicable.
+     */
     fun recordPaymentAndMaybeUpdateBacking(
         paymentId: String?,
         paymentType: String,
@@ -1335,7 +1644,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         counterparty: String? = null,
         userChannelId: String? = null,
         backingDeltaSats: Long? = null,
-        settlementId: String? = null
+        settlementId: String? = null,
     ): PaymentPersistenceResult {
         val db = writableDatabase
         // BEGIN IMMEDIATE acquires the write lock before the dedup SELECT, preventing
@@ -1344,78 +1653,91 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         try {
             // Dedup check inside the write lock
             if (!paymentId.isNullOrEmpty()) {
-                val cursor = db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
+                val cursor =
+                    db.rawQuery("SELECT id FROM payments WHERE payment_id = ?", arrayOf(paymentId))
                 val exists = cursor.use { it.moveToFirst() }
                 if (exists) {
-                    val backing = if (backingDeltaSats != null) {
-                        val ucid = userChannelId
-                            ?: throw IllegalStateException("userChannelId required for backing update")
-                        readBackingSats(db, ucid)
-                            ?: throw MissingChannelRowException(ucid)
-                    } else {
-                        null
-                    }
+                    val backing =
+                        if (backingDeltaSats != null) {
+                            val ucid =
+                                userChannelId
+                                    ?: throw IllegalStateException(
+                                        "userChannelId required for backing update"
+                                    )
+                            readBackingSats(db, ucid) ?: throw MissingChannelRowException(ucid)
+                        } else {
+                            null
+                        }
                     db.execSQL("ROLLBACK")
                     return PaymentPersistenceResult(false, backing)
                 }
             }
             // Replay guard: an already-applied settlement id never credits backing again.
             if (settlementId != null) {
-                val cursor = db.rawQuery(
-                    "SELECT settlement_id FROM stability_settlements WHERE settlement_id = ?",
-                    arrayOf(settlementId)
-                )
+                val cursor =
+                    db.rawQuery(
+                        "SELECT settlement_id FROM stability_settlements WHERE settlement_id = ?",
+                        arrayOf(settlementId),
+                    )
                 val seen = cursor.use { it.moveToFirst() }
                 if (seen) {
-                    val backing = if (backingDeltaSats != null) {
-                        val ucid = userChannelId
-                            ?: throw IllegalStateException("userChannelId required for backing update")
-                        readBackingSats(db, ucid)
-                            ?: throw MissingChannelRowException(ucid)
-                    } else {
-                        null
-                    }
+                    val backing =
+                        if (backingDeltaSats != null) {
+                            val ucid =
+                                userChannelId
+                                    ?: throw IllegalStateException(
+                                        "userChannelId required for backing update"
+                                    )
+                            readBackingSats(db, ucid) ?: throw MissingChannelRowException(ucid)
+                        } else {
+                            null
+                        }
                     db.execSQL("ROLLBACK")
                     return PaymentPersistenceResult(false, backing)
                 }
             }
-            val cv = ContentValues().apply {
-                put("payment_id", paymentId)
-                put("payment_type", paymentType)
-                put("direction", direction)
-                put("amount_msat", amountMsat)
-                put("amount_usd", amountUSD)
-                put("btc_price", btcPrice)
-                put("counterparty", counterparty)
-                put("status", "completed")
-            }
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", paymentId)
+                    put("payment_type", paymentType)
+                    put("direction", direction)
+                    put("amount_msat", amountMsat)
+                    put("amount_usd", amountUSD)
+                    put("btc_price", btcPrice)
+                    put("counterparty", counterparty)
+                    put("status", "completed")
+                }
             db.insertOrThrow("payments", null, cv)
             if (settlementId != null) {
                 db.execSQL(
                     "INSERT INTO stability_settlements (settlement_id) VALUES (?)",
-                    arrayOf(settlementId)
+                    arrayOf(settlementId),
                 )
             }
             var resultingBacking: Long? = null
             if (backingDeltaSats != null) {
-                val ucid = userChannelId
-                    ?: throw IllegalStateException("userChannelId required for backing update")
-                val current = readBackingSats(db, ucid)
-                    ?: throw MissingChannelRowException(ucid)
+                val ucid =
+                    userChannelId
+                        ?: throw IllegalStateException("userChannelId required for backing update")
+                val current = readBackingSats(db, ucid) ?: throw MissingChannelRowException(ucid)
                 // Clamp instead of refusing: this runs after the payment already settled, so the
                 // sats truly moved — a floor of 0 keeps the ledger recordable instead of wedging.
                 val newBacking = maxOf(0L, current + backingDeltaSats)
                 if (current + backingDeltaSats < 0) {
-                    AuditService.log("BACKING_CLAMPED", mapOf(
-                        "user_channel_id" to ucid,
-                        "current_backing_sats" to current,
-                        "delta_sats" to backingDeltaSats,
-                        "clamped_to" to newBacking
-                    ))
+                    AuditService.log(
+                        "BACKING_CLAMPED",
+                        mapOf(
+                            "user_channel_id" to ucid,
+                            "current_backing_sats" to current,
+                            "delta_sats" to backingDeltaSats,
+                            "clamped_to" to newBacking,
+                        ),
+                    )
                 }
-                val stmt = db.compileStatement(
-                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
-                )
+                val stmt =
+                    db.compileStatement(
+                        "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s','now') WHERE user_channel_id = ?"
+                    )
                 stmt.bindLong(1, newBacking)
                 stmt.bindString(2, ucid)
                 val rows = stmt.executeUpdateDelete()
@@ -1429,102 +1751,148 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             db.execSQL("COMMIT")
             return PaymentPersistenceResult(true, resultingBacking)
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
 
     private fun readBackingSats(db: SQLiteDatabase, userChannelId: String): Long? {
-        val cursor = db.rawQuery(
-            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
-            arrayOf(userChannelId)
-        )
+        val cursor =
+            db.rawQuery(
+                "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                arrayOf(userChannelId),
+            )
         return cursor.use { if (it.moveToFirst()) it.getLong(0) else null }
     }
 
-    fun pendingOutgoingPaymentAgeSecs(paymentId: String): Long = readableDatabase.rawQuery(
-        "SELECT strftime('%s','now') - created_at FROM payments WHERE payment_id = ? AND status = 'pending'",
-        arrayOf(paymentId)
-    ).use { if (it.moveToFirst()) it.getLong(0) else 0L }
+    fun pendingOutgoingPaymentAgeSecs(paymentId: String): Long =
+        readableDatabase
+            .rawQuery(
+                "SELECT strftime('%s','now') - created_at FROM payments WHERE payment_id = ? AND status = 'pending'",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst()) it.getLong(0) else 0L }
 
     /** Transport success alone is insufficient: ordinary sends must finish their accounting. */
-    fun hasPendingChannelSend(): Boolean = readableDatabase.rawQuery(
-        """
-        SELECT 1 FROM payments p
-        LEFT JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
-        WHERE p.direction = 'sent'
-          AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
-          AND (
-            (p.payment_type IN ('lightning', 'bolt12', 'stability') AND p.status = 'pending') OR
-            (p.payment_type IN ('lightning', 'bolt12') AND p.status != 'failed' AND a.completed = 0)
-        ) LIMIT 1
-        """.trimIndent(), null
-    ).use { it.moveToFirst() }
+    fun hasPendingChannelSend(): Boolean =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT 1 FROM payments p
+                LEFT JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+                WHERE p.direction = 'sent'
+                  AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
+                  AND (
+                    (p.payment_type IN ('lightning', 'bolt12', 'stability') AND p.status = 'pending') OR
+                    (p.payment_type IN ('lightning', 'bolt12') AND p.status != 'failed' AND a.completed = 0)
+                ) LIMIT 1
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { it.moveToFirst() }
 
-    fun isLightningAccountingComplete(paymentId: String): Boolean = readableDatabase.rawQuery(
-        "SELECT 1 FROM outgoing_lightning_accounting WHERE payment_id = ? AND completed = 1",
-        arrayOf(paymentId)
-    ).use { it.moveToFirst() }
+    fun isLightningAccountingComplete(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM outgoing_lightning_accounting WHERE payment_id = ? AND completed = 1",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
 
-    fun getUnaccountedOutgoingLightningPaymentIds(): List<String> = readableDatabase.rawQuery(
-        """
-        SELECT p.payment_id FROM payments p
-        JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
-        WHERE p.direction = 'sent' AND p.payment_type IN ('lightning', 'bolt12')
-          AND p.status = 'completed' AND a.completed = 0
-          AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
-        ORDER BY p.created_at
-        """.trimIndent(), null
-    ).use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+    fun getUnaccountedOutgoingLightningPaymentIds(): List<String> =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT p.payment_id FROM payments p
+                JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+                WHERE p.direction = 'sent' AND p.payment_type IN ('lightning', 'bolt12')
+                  AND p.status = 'completed' AND a.completed = 0
+                  AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
+                ORDER BY p.created_at
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
 
-    fun lightningAccountingChannelId(paymentId: String): String? = readableDatabase.rawQuery(
-        "SELECT user_channel_id FROM outgoing_lightning_accounting WHERE payment_id = ?", arrayOf(paymentId)
-    ).use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+    fun lightningAccountingChannelId(paymentId: String): String? =
+        readableDatabase
+            .rawQuery(
+                "SELECT user_channel_id FROM outgoing_lightning_accounting WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
 
-    fun hasArchivedLightningAccounting(paymentId: String): Boolean = readableDatabase.rawQuery(
-        """SELECT 1 FROM outgoing_lightning_accounting a JOIN closed_channel_books c
-           ON c.user_channel_id = a.user_channel_id WHERE a.payment_id = ?""", arrayOf(paymentId)
-    ).use { it.moveToFirst() }
+    fun hasArchivedLightningAccounting(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                """SELECT 1 FROM outgoing_lightning_accounting a JOIN closed_channel_books c
+           ON c.user_channel_id = a.user_channel_id WHERE a.payment_id = ?""",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
 
-    /** A terminal event can be acknowledged once this commits, even if its books must wait.
-     * Keep the original channel identity on replay; never attach an old send to a new channel. */
+    /**
+     * A terminal event can be acknowledged once this commits, even if its books must wait. Keep the
+     * original channel identity on replay; never attach an old send to a new channel.
+     */
     fun deferLightningAccounting(paymentId: String, userChannelId: String?, feeMsat: Long) {
         writableDatabase.transaction {
-            execSQL("""INSERT OR IGNORE INTO outgoing_lightning_accounting
+            execSQL(
+                """INSERT OR IGNORE INTO outgoing_lightning_accounting
                 (payment_id, completed, user_channel_id) VALUES (?, 0, ?)""",
-                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }))
-            execSQL("""UPDATE outgoing_lightning_accounting SET user_channel_id = ?
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }),
+            )
+            execSQL(
+                """UPDATE outgoing_lightning_accounting SET user_channel_id = ?
                 WHERE payment_id = ? AND user_channel_id IS NULL""",
-                arrayOf(userChannelId?.takeIf { it.isNotBlank() }, paymentId))
+                arrayOf(userChannelId?.takeIf { it.isNotBlank() }, paymentId),
+            )
             // Legacy events can outlive their history row. Persist their identity even then.
-            execSQL("""INSERT OR IGNORE INTO payments
+            execSQL(
+                """INSERT OR IGNORE INTO payments
                 (payment_id, payment_type, direction, amount_msat, status)
                 SELECT ?, 'lightning', 'sent', 0, 'completed'
-                WHERE NOT EXISTS (SELECT 1 FROM payments WHERE payment_id = ?)""", arrayOf(paymentId, paymentId))
-            val values = ContentValues().apply {
-                put("status", "completed")
-                if (feeMsat > 0L) put("fee_msat", feeMsat)
-            }
+                WHERE NOT EXISTS (SELECT 1 FROM payments WHERE payment_id = ?)""",
+                arrayOf(paymentId, paymentId),
+            )
+            val values =
+                ContentValues().apply {
+                    put("status", "completed")
+                    if (feeMsat > 0L) put("fee_msat", feeMsat)
+                }
             update("payments", values, "payment_id = ?", arrayOf(paymentId))
         }
     }
 
     /** Must commit in the same transaction as the corresponding balance reconciliation. */
     private fun completeLightningAccounting(db: SQLiteDatabase, paymentId: String, feeMsat: Long) {
-        db.execSQL("INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)", arrayOf(paymentId))
-        db.execSQL("UPDATE outgoing_lightning_accounting SET completed = 1 WHERE payment_id = ?", arrayOf(paymentId))
-        val values = ContentValues().apply {
-            put("status", "completed")
-            if (feeMsat > 0) put("fee_msat", feeMsat)
-        }
+        db.execSQL(
+            "INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)",
+            arrayOf(paymentId),
+        )
+        db.execSQL(
+            "UPDATE outgoing_lightning_accounting SET completed = 1 WHERE payment_id = ?",
+            arrayOf(paymentId),
+        )
+        val values =
+            ContentValues().apply {
+                put("status", "completed")
+                if (feeMsat > 0) put("fee_msat", feeMsat)
+            }
         db.update("payments", values, "payment_id = ?", arrayOf(paymentId))
     }
 
     // --- Pending outgoing stability send marker (single row, id = 1) ---
 
-    /** Atomically claim the right to send an outgoing stability payment.
-     *  Returns false when a marker already exists (another sender owns the send).
-     *  BEGIN IMMEDIATE makes the check-and-insert a single atomic step across processes. */
+    /**
+     * Atomically claim the right to send an outgoing stability payment. Returns false when a marker
+     * already exists (another sender owns the send). BEGIN IMMEDIATE makes the check-and-insert a
+     * single atomic step across processes.
+     */
     fun claimPendingSend(amountMsat: Long, price: Double, userChannelId: String): Boolean {
         require(userChannelId.isNotBlank()) { "Stability payment requires its originating channel" }
         require(amountMsat > 0L && amountMsat % 1000L == 0L && price.isFinite() && price > 0.0)
@@ -1540,12 +1908,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             }
             db.execSQL(
                 "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at, user_channel_id) VALUES (1, '', ?, ?, ?, ?)",
-                arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000, userChannelId)
+                arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000, userChannelId),
             )
             db.execSQL("COMMIT")
             return true
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
@@ -1553,15 +1923,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     fun setPendingSendPaymentId(paymentId: String) {
         writableDatabase.execSQL(
             "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1",
-            arrayOf(paymentId)
+            arrayOf(paymentId),
         )
     }
 
     fun loadPendingSend(): PendingStabilitySend? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT payment_id, amount_msat, price, created_at, user_channel_id FROM pending_stability_send WHERE id = 1",
-            null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT payment_id, amount_msat, price, created_at, user_channel_id FROM pending_stability_send WHERE id = 1",
+                null,
+            )
         return cursor.use {
             if (it.moveToFirst()) {
                 PendingStabilitySend(
@@ -1569,7 +1940,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                     amountMsat = it.getLong(1),
                     price = it.getDouble(2),
                     createdAt = it.getLong(3),
-                    userChannelId = if (it.isNull(4)) null else it.getString(4)
+                    userChannelId = if (it.isNull(4)) null else it.getString(4),
                 )
             } else null
         }
@@ -1579,220 +1950,330 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         writableDatabase.execSQL("DELETE FROM pending_stability_send WHERE id = 1")
     }
 
-    /** Compare the whole claim while holding the write lock: a delayed recovery cannot
-     * remove a newer sender's marker. No backing is debited for failed/unsent payments. */
+    /**
+     * Compare the whole claim while holding the write lock: a delayed recovery cannot remove a
+     * newer sender's marker. No backing is debited for failed/unsent payments.
+     */
     fun clearPendingSend(expected: PendingStabilitySend): Boolean = writableDatabase.transaction {
         if (loadPendingSend() != expected) return@transaction false
         delete("pending_stability_send", "id = 1", null)
         true
     }
 
-    /** Called after transport success for a marker that predates channel identity. The old
-     * writer committed completed history and its backing debit together, then cleared the
-     * marker separately. Finish that cleanup without needing an origin or another debit. */
+    /**
+     * Called after transport success for a marker that predates channel identity. The old writer
+     * committed completed history and its backing debit together, then cleared the marker
+     * separately. Finish that cleanup without needing an origin or another debit.
+     */
     fun clearAccountedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
         writableDatabase.transaction {
-            if (expected.userChannelId != null || expected.paymentId.isBlank() ||
-                expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction false
-            val alreadyAccounted = rawQuery("""SELECT 1 FROM payments WHERE payment_id = ?
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction false
+            val alreadyAccounted =
+                rawQuery(
+                        """SELECT 1 FROM payments WHERE payment_id = ?
                 AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'
                 AND amount_msat = ? LIMIT 1""",
-                arrayOf(expected.paymentId, expected.amountMsat.toString())).use { it.moveToFirst() }
+                        arrayOf(expected.paymentId, expected.amountMsat.toString()),
+                    )
+                    .use { it.moveToFirst() }
             if (!alreadyAccounted) return@transaction false
             // Check the history and the entire claim under the same write lock, so a delayed
             // recovery cannot clear a newer send. Never assign an unknown origin to a channel.
             delete("pending_stability_send", "id = 1", null) == 1
         }
 
-    /** Bind a marker that predates channel identity to its origin only on evidence: exactly one
+    /**
+     * Bind a marker that predates channel identity to its origin only on evidence: exactly one
      * saved channel existed at the claim and its books, frozen under the marker, still reproduce
-     * the claimed amount at the claimed price. A replacement is always newer than the claim,
-     * given a device clock that did not move backwards between the two inserts. */
-    fun adoptLegacyStabilityOrigin(expected: PendingStabilitySend): String? = writableDatabase.transaction {
-        if (expected.userChannelId != null || expected.paymentId.isBlank() ||
-            expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction null
-        val candidates = rawQuery("""SELECT user_channel_id, expected_usd, stable_sats FROM channels
+     * the claimed amount at the claimed price. A replacement is always newer than the claim, given
+     * a device clock that did not move backwards between the two inserts.
+     */
+    fun adoptLegacyStabilityOrigin(expected: PendingStabilitySend): String? =
+        writableDatabase.transaction {
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction null
+            val candidates =
+                rawQuery(
+                        """SELECT user_channel_id, expected_usd, stable_sats FROM channels
             WHERE user_channel_id IS NOT NULL AND created_at <= ?""",
-            arrayOf(expected.createdAt.toString())).use { c ->
-            val rows = mutableListOf<Triple<String, Double, Long>>()
-            while (c.moveToNext()) rows.add(Triple(c.getString(0), c.getDouble(1), c.getLong(2)))
-            rows
+                        arrayOf(expected.createdAt.toString()),
+                    )
+                    .use { c ->
+                        val rows = mutableListOf<Triple<String, Double, Long>>()
+                        while (c.moveToNext()) rows.add(
+                            Triple(c.getString(0), c.getDouble(1), c.getLong(2))
+                        )
+                        rows
+                    }
+            val (origin, expectedUsd, backing) =
+                candidates.singleOrNull() ?: return@transaction null
+            // Same arithmetic as the pre-upgrade tick: surplus in USD, floored to whole sats.
+            val surplusUsd =
+                backing.toDouble() / Constants.SATS_IN_BTC * expected.price - expectedUsd
+            val claimedSats =
+                (surplusUsd / expected.price * Constants.SATS_IN_BTC * 1000.0).toLong() / 1000L
+            if (surplusUsd <= 0.0 || abs(claimedSats - expected.amountMsat / 1000L) > 1L)
+                return@transaction null
+            execSQL(
+                "UPDATE pending_stability_send SET user_channel_id = ? WHERE id = 1",
+                arrayOf(origin),
+            )
+            origin
         }
-        val (origin, expectedUsd, backing) = candidates.singleOrNull() ?: return@transaction null
-        // Same arithmetic as the pre-upgrade tick: surplus in USD, floored to whole sats.
-        val surplusUsd = backing.toDouble() / Constants.SATS_IN_BTC * expected.price - expectedUsd
-        val claimedSats = (surplusUsd / expected.price * Constants.SATS_IN_BTC * 1000.0).toLong() / 1000L
-        if (surplusUsd <= 0.0 || abs(claimedSats - expected.amountMsat / 1000L) > 1L) return@transaction null
-        execSQL("UPDATE pending_stability_send SET user_channel_id = ? WHERE id = 1", arrayOf(origin))
-        origin
-    }
 
-    /** A succeeded legacy payment whose origin cannot be proven: keep it on record and release
-     * the spend barrier without debiting any channel, since a guess could charge a replacement. */
+    /**
+     * A succeeded legacy payment whose origin cannot be proven: keep it on record and release the
+     * spend barrier without debiting any channel, since a guess could charge a replacement.
+     */
     fun recordUnattributedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
         writableDatabase.transaction {
-            if (expected.userChannelId != null || expected.paymentId.isBlank() ||
-                expected.amountMsat <= 0L || loadPendingSend() != expected) return@transaction false
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction false
             recordCompletedStabilityHistory(expected)
             delete("pending_stability_send", "id = 1", null) == 1
         }
 
-    fun outgoingStabilityOrigin(paymentId: String): String? = readableDatabase.rawQuery(
-        "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?", arrayOf(paymentId)
-    ).use { if (it.moveToFirst()) it.getString(0) else null }
+    fun outgoingStabilityOrigin(paymentId: String): String? =
+        readableDatabase
+            .rawQuery(
+                "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst()) it.getString(0) else null }
 
     private fun SQLiteDatabase.recordCompletedStabilityHistory(pending: PendingStabilitySend) {
-        val values = ContentValues().apply {
-            put("payment_id", pending.paymentId)
-            put("payment_type", "stability")
-            put("direction", "sent")
-            put("amount_msat", pending.amountMsat)
-            put("amount_usd", pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price)
-            put("btc_price", pending.price)
-            put("status", "completed")
-        }
+        val values =
+            ContentValues().apply {
+                put("payment_id", pending.paymentId)
+                put("payment_type", "stability")
+                put("direction", "sent")
+                put("amount_msat", pending.amountMsat)
+                put(
+                    "amount_usd",
+                    pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price,
+                )
+                put("btc_price", pending.price)
+                put("status", "completed")
+            }
         if (update("payments", values, "payment_id = ?", arrayOf(pending.paymentId)) == 0)
             insertOrThrow("payments", null, values)
     }
 
-    fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean = writableDatabase.transaction {
-        if (loadPendingSend() != expected || expected.paymentId.isNotEmpty()) return@transaction false
-        setPendingSendPaymentId(paymentId)
-        true
-    }
-
-    /** Called only with a succeeded LDK payment. Debit its original live or archived allocation,
-     * record the origin permanently, and clear the exact claim in one transaction. */
-    fun completePendingStabilitySend(pending: PendingStabilitySend, channelClosed: Boolean): Boolean =
+    fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean =
         writableDatabase.transaction {
-            if (loadPendingSend() != pending) return@transaction false
-            val origin = pending.userChannelId?.takeIf { it.isNotBlank() } ?: return@transaction false
-            if (pending.paymentId.isBlank() || pending.amountMsat <= 0L) return@transaction false
-            if (channelClosed) deleteChannel(origin)
-
-            val archived = rawQuery("SELECT 1 FROM closed_channel_books WHERE user_channel_id = ?", arrayOf(origin))
-                .use { it.moveToFirst() }
-            val table = if (archived) "closed_channel_books" else "channels"
-            val backing = rawQuery("SELECT stable_sats FROM $table WHERE user_channel_id = ?", arrayOf(origin)).use {
-                if (!it.moveToFirst()) return@transaction false
-                if (it.isNull(0)) null else it.getLong(0)
-            }
-            val accountedOrigin = rawQuery("SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
-                arrayOf(pending.paymentId)).use { if (it.moveToFirst()) it.getString(0) else null }
-            check(accountedOrigin == null || accountedOrigin == origin) { "Stability payment origin mismatch" }
-            // Before the origin ledger existed, this completed history row and its backing debit
-            // were written atomically by recordPaymentAndMaybeUpdateBacking / the background writer.
-            val alreadyRecorded = rawQuery("""SELECT 1 FROM payments WHERE payment_id = ?
-                AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'""",
-                arrayOf(pending.paymentId)).use { it.moveToFirst() }
-            if (accountedOrigin == null && !alreadyRecorded && backing != null) {
-                val newBacking = (backing - pending.amountMsat / 1000L).coerceAtLeast(0L)
-                val values = ContentValues().apply {
-                    put("stable_sats", newBacking)
-                    if (!archived) put("updated_at", System.currentTimeMillis() / 1000)
-                }
-                check(update(table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
-            }
-            // Null archived backing means unknown books; record the known payment without
-            // fabricating an allocation or borrowing one from a replacement channel.
-            if (!alreadyRecorded) recordCompletedStabilityHistory(pending)
-            execSQL("INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
-                arrayOf(pending.paymentId, origin))
-            delete("pending_stability_send", "id = 1", null)
+            if (loadPendingSend() != expected || expected.paymentId.isNotEmpty())
+                return@transaction false
+            setPendingSendPaymentId(paymentId)
             true
         }
 
-    fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000) ORDER BY created_at DESC LIMIT ?",
-            arrayOf(limit.toString())
+    /**
+     * Called only with a succeeded LDK payment. Debit its original live or archived allocation,
+     * record the origin permanently, and clear the exact claim in one transaction.
+     */
+    fun completePendingStabilitySend(
+        pending: PendingStabilitySend,
+        channelClosed: Boolean,
+    ): Boolean = writableDatabase.transaction {
+        if (loadPendingSend() != pending) return@transaction false
+        val origin = pending.userChannelId?.takeIf { it.isNotBlank() } ?: return@transaction false
+        if (pending.paymentId.isBlank() || pending.amountMsat <= 0L) return@transaction false
+        if (channelClosed) deleteChannel(origin)
+
+        val archived =
+            rawQuery(
+                    "SELECT 1 FROM closed_channel_books WHERE user_channel_id = ?",
+                    arrayOf(origin),
+                )
+                .use { it.moveToFirst() }
+        val table = if (archived) "closed_channel_books" else "channels"
+        val backing =
+            rawQuery("SELECT stable_sats FROM $table WHERE user_channel_id = ?", arrayOf(origin))
+                .use {
+                    if (!it.moveToFirst()) return@transaction false
+                    if (it.isNull(0)) null else it.getLong(0)
+                }
+        val accountedOrigin =
+            rawQuery(
+                    "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
+                    arrayOf(pending.paymentId),
+                )
+                .use { if (it.moveToFirst()) it.getString(0) else null }
+        check(accountedOrigin == null || accountedOrigin == origin) {
+            "Stability payment origin mismatch"
+        }
+        // Before the origin ledger existed, this completed history row and its backing debit
+        // were written atomically by recordPaymentAndMaybeUpdateBacking / the background writer.
+        val alreadyRecorded =
+            rawQuery(
+                    """SELECT 1 FROM payments WHERE payment_id = ?
+                AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'""",
+                    arrayOf(pending.paymentId),
+                )
+                .use { it.moveToFirst() }
+        if (accountedOrigin == null && !alreadyRecorded && backing != null) {
+            val newBacking = (backing - pending.amountMsat / 1000L).coerceAtLeast(0L)
+            val values =
+                ContentValues().apply {
+                    put("stable_sats", newBacking)
+                    if (!archived) put("updated_at", System.currentTimeMillis() / 1000)
+                }
+            check(update(table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
+        }
+        // Null archived backing means unknown books; record the known payment without
+        // fabricating an allocation or borrowing one from a replacement channel.
+        if (!alreadyRecorded) recordCompletedStabilityHistory(pending)
+        execSQL(
+            "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+            arrayOf(pending.paymentId, origin),
         )
+        delete("pending_stability_send", "id = 1", null)
+        true
+    }
+
+    fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000) ORDER BY created_at DESC LIMIT ?",
+                arrayOf(limit.toString()),
+            )
         return cursor.use { c ->
             val list = mutableListOf<PaymentRecord>()
             while (c.moveToNext()) {
-                list.add(PaymentRecord(
-                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
-                    paymentType = c.getString(2), direction = c.getString(3),
-                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
-                    status = c.getString(8), createdAt = c.getLong(9),
-                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
-                ))
+                list.add(
+                    PaymentRecord(
+                        id = c.getLong(0),
+                        paymentId = c.getStringOrNull(1),
+                        paymentType = c.getString(2),
+                        direction = c.getString(3),
+                        amountMsat = c.getLong(4),
+                        amountUSD = c.getDoubleOrNull(5),
+                        btcPrice = c.getDoubleOrNull(6),
+                        counterparty = c.getStringOrNull(7),
+                        status = c.getString(8),
+                        createdAt = c.getLong(9),
+                        feeMsat = c.getLong(10),
+                        txid = c.getStringOrNull(11),
+                        address = c.getStringOrNull(12),
+                        confirmations = c.getInt(13),
+                    )
+                )
             }
             list
         }
     }
 
-    /** Confirmations for a specific channel-close txid, so a caller can check whether THIS
-     * close's funds are settled instead of inferring it from aggregate spendable balance. */
+    /**
+     * Confirmations for a specific channel-close txid, so a caller can check whether THIS close's
+     * funds are settled instead of inferring it from aggregate spendable balance.
+     */
     fun getConfirmationsForCloseTxid(txid: String): Int? {
-        return readableDatabase.rawQuery(
-            "SELECT confirmations FROM payments WHERE txid = ? AND payment_type = 'channel_close' LIMIT 1",
-            arrayOf(txid)
-        ).use { c -> if (c.moveToFirst()) c.getInt(0) else null }
-    }
-
-    /** Kept for other callers — returns the single most-recently-created pending receive,
-     * matching this function's original (pre-list) semantics. */
-    fun latestPendingOnchainReceive(): PaymentRecord? {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
-            FROM payments
-            WHERE payment_type = 'onchain'
-              AND direction = 'received'
-              AND status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """.trimIndent(),
-            null
-        )
-        return cursor.use { c ->
-            if (!c.moveToFirst()) return@use null
-            PaymentRecord(
-                id = c.getLong(0), paymentId = c.getStringOrNull(1),
-                paymentType = c.getString(2), direction = c.getString(3),
-                amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-                btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
-                status = c.getString(8), createdAt = c.getLong(9),
-                feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-                address = c.getStringOrNull(12), confirmations = c.getInt(13)
+        return readableDatabase
+            .rawQuery(
+                "SELECT confirmations FROM payments WHERE txid = ? AND payment_type = 'channel_close' LIMIT 1",
+                arrayOf(txid),
             )
-        }
+            .use { c -> if (c.moveToFirst()) c.getInt(0) else null }
     }
 
-    /** All pending on-chain receives, oldest first — more than one can exist if a deposit
-     * arrives while another is confirming or a splice/close is in flight. Inner query keeps the
-     * newest rows (old stuck ones can't starve out a new deposit); outer query re-sorts them
-     * oldest-first for display. */
-    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT * FROM (
+    /**
+     * Kept for other callers — returns the single most-recently-created pending receive, matching
+     * this function's original (pre-list) semantics.
+     */
+    fun latestPendingOnchainReceive(): PaymentRecord? {
+        val cursor =
+            readableDatabase.rawQuery(
+                """
                 SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
                 FROM payments
                 WHERE payment_type = 'onchain'
                   AND direction = 'received'
                   AND status = 'pending'
-                ORDER BY created_at DESC, id DESC
-                LIMIT ?
-            ) ORDER BY created_at ASC, id ASC
-            """.trimIndent(),
-            arrayOf(limit.toString())
-        )
+                ORDER BY created_at DESC
+                LIMIT 1
+                """
+                    .trimIndent(),
+                null,
+            )
+        return cursor.use { c ->
+            if (!c.moveToFirst()) return@use null
+            PaymentRecord(
+                id = c.getLong(0),
+                paymentId = c.getStringOrNull(1),
+                paymentType = c.getString(2),
+                direction = c.getString(3),
+                amountMsat = c.getLong(4),
+                amountUSD = c.getDoubleOrNull(5),
+                btcPrice = c.getDoubleOrNull(6),
+                counterparty = c.getStringOrNull(7),
+                status = c.getString(8),
+                createdAt = c.getLong(9),
+                feeMsat = c.getLong(10),
+                txid = c.getStringOrNull(11),
+                address = c.getStringOrNull(12),
+                confirmations = c.getInt(13),
+            )
+        }
+    }
+
+    /**
+     * All pending on-chain receives, oldest first — more than one can exist if a deposit arrives
+     * while another is confirming or a splice/close is in flight. Inner query keeps the newest rows
+     * (old stuck ones can't starve out a new deposit); outer query re-sorts them oldest-first for
+     * display.
+     */
+    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> {
+        val cursor =
+            readableDatabase.rawQuery(
+                """
+                SELECT * FROM (
+                    SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+                    FROM payments
+                    WHERE payment_type = 'onchain'
+                      AND direction = 'received'
+                      AND status = 'pending'
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                ) ORDER BY created_at ASC, id ASC
+                """
+                    .trimIndent(),
+                arrayOf(limit.toString()),
+            )
         return cursor.use { c ->
             buildList {
                 while (c.moveToNext()) {
                     add(
                         PaymentRecord(
-                            id = c.getLong(0), paymentId = c.getStringOrNull(1),
-                            paymentType = c.getString(2), direction = c.getString(3),
-                            amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-                            btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
-                            status = c.getString(8), createdAt = c.getLong(9),
-                            feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-                            address = c.getStringOrNull(12), confirmations = c.getInt(13)
+                            id = c.getLong(0),
+                            paymentId = c.getStringOrNull(1),
+                            paymentType = c.getString(2),
+                            direction = c.getString(3),
+                            amountMsat = c.getLong(4),
+                            amountUSD = c.getDoubleOrNull(5),
+                            btcPrice = c.getDoubleOrNull(6),
+                            counterparty = c.getStringOrNull(7),
+                            status = c.getString(8),
+                            createdAt = c.getLong(9),
+                            feeMsat = c.getLong(10),
+                            txid = c.getStringOrNull(11),
+                            address = c.getStringOrNull(12),
+                            confirmations = c.getInt(13),
                         )
                     )
                 }
@@ -1810,169 +2291,213 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
      * withdrawal stayed absent from Stable USD, and recovery could not repair it either, because
      * hasPendingSplice()/getPendingSpliceTxid() only look at 'pending' rows (issue #311, mainnet
      * 2026-09-12). The poller runs far more often than the monitor on a real device — it is
-     * force-run on every mempool websocket block header, on foreground resume and whenever
-     * History is opened — so it usually won. One writer owns splice completion: the monitor.
+     * force-run on every mempool websocket block header, on foreground resume and whenever History
+     * is opened — so it usually won. One writer owns splice completion: the monitor.
      */
     fun getPaymentsNeedingConfirmation(limit: Int = 50): List<PaymentRecord> {
-        val cursor = readableDatabase.rawQuery(
-            """
-            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
-            FROM payments
-            WHERE txid IS NOT NULL AND txid != ''
-              AND payment_type IN ('onchain', 'channel_close')
-              AND status != 'failed'
-              AND confirmations < 6
-            ORDER BY created_at DESC
-            LIMIT ?
-            """.trimIndent(),
-            arrayOf(limit.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                """
+                SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
+                FROM payments
+                WHERE txid IS NOT NULL AND txid != ''
+                  AND payment_type IN ('onchain', 'channel_close')
+                  AND status != 'failed'
+                  AND confirmations < 6
+                ORDER BY created_at DESC
+                LIMIT ?
+                """
+                    .trimIndent(),
+                arrayOf(limit.toString()),
+            )
         return cursor.use { c ->
             val list = mutableListOf<PaymentRecord>()
             while (c.moveToNext()) {
-                list.add(PaymentRecord(
-                    id = c.getLong(0), paymentId = c.getStringOrNull(1),
-                    paymentType = c.getString(2), direction = c.getString(3),
-                    amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-                    btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7),
-                    status = c.getString(8), createdAt = c.getLong(9),
-                    feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-                    address = c.getStringOrNull(12), confirmations = c.getInt(13)
-                ))
+                list.add(
+                    PaymentRecord(
+                        id = c.getLong(0),
+                        paymentId = c.getStringOrNull(1),
+                        paymentType = c.getString(2),
+                        direction = c.getString(3),
+                        amountMsat = c.getLong(4),
+                        amountUSD = c.getDoubleOrNull(5),
+                        btcPrice = c.getDoubleOrNull(6),
+                        counterparty = c.getStringOrNull(7),
+                        status = c.getString(8),
+                        createdAt = c.getLong(9),
+                        feeMsat = c.getLong(10),
+                        txid = c.getStringOrNull(11),
+                        address = c.getStringOrNull(12),
+                        confirmations = c.getInt(13),
+                    )
+                )
             }
             list
         }
     }
 
-    fun updatePaymentConfirmationState(paymentRowId: Long, confirmations: Int, status: String): Boolean {
-        val cv = ContentValues().apply {
-            put("confirmations", confirmations)
-            put("status", status)
-        }
+    fun updatePaymentConfirmationState(
+        paymentRowId: Long,
+        confirmations: Int,
+        status: String,
+    ): Boolean {
+        val cv =
+            ContentValues().apply {
+                put("confirmations", confirmations)
+                put("status", status)
+            }
         return writableDatabase.update(
             "payments",
             cv,
             "id = ?",
-            arrayOf(paymentRowId.toString())
+            arrayOf(paymentRowId.toString()),
         ) > 0
     }
 
     fun clearPaymentTxidForRow(paymentRowId: Long): Boolean {
-        val cv = ContentValues().apply {
-            putNull("txid")
-            put("confirmations", 0)
-            put("status", "pending")
-        }
+        val cv =
+            ContentValues().apply {
+                putNull("txid")
+                put("confirmations", 0)
+                put("status", "pending")
+            }
         return writableDatabase.update(
             "payments",
             cv,
             "id = ?",
-            arrayOf(paymentRowId.toString())
+            arrayOf(paymentRowId.toString()),
         ) > 0
     }
 
     fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
-        val cv = ContentValues().apply {
-            put("status", status)
-            if (feeMsat > 0) put("fee_msat", feeMsat)
-        }
+        val cv =
+            ContentValues().apply {
+                put("status", status)
+                if (feeMsat > 0) put("fee_msat", feeMsat)
+            }
         writableDatabase.transaction {
             // Also adopt pending sends from before the accounting marker was introduced.
             // Transport success (including background recovery) cannot release this barrier.
-            if (status == "completed") execSQL("""
-                INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed)
-                SELECT payment_id, 0 FROM payments WHERE payment_id = ?
-                  AND direction = 'sent' AND payment_type IN ('lightning', 'bolt12') AND status = 'pending'
-            """.trimIndent(), arrayOf(paymentId))
+            if (status == "completed")
+                execSQL(
+                    """
+                    INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed)
+                    SELECT payment_id, 0 FROM payments WHERE payment_id = ?
+                      AND direction = 'sent' AND payment_type IN ('lightning', 'bolt12') AND status = 'pending'
+                    """
+                        .trimIndent(),
+                    arrayOf(paymentId),
+                )
             update("payments", cv, "payment_id = ?", arrayOf(paymentId))
         }
     }
 
     fun isOutgoingStabilityPayment(paymentId: String): Boolean {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
-            arrayOf(paymentId)
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT 1 FROM payments WHERE payment_id = ? AND payment_type = 'stability' AND direction = 'sent' LIMIT 1",
+                arrayOf(paymentId),
+            )
         return cursor.use { it.moveToFirst() }
     }
 
-    /** Only writes if the row is still txid-less and no other row already claims this txid —
-     *  txid is the unique identity for a payment, so a stale/racing caller must never overwrite
-     *  an already-resolved row nor attach the same txid to two rows. Returns whether it wrote.
+    /**
+     * Only writes if the row is still txid-less and no other row already claims this txid — txid is
+     * the unique identity for a payment, so a stale/racing caller must never overwrite an
+     * already-resolved row nor attach the same txid to two rows. Returns whether it wrote.
      *
-     *  The uniqueness guard is keyed on the row's own primary key (`id`), not `payment_id`:
-     *  `payment_id` can be NULL on other rows (e.g. some channel-close bookkeeping paths), and
-     *  `payment_id != ?` evaluates to NULL/unknown for a NULL `payment_id` — SQLite then excludes
-     *  that row from the `NOT EXISTS` subquery, silently defeating the duplicate-txid check for
-     *  exactly the rows that most need it. `id` is never NULL, so this can't happen. */
+     * The uniqueness guard is keyed on the row's own primary key (`id`), not `payment_id`:
+     * `payment_id` can be NULL on other rows (e.g. some channel-close bookkeeping paths), and
+     * `payment_id != ?` evaluates to NULL/unknown for a NULL `payment_id` — SQLite then excludes
+     * that row from the `NOT EXISTS` subquery, silently defeating the duplicate-txid check for
+     * exactly the rows that most need it. `id` is never NULL, so this can't happen.
+     */
     fun updatePaymentTxid(paymentId: String, txid: String): Boolean {
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
-            val rowId = db.rawQuery(
-                "SELECT id FROM payments WHERE payment_id = ? AND (txid IS NULL OR txid = '') LIMIT 1",
-                arrayOf(paymentId)
-            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+            val rowId =
+                db.rawQuery(
+                        "SELECT id FROM payments WHERE payment_id = ? AND (txid IS NULL OR txid = '') LIMIT 1",
+                        arrayOf(paymentId),
+                    )
+                    .use { c -> if (c.moveToFirst()) c.getLong(0) else null }
             if (rowId == null) {
                 db.execSQL("ROLLBACK")
                 return false
             }
-            val cv = ContentValues().apply {
-                put("txid", txid)
-            }
-            val updated = db.update(
-                "payments",
-                cv,
-                "id = ? AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)",
-                arrayOf(rowId.toString(), txid, rowId.toString())
-            )
+            val cv =
+                ContentValues().apply {
+                    put("txid", txid)
+                }
+            val updated =
+                db.update(
+                    "payments",
+                    cv,
+                    "id = ? AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)",
+                    arrayOf(rowId.toString(), txid, rowId.toString()),
+                )
             db.execSQL("COMMIT")
             return updated > 0
         } catch (e: Exception) {
-            try { db.execSQL("ROLLBACK") } catch (_: Exception) {}
+            try {
+                db.execSQL("ROLLBACK")
+            } catch (_: Exception) {}
             throw e
         }
     }
 
     private data class PendingPlaceholder(val id: Long, val amountMsat: Long)
 
-    /** The newest txid-less pending receive placeholder for an address — the row the
-     *  balance-delta path writes before the txid is known. When `amountMsat` is given, only a
-     *  placeholder with exactly that amount matches: several deposits to the same (reused)
-     *  address can be pending at once, and amount is what tells their placeholders apart. */
+    /**
+     * The newest txid-less pending receive placeholder for an address — the row the balance-delta
+     * path writes before the txid is known. When `amountMsat` is given, only a placeholder with
+     * exactly that amount matches: several deposits to the same (reused) address can be pending at
+     * once, and amount is what tells their placeholders apart.
+     */
     private fun findPendingPlaceholder(
         db: SQLiteDatabase,
         address: String,
-        amountMsat: Long? = null
+        amountMsat: Long? = null,
     ): PendingPlaceholder? {
         val amountFilter = if (amountMsat != null) "AND amount_msat = ? " else ""
-        val args = if (amountMsat != null) arrayOf(address, amountMsat.toString()) else arrayOf(address)
+        val args =
+            if (amountMsat != null) arrayOf(address, amountMsat.toString()) else arrayOf(address)
         return db.rawQuery(
-            "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' " + amountFilter + "ORDER BY created_at DESC LIMIT 1",
-            args
-        ).use { c -> if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null }
+                "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' " +
+                    amountFilter +
+                    "ORDER BY created_at DESC LIMIT 1",
+                args,
+            )
+            .use { c ->
+                if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null
+            }
     }
 
-    /** Record a websocket-detected receive unless its txid is already tracked. Check and write
-     *  run in one transaction so a concurrent balance-delta detection can't double-insert. If the
-     *  balance-delta path already wrote a txid-less placeholder for this address, that row is
-     *  adopted (txid + exact websocket amount attached) instead of inserting a second row.
-     *  Returns the row id, or -1 when the txid is already on any row. */
+    /**
+     * Record a websocket-detected receive unless its txid is already tracked. Check and write run
+     * in one transaction so a concurrent balance-delta detection can't double-insert. If the
+     * balance-delta path already wrote a txid-less placeholder for this address, that row is
+     * adopted (txid + exact websocket amount attached) instead of inserting a second row. Returns
+     * the row id, or -1 when the txid is already on any row.
+     */
     fun recordWebSocketReceive(
         paymentId: String,
         amountMsat: Long,
         amountUSD: Double?,
         btcPrice: Double?,
         txid: String,
-        address: String
+        address: String,
     ): Long {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val alreadyTracked = db.rawQuery(
-                "SELECT 1 FROM payments WHERE txid = ? OR payment_id = ? LIMIT 1",
-                arrayOf(txid, paymentId)
-            ).use { it.moveToFirst() }
+            val alreadyTracked =
+                db.rawQuery(
+                        "SELECT 1 FROM payments WHERE txid = ? OR payment_id = ? LIMIT 1",
+                        arrayOf(txid, paymentId),
+                    )
+                    .use { it.moveToFirst() }
             if (alreadyTracked) {
                 db.setTransactionSuccessful()
                 return -1L
@@ -1987,27 +2512,29 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
             val rowId: Long
             if (placeholder != null) {
-                val cv = ContentValues().apply {
-                    put("payment_id", paymentId)
-                    put("txid", txid)
-                    put("amount_msat", amountMsat)
-                    amountUSD?.let { put("amount_usd", it) }
-                    btcPrice?.let { put("btc_price", it) }
-                }
+                val cv =
+                    ContentValues().apply {
+                        put("payment_id", paymentId)
+                        put("txid", txid)
+                        put("amount_msat", amountMsat)
+                        amountUSD?.let { put("amount_usd", it) }
+                        btcPrice?.let { put("btc_price", it) }
+                    }
                 db.update("payments", cv, "id = ?", arrayOf(placeholder.id.toString()))
                 rowId = placeholder.id
             } else {
-                val cv = ContentValues().apply {
-                    put("payment_id", paymentId)
-                    put("payment_type", "onchain")
-                    put("direction", "received")
-                    put("amount_msat", amountMsat)
-                    put("amount_usd", amountUSD)
-                    put("btc_price", btcPrice)
-                    put("status", "pending")
-                    put("txid", txid)
-                    put("address", address)
-                }
+                val cv =
+                    ContentValues().apply {
+                        put("payment_id", paymentId)
+                        put("payment_type", "onchain")
+                        put("direction", "received")
+                        put("amount_msat", amountMsat)
+                        put("amount_usd", amountUSD)
+                        put("btc_price", btcPrice)
+                        put("status", "pending")
+                        put("txid", txid)
+                        put("address", address)
+                    }
                 rowId = db.insert("payments", null, cv)
             }
             db.setTransactionSuccessful()
@@ -2017,37 +2544,42 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         }
     }
 
-    /** Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction.
-     *  If a row already carries the txid AND its amount matches the placeholder's, the websocket
-     *  recorded this same deposit first — the placeholder is a duplicate, delete it. On an amount
-     *  mismatch the placeholder is a different deposit whose txid the resolver couldn't tell
-     *  apart (the resolver looks up by address, not per-deposit), so it is left alone rather
-     *  than deleted or mislabeled. With no websocket row, attach the txid to the placeholder. */
+    /**
+     * Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction. If a
+     * row already carries the txid AND its amount matches the placeholder's, the websocket recorded
+     * this same deposit first — the placeholder is a duplicate, delete it. On an amount mismatch
+     * the placeholder is a different deposit whose txid the resolver couldn't tell apart (the
+     * resolver looks up by address, not per-deposit), so it is left alone rather than deleted or
+     * mislabeled. With no websocket row, attach the txid to the placeholder.
+     */
     fun reconcileResolvedReceiveTxid(txid: String, address: String): Boolean {
         val db = writableDatabase
         db.beginTransaction()
         try {
-            val websocketRowAmountMsat = db.rawQuery(
-                "SELECT amount_msat FROM payments WHERE txid = ? LIMIT 1",
-                arrayOf(txid)
-            ).use { c -> if (c.moveToFirst()) c.getLong(0) else null }
+            val websocketRowAmountMsat =
+                db.rawQuery(
+                        "SELECT amount_msat FROM payments WHERE txid = ? LIMIT 1",
+                        arrayOf(txid),
+                    )
+                    .use { c -> if (c.moveToFirst()) c.getLong(0) else null }
 
-            val changed = if (websocketRowAmountMsat != null) {
-                // The websocket already recorded this deposit; only the placeholder with the
-                // SAME amount is its duplicate — a different-amount placeholder belongs to
-                // another deposit and must survive.
-                findPendingPlaceholder(db, address, websocketRowAmountMsat)?.let {
-                    db.delete("payments", "id = ?", arrayOf(it.id.toString())) > 0
-                } ?: false
-            } else {
-                // No amount to disambiguate by (the resolver returns only a txid), so this
-                // attaches to the newest placeholder — with several deposits pending it can
-                // pick the wrong one. Making the resolver return per-tx vout sums would fix it.
-                findPendingPlaceholder(db, address)?.let {
-                    val cv = ContentValues().apply { put("txid", txid) }
-                    db.update("payments", cv, "id = ?", arrayOf(it.id.toString())) > 0
-                } ?: false
-            }
+            val changed =
+                if (websocketRowAmountMsat != null) {
+                    // The websocket already recorded this deposit; only the placeholder with the
+                    // SAME amount is its duplicate — a different-amount placeholder belongs to
+                    // another deposit and must survive.
+                    findPendingPlaceholder(db, address, websocketRowAmountMsat)?.let {
+                        db.delete("payments", "id = ?", arrayOf(it.id.toString())) > 0
+                    } ?: false
+                } else {
+                    // No amount to disambiguate by (the resolver returns only a txid), so this
+                    // attaches to the newest placeholder — with several deposits pending it can
+                    // pick the wrong one. Making the resolver return per-tx vout sums would fix it.
+                    findPendingPlaceholder(db, address)?.let {
+                        val cv = ContentValues().apply { put("txid", txid) }
+                        db.update("payments", cv, "id = ?", arrayOf(it.id.toString())) > 0
+                    } ?: false
+                }
             db.setTransactionSuccessful()
             return changed
         } finally {
@@ -2058,68 +2590,88 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     fun failPaymentByTxid(txid: String) {
         writableDatabase.execSQL(
             "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
-            arrayOf(txid)
+            arrayOf(txid),
         )
     }
 
     fun getPendingChannelClosePaymentId(): String? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT payment_id FROM payments WHERE payment_type = 'channel_close' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
-            null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT payment_id FROM payments WHERE payment_type = 'channel_close' AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+                null,
+            )
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
     fun getPaymentTxid(paymentId: String): String? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT txid FROM payments WHERE payment_id = ?",
-            arrayOf(paymentId)
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT txid FROM payments WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
         return cursor.use { if (it.moveToFirst()) it.getString(0) else null }
     }
 
-    /** payment_type, direction, amount_msat, and destination address for a row by id — used to
-     * check whether a just-completed row was a splice-out (which can raise the on-chain balance
-     * if self-sent) without relying on possibly-stale in-memory splice state. */
+    /**
+     * payment_type, direction, amount_msat, and destination address for a row by id — used to check
+     * whether a just-completed row was a splice-out (which can raise the on-chain balance if
+     * self-sent) without relying on possibly-stale in-memory splice state.
+     */
     data class PaymentAccountingInfo(
         val paymentType: String,
         val direction: String,
         val amountMsat: Long,
-        val address: String?
+        val address: String?,
     )
 
     fun getPaymentTypeDirectionAmountMsat(id: Long): PaymentAccountingInfo? {
-        return readableDatabase.rawQuery(
-            "SELECT payment_type, direction, amount_msat, address FROM payments WHERE id = ? LIMIT 1",
-            arrayOf(id.toString())
-        ).use { c ->
-            if (c.moveToFirst()) {
-                PaymentAccountingInfo(c.getString(0), c.getString(1), c.getLong(2), c.getStringOrNull(3))
-            } else {
-                null
+        return readableDatabase
+            .rawQuery(
+                "SELECT payment_type, direction, amount_msat, address FROM payments WHERE id = ? LIMIT 1",
+                arrayOf(id.toString()),
+            )
+            .use { c ->
+                if (c.moveToFirst()) {
+                    PaymentAccountingInfo(
+                        c.getString(0),
+                        c.getString(1),
+                        c.getLong(2),
+                        c.getStringOrNull(3),
+                    )
+                } else {
+                    null
+                }
             }
-        }
     }
 
-    /** True if any row (of any payment_type/status) already claims this txid — used to avoid
-     * inserting a duplicate deposit row for a txid that a splice/close has already reconciled
-     * onto its own row (e.g. a self-send whose original receive row was deleted and replaced). */
+    /**
+     * True if any row (of any payment_type/status) already claims this txid — used to avoid
+     * inserting a duplicate deposit row for a txid that a splice/close has already reconciled onto
+     * its own row (e.g. a self-send whose original receive row was deleted and replaced).
+     */
     fun paymentExistsForTxid(txid: String): Boolean {
-        return readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)
-        ).use { it.moveToFirst() }
+        return readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
+                arrayOf(txid),
+            )
+            .use { it.moveToFirst() }
     }
 
-    /** True if this address has ever received an on-chain deposit we recorded — i.e. it is one
-     * of our own wallet's addresses, not an arbitrary external destination. Used to gate the
+    /**
+     * True if this address has ever received an on-chain deposit we recorded — i.e. it is one of
+     * our own wallet's addresses, not an arbitrary external destination. Used to gate the
      * splice-completion baseline advance to genuine self-sends only (#316 review): an external
      * splice-out never raises our own balance, so advancing the baseline for one anyway would
-     * wrongly consume a concurrent, unrelated deposit's sats instead of surfacing them. */
+     * wrongly consume a concurrent, unrelated deposit's sats instead of surfacing them.
+     */
     fun isKnownReceiveAddress(address: String): Boolean {
-        return readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? LIMIT 1",
-            arrayOf(address)
-        ).use { it.moveToFirst() }
+        return readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? LIMIT 1",
+                arrayOf(address),
+            )
+            .use { it.moveToFirst() }
     }
 
     private fun SQLiteDatabase.queryIds(sql: String, args: Array<String>): List<Long> =
@@ -2127,12 +2679,16 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
             buildList { while (cursor.moveToNext()) add(cursor.getLong(0)) }
         }
 
-    private fun SQLiteDatabase.recentPendingSpliceIds(paymentRowId: Long?, cutoff: Long): List<Long> {
+    private fun SQLiteDatabase.recentPendingSpliceIds(
+        paymentRowId: Long?,
+        cutoff: Long,
+    ): List<Long> {
         val idClause = if (paymentRowId == null) "" else "AND id = ?"
         val args = buildList {
             if (paymentRowId != null) add(paymentRowId.toString())
             add(cutoff.toString())
-        }.toTypedArray()
+        }
+            .toTypedArray()
         return queryIds(
             """
             SELECT id FROM payments
@@ -2140,46 +2696,56 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
               AND status = 'pending' AND txid IS NULL
               $idClause AND created_at >= ?
             LIMIT 2
-            """.trimIndent(),
-            args
+            """
+                .trimIndent(),
+            args,
         )
     }
 
-    /** Assigns a negotiated txid to one pending splice without guessing from payment history.
-     *  The exact row is preferred. After a process restart, where that in-memory id is gone,
-     *  exactly one recent pending NULL-txid splice must exist or no row is changed. */
+    /**
+     * Assigns a negotiated txid to one pending splice without guessing from payment history. The
+     * exact row is preferred. After a process restart, where that in-memory id is gone, exactly one
+     * recent pending NULL-txid splice must exist or no row is changed.
+     */
     fun assignPendingSpliceTxid(
         txid: String,
         paymentRowId: Long? = null,
-        nowEpochSecs: Long = System.currentTimeMillis() / 1000L
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L,
     ): Long? {
         val normalizedTxid = txid.trim()
         if (normalizedTxid.isEmpty()) return null
 
         return try {
             writableDatabase.transaction {
-                val existing = queryIds(
-                    "SELECT id FROM payments WHERE txid = ? AND payment_type IN ('splice_in','splice_out') AND status = 'pending' LIMIT 2",
-                    arrayOf(normalizedTxid)
-                )
+                val existing =
+                    queryIds(
+                        "SELECT id FROM payments WHERE txid = ? AND payment_type IN ('splice_in','splice_out') AND status = 'pending' LIMIT 2",
+                        arrayOf(normalizedTxid),
+                    )
                 if (existing.isNotEmpty()) {
-                    return@transaction existing.singleOrNull()
-                        ?.takeIf { paymentRowId == null || it == paymentRowId }
+                    return@transaction existing.singleOrNull()?.takeIf {
+                        paymentRowId == null || it == paymentRowId
+                    }
                 }
 
                 // Resolve the splice candidate before touching any conflicting row: if this txid
                 // can't be assigned to a single, unambiguous, non-expired splice, nothing here
                 // may mutate the DB — a conflicting row found below must survive intact.
                 val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
-                val candidateId = recentPendingSpliceIds(paymentRowId, cutoff).singleOrNull()
-                    ?: return@transaction null
+                val candidateId =
+                    recentPendingSpliceIds(paymentRowId, cutoff).singleOrNull()
+                        ?: return@transaction null
 
-                val txidInUse = rawQuery(
-                    "SELECT id, payment_type, direction FROM payments WHERE txid = ? LIMIT 1",
-                    arrayOf(normalizedTxid)
-                ).use { c ->
-                    if (c.moveToFirst()) Triple(c.getLong(0), c.getString(1), c.getString(2)) else null
-                }
+                val txidInUse =
+                    rawQuery(
+                            "SELECT id, payment_type, direction FROM payments WHERE txid = ? LIMIT 1",
+                            arrayOf(normalizedTxid),
+                        )
+                        .use { c ->
+                            if (c.moveToFirst())
+                                Triple(c.getLong(0), c.getString(1), c.getString(2))
+                            else null
+                        }
                 if (txidInUse != null) {
                     val (conflictingId, conflictingType, conflictingDirection) = txidInUse
                     // Callers always pass the splice's own observed txid, so a collision here
@@ -2195,15 +2761,17 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 }
 
                 val values = ContentValues().apply { put("txid", normalizedTxid) }
-                val updated = update(
-                    "payments",
-                    values,
-                    """
-                    id = ? AND status = 'pending' AND txid IS NULL
-                      AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)
-                    """.trimIndent(),
-                    arrayOf(candidateId.toString(), normalizedTxid, candidateId.toString())
-                )
+                val updated =
+                    update(
+                        "payments",
+                        values,
+                        """
+                        id = ? AND status = 'pending' AND txid IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM payments WHERE txid = ? AND id != ?)
+                        """
+                            .trimIndent(),
+                        arrayOf(candidateId.toString(), normalizedTxid, candidateId.toString()),
+                    )
                 // If the update didn't land, roll back so a just-deleted conflicting row isn't
                 // lost for an assignment that ultimately failed.
                 if (updated == 1) candidateId else throw SpliceTxidAssignmentAbortedException
@@ -2216,7 +2784,7 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     /** Marks one pre-negotiation splice failed. Failed rows are terminal. */
     fun failPendingSplice(
         paymentRowId: Long? = null,
-        nowEpochSecs: Long = System.currentTimeMillis() / 1000L
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L,
     ): Boolean {
         return writableDatabase.transaction {
             val cutoff = nowEpochSecs - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
@@ -2227,20 +2795,24 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
                 "payments",
                 values,
                 "id = ? AND status = 'pending' AND txid IS NULL",
-                arrayOf(candidateId.toString())
+                arrayOf(candidateId.toString()),
             ) == 1
         }
     }
 
-    /** Marks the negotiated splice carrying this exact txid failed once esplora proved it was never broadcast. */
+    /**
+     * Marks the negotiated splice carrying this exact txid failed once esplora proved it was never
+     * broadcast.
+     */
     fun failNegotiatedSplice(txid: String, paymentRowId: Long?): Boolean {
         val values = ContentValues().apply { put("status", "failed") }
         val rowClause = if (paymentRowId == null) "" else " AND id = ?"
         val args = listOfNotNull(txid, paymentRowId?.toString()).toTypedArray()
         return writableDatabase.update(
-            "payments", values,
+            "payments",
+            values,
             "txid = ? AND status = 'pending' AND payment_type IN ('splice_in','splice_out')$rowClause",
-            args
+            args,
         ) == 1
     }
 
@@ -2248,42 +2820,65 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     fun hasPendingSpliceFor(txid: String): Boolean = getSplice(txid)?.status == "pending"
 
     fun getSplice(txid: String): PaymentRecord? {
-        val ids = readableDatabase.queryIds(
-            "SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid = ? LIMIT 2",
-            arrayOf(txid)
-        )
+        val ids =
+            readableDatabase.queryIds(
+                "SELECT id FROM payments WHERE payment_type IN ('splice_in','splice_out') AND txid = ? LIMIT 2",
+                arrayOf(txid),
+            )
         val rowId = ids.singleOrNull() ?: return null
         return getPaymentByRowId(rowId)
     }
 
-    private fun getPaymentByRowId(rowId: Long): PaymentRecord? = readableDatabase.rawQuery(
-        "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE id = ?",
-        arrayOf(rowId.toString())
-    ).use { c ->
-        if (!c.moveToFirst()) null else PaymentRecord(
-            id = c.getLong(0), paymentId = c.getStringOrNull(1), paymentType = c.getString(2),
-            direction = c.getString(3), amountMsat = c.getLong(4), amountUSD = c.getDoubleOrNull(5),
-            btcPrice = c.getDoubleOrNull(6), counterparty = c.getStringOrNull(7), status = c.getString(8),
-            createdAt = c.getLong(9), feeMsat = c.getLong(10), txid = c.getStringOrNull(11),
-            address = c.getStringOrNull(12), confirmations = c.getInt(13)
-        )
-    }
+    private fun getPaymentByRowId(rowId: Long): PaymentRecord? =
+        readableDatabase
+            .rawQuery(
+                "SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations FROM payments WHERE id = ?",
+                arrayOf(rowId.toString()),
+            )
+            .use { c ->
+                if (!c.moveToFirst()) null
+                else
+                    PaymentRecord(
+                        id = c.getLong(0),
+                        paymentId = c.getStringOrNull(1),
+                        paymentType = c.getString(2),
+                        direction = c.getString(3),
+                        amountMsat = c.getLong(4),
+                        amountUSD = c.getDoubleOrNull(5),
+                        btcPrice = c.getDoubleOrNull(6),
+                        counterparty = c.getStringOrNull(7),
+                        status = c.getString(8),
+                        createdAt = c.getLong(9),
+                        feeMsat = c.getLong(10),
+                        txid = c.getStringOrNull(11),
+                        address = c.getStringOrNull(12),
+                        confirmations = c.getInt(13),
+                    )
+            }
 
     fun completeSplice(txid: String): Boolean = writableDatabase.transaction {
         val row = getSplice(txid)?.takeIf { it.status == "pending" } ?: return@transaction false
-        update("payments", ContentValues().apply {
-            put("status", "completed")
-            put("confirmations", 1)
-        }, "id = ? AND txid = ? AND status = 'pending'", arrayOf(row.id.toString(), txid)) == 1
+        update(
+            "payments",
+            ContentValues().apply {
+                put("status", "completed")
+                put("confirmations", 1)
+            },
+            "id = ? AND txid = ? AND status = 'pending'",
+            arrayOf(row.id.toString(), txid),
+        ) == 1
     }
 
     fun getPendingSpliceTxid(): String? {
-        val txids = readableDatabase.rawQuery(
-            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL LIMIT 2",
-            null
-        ).use { cursor ->
-            buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
-        }
+        val txids =
+            readableDatabase
+                .rawQuery(
+                    "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NOT NULL LIMIT 2",
+                    null,
+                )
+                .use { cursor ->
+                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                }
         return txids.singleOrNull()
     }
 
@@ -2293,16 +2888,19 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         // Keep with-txid rows pending: confirmation can outlive the app process,
         // and the splice confirmation monitor completes them after 1 conf.
         SpliceEventRecorder.recoverAssignments(this)
-        val noTxidCutoff = System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
-        // Only an event whose txid can still be assigned proves negotiation; if assignment keeps refusing the txid, that operation must still expire.
+        val noTxidCutoff =
+            System.currentTimeMillis() / 1000 - PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS
+        // Only an event whose txid can still be assigned proves negotiation; if assignment keeps
+        // refusing the txid, that operation must still expire.
         writableDatabase.execSQL(
             "UPDATE payments SET status = 'failed' WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND txid IS NULL AND created_at < ? AND NOT EXISTS (SELECT 1 FROM splice_events e WHERE e.payment_row_id = payments.id AND e.txid IS NOT NULL AND NOT EXISTS (SELECT 1 FROM payments o WHERE o.txid = e.txid AND o.id != payments.id))",
-            arrayOf(noTxidCutoff)
+            arrayOf(noTxidCutoff),
         )
-        val cursor = readableDatabase.rawQuery(
-            "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') LIMIT 1",
-            null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') LIMIT 1",
+                null,
+            )
         return cursor.use { it.moveToFirst() }
     }
 
@@ -2315,44 +2913,56 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     fun recordPrice(price: Double, source: String?) {
-        val cv = ContentValues().apply {
-            put("price", price)
-            put("source", source)
-        }
+        val cv =
+            ContentValues().apply {
+                put("price", price)
+                put("source", source)
+            }
         writableDatabase.insert("price_history", null, cv)
     }
 
     fun getPriceHistory(hours: Int = 24): List<PriceRecord> {
         val cutoff = System.currentTimeMillis() / 1000 - hours * 3600
-        val cursor = readableDatabase.rawQuery(
-            "SELECT id, price, source, timestamp FROM price_history WHERE timestamp >= ? ORDER BY timestamp ASC",
-            arrayOf(cutoff.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT id, price, source, timestamp FROM price_history WHERE timestamp >= ? ORDER BY timestamp ASC",
+                arrayOf(cutoff.toString()),
+            )
         return cursor.use { c ->
             val list = mutableListOf<PriceRecord>()
             while (c.moveToNext()) {
-                list.add(PriceRecord(
-                    id = c.getLong(0), price = c.getDouble(1),
-                    source = c.getStringOrNull(2), timestamp = c.getLong(3)
-                ))
+                list.add(
+                    PriceRecord(
+                        id = c.getLong(0),
+                        price = c.getDouble(1),
+                        source = c.getStringOrNull(2),
+                        timestamp = c.getLong(3),
+                    )
+                )
             }
             list
         }
     }
 
     fun getDailyPrices(days: Int = 365): List<DailyPriceRecord> {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT date, open, high, low, close, volume FROM daily_prices ORDER BY date DESC LIMIT ?",
-            arrayOf(days.toString())
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT date, open, high, low, close, volume FROM daily_prices ORDER BY date DESC LIMIT ?",
+                arrayOf(days.toString()),
+            )
         return cursor.use { c ->
             val list = mutableListOf<DailyPriceRecord>()
             while (c.moveToNext()) {
-                list.add(DailyPriceRecord(
-                    date = c.getString(0), open = c.getDouble(1), high = c.getDouble(2),
-                    low = c.getDouble(3), close = c.getDouble(4),
-                    volume = c.getDoubleOrNull(5)
-                ))
+                list.add(
+                    DailyPriceRecord(
+                        date = c.getString(0),
+                        open = c.getDouble(1),
+                        high = c.getDouble(2),
+                        low = c.getDouble(3),
+                        close = c.getDouble(4),
+                        volume = c.getDoubleOrNull(5),
+                    )
+                )
             }
             list
         }
@@ -2367,9 +2977,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 
         db.beginTransaction()
         try {
-            val stmt = db.compileStatement(
-                "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, source) VALUES (?, ?, ?, ?, ?, 'seed')"
-            )
+            val stmt =
+                db.compileStatement(
+                    "INSERT OR IGNORE INTO daily_prices (date, open, high, low, close, source) VALUES (?, ?, ?, ?, ?, 'seed')"
+                )
             for (p in HistoricalPrices.seedPrices) {
                 stmt.clearBindings()
                 stmt.bindString(1, p.date)
@@ -2386,16 +2997,20 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
     }
 
     fun getOldestPriceHistoryTimestamp(): Long? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT MIN(timestamp) FROM price_history", null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT MIN(timestamp) FROM price_history",
+                null,
+            )
         return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
     }
 
     fun getLatestPriceHistoryTimestamp(): Long? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT MAX(timestamp) FROM price_history", null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT MAX(timestamp) FROM price_history",
+                null,
+            )
         return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null }
     }
 
@@ -2405,12 +3020,14 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         var count = 0
         db.beginTransaction()
         try {
-            val checkStmt = db.compileStatement(
-                "SELECT COUNT(*) FROM price_history WHERE timestamp BETWEEN ? AND ?"
-            )
-            val insertStmt = db.compileStatement(
-                "INSERT OR IGNORE INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)"
-            )
+            val checkStmt =
+                db.compileStatement(
+                    "SELECT COUNT(*) FROM price_history WHERE timestamp BETWEEN ? AND ?"
+                )
+            val insertStmt =
+                db.compileStatement(
+                    "INSERT OR IGNORE INTO price_history (price, source, timestamp) VALUES (?, 'kraken_ohlc', ?)"
+                )
             for ((ts, price) in candles) {
                 checkStmt.clearBindings()
                 checkStmt.bindLong(1, ts - 1800)
@@ -2433,23 +3050,39 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         return count
     }
 
-    fun recordDailyPrice(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?, source: String?) {
-        val cv = ContentValues().apply {
-            put("date", date)
-            put("open", open)
-            put("high", high)
-            put("low", low)
-            put("close", close)
-            put("volume", volume)
-            put("source", source)
-        }
-        writableDatabase.insertWithOnConflict("daily_prices", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
+    fun recordDailyPrice(
+        date: String,
+        open: Double,
+        high: Double,
+        low: Double,
+        close: Double,
+        volume: Double?,
+        source: String?,
+    ) {
+        val cv =
+            ContentValues().apply {
+                put("date", date)
+                put("open", open)
+                put("high", high)
+                put("low", low)
+                put("close", close)
+                put("volume", volume)
+                put("source", source)
+            }
+        writableDatabase.insertWithOnConflict(
+            "daily_prices",
+            null,
+            cv,
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
     }
 
     fun getLatestDailyPriceDate(): String? {
-        val cursor = readableDatabase.rawQuery(
-            "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1", null
-        )
+        val cursor =
+            readableDatabase.rawQuery(
+                "SELECT date FROM daily_prices ORDER BY date DESC LIMIT 1",
+                null,
+            )
         return cursor.use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
     }
 
@@ -2460,9 +3093,10 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
         db.beginTransaction()
         try {
             val checkStmt = db.compileStatement("SELECT COUNT(*) FROM daily_prices WHERE date = ?")
-            val stmt = db.compileStatement(
-                "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')"
-            )
+            val stmt =
+                db.compileStatement(
+                    "INSERT OR REPLACE INTO daily_prices (date, open, high, low, close, volume, source) VALUES (?, ?, ?, ?, ?, ?, 'kraken_ohlc')"
+                )
             for (p in prices) {
                 checkStmt.clearBindings()
                 checkStmt.bindString(1, p.date)
@@ -2492,5 +3126,8 @@ class DatabaseService(context: Context) : SQLiteOpenHelper(
 }
 
 // Cursor extension helpers
-private fun Cursor.getStringOrNull(index: Int): String? = if (isNull(index)) null else getString(index)
-private fun Cursor.getDoubleOrNull(index: Int): Double? = if (isNull(index)) null else getDouble(index)
+private fun Cursor.getStringOrNull(index: Int): String? =
+    if (isNull(index)) null else getString(index)
+
+private fun Cursor.getDoubleOrNull(index: Int): Double? =
+    if (isNull(index)) null else getDouble(index)

@@ -18,7 +18,7 @@ class StabilityServiceTest {
 
     @Test
     fun `returns STABLE when no expected USD set`() {
-        val sc = StableChannel()  // expectedUSD defaults to 0
+        val sc = StableChannel() // expectedUSD defaults to 0
         val result = StabilityService.checkStabilityAction(sc, price = 85_000.0)
         assertEquals(StabilityAction.STABLE, result.action)
     }
@@ -34,11 +34,12 @@ class StabilityServiceTest {
     fun `returns STABLE when within 10 cent threshold`() {
         // $100 target, backing sats = 100/85000 * 1e8 = 117_647 sats
         val backingSats = (100.0 / 85_000.0 * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = backingSats,
-            isStableReceiver = true
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = backingSats,
+                isStableReceiver = true,
+            )
         val result = StabilityService.checkStabilityAction(sc, price = 85_000.0)
         assertEquals(StabilityAction.STABLE, result.action)
         assertEquals(0.0, result.percentFromPar, 0.01)
@@ -49,11 +50,12 @@ class StabilityServiceTest {
         // $100 target. If price rises to 90_000, backing sats are worth MORE.
         // Receiver (provider side here) owes sats back.
         val backingSats = (100.0 / 85_000.0 * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = backingSats,
-            isStableReceiver = false   // provider pays when price rises
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = backingSats,
+                isStableReceiver = false, // provider pays when price rises
+            )
         val result = StabilityService.checkStabilityAction(sc, price = 90_000.0)
         assertEquals(StabilityAction.PAY, result.action)
         assertTrue(result.dollarsFromPar > 0)
@@ -63,11 +65,12 @@ class StabilityServiceTest {
     fun `returns CHECK_ONLY when receiver is below peg`() {
         // Price dropped — receiver's backing sats worth LESS than target
         val backingSats = (100.0 / 85_000.0 * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = backingSats,
-            isStableReceiver = true
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = backingSats,
+                isStableReceiver = true,
+            )
         // Price drops to 80_000 — backing_sats now worth only ~$94
         val result = StabilityService.checkStabilityAction(sc, price = 80_000.0)
         // Receiver checks only — provider should pay, not receiver
@@ -77,12 +80,13 @@ class StabilityServiceTest {
     @Test
     fun `returns HIGH_RISK_NO_ACTION when riskLevel exceeds max`() {
         val backingSats = (100.0 / 85_000.0 * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = backingSats,
-            riskLevel = 101,           // exceeds MAX_RISK_LEVEL = 100
-            isStableReceiver = false
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = backingSats,
+                riskLevel = 101, // exceeds MAX_RISK_LEVEL = 100
+                isStableReceiver = false,
+            )
         val result = StabilityService.checkStabilityAction(sc, price = 90_000.0)
         assertEquals(StabilityAction.HIGH_RISK_NO_ACTION, result.action)
     }
@@ -91,12 +95,13 @@ class StabilityServiceTest {
     fun `percentFromPar is calculated correctly`() {
         // Target: $100. Backing sats worth $110 at new price.
         val backingSats = (100.0 / 85_000.0 * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = backingSats,
-            isStableReceiver = false
-        )
-        val newPrice = 85_000.0 * 1.10  // 10% price increase → backing worth $110
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = backingSats,
+                isStableReceiver = false,
+            )
+        val newPrice = 85_000.0 * 1.10 // 10% price increase → backing worth $110
         val result = StabilityService.checkStabilityAction(sc, price = newPrice)
         assertEquals(10.0, result.percentFromPar, 0.5)
     }
@@ -133,7 +138,7 @@ class StabilityServiceTest {
 
     @Test
     fun `reconcileOutgoing returns unchanged when no stable position`() {
-        val sc = StableChannel()  // expectedUSD = 0
+        val sc = StableChannel() // expectedUSD = 0
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price = 85_000.0)
         assertEquals(null, deducted)
         assertEquals(0.0, updated.expectedUSD.amount, 0.0)
@@ -143,11 +148,12 @@ class StabilityServiceTest {
     fun `reconcileOutgoing deducts overflow sats from expectedUSD`() {
         val price = 85_000.0
         val expectedSats = (100.0 / price * 100_000_000).toLong()
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = expectedSats + 50_000L,   // 50k extra sats
-            stableReceiverBTC = Bitcoin(expectedSats)
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = expectedSats + 50_000L, // 50k extra sats
+                stableReceiverBTC = Bitcoin(expectedSats),
+            )
         val (_, deducted) = StabilityService.reconcileOutgoing(sc, price)
         val expectedDeduction = 50_000.0 / 100_000_000.0 * price
         assertEquals(expectedDeduction, deducted!!, 0.01)
@@ -160,16 +166,17 @@ class StabilityServiceTest {
         // balance whenever the position was below par — so a second call deducted again
         // ($100 -> $92 -> $82) and the phantom backing hid a real below-par claim.
         val price = 100_000.0
-        val sc = StableChannel(
-            expectedUSD = USD(100.0),
-            backingSats = 90_000L,                      // below par: worth $90, target $100
-            stableReceiverBTC = Bitcoin(82_000L)        // an 8,000 sat withdrawal just landed
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(100.0),
+                backingSats = 90_000L, // below par: worth $90, target $100
+                stableReceiverBTC = Bitcoin(82_000L), // an 8,000 sat withdrawal just landed
+            )
 
         val (first, deducted) = StabilityService.reconcileOutgoing(sc, price)
         assertEquals(8.0, deducted!!, 0.0001)
         assertEquals(92.0, first.expectedUSD.amount, 0.0001)
-        assertEquals(82_000L, first.backingSats)        // == live balance, not 92,000
+        assertEquals(82_000L, first.backingSats) // == live balance, not 92,000
 
         val (second, deductedAgain) = StabilityService.reconcileOutgoing(first, price)
         assertEquals(null, deductedAgain)
@@ -181,11 +188,12 @@ class StabilityServiceTest {
     fun `reconcileOutgoing preserves unpaid surplus when the spend exhausts the target`() {
         // Even an already-completed overspend must preserve the surplus still in the channel.
         val price = 100_000.0
-        val sc = StableChannel(
-            expectedUSD = USD(10.0),
-            backingSats = 20_000L,
-            stableReceiverBTC = Bitcoin(5_000L)   // a $15 overflow against a $10 target
-        )
+        val sc =
+            StableChannel(
+                expectedUSD = USD(10.0),
+                backingSats = 20_000L,
+                stableReceiverBTC = Bitcoin(5_000L), // a $15 overflow against a $10 target
+            )
 
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
         assertEquals(15.0, deducted!!, 0.0001)
@@ -196,28 +204,51 @@ class StabilityServiceTest {
 
     @Test
     fun `zero and sub-cent claims still settle above-threshold surplus`() {
-        for ((expected, backing, price) in listOf(
-            Triple(0.0, 1_000L, 100_000.0), Triple(0.00085, 477L, 105_000.0)
-        )) {
-            val sc = StableChannel(expectedUSD = USD(expected), backingSats = backing,
-                stableReceiverBTC = Bitcoin(backing))
-            assertEquals(StabilityAction.PAY, StabilityService.checkStabilityAction(sc, price).action)
-            assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure)
+        for ((expected, backing, price) in
+            listOf(
+                Triple(0.0, 1_000L, 100_000.0),
+                Triple(0.00085, 477L, 105_000.0),
+            )) {
+            val sc =
+                StableChannel(
+                    expectedUSD = USD(expected),
+                    backingSats = backing,
+                    stableReceiverBTC = Bitcoin(backing),
+                )
+            assertEquals(
+                StabilityAction.PAY,
+                StabilityService.checkStabilityAction(sc, price).action,
+            )
+            assertTrue(
+                runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure
+            )
         }
         for (backing in listOf(0L, 249L, 250L)) {
-            val sc = StableChannel(expectedUSD = USD(0.0), backingSats = backing,
-                stableReceiverBTC = Bitcoin(backing))
-            assertEquals(if (backing < 250L) StabilityAction.STABLE else StabilityAction.PAY,
-                StabilityService.checkStabilityAction(sc, 100_000.0).action)
+            val sc =
+                StableChannel(
+                    expectedUSD = USD(0.0),
+                    backingSats = backing,
+                    stableReceiverBTC = Bitcoin(backing),
+                )
+            assertEquals(
+                if (backing < 250L) StabilityAction.STABLE else StabilityAction.PAY,
+                StabilityService.checkStabilityAction(sc, 100_000.0).action,
+            )
         }
     }
 
     @Test
     fun `spends reaching backing require payable surplus to settle and a fresh price`() {
-        val sc = StableChannel(expectedUSD = USD(10.0), backingSats = 10_000,
-            stableReceiverBTC = Bitcoin(100_000))
+        val sc =
+            StableChannel(
+                expectedUSD = USD(10.0),
+                backingSats = 10_000,
+                stableReceiverBTC = Bitcoin(100_000),
+            )
         for (price in listOf(110_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
-            assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure)
+            assertTrue(
+                runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure
+            )
         }
         StabilityService.checkOutgoingAllocation(sc, 90_000.0) // LSP owes the shortfall
         StabilityService.checkOutgoingAllocation(sc, 100_000.0)
@@ -227,21 +258,37 @@ class StabilityServiceTest {
 
     @Test
     fun `native amount including fees is allowed even with surplus or no trusted price`() {
-        val sc = StableChannel(expectedUSD = USD(10.0), backingSats = 10_000,
-            stableReceiverBTC = Bitcoin(100_000))
+        val sc =
+            StableChannel(
+                expectedUSD = USD(10.0),
+                backingSats = 10_000,
+                stableReceiverBTC = Bitcoin(100_000),
+            )
         for (price in listOf(110_000.0, 90_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
             StabilityService.checkOutgoingAllocation(sc, price, 90_000L)
         }
-        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) }.isFailure)
-        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) }.isFailure)
+        assertTrue(
+            runCatching { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) }
+                .isFailure
+        )
+        assertTrue(
+            runCatching { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) }.isFailure
+        )
     }
 
     @Test
     fun `zero target surplus is protected but native sats remain spendable`() {
-        val sc = StableChannel(expectedUSD = USD(0.0), backingSats = 1_000,
-            stableReceiverBTC = Bitcoin(3_000))
+        val sc =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 1_000,
+                stableReceiverBTC = Bitcoin(3_000),
+            )
         StabilityService.checkOutgoingAllocation(sc, 0.0, 2_000L)
-        assertTrue(runCatching { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) }.isFailure)
+        assertTrue(
+            runCatching { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) }
+                .isFailure
+        )
     }
 
     // ---------------------------------------------------------------------------

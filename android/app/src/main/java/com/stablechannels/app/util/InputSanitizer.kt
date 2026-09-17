@@ -2,8 +2,8 @@ package com.stablechannels.app.util
 
 object InputSanitizer {
     /**
-     * Keeps digits + at most one dot, trims excess decimals, strips leading zeros, prepends zero to leading dot.
-     * "00012.3a." with maxDecimals: 2 -> "12.3", "." -> "0.", ".5" -> "0.5", "" -> "".
+     * Keeps digits + at most one dot, trims excess decimals, strips leading zeros, prepends zero to
+     * leading dot. "00012.3a." with maxDecimals: 2 -> "12.3", "." -> "0.", ".5" -> "0.5", "" -> "".
      */
     fun decimal(raw: String, maxDecimals: Int = 2): String {
         var start = 0

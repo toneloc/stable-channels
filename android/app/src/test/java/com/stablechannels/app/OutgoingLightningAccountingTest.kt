@@ -7,6 +7,10 @@ import com.stablechannels.app.services.LightningPaymentResolution
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.util.Constants
+import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -15,10 +19,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -30,7 +30,9 @@ class OutgoingLightningAccountingTest {
     @Before
     fun setUp() {
         context = RuntimeEnvironment.getApplication()
-        context.deleteDatabase(File(Constants.userDataDir(context), "stablechannels.db").absolutePath)
+        context.deleteDatabase(
+            File(Constants.userDataDir(context), "stablechannels.db").absolutePath
+        )
         db = DatabaseService(context)
         db.saveChannel("channel", "7", 100.0, 100_000L, null, 110_000L, price)
     }
@@ -38,19 +40,29 @@ class OutgoingLightningAccountingTest {
     @After
     fun tearDown() {
         db.close()
-        context.deleteDatabase(File(Constants.userDataDir(context), "stablechannels.db").absolutePath)
+        context.deleteDatabase(
+            File(Constants.userDataDir(context), "stablechannels.db").absolutePath
+        )
     }
 
-    private fun nodeService() = NodeService(context).also { service ->
-        service.channelSpendGuard = { _, _ -> check(!db.hasPendingChannelSend()) }
-        service.channelPaymentRecorder = { id, type, amount, _ ->
-            db.recordPendingLightningPayment(id, type, amount, price)
+    private fun nodeService() =
+        NodeService(context).also { service ->
+            service.channelSpendGuard = { _, _ -> check(!db.hasPendingChannelSend()) }
+            service.channelPaymentRecorder = { id, type, amount, _ ->
+                db.recordPendingLightningPayment(id, type, amount, price)
+            }
         }
-    }
 
-    private fun reconcile(id: String, liveSats: Long) = db.reconcileOutgoingBacking(
-        "channel", "7", null, liveSats, price, price, paymentId = id
-    )
+    private fun reconcile(id: String, liveSats: Long) =
+        db.reconcileOutgoingBacking(
+            "channel",
+            "7",
+            null,
+            liveSats,
+            price,
+            price,
+            paymentId = id,
+        )
 
     @Test
     fun bolt11SuccessMustBeAccountedBeforeAnotherSendAndLateReplayCannotChargeFailedSend() {
@@ -135,10 +147,12 @@ class OutgoingLightningAccountingTest {
     fun accountingFailureRollsBackBothBalanceAndCompletionMarker() {
         db.recordPendingLightningPayment("first", "lightning", 15_000_000L, price)
         LightningPaymentRecovery.recordSuccess(db, "first", 0L)
-        db.writableDatabase.execSQL("""
+        db.writableDatabase.execSQL(
+            """
             CREATE TRIGGER fail_accounting BEFORE UPDATE OF completed ON outgoing_lightning_accounting
             WHEN NEW.completed = 1 BEGIN SELECT RAISE(ABORT, 'injected accounting failure'); END
-        """)
+        """
+        )
         assertThrows(Exception::class.java) { reconcile("first", 95_000L) }
         assertEquals(100.0, db.loadChannel("7")!!.expectedUSD, 0.0)
         assertEquals(100_000L, db.loadChannel("7")!!.backingSats)
@@ -180,7 +194,9 @@ class OutgoingLightningAccountingTest {
         db.recordPayment("lost", "lightning", "sent", 5_000_000L, status = "pending")
         assertEquals(0, LightningPaymentRecovery.reconcilePending(db, { true }) { null })
         assertTrue(db.hasPendingChannelSend())
-        db.writableDatabase.execSQL("UPDATE payments SET created_at = created_at - ${LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS + 1} WHERE payment_id = 'lost'")
+        db.writableDatabase.execSQL(
+            "UPDATE payments SET created_at = created_at - ${LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS + 1} WHERE payment_id = 'lost'"
+        )
         assertEquals(0, LightningPaymentRecovery.reconcilePending(db, { false }) { null })
         assertTrue(db.hasPendingChannelSend())
         assertEquals(1, LightningPaymentRecovery.reconcilePending(db, { true }) { null })
@@ -203,19 +219,21 @@ class OutgoingLightningAccountingTest {
             db.updatePaymentStatus(id, "completed")
         }
         try {
-            val first = executor.submit<String> {
-                node.sendTrackedLightningPayment("lightning", 5_000_000L, price) { "first" }
-            }
-            assertTrue(recording.await(5, TimeUnit.SECONDS))
-            val second = executor.submit<Boolean> {
-                secondStarted.countDown()
-                try {
-                    node.sendTrackedLightningPayment("bolt12", 10_000_000L, price) { "second" }
-                    false
-                } catch (_: IllegalStateException) {
-                    true
+            val first =
+                executor.submit<String> {
+                    node.sendTrackedLightningPayment("lightning", 5_000_000L, price) { "first" }
                 }
-            }
+            assertTrue(recording.await(5, TimeUnit.SECONDS))
+            val second =
+                executor.submit<Boolean> {
+                    secondStarted.countDown()
+                    try {
+                        node.sendTrackedLightningPayment("bolt12", 10_000_000L, price) { "second" }
+                        false
+                    } catch (_: IllegalStateException) {
+                        true
+                    }
+                }
             assertTrue(secondStarted.await(5, TimeUnit.SECONDS))
             release.countDown()
             assertEquals("first", first.get(5, TimeUnit.SECONDS))

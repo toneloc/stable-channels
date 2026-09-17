@@ -3,6 +3,10 @@ package com.stablechannels.app.services
 import android.content.Context
 import android.util.Log
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.StabilityFreshness
+import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -14,11 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import com.stablechannels.app.util.LspPreferencesManager
-import com.stablechannels.app.util.QRCodeUtils
-import com.stablechannels.app.util.StabilityFreshness
 import org.lightningdevkit.ldknode.*
-import java.io.File
 
 class NodeService(private val context: Context) {
 
@@ -32,30 +32,43 @@ class NodeService(private val context: Context) {
         paymentType: String,
         amountMsat: Long,
         price: Double?,
-        send: () -> String
-    ): String = withSettledChannel(maximumDebitSats = maximumLightningDebitSats(amountMsat)) {
-        val record = channelPaymentRecorder
-            ?: throw IllegalStateException("Payment history is not ready. Please try again shortly.")
-        val paymentId = send()
-        record(paymentId, paymentType, amountMsat, price)
-        paymentId
-    }
+        send: () -> String,
+    ): String =
+        withSettledChannel(maximumDebitSats = maximumLightningDebitSats(amountMsat)) {
+            val record =
+                channelPaymentRecorder
+                    ?: throw IllegalStateException(
+                        "Payment history is not ready. Please try again shortly."
+                    )
+            val paymentId = send()
+            record(paymentId, paymentType, amountMsat, price)
+            paymentId
+        }
 
-    private inline fun <T> withSettledChannel(isSplice: Boolean = false, maximumDebitSats: Long? = null, send: () -> T): T =
+    private inline fun <T> withSettledChannel(
+        isSplice: Boolean = false,
+        maximumDebitSats: Long? = null,
+        send: () -> T,
+    ): T =
         synchronized(channelOperationLock) {
-            val guard = channelSpendGuard
-                ?: throw IllegalStateException("Channel accounting is not ready. Please try again shortly.")
+            val guard =
+                channelSpendGuard
+                    ?: throw IllegalStateException(
+                        "Channel accounting is not ready. Please try again shortly."
+                    )
             guard(isSplice, maximumDebitSats)
             send()
         }
 
     // Same fee budget as LDK's default: 1% + 50 sats. Pass it explicitly to both
     // invoice APIs so the bound used for allocation admission is also enforced by routing.
-    internal fun routingParameters(amountMsat: Long): RouteParametersConfig = RouteParametersConfig(
-        maxTotalRoutingFeeMsat = lightningFeeLimitMsat(amountMsat).toULong(),
-        maxTotalCltvExpiryDelta = 1008u, maxPathCount = 10u,
-        maxChannelSaturationPowerOfHalf = 2u
-    )
+    internal fun routingParameters(amountMsat: Long): RouteParametersConfig =
+        RouteParametersConfig(
+            maxTotalRoutingFeeMsat = lightningFeeLimitMsat(amountMsat).toULong(),
+            maxTotalCltvExpiryDelta = 1008u,
+            maxPathCount = 10u,
+            maxChannelSaturationPowerOfHalf = 2u,
+        )
 
     internal fun maximumLightningDebitSats(amountMsat: Long): Long? {
         if (amountMsat <= 0L) return null // unknown offer amount: backing remains reachable
@@ -68,13 +81,18 @@ class NodeService(private val context: Context) {
 
     var node: Node? = null
         private set
+
     private val _isRunning = MutableStateFlow(false)
     val isRunningFlow: StateFlow<Boolean> = _isRunning.asStateFlow()
-    val isRunning: Boolean get() = _isRunning.value
+    val isRunning: Boolean
+        get() = _isRunning.value
+
     var nodeId: String = ""
         private set
+
     var channels: List<ChannelDetails> = emptyList()
         private set
+
     var savedMnemonic: String? = run {
         // Pre-load saved mnemonic from disk so it's available immediately
         val file = File(Constants.userDataDir(context), "seed_phrase")
@@ -88,11 +106,17 @@ class NodeService(private val context: Context) {
     // Each event is paired with a CompletableDeferred. The event loop awaits the deferred
     // before calling n.eventHandled(), ensuring ack happens after processing completes.
     // Boolean deferred: true = call n.eventHandled(); false = skip (LDK will retry this event).
-    private val _eventChannel = Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
+    private val _eventChannel =
+        Channel<Pair<Event, CompletableDeferred<Boolean>>>(Channel.RENDEZVOUS)
     val eventChannel: ReceiveChannel<Pair<Event, CompletableDeferred<Boolean>>> = _eventChannel
 
     @Synchronized
-    fun start(network: Network, esploraURL: String, mnemonic: String?, strictLspConnect: Boolean = false) {
+    fun start(
+        network: Network,
+        esploraURL: String,
+        mnemonic: String?,
+        strictLspConnect: Boolean = false,
+    ) {
         if (node != null || _isRunning.value) {
             throw AlreadyRunningException()
         }
@@ -108,76 +132,82 @@ class NodeService(private val context: Context) {
             val dataDir = Constants.userDataDir(context)
             val lspPubkey = LspPreferencesManager.getLspPubkey(context)
             val lspAddress = LspPreferencesManager.getLspAddress(context)
-            val anchorConfig = AnchorChannelsConfig(
-                trustedPeersNoReserve = listOf(lspPubkey),
-                perChannelReserveSats = 25_000UL
-            )
-
-            val config = Config(
-                storageDirPath = dataDir.absolutePath,
-                network = network,
-                listeningAddresses = null,
-                announcementAddresses = null,
-                nodeAlias = null,
-                trustedPeers0conf = listOf(lspPubkey),
-                probingLiquidityLimitMultiplier = 3UL,
-                anchorChannelsConfig = anchorConfig,
-                routeParameters = null,
-                torConfig = null,
-                hrnConfig = HumanReadableNamesConfig(
-                    HrnResolverConfig.Dns(
-                        dnsServerAddress = "8.8.8.8:53",
-                        enableHrnResolutionService = false
-                    )
+            val anchorConfig =
+                AnchorChannelsConfig(
+                    trustedPeersNoReserve = listOf(lspPubkey),
+                    perChannelReserveSats = 25_000UL,
                 )
-            )
+
+            val config =
+                Config(
+                    storageDirPath = dataDir.absolutePath,
+                    network = network,
+                    listeningAddresses = null,
+                    announcementAddresses = null,
+                    nodeAlias = null,
+                    trustedPeers0conf = listOf(lspPubkey),
+                    probingLiquidityLimitMultiplier = 3UL,
+                    anchorChannelsConfig = anchorConfig,
+                    routeParameters = null,
+                    torConfig = null,
+                    hrnConfig =
+                        HumanReadableNamesConfig(
+                            HrnResolverConfig.Dns(
+                                dnsServerAddress = "8.8.8.8:53",
+                                enableHrnResolutionService = false,
+                            )
+                        ),
+                )
 
             val builder = Builder.fromConfig(config)
             builder.setChainSourceEsplora(esploraURL, null)
 
-            val rgsUrl = when (network) {
-                Network.BITCOIN -> Constants.RGSServer.BITCOIN
-                Network.SIGNET -> Constants.RGSServer.SIGNET
-                Network.TESTNET -> Constants.RGSServer.TESTNET
-                else -> Constants.RGSServer.BITCOIN
-            }
+            val rgsUrl =
+                when (network) {
+                    Network.BITCOIN -> Constants.RGSServer.BITCOIN
+                    Network.SIGNET -> Constants.RGSServer.SIGNET
+                    Network.TESTNET -> Constants.RGSServer.TESTNET
+                    else -> Constants.RGSServer.BITCOIN
+                }
             builder.setGossipSourceRgs(rgsUrl)
 
             builder.setLiquiditySourceLsps2(
                 lspPubkey,
                 lspAddress,
-                null
+                null,
             )
 
             val seedPhrasePath = File(Constants.userDataDir(context), "seed_phrase")
             val keySeedPath = File(Constants.userDataDir(context), "keys_seed")
 
             // Determine which mnemonic to use
-            val words: String = if (mnemonic != null) {
-                // Restore — wipe ALL wallet data so new seed takes effect
-                wipeWalletData(context)
-                mnemonic.trim()
-            } else if (seedPhrasePath.exists()) {
-                // Existing wallet — re-read saved mnemonic
-                seedPhrasePath.readText().trim()
-            } else if (!keySeedPath.exists()) {
-                // Truly new wallet — no seed_phrase, no keys_seed
-                wipeWalletData(context)
-                generateEntropyMnemonic(null)
-            } else {
-                // Pre-upgrade wallet with only keys_seed, no mnemonic available
-                ""
-            }
+            val words: String =
+                if (mnemonic != null) {
+                    // Restore — wipe ALL wallet data so new seed takes effect
+                    wipeWalletData(context)
+                    mnemonic.trim()
+                } else if (seedPhrasePath.exists()) {
+                    // Existing wallet — re-read saved mnemonic
+                    seedPhrasePath.readText().trim()
+                } else if (!keySeedPath.exists()) {
+                    // Truly new wallet — no seed_phrase, no keys_seed
+                    wipeWalletData(context)
+                    generateEntropyMnemonic(null)
+                } else {
+                    // Pre-upgrade wallet with only keys_seed, no mnemonic available
+                    ""
+                }
 
             // Save mnemonic to file and derive node entropy (entropy now passed to build()).
-            val nodeEntropy = if (words.isNotEmpty()) {
-                seedPhrasePath.writeText(words)
-                savedMnemonic = words
-                NodeEntropy.fromBip39Mnemonic(words, null)
-            } else {
-                // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
-                NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
-            }
+            val nodeEntropy =
+                if (words.isNotEmpty()) {
+                    seedPhrasePath.writeText(words)
+                    savedMnemonic = words
+                    NodeEntropy.fromBip39Mnemonic(words, null)
+                } else {
+                    // Pre-upgrade wallet with only keys_seed: derive entropy from that seed file.
+                    NodeEntropy.fromSeedPath(keySeedPath.absolutePath)
+                }
 
             val startedNode = builder.build(nodeEntropy)
             ldkNode = startedNode
@@ -207,7 +237,10 @@ class NodeService(private val context: Context) {
             try {
                 ldkNode?.stop()
             } catch (stopError: Exception) {
-                Log.w("NodeService", "Failed to stop node after start failure: ${stopError.message}")
+                Log.w(
+                    "NodeService",
+                    "Failed to stop node after start failure: ${stopError.message}",
+                )
             }
             node = null
             _isRunning.value = false
@@ -239,7 +272,7 @@ class NodeService(private val context: Context) {
             while (true) {
                 val event = n.nextEventAsync()
                 val ack = CompletableDeferred<Boolean>()
-                _eventChannel.send(Pair(event, ack))  // suspends until AppState receives
+                _eventChannel.send(Pair(event, ack)) // suspends until AppState receives
                 if (ack.await()) {
                     n.eventHandled()
                     retryDelayMs = 1_000L
@@ -273,21 +306,42 @@ class NodeService(private val context: Context) {
 
     // LDK does not expose a total splice fee cap. Until it does, the maximum debit is
     // unknown: even a native-sized output can reach backing through the negotiated fee.
-    fun spliceOut(userChannelId: String, counterpartyNodeId: String, address: String, amountSats: Long) = withSettledChannel(isSplice = true) {
-        val n = node ?: throw NodeServiceError()
-        n.spliceOut(userChannelId, counterpartyNodeId, QRCodeUtils.normalizeAddress(address), amountSats.toULong())
-    }
-
-    fun sendPayment(invoice: Bolt11Invoice, price: Double? = null): String =
-        sendTrackedLightningPayment("lightning", invoice.amountMilliSatoshis()?.toLong() ?: 0L, price) {
+    fun spliceOut(
+        userChannelId: String,
+        counterpartyNodeId: String,
+        address: String,
+        amountSats: Long,
+    ) =
+        withSettledChannel(isSplice = true) {
             val n = node ?: throw NodeServiceError()
-            n.bolt11Payment().send(invoice, routingParameters(invoice.amountMilliSatoshis()?.toLong() ?: 0L))
+            n.spliceOut(
+                userChannelId,
+                counterpartyNodeId,
+                QRCodeUtils.normalizeAddress(address),
+                amountSats.toULong(),
+            )
         }
 
-    fun sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: Long, price: Double? = null): String =
+    fun sendPayment(invoice: Bolt11Invoice, price: Double? = null): String =
+        sendTrackedLightningPayment(
+            "lightning",
+            invoice.amountMilliSatoshis()?.toLong() ?: 0L,
+            price,
+        ) {
+            val n = node ?: throw NodeServiceError()
+            n.bolt11Payment()
+                .send(invoice, routingParameters(invoice.amountMilliSatoshis()?.toLong() ?: 0L))
+        }
+
+    fun sendPaymentUsingAmount(
+        invoice: Bolt11Invoice,
+        amountMsat: Long,
+        price: Double? = null,
+    ): String =
         sendTrackedLightningPayment("lightning", amountMsat, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt11Payment().sendUsingAmount(invoice, amountMsat.toULong(), routingParameters(amountMsat))
+            n.bolt11Payment()
+                .sendUsingAmount(invoice, amountMsat.toULong(), routingParameters(amountMsat))
         }
 
     fun sendBolt12(offer: Offer, price: Double? = null): String {
@@ -301,7 +355,14 @@ class NodeService(private val context: Context) {
     fun sendBolt12UsingAmount(offer: Offer, amountMsat: Long, price: Double? = null): String =
         sendTrackedLightningPayment("bolt12", amountMsat, price) {
             val n = node ?: throw NodeServiceError()
-            n.bolt12Payment().sendUsingAmount(offer, amountMsat.toULong(), null, null, routingParameters(amountMsat))
+            n.bolt12Payment()
+                .sendUsingAmount(
+                    offer,
+                    amountMsat.toULong(),
+                    null,
+                    null,
+                    routingParameters(amountMsat),
+                )
         }
 
     fun sendKeysend(amountMsat: Long, toNodeId: String): String {
@@ -309,24 +370,36 @@ class NodeService(private val context: Context) {
         return n.spontaneousPayment().send(amountMsat.toULong(), toNodeId, null)
     }
 
-    fun sendKeysendWithTLV(amountMsat: Long, toNodeId: String, tlvs: List<CustomTlvRecord>): String {
+    fun sendKeysendWithTLV(
+        amountMsat: Long,
+        toNodeId: String,
+        tlvs: List<CustomTlvRecord>,
+    ): String {
         val n = node ?: throw NodeServiceError()
         return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, null, tlvs)
     }
 
-    /** Age in seconds of LDK's last successful Lightning-wallet chain sync, or null when the
-     *  node isn't running, the wallet has never synced, or the timestamp is in the future. */
+    /**
+     * Age in seconds of LDK's last successful Lightning-wallet chain sync, or null when the node
+     * isn't running, the wallet has never synced, or the timestamp is in the future.
+     */
     fun lightningSyncAgeSecs(): Long? {
         val n = node ?: return null
         val ts = n.status().latestLightningWalletSyncTimestamp?.toLong()
         return StabilityFreshness.syncAgeSecs(ts, System.currentTimeMillis() / 1000)
     }
 
-    /** Send-boundary gate for stability payments (see #243): all foreground stability sends
-     *  must go through this wrapper, which refuses to pay on a stale chain tip. Throws
-     *  [StaleLightningSyncException] so the caller can release its send claim and retry on
-     *  the next stability tick once LDK's background sync catches up. */
-    fun sendStabilityPayment(amountMsat: Long, toNodeId: String, tlvs: List<CustomTlvRecord>): String {
+    /**
+     * Send-boundary gate for stability payments (see #243): all foreground stability sends must go
+     * through this wrapper, which refuses to pay on a stale chain tip. Throws
+     * [StaleLightningSyncException] so the caller can release its send claim and retry on the next
+     * stability tick once LDK's background sync catches up.
+     */
+    fun sendStabilityPayment(
+        amountMsat: Long,
+        toNodeId: String,
+        tlvs: List<CustomTlvRecord>,
+    ): String {
         val n = node ?: throw NodeServiceError()
         val ts = n.status().latestLightningWalletSyncTimestamp?.toLong()
         val now = System.currentTimeMillis() / 1000
@@ -338,29 +411,32 @@ class NodeService(private val context: Context) {
 
     fun receivePayment(amountMsat: Long, description: String): Bolt11Invoice {
         val n = node ?: throw NodeServiceError()
-        return n.bolt11Payment().receive(
-            amountMsat.toULong(),
-            Bolt11InvoiceDescription.Direct(description),
-            Constants.INVOICE_EXPIRY_SECS.toUInt()
-        )
+        return n.bolt11Payment()
+            .receive(
+                amountMsat.toULong(),
+                Bolt11InvoiceDescription.Direct(description),
+                Constants.INVOICE_EXPIRY_SECS.toUInt(),
+            )
     }
 
     fun receiveVariablePayment(description: String): Bolt11Invoice {
         val n = node ?: throw NodeServiceError()
-        return n.bolt11Payment().receiveVariableAmount(
-            Bolt11InvoiceDescription.Direct(description),
-            Constants.INVOICE_EXPIRY_SECS.toUInt()
-        )
+        return n.bolt11Payment()
+            .receiveVariableAmount(
+                Bolt11InvoiceDescription.Direct(description),
+                Constants.INVOICE_EXPIRY_SECS.toUInt(),
+            )
     }
 
     fun receiveViaJitChannel(amountMsat: Long, description: String): Bolt11Invoice {
         val n = node ?: throw NodeServiceError()
-        return n.bolt11Payment().receiveViaJitChannel(
-            amountMsat.toULong(),
-            Bolt11InvoiceDescription.Direct(description),
-            Constants.INVOICE_EXPIRY_SECS.toUInt(),
-            null
-        )
+        return n.bolt11Payment()
+            .receiveViaJitChannel(
+                amountMsat.toULong(),
+                Bolt11InvoiceDescription.Direct(description),
+                Constants.INVOICE_EXPIRY_SECS.toUInt(),
+                null,
+            )
     }
 
     fun newOnchainAddress(): String {
@@ -370,12 +446,14 @@ class NodeService(private val context: Context) {
 
     fun sendOnchain(address: String, amountSats: Long): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().sendToAddress(QRCodeUtils.normalizeAddress(address), amountSats.toULong(), null)
+        return n.onchainPayment()
+            .sendToAddress(QRCodeUtils.normalizeAddress(address), amountSats.toULong(), null)
     }
 
     fun sendAllOnchain(address: String): String {
         val n = node ?: throw NodeServiceError()
-        return n.onchainPayment().sendAllToAddress(QRCodeUtils.normalizeAddress(address), false, null)
+        return n.onchainPayment()
+            .sendAllToAddress(QRCodeUtils.normalizeAddress(address), false, null)
     }
 
     fun syncWallets() {
@@ -404,51 +482,55 @@ class NodeService(private val context: Context) {
         return try {
             val n = node ?: return false
             n.verifySignature(message.map { it.toUByte() }, signature, pubkey)
-        } catch (_: Exception) { false }
+        } catch (_: Exception) {
+            false
+        }
     }
 
     companion object {
         fun wipeWalletData(context: Context) {
             val dir = Constants.userDataDir(context)
             listOf(
-                "keys_seed",
-                "seed_phrase",
-                "ldk_node_data.sqlite",
-                "ldk_node_data.sqlite-wal",
-                "ldk_node_data.sqlite-shm",
-            ).forEach { File(dir, it).delete() }
+                    "keys_seed",
+                    "seed_phrase",
+                    "ldk_node_data.sqlite",
+                    "ldk_node_data.sqlite-wal",
+                    "ldk_node_data.sqlite-shm",
+                )
+                .forEach { File(dir, it).delete() }
         }
 
         /**
-         * Derive the node_id a mnemonic maps to by building (never starting) a
-         * throwaway node in a temp directory. Used by the restore guard to ask
-         * the LSP whether this wallet still has an open channel BEFORE the
-         * restore wipes LDK state (which would force-close it at reestablish).
-         * Returns null on any failure so the guard fails open. Never touches
-         * the real wallet data directory.
+         * Derive the node_id a mnemonic maps to by building (never starting) a throwaway node in a
+         * temp directory. Used by the restore guard to ask the LSP whether this wallet still has an
+         * open channel BEFORE the restore wipes LDK state (which would force-close it at
+         * reestablish). Returns null on any failure so the guard fails open. Never touches the real
+         * wallet data directory.
          */
         fun deriveNodeId(context: Context, mnemonic: String): String? {
             val tmp = File(context.cacheDir, "nodeid-probe-${java.util.UUID.randomUUID()}")
             return try {
                 tmp.mkdirs()
-                val config = Config(
-                    storageDirPath = tmp.absolutePath,
-                    network = Network.BITCOIN,
-                    listeningAddresses = null,
-                    announcementAddresses = null,
-                    nodeAlias = null,
-                    trustedPeers0conf = emptyList(),
-                    probingLiquidityLimitMultiplier = 3UL,
-                    anchorChannelsConfig = null,
-                    routeParameters = null,
-                    torConfig = null,
-                    hrnConfig = HumanReadableNamesConfig(
-                        HrnResolverConfig.Dns(
-                            dnsServerAddress = "8.8.8.8:53",
-                            enableHrnResolutionService = false
-                        )
+                val config =
+                    Config(
+                        storageDirPath = tmp.absolutePath,
+                        network = Network.BITCOIN,
+                        listeningAddresses = null,
+                        announcementAddresses = null,
+                        nodeAlias = null,
+                        trustedPeers0conf = emptyList(),
+                        probingLiquidityLimitMultiplier = 3UL,
+                        anchorChannelsConfig = null,
+                        routeParameters = null,
+                        torConfig = null,
+                        hrnConfig =
+                            HumanReadableNamesConfig(
+                                HrnResolverConfig.Dns(
+                                    dnsServerAddress = "8.8.8.8:53",
+                                    enableHrnResolutionService = false,
+                                )
+                            ),
                     )
-                )
                 val builder = Builder.fromConfig(config)
                 // A chain source is required to build; nothing syncs without start().
                 builder.setChainSourceEsplora(Constants.PRIMARY_CHAIN_URL, null)
@@ -467,8 +549,10 @@ class NodeService(private val context: Context) {
 
     class AlreadyRunningException : IllegalStateException("LDK node already running")
 
-    /** Thrown by [sendStabilityPayment] when the Lightning wallet's chain sync is too old
-     *  to safely pay. [syncAgeSecs] is null when the wallet has never synced. */
+    /**
+     * Thrown by [sendStabilityPayment] when the Lightning wallet's chain sync is too old to safely
+     * pay. [syncAgeSecs] is null when the wallet has never synced.
+     */
     class StaleLightningSyncException(val syncAgeSecs: Long?) :
         Exception("Lightning wallet sync is stale (age=${syncAgeSecs ?: "never"}s)")
 }

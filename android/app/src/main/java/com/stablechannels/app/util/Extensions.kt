@@ -55,8 +55,8 @@ fun Long.btcFormatted(): String {
 }
 
 /**
- * Format as BTC with spaced digit groups: "0.00 190 079" (matches iOS).
- * Preallocates buffer capacity to minimize intermediate allocations.
+ * Format as BTC with spaced digit groups: "0.00 190 079" (matches iOS). Preallocates buffer
+ * capacity to minimize intermediate allocations.
  */
 fun Long.btcSpacedFormatted(): String {
     val btc = this.toDouble() / Constants.SATS_IN_BTC

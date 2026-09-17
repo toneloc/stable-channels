@@ -17,7 +17,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -34,19 +33,19 @@ import com.stablechannels.app.ui.components.CurvePattern
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.util.percentFormatted
 import com.stablechannels.app.util.usdFormatted
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @Composable
 fun PriceChart(
     appState: AppState,
     databaseService: DatabaseService?,
     currentPrice: Double,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
 ) {
     var chartPeriod by remember { mutableStateOf(ChartPeriod.ALL) }
     var priceHistory by remember { mutableStateOf(emptyList<PriceRecord>()) }
@@ -63,14 +62,23 @@ fun PriceChart(
         withContext(Dispatchers.IO) {
             val hourly = databaseService?.getPriceHistory(24 * 30) ?: emptyList()
             val dailyPrices = databaseService?.getDailyPrices(99999) ?: emptyList()
-            val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
-                timeZone = TimeZone.getTimeZone("UTC")
-            }
-            val daily = dailyPrices.mapNotNull { d ->
-                val date = try { fmt.parse(d.date) } catch (_: Exception) { null } ?: return@mapNotNull null
-                val ts = date.time / 1000
-                PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
-            }.sortedBy { it.timestamp }
+            val fmt =
+                SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }
+            val daily =
+                dailyPrices
+                    .mapNotNull { d ->
+                        val date =
+                            try {
+                                fmt.parse(d.date)
+                            } catch (_: Exception) {
+                                null
+                            } ?: return@mapNotNull null
+                        val ts = date.time / 1000
+                        PriceRecord(id = ts, price = d.close, source = "daily", timestamp = ts)
+                    }
+                    .sortedBy { it.timestamp }
 
             hourlyPrices = hourly
             allDailyPrices = daily
@@ -89,75 +97,80 @@ fun PriceChart(
     LaunchedEffect(chartPeriod, dataLoaded, hourlyPrices, allDailyPrices) {
         if (!dataLoaded) return@LaunchedEffect
         selectedPoint = null
-        val cutoffMs = System.currentTimeMillis() - chartPeriod.effectiveDays().toLong() * 86400 * 1000
+        val cutoffMs =
+            System.currentTimeMillis() - chartPeriod.effectiveDays().toLong() * 86400 * 1000
         val cutoffSec = cutoffMs / 1000
 
-        val raw = if (chartPeriod.usesHourly) {
-            val startIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
-            val hourlySlice = hourlyPrices.subList(startIdx, hourlyPrices.size)
-            if (hourlySlice.size >= 2) {
-                hourlySlice
+        val raw =
+            if (chartPeriod.usesHourly) {
+                val startIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
+                val hourlySlice = hourlyPrices.subList(startIdx, hourlyPrices.size)
+                if (hourlySlice.size >= 2) {
+                    hourlySlice
+                } else {
+                    // Fallback to daily if hourly is sparse or still backfilling
+                    val dailyStartIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
+                    val dailySlice = allDailyPrices.subList(dailyStartIdx, allDailyPrices.size)
+                    if (dailySlice.size >= 2) dailySlice else hourlySlice
+                }
             } else {
-                // Fallback to daily if hourly is sparse or still backfilling
-                val dailyStartIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
-                val dailySlice = allDailyPrices.subList(dailyStartIdx, allDailyPrices.size)
-                if (dailySlice.size >= 2) dailySlice else hourlySlice
+                val startIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
+                val dailySlice = allDailyPrices.subList(startIdx, allDailyPrices.size)
+                if (dailySlice.size >= 2) {
+                    dailySlice
+                } else {
+                    // Fallback to hourly if daily is sparse or still backfilling
+                    val hourlyStartIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
+                    val hourlySlice = hourlyPrices.subList(hourlyStartIdx, hourlyPrices.size)
+                    if (hourlySlice.size >= 2) hourlySlice else dailySlice
+                }
             }
-        } else {
-            val startIdx = PriceChartAlgorithms.lowerBound(allDailyPrices, cutoffSec)
-            val dailySlice = allDailyPrices.subList(startIdx, allDailyPrices.size)
-            if (dailySlice.size >= 2) {
-                dailySlice
-            } else {
-                // Fallback to hourly if daily is sparse or still backfilling
-                val hourlyStartIdx = PriceChartAlgorithms.lowerBound(hourlyPrices, cutoffSec)
-                val hourlySlice = hourlyPrices.subList(hourlyStartIdx, hourlyPrices.size)
-                if (hourlySlice.size >= 2) hourlySlice else dailySlice
-            }
-        }
         priceHistory = PriceChartAlgorithms.lttbDownsample(raw, 200)
     }
 
-    val livePriceText by remember(currentPrice) {
-        derivedStateOf { currentPrice.usdFormatted() }
-    }
+    val livePriceText by
+        remember(currentPrice) {
+            derivedStateOf { currentPrice.usdFormatted() }
+        }
 
     Card(
         modifier = modifier.fillMaxWidth(),
-        colors = androidx.compose.material3.CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.background
-        )
+        colors =
+            androidx.compose.material3.CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.background
+            ),
     ) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
             // Price header
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column {
                     val selected = selectedPoint
                     if (selected != null) {
-                        val dateFmt = if (chartPeriod == ChartPeriod.DAY_1) {
-                            SimpleDateFormat("h:mm a", Locale.US)
-                        } else {
-                            SimpleDateFormat("MMM d, yyyy", Locale.US)
-                        }
+                        val dateFmt =
+                            if (chartPeriod == ChartPeriod.DAY_1) {
+                                SimpleDateFormat("h:mm a", Locale.US)
+                            } else {
+                                SimpleDateFormat("MMM d, yyyy", Locale.US)
+                            }
                         Text(
                             dateFmt.format(Date(selected.timestamp * 1000)),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
                             selected.price.usdFormatted(),
                             style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                     } else {
                         Text("BTC Price", style = MaterialTheme.typography.labelMedium)
                         Text(
                             livePriceText,
                             style = MaterialTheme.typography.headlineSmall,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.Bold,
                         )
                     }
                 }
@@ -166,19 +179,21 @@ fun PriceChart(
                     val firstPrice = priceHistory.first().price
                     val isUp = displayPrice >= firstPrice
                     val changeColor = if (isUp) Color(0xFF10B981) else Color(0xFFEF4444)
-                    val changePercent = if (firstPrice > 0) ((displayPrice - firstPrice) / firstPrice) * 100 else 0.0
+                    val changePercent =
+                        if (firstPrice > 0) ((displayPrice - firstPrice) / firstPrice) * 100
+                        else 0.0
 
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
                             chartPeriod.label,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
                             changePercent.percentFormatted(),
                             color = changeColor,
                             fontWeight = FontWeight.SemiBold,
-                            fontSize = 14.sp
+                            fontSize = 14.sp,
                         )
                     }
                 }
@@ -186,25 +201,27 @@ fun PriceChart(
 
             // Period selector pills — scrollable
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 ChartPeriod.entries.forEach { period ->
                     val selected = chartPeriod == period
                     Surface(
                         onClick = { chartPeriod = period },
                         shape = RoundedCornerShape(20.dp),
-                        color = if (selected) Color(0xFF3B82F6) else MaterialTheme.colorScheme.surfaceVariant,
+                        color =
+                            if (selected) Color(0xFF3B82F6)
+                            else MaterialTheme.colorScheme.surfaceVariant,
                     ) {
                         Text(
                             period.label,
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
-                            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color =
+                                if (selected) Color.White
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                            textAlign = TextAlign.Center
+                            textAlign = TextAlign.Center,
                         )
                     }
                 }
@@ -214,9 +231,10 @@ fun PriceChart(
 
             if (priceHistory.size >= 2) {
                 // Single-pass min/max calculation
-                val (minPrice, maxPrice) = remember(priceHistory) {
-                    PriceChartAlgorithms.minMaxPrices(priceHistory)
-                }
+                val (minPrice, maxPrice) =
+                    remember(priceHistory) {
+                        PriceChartAlgorithms.minMaxPrices(priceHistory)
+                    }
                 val priceRange = maxPrice - minPrice
                 val firstPrice = priceHistory.first().price
                 val displayPrice = selectedPoint?.price ?: currentPrice
@@ -230,44 +248,51 @@ fun PriceChart(
                 // Chart with Y-axis labels
                 Row(Modifier.fillMaxWidth()) {
                     Canvas(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(160.dp)
-                            .pointerInput(priceHistory) {
-                                detectDragGestures(
-                                    onDragEnd = { selectedPoint = null },
-                                    onDragCancel = { selectedPoint = null },
-                                    onDrag = { change, _ ->
-                                        change.consume()
-                                        val x = change.position.x
-                                        val w = size.width.toFloat()
-                                        val index = ((x / w) * (priceHistory.size - 1))
-                                            .toInt()
-                                            .coerceIn(0, priceHistory.size - 1)
-                                        selectedPoint = priceHistory[index]
-                                    }
-                                )
-                            }
-                            .pointerInput(priceHistory) {
-                                detectTapGestures(
-                                    onPress = {
-                                        val x = it.x
-                                        val w = size.width.toFloat()
-                                        val index = ((x / w) * (priceHistory.size - 1))
-                                            .toInt()
-                                            .coerceIn(0, priceHistory.size - 1)
-                                        selectedPoint = priceHistory[index]
-                                        tryAwaitRelease()
-                                        selectedPoint = null
-                                    }
-                                )
-                            }
+                        modifier =
+                            Modifier.weight(1f)
+                                .height(160.dp)
+                                .pointerInput(priceHistory) {
+                                    detectDragGestures(
+                                        onDragEnd = { selectedPoint = null },
+                                        onDragCancel = { selectedPoint = null },
+                                        onDrag = { change, _ ->
+                                            change.consume()
+                                            val x = change.position.x
+                                            val w = size.width.toFloat()
+                                            val index =
+                                                ((x / w) * (priceHistory.size - 1))
+                                                    .toInt()
+                                                    .coerceIn(0, priceHistory.size - 1)
+                                            selectedPoint = priceHistory[index]
+                                        },
+                                    )
+                                }
+                                .pointerInput(priceHistory) {
+                                    detectTapGestures(
+                                        onPress = {
+                                            val x = it.x
+                                            val w = size.width.toFloat()
+                                            val index =
+                                                ((x / w) * (priceHistory.size - 1))
+                                                    .toInt()
+                                                    .coerceIn(0, priceHistory.size - 1)
+                                            selectedPoint = priceHistory[index]
+                                            tryAwaitRelease()
+                                            selectedPoint = null
+                                        }
+                                    )
+                                }
                     ) {
                         val w = size.width
                         val h = size.height
 
                         if (priceRange < 0.01) {
-                            drawLine(color = lineColor, start = Offset(0f, h / 2), end = Offset(w, h / 2), strokeWidth = 2f)
+                            drawLine(
+                                color = lineColor,
+                                start = Offset(0f, h / 2),
+                                end = Offset(w, h / 2),
+                                strokeWidth = 2f,
+                            )
                             return@Canvas
                         }
 
@@ -279,7 +304,7 @@ fun PriceChart(
                                 start = Offset(0f, gy),
                                 end = Offset(w, gy),
                                 strokeWidth = 0.5f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f))
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f)),
                             )
                         }
 
@@ -296,17 +321,22 @@ fun PriceChart(
                         // Area fill
                         drawPath(
                             path = areaPath,
-                            brush = Brush.verticalGradient(
-                                colors = listOf(lineColor.copy(alpha = 0.15f), lineColor.copy(alpha = 0.02f))
-                            ),
-                            style = Fill
+                            brush =
+                                Brush.verticalGradient(
+                                    colors =
+                                        listOf(
+                                            lineColor.copy(alpha = 0.15f),
+                                            lineColor.copy(alpha = 0.02f),
+                                        )
+                                ),
+                            style = Fill,
                         )
 
                         // Line
                         drawPath(
                             path = linePath,
                             color = lineColor,
-                            style = Stroke(width = if (selectedIndex != null) 1.5f else 2f)
+                            style = Stroke(width = if (selectedIndex != null) 1.5f else 2f),
                         )
 
                         // Selected indicator
@@ -319,7 +349,7 @@ fun PriceChart(
                                 start = Offset(sx, 0f),
                                 end = Offset(sx, h),
                                 strokeWidth = 1f,
-                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))
+                                pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f)),
                             )
                             drawCircle(lineColor, 5f, Offset(sx, sy))
                             drawCircle(Color.White, 3f, Offset(sx, sy))
@@ -330,14 +360,14 @@ fun PriceChart(
                     Column(
                         modifier = Modifier.height(160.dp).padding(start = 4.dp),
                         verticalArrangement = Arrangement.SpaceBetween,
-                        horizontalAlignment = Alignment.End
+                        horizontalAlignment = Alignment.End,
                     ) {
                         for (i in 4 downTo 0) {
                             val price = minPrice + (priceRange * i / 4)
                             Text(
                                 PriceChartAlgorithms.formatYAxis(price),
                                 fontSize = 9.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -346,23 +376,25 @@ fun PriceChart(
                 Spacer(Modifier.height(4.dp))
 
                 // X-axis time labels
-                val xFmt = when {
-                    chartPeriod == ChartPeriod.DAY_1 -> SimpleDateFormat("ha", Locale.US)
-                    chartPeriod.effectiveDays() <= 90 -> SimpleDateFormat("MMM d", Locale.US)
-                    chartPeriod.effectiveDays() <= 365 -> SimpleDateFormat("MMM", Locale.US)
-                    else -> SimpleDateFormat("yyyy", Locale.US)
-                }
+                val xFmt =
+                    when {
+                        chartPeriod == ChartPeriod.DAY_1 -> SimpleDateFormat("ha", Locale.US)
+                        chartPeriod.effectiveDays() <= 90 -> SimpleDateFormat("MMM d", Locale.US)
+                        chartPeriod.effectiveDays() <= 365 -> SimpleDateFormat("MMM", Locale.US)
+                        else -> SimpleDateFormat("yyyy", Locale.US)
+                    }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     val step = maxOf(priceHistory.size / 4, 1)
-                    for (i in listOf(0, step, step * 2, step * 3, priceHistory.size - 1).distinct()) {
+                    for (i in
+                        listOf(0, step, step * 2, step * 3, priceHistory.size - 1).distinct()) {
                         if (i < priceHistory.size) {
                             Text(
                                 xFmt.format(Date(priceHistory[i].timestamp * 1000)),
                                 fontSize = 9.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -370,21 +402,21 @@ fun PriceChart(
             } else {
                 Box(
                     modifier = Modifier.fillMaxWidth().height(160.dp),
-                    contentAlignment = Alignment.Center
+                    contentAlignment = Alignment.Center,
                 ) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         CurveProgressIndicator(
                             size = 68.dp,
                             pattern = CurvePattern.SPIRAL_SEARCH,
-                            primaryColor = Color(0xFF38BDF8)
+                            primaryColor = Color(0xFF38BDF8),
                         )
                         Text(
                             "Collecting price data...",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -399,27 +431,28 @@ private fun PriceChartCollectingDataPreview() {
     MaterialTheme {
         Card(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
-            colors = androidx.compose.material3.CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.background
-            )
+            colors =
+                androidx.compose.material3.CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.background
+                ),
         ) {
             Box(
                 modifier = Modifier.fillMaxWidth().height(160.dp),
-                contentAlignment = Alignment.Center
+                contentAlignment = Alignment.Center,
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     CurveProgressIndicator(
                         size = 68.dp,
                         pattern = CurvePattern.SPIRAL_SEARCH,
-                        primaryColor = Color(0xFF38BDF8)
+                        primaryColor = Color(0xFF38BDF8),
                     )
                     Text(
                         "Collecting price data...",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

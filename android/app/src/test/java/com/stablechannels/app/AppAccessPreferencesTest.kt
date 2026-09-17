@@ -2,7 +2,6 @@ package com.stablechannels.app
 
 import com.stablechannels.app.services.AppAccessPreferences
 import com.stablechannels.app.services.AppAccessPreferencesManager
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -55,7 +54,7 @@ class AppAccessPreferencesTest {
         assertTrue(
             AppAccessPreferencesManager.requiresAuthForToggleChange(
                 currentlyEnabled = true,
-                requestedEnabled = false
+                requestedEnabled = false,
             )
         )
     }
@@ -65,7 +64,7 @@ class AppAccessPreferencesTest {
         assertFalse(
             AppAccessPreferencesManager.requiresAuthForToggleChange(
                 currentlyEnabled = false,
-                requestedEnabled = true
+                requestedEnabled = true,
             )
         )
     }
@@ -75,13 +74,13 @@ class AppAccessPreferencesTest {
         assertFalse(
             AppAccessPreferencesManager.requiresAuthForToggleChange(
                 currentlyEnabled = true,
-                requestedEnabled = true
+                requestedEnabled = true,
             )
         )
         assertFalse(
             AppAccessPreferencesManager.requiresAuthForToggleChange(
                 currentlyEnabled = false,
-                requestedEnabled = false
+                requestedEnabled = false,
             )
         )
     }
@@ -92,13 +91,36 @@ class AppAccessPreferencesTest {
 
     @Test
     fun `seed phrase viewing requires auth if security settings enabled`() {
-        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = true, paymentConfirmationEnabled = false))
-        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = false, paymentConfirmationEnabled = true))
-        assertTrue(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = true, paymentConfirmationEnabled = true))
-        assertFalse(shouldRequireAuthForSeedPhrasePure(appUnlockEnabled = false, paymentConfirmationEnabled = false))
+        assertTrue(
+            shouldRequireAuthForSeedPhrasePure(
+                appUnlockEnabled = true,
+                paymentConfirmationEnabled = false,
+            )
+        )
+        assertTrue(
+            shouldRequireAuthForSeedPhrasePure(
+                appUnlockEnabled = false,
+                paymentConfirmationEnabled = true,
+            )
+        )
+        assertTrue(
+            shouldRequireAuthForSeedPhrasePure(
+                appUnlockEnabled = true,
+                paymentConfirmationEnabled = true,
+            )
+        )
+        assertFalse(
+            shouldRequireAuthForSeedPhrasePure(
+                appUnlockEnabled = false,
+                paymentConfirmationEnabled = false,
+            )
+        )
     }
 
-    private fun shouldRequireAuthForSeedPhrasePure(appUnlockEnabled: Boolean, paymentConfirmationEnabled: Boolean): Boolean {
+    private fun shouldRequireAuthForSeedPhrasePure(
+        appUnlockEnabled: Boolean,
+        paymentConfirmationEnabled: Boolean,
+    ): Boolean {
         return appUnlockEnabled || paymentConfirmationEnabled
     }
 
@@ -107,10 +129,13 @@ class AppAccessPreferencesTest {
     // ---------------------------------------------------------------------------
 
     /**
-     * Mirrors the logic of AppAccessPreferencesManager.shouldRequireAuth
-     * without requiring an Android Context, for unit test verification.
+     * Mirrors the logic of AppAccessPreferencesManager.shouldRequireAuth without requiring an
+     * Android Context, for unit test verification.
      */
-    private fun shouldRequireAuthPure(isOnChain: Boolean, paymentConfirmationEnabled: Boolean): Boolean {
+    private fun shouldRequireAuthPure(
+        isOnChain: Boolean,
+        paymentConfirmationEnabled: Boolean,
+    ): Boolean {
         return paymentConfirmationEnabled
     }
 }

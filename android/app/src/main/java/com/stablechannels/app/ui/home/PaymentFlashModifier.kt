@@ -33,13 +33,13 @@ fun Modifier.paymentFlash(isFlashing: Boolean): Modifier {
                 launch {
                     scale.animateTo(
                         targetValue = 1.08f,
-                        animationSpec = tween(durationMillis = 300, easing = EaseOut)
+                        animationSpec = tween(durationMillis = 300, easing = EaseOut),
                     )
                 }
                 launch {
                     tintAlpha.animateTo(
                         targetValue = 0.35f,
-                        animationSpec = tween(durationMillis = 300, easing = EaseOut)
+                        animationSpec = tween(durationMillis = 300, easing = EaseOut),
                     )
                 }
             }
@@ -49,13 +49,13 @@ fun Modifier.paymentFlash(isFlashing: Boolean): Modifier {
                 launch {
                     scale.animateTo(
                         targetValue = 1f,
-                        animationSpec = tween(durationMillis = 400, easing = EaseInOut)
+                        animationSpec = tween(durationMillis = 400, easing = EaseInOut),
                     )
                 }
                 launch {
                     tintAlpha.animateTo(
                         targetValue = 0f,
-                        animationSpec = tween(durationMillis = 400, easing = EaseInOut)
+                        animationSpec = tween(durationMillis = 400, easing = EaseInOut),
                     )
                 }
             }
@@ -65,8 +65,7 @@ fun Modifier.paymentFlash(isFlashing: Boolean): Modifier {
     val currentScale by scale.asState()
     val currentTintAlpha by tintAlpha.asState()
 
-    return this
-        .graphicsLayer {
+    return this.graphicsLayer {
             scaleX = currentScale
             scaleY = currentScale
             alpha = 1f - (currentTintAlpha * 0.3f) // slight dim during flash
@@ -76,7 +75,7 @@ fun Modifier.paymentFlash(isFlashing: Boolean): Modifier {
             if (currentTintAlpha > 0f) {
                 drawRect(
                     color = Color(0xFF10B981).copy(alpha = currentTintAlpha),
-                    size = size
+                    size = size,
                 )
             }
         }
