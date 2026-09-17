@@ -2691,7 +2691,13 @@ class AppState(private val context: Context) : ViewModel() {
                 (databaseService?.isOutgoingStabilityPayment(paymentId) == true)
         if (!isRecordedStabilityPayment) return false
 
-        databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
+        synchronized(booksLock) {
+            // A claim released after LDK lost its record is debited now; show it if it is ours.
+            val released = databaseService?.releasedStabilityOrigin(paymentId!!)
+            databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
+            if (released != null && released == _stableChannel.value.userChannelId)
+                publishBooksFromDB()
+        }
         refreshBalances()
         updateStableBalances()
         _statusMessage.value = "Payment confirmed"

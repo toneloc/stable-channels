@@ -932,7 +932,7 @@ class OutgoingPaymentLifecycleTest {
     }
 
     @Test
-    fun stabilityLateSuccessAfterALostRecordReleaseIsNeverAnOrdinarySend() {
+    fun stabilityLateSuccessAfterALostRecordReleaseDebitsItsArchivedOriginOnce() {
         closeWithPendingStabilityAndReplace()
         val succeeded = node.payments.single()
         node.payments = emptyList()
@@ -942,15 +942,60 @@ class OutgoingPaymentLifecycleTest {
         assertTrue(db.isOutgoingStabilityPayment("send"))
         assertEquals("failed", payment().status)
         assertEquals(1_000_000L, payment().amountMsat)
+        assertArchive(10.0, 11_000L)
         // A balance below backing would make an ordinary-send reconcile cut the USD target.
         node.channels = listOf(channel("8", "new-channel", 4_000))
         node.payments = listOf(succeeded)
+        event(success)
         event(success)
         assertEquals("completed", payment().status)
         assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
         assertEquals(5.0, db.loadChannel("8")!!.expectedUSD, 0.0)
         assertEquals(5_000L, db.loadChannel("8")!!.backingSats)
-        assertArchive(10.0, 11_000L)
+        assertArchive(10.0, 10_000L) // the settlement that left the wallet reaches the books once
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    @Test
+    fun stabilityLateSuccessAfterALostRecordReleaseDebitsItsLiveOrigin() {
+        releaseLostRecordOnTheLiveChannel()
+        event(success)
+        assertEquals("completed", payment().status)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    @Test
+    fun stabilityLateSuccessSeenInTheBackgroundDebitsTheReleasedOrigin() {
+        releaseLostRecordOnTheLiveChannel()
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
+        assertEquals("completed", payment().status)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    @Test
+    fun stabilityLateFailureAfterALostRecordReleaseSettlesTheClaimWithoutADebit() {
+        releaseLostRecordOnTheLiveChannel()
+        event(Event.PaymentFailed("send", null, null))
+        // A proven failure ends the claim, so nothing can debit it afterwards.
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
+        assertNoStabilityOriginRecorded()
+    }
+
+    private fun releaseLostRecordOnTheLiveChannel() {
+        node.channels = listOf(channel("7", "channel", 11_000))
+        price(100_000.0)
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
+        db.setPendingSendPaymentId("send")
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
     }
 
     @Suppress("UNCHECKED_CAST")

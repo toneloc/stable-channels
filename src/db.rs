@@ -68,6 +68,13 @@ pub struct StabilityPaymentRollback {
     pub restored: bool,
 }
 
+/// The debit re-applied when a rolled-back stability payment turns out to have succeeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StabilityPaymentRedebit {
+    pub user_channel_id: String,
+    pub debit_sats: u64,
+}
+
 /// Returns true if `err` is the distinct missing-channel-row condition from
 /// `record_payment_and_maybe_update_backing` — i.e. a backing update was
 /// requested but no `channels` row exists for the user_channel_id. Callers
@@ -516,6 +523,11 @@ impl Database {
         );
         let _ = conn.execute(
             "ALTER TABLE payments ADD COLUMN backing_sats_after INTEGER",
+            [],
+        );
+        // Set when a rollback restored the backing, so a late success can re-apply the debit once.
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN backing_rolled_back INTEGER NOT NULL DEFAULT 0",
             [],
         );
 
@@ -2698,6 +2710,12 @@ impl Database {
                 }
                 _ => false,
             };
+            if restored {
+                conn.execute(
+                    "UPDATE payments SET backing_rolled_back = 1 WHERE id = ?1",
+                    params![payment_db_id],
+                )?;
+            }
 
             let channel_after: Option<(String, f64, i64, i64)> = match user_channel_id.as_deref() {
                 Some(uid) => conn
@@ -2886,6 +2904,116 @@ impl Database {
             crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
         }
         Ok(true)
+    }
+
+    /// A success event for a stability payment already marked failed proves it left after all.
+    /// Complete the row and, if its rollback restored the backing, re-apply the debit once.
+    pub fn settle_rolled_back_stability_payment(
+        &self,
+        payment_id: &str,
+        payment_hash: &str,
+        fee_paid_msat: Option<u64>,
+    ) -> SqliteResult<Option<StabilityPaymentRedebit>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(i64, Option<String>, Option<i64>, Option<i64>, bool)> = tx
+            .query_row(
+                "SELECT id, user_channel_id, backing_sats_before, backing_sats_after,
+                        backing_rolled_back
+                 FROM payments
+                 WHERE payment_id = ?1 AND payment_type = 'stability'
+                   AND direction = 'sent' AND status = 'failed'
+                 ORDER BY id DESC LIMIT 1",
+                params![payment_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()?;
+        let Some((payment_db_id, user_channel_id, before, after, rolled_back)) = row else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let fee = fee_paid_msat.and_then(|value| i64::try_from(value).ok());
+        tx.execute(
+            "UPDATE payments SET status = 'completed', backing_rolled_back = 0,
+                                 fee_msat = COALESCE(?1, fee_msat)
+             WHERE id = ?2",
+            params![fee, payment_db_id],
+        )?;
+
+        let channel_books = |tx: &rusqlite::Transaction, uid: &str| {
+            tx.query_row(
+                "SELECT expected_usd, stable_sats, native_sats FROM channels
+                 WHERE user_channel_id = ?1",
+                params![uid],
+                |row| {
+                    Ok(AccountingSnapshot {
+                        expected_usd: Some(row.get(0)?),
+                        backing_sats: u64::try_from(row.get::<_, i64>(1)?).ok(),
+                        native_sats: u64::try_from(row.get::<_, i64>(2)?).ok(),
+                        ..Default::default()
+                    })
+                },
+            )
+            .optional()
+        };
+        let mut redebit = None;
+        let mut books_before = None;
+        let mut books_after = None;
+        if let (true, Some(uid), Some(before), Some(after)) =
+            (rolled_back, user_channel_id.as_deref(), before, after)
+        {
+            let debit = before.saturating_sub(after).max(0);
+            books_before = channel_books(&tx, uid)?;
+            let changed = tx.execute(
+                "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?1),
+                                     updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?2",
+                params![debit, uid],
+            )?;
+            books_after = channel_books(&tx, uid)?;
+            if changed > 0 && debit > 0 {
+                redebit = Some(StabilityPaymentRedebit {
+                    user_channel_id: uid.to_owned(),
+                    debit_sats: debit as u64,
+                });
+            }
+        }
+
+        let mut refs = vec![
+            LedgerRef::new("payment_id", payment_id),
+            LedgerRef::new("payment_hash", payment_hash),
+        ];
+        if let Some(uid) = user_channel_id.as_deref() {
+            refs.push(LedgerRef::new("user_channel_id", uid));
+        }
+        let draft = LedgerEventDraft {
+            event_type: "STABILITY_PAYMENT_SETTLED_AFTER_ROLLBACK".to_owned(),
+            category: "stability".to_owned(),
+            severity: "warning".to_owned(),
+            status: "completed".to_owned(),
+            source: "desktop_wallet".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!(
+                "desktop-wallet:stability-payment-settled-after-rollback:{payment_id}"
+            )),
+            before: books_before,
+            after: books_after,
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "payment_hash": payment_hash,
+                "user_channel_id": user_channel_id,
+                "fee_paid_msat": fee_paid_msat,
+                "redebited_sats": redebit.as_ref().map(|r| r.debit_sats),
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
+        Ok(redebit)
     }
 
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
@@ -5726,6 +5854,62 @@ mod tests {
         let channel = db.load_channel("user-channel-1").unwrap().unwrap();
         assert_eq!(channel.expected_usd, 80.0);
         assert_eq!(channel.backing_sats, 80_000);
+    }
+
+    fn pending_stability_claim(db: &Database) {
+        db.save_channel("channel-1", "user-channel-1", 100.0, 120_000, 20_000, None)
+            .unwrap();
+        db.record_pending_stability_payment(
+            "stability-1",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn late_stability_success_debits_the_amount_not_a_stale_snapshot() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        // The books moved on after the rollback; the payment that left still costs its amount.
+        db.save_channel("channel-1", "user-channel-1", 100.0, 125_000, 20_000, None)
+            .unwrap();
+
+        let redebit = db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(redebit.debit_sats, 20_000);
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 105_000);
+        assert_eq!(channel.expected_usd, 100.0);
+    }
+
+    #[test]
+    fn late_stability_success_never_debits_a_rollback_that_restored_nothing() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None)
+            .unwrap();
+        assert!(!db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+
+        // The optimistic debit was never undone, so the success only completes the history row.
+        assert!(db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .is_none());
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 80_000);
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
     }
 
     #[test]

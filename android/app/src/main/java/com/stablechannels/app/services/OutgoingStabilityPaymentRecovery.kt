@@ -91,8 +91,8 @@ object OutgoingStabilityPaymentRecovery {
         return db.completePendingStabilitySend(pending, channelClosed = closed)
     }
 
-    // Only a running node's store can prove a record is missing. Nothing can then resolve the
-    // marker, so after the grace period it is released without a debit instead of blocking spends.
+    // Only a running node's store can prove a record is missing. After the grace period the marker
+    // stops blocking spends; its origin stays on record, so a late success still debits it once.
     private fun releaseLostRecord(
         db: DatabaseService,
         pending: PendingStabilitySend,

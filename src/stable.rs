@@ -1,5 +1,5 @@
 use crate::audit::audit_event;
-use crate::db::{Database, StabilityPaymentRollback};
+use crate::db::{Database, StabilityPaymentRedebit, StabilityPaymentRollback};
 use rusqlite::Result as SqliteResult;
 use crate::constants::{
     MAX_RISK_LEVEL, SATS_IN_BTC, STABILITY_MAX_LIGHTNING_SYNC_AGE_SECS,
@@ -486,7 +486,8 @@ pub fn reconcile_pending_sent_lightning(
 }
 
 /// A stability claim LDK fails, or never heard of because the process stopped between the claim
-/// and the send, is rolled back; the caller mirrors each rollback into the live channel.
+/// and the send, is rolled back; the caller mirrors each rollback into the live channel. A success
+/// event that still arrives re-applies the debit (`settle_rolled_back_stability_payment`).
 pub fn reconcile_lost_stability_claims(
     db: &Database,
     payments: &[PaymentDetails],
@@ -528,6 +529,17 @@ pub fn apply_stability_rollback(sc: &mut StableChannel, rollback: &StabilityPaym
     recompute_native(sc);
     sc.last_stability_payment = 0;
     sc.payment_made = false;
+    true
+}
+
+/// Mirror a late success's re-applied debit into the live channel.
+pub fn apply_stability_redebit(sc: &mut StableChannel, redebit: &StabilityPaymentRedebit) -> bool {
+    if format!("{}", sc.user_channel_id) != redebit.user_channel_id {
+        return false;
+    }
+    sc.backing_sats = sc.backing_sats.saturating_sub(redebit.debit_sats);
+    sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+    recompute_native(sc);
     true
 }
 
@@ -1544,6 +1556,33 @@ mod tests {
         assert_eq!(sc.backing_sats, 11_000);
         assert_eq!(sc.last_stability_payment, 0);
         assert!(!apply_stability_rollback(&mut sc, &rollbacks[0]), "only the optimistic allocation is undone");
+    }
+
+    #[test]
+    fn a_success_after_a_lost_record_rollback_reapplies_the_debit_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let rollbacks =
+            reconcile_lost_stability_claims(&db, &[], now + LOST_LDK_RECORD_TIMEOUT_SECS + 1).unwrap();
+        assert!(apply_stability_rollback(&mut sc, &rollbacks[0]));
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+
+        // The payment had left after all: its success event arrives after the rollback.
+        assert!(!db.complete_pending_stability_payment(&id, "hash", Some(5)).unwrap());
+        let redebit = db.settle_rolled_back_stability_payment(&id, "hash", Some(5)).unwrap().unwrap();
+        assert_eq!(redebit.debit_sats, 1_000);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
+        assert!(apply_stability_redebit(&mut sc, &redebit));
+        assert_eq!(sc.backing_sats, 10_000);
+
+        // A replayed event debits nothing more.
+        assert!(db.settle_rolled_back_stability_payment(&id, "hash", Some(5)).unwrap().is_none());
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
     }
 
     #[test]

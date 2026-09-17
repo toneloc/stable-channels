@@ -3450,8 +3450,24 @@ impl UserApp {
                         &event_id,
                         payment_hash,
                         fee_paid_msat,
-                    ) {
-                        Ok(_) => {
+                    )
+                    .and_then(|completed| {
+                        if completed {
+                            return Ok(());
+                        }
+                        // A row already rolled back (LDK had lost its record) gets its debit back;
+                        // the channel stays locked so the worker cannot save over the new books.
+                        let mut sc = self.stable_channel.lock().unwrap();
+                        if let Some(redebit) = self.db.settle_rolled_back_stability_payment(
+                            &event_id,
+                            payment_hash,
+                            fee_paid_msat,
+                        )? {
+                            stable::apply_stability_redebit(&mut sc, &redebit);
+                        }
+                        Ok(())
+                    }) {
+                        Ok(()) => {
                             if let Some(pid) = payment_id {
                                 self.pending_payments.remove(&pid);
                             }

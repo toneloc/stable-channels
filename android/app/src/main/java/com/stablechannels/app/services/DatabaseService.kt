@@ -316,6 +316,15 @@ class DatabaseService(context: Context) :
             )
         """
         )
+        // A claim released because LDK lost its record; a late success still debits this origin.
+        execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS released_stability_sends (
+                payment_id TEXT PRIMARY KEY, user_channel_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL
+            )
+        """
+        )
     }
 
     /**
@@ -2077,9 +2086,45 @@ class DatabaseService(context: Context) :
             insertOrThrow("payments", null, values)
     }
 
+    private class StabilityOriginBooks(val table: String, val backingSats: Long?)
+
+    /** The origin's live books, or its archive once the channel has closed. */
+    private fun SQLiteDatabase.stabilityOriginBooks(origin: String): StabilityOriginBooks? {
+        val archived =
+            rawQuery(
+                    "SELECT 1 FROM closed_channel_books WHERE user_channel_id = ?",
+                    arrayOf(origin),
+                )
+                .use { it.moveToFirst() }
+        val table = if (archived) "closed_channel_books" else "channels"
+        return rawQuery(
+                "SELECT stable_sats FROM $table WHERE user_channel_id = ?",
+                arrayOf(origin),
+            )
+            .use {
+                if (!it.moveToFirst()) null
+                else StabilityOriginBooks(table, if (it.isNull(0)) null else it.getLong(0))
+            }
+    }
+
+    // Null archived backing means unknown books: never fabricate an allocation for them.
+    private fun SQLiteDatabase.debitStabilityOrigin(
+        origin: String,
+        books: StabilityOriginBooks,
+        amountMsat: Long,
+    ) {
+        val backing = books.backingSats ?: return
+        val values =
+            ContentValues().apply {
+                put("stable_sats", (backing - amountMsat / 1000L).coerceAtLeast(0L))
+                if (books.table == "channels") put("updated_at", System.currentTimeMillis() / 1000)
+            }
+        check(update(books.table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
+    }
+
     /**
      * LDK has lost this payment's record, so its outcome is unknown. Keep the id on record as a
-     * stability payment, so a late event is never reconciled as an ordinary send, then release.
+     * stability payment and keep its origin, so a late success still debits that channel once.
      */
     fun releaseLostStabilitySend(expected: PendingStabilitySend): Boolean =
         writableDatabase.transaction {
@@ -2089,8 +2134,49 @@ class DatabaseService(context: Context) :
                 rawQuery("SELECT 1 FROM payments WHERE payment_id = ?", arrayOf(expected.paymentId))
                     .use { it.moveToFirst() }
             if (!known) insertOrThrow("payments", null, stabilityHistoryValues(expected, "failed"))
+            expected.userChannelId
+                ?.takeIf { it.isNotBlank() }
+                ?.let { origin ->
+                    execSQL(
+                        "INSERT OR IGNORE INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES (?, ?, ?)",
+                        arrayOf(expected.paymentId, origin, expected.amountMsat),
+                    )
+                }
             delete("pending_stability_send", "id = 1", null) == 1
         }
+
+    fun releasedStabilityOrigin(paymentId: String): String? =
+        readableDatabase
+            .rawQuery(
+                "SELECT user_channel_id FROM released_stability_sends WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst()) it.getString(0) else null }
+
+    /** A released claim whose payment proves successful is debited from its origin exactly once. */
+    private fun SQLiteDatabase.settleReleasedStabilitySend(paymentId: String): String? {
+        val (origin, amountMsat) =
+            rawQuery(
+                    "SELECT user_channel_id, amount_msat FROM released_stability_sends WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
+                .use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else return null }
+        val accounted =
+            rawQuery(
+                    "SELECT 1 FROM outgoing_stability_accounting WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
+                .use { it.moveToFirst() }
+        if (!accounted) {
+            stabilityOriginBooks(origin)?.let { debitStabilityOrigin(origin, it, amountMsat) }
+            execSQL(
+                "INSERT INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+                arrayOf(paymentId, origin),
+            )
+        }
+        delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
+        return origin
+    }
 
     fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean =
         writableDatabase.transaction {
@@ -2113,19 +2199,7 @@ class DatabaseService(context: Context) :
         if (pending.paymentId.isBlank() || pending.amountMsat <= 0L) return@transaction false
         if (channelClosed) deleteChannel(origin)
 
-        val archived =
-            rawQuery(
-                    "SELECT 1 FROM closed_channel_books WHERE user_channel_id = ?",
-                    arrayOf(origin),
-                )
-                .use { it.moveToFirst() }
-        val table = if (archived) "closed_channel_books" else "channels"
-        val backing =
-            rawQuery("SELECT stable_sats FROM $table WHERE user_channel_id = ?", arrayOf(origin))
-                .use {
-                    if (!it.moveToFirst()) return@transaction false
-                    if (it.isNull(0)) null else it.getLong(0)
-                }
+        val books = stabilityOriginBooks(origin) ?: return@transaction false
         val accountedOrigin =
             rawQuery(
                     "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
@@ -2144,17 +2218,8 @@ class DatabaseService(context: Context) :
                     arrayOf(pending.paymentId),
                 )
                 .use { it.moveToFirst() }
-        if (accountedOrigin == null && !alreadyRecorded && backing != null) {
-            val newBacking = (backing - pending.amountMsat / 1000L).coerceAtLeast(0L)
-            val values =
-                ContentValues().apply {
-                    put("stable_sats", newBacking)
-                    if (!archived) put("updated_at", System.currentTimeMillis() / 1000)
-                }
-            check(update(table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
-        }
-        // Null archived backing means unknown books; record the known payment without
-        // fabricating an allocation or borrowing one from a replacement channel.
+        if (accountedOrigin == null && !alreadyRecorded)
+            debitStabilityOrigin(origin, books, pending.amountMsat)
         if (!alreadyRecorded) recordCompletedStabilityHistory(pending)
         execSQL(
             "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
@@ -2392,7 +2457,12 @@ class DatabaseService(context: Context) :
                 put("status", status)
                 if (feeMsat > 0) put("fee_msat", feeMsat)
             }
+        var settledOrigin: String? = null
         writableDatabase.transaction {
+            // Every path that learns a released claim's outcome passes here: debit it or end it.
+            if (status == "completed") settledOrigin = settleReleasedStabilitySend(paymentId)
+            if (status == "failed")
+                delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
             // Also adopt pending sends from before the accounting marker was introduced.
             // Transport success (including background recovery) cannot release this barrier.
             if (status == "completed")
@@ -2406,6 +2476,12 @@ class DatabaseService(context: Context) :
                     arrayOf(paymentId),
                 )
             update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+        }
+        settledOrigin?.let {
+            AuditService.log(
+                "STABILITY_RELEASED_CLAIM_SETTLED",
+                mapOf("payment_id" to paymentId, "user_channel_id" to it),
+            )
         }
     }
 
