@@ -145,9 +145,11 @@ final class PaymentRepository {
         return paymentRecord(from: row)
     }
 
+    /// Rows the confirmation poller advances. Splices are deliberately NOT here.
+    /// A splice row's completion triggers stable-books reconcile in AppState.completeConfirmedSplice().
+    /// Excluding splices ensures the poller does not race the monitor and complete rows without deducting books.
     func paymentsNeedingConfirmation() throws -> [PaymentRecord] {
         let defaultRequired = ConfirmationPolicy.defaultRequiredConfirmations
-        let spliceRequired = ConfirmationPolicy.spliceRequiredConfirmations
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
@@ -155,21 +157,25 @@ final class PaymentRepository {
         WHERE txid IS NOT NULL
         AND txid != ''
         AND status != 'failed'
-        AND (
-            (payment_type IN ('splice_in', 'splice_out') AND (confirmations IS NULL OR confirmations < ?))
-            OR
-            (payment_type IN ('onchain', 'channel_close') AND (confirmations IS NULL OR confirmations < ?))
-        )
+        AND payment_type IN ('onchain', 'channel_close')
+        AND (confirmations IS NULL OR confirmations < ?)
         ORDER BY created_at DESC
         LIMIT 50
         """
         let rows = try rawSQL.query(
             sql,
-            params: [.integer(Int64(spliceRequired)), .integer(Int64(defaultRequired))]
+            params: [.integer(Int64(defaultRequired))]
         )
         return rows.map { row in
             paymentRecord(from: row)
         }
+    }
+
+    /// Check if any payment row exists carrying this transaction ID.
+    func paymentExists(forTxid txid: String) throws -> Bool {
+        let sql = "SELECT 1 FROM payments WHERE txid = ? LIMIT 1"
+        let rows = try rawSQL.query(sql, params: [.text(txid)])
+        return !rows.isEmpty
     }
 
     func getPayment(byId id: Int64) throws -> PaymentRecord? {
