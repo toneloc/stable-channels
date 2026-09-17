@@ -460,7 +460,8 @@ pub const LOST_LDK_RECORD_TIMEOUT_SECS: i64 = 600;
 
 /// Resolve `pending` sent rows against LDK's payment store. A failure delivered to a process
 /// that never sent the payment, or a record LDK has lost, must not block channel spends forever.
-/// Success waits for the redelivered event, which carries the reconciliation.
+/// A fresh success waits for its event, which carries the reconciliation; a stale one lost that
+/// event (older builds acknowledged it unsaved) and is completed so it cannot block either.
 pub fn reconcile_pending_sent_lightning(
     db: &Database,
     payments: &[PaymentDetails],
@@ -468,37 +469,61 @@ pub fn reconcile_pending_sent_lightning(
 ) -> SqliteResult<usize> {
     let mut resolved = 0;
     for (payment_id, created_at) in db.pending_sent_payments("lightning")? {
+        let stale = now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS;
         let status = payments.iter().find(|p| format!("{}", p.id) == payment_id).map(|p| p.status);
-        let reason = match status {
-            Some(PaymentStatus::Failed) => "ldk_failed",
-            None if now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS => "no_ldk_record",
+        let (outcome, reason) = match status {
+            Some(PaymentStatus::Failed) => ("failed", "ldk_failed"),
+            Some(PaymentStatus::Succeeded) if stale => ("completed", "ldk_succeeded_event_lost"),
+            None if stale => ("failed", "no_ldk_record"),
             _ => continue,
         };
-        if db.update_payment_status_by_pid(&payment_id, "failed", None)? > 0 {
+        if db.update_payment_status_by_pid(&payment_id, outcome, None)? > 0 {
             resolved += 1;
             audit_event(
-                "PENDING_SEND_FAILED_ON_RECOVERY",
-                json!({ "payment_id": payment_id, "reason": reason }),
+                "PENDING_SEND_RESOLVED_ON_RECOVERY",
+                json!({ "payment_id": payment_id, "outcome": outcome, "reason": reason }),
             );
         }
     }
     Ok(resolved)
 }
 
+fn payment_hash_hex(payment: &PaymentDetails) -> String {
+    match &payment.kind {
+        ldk_node::payment::PaymentKind::Spontaneous { hash, .. } => format!("{hash}"),
+        _ => String::new(),
+    }
+}
+
 /// A stability claim LDK fails, or never heard of because the process stopped between the claim
-/// and the send, is rolled back; the caller mirrors each rollback into the live channel. A success
-/// event that still arrives re-applies the debit (`settle_rolled_back_stability_payment`).
+/// and the send, is rolled back in the saved books and in `sc` together: taking the live channel
+/// by `&mut` makes the caller hold its lock, so a late success cannot re-debit in between. A
+/// success event that still arrives re-applies the debit (`settle_rolled_back_stability_payment`).
 pub fn reconcile_lost_stability_claims(
     db: &Database,
+    sc: &mut StableChannel,
     payments: &[PaymentDetails],
     now_unix: i64,
-) -> SqliteResult<Vec<StabilityPaymentRollback>> {
-    let mut rollbacks = Vec::new();
+) -> SqliteResult<usize> {
+    let mut rolled_back = 0;
     for (payment_id, created_at) in db.pending_sent_payments("stability")? {
-        let status = payments.iter().find(|p| format!("{}", p.id) == payment_id).map(|p| p.status);
-        let reason = match status {
+        let stale = now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS;
+        let payment = payments.iter().find(|p| format!("{}", p.id) == payment_id);
+        let reason = match payment.map(|p| p.status) {
             Some(PaymentStatus::Failed) => "ldk_failed",
-            None if now_unix - created_at > LOST_LDK_RECORD_TIMEOUT_SECS => "no_ldk_record",
+            Some(PaymentStatus::Succeeded) if stale => {
+                // Its event is long gone; the optimistic debit is already the right books.
+                let hash = payment.map(payment_hash_hex).unwrap_or_default();
+                let fee = payment.and_then(|p| p.fee_paid_msat);
+                if db.complete_pending_stability_payment(&payment_id, &hash, fee)? {
+                    audit_event(
+                        "STABILITY_CLAIM_COMPLETED_ON_RECOVERY",
+                        json!({ "payment_id": payment_id }),
+                    );
+                }
+                continue;
+            }
+            None if stale => "no_ldk_record",
             _ => continue,
         };
         if let Some(rollback) = db.fail_pending_stability_payment(&payment_id)? {
@@ -506,10 +531,11 @@ pub fn reconcile_lost_stability_claims(
                 "STABILITY_CLAIM_ROLLED_BACK_ON_RECOVERY",
                 json!({ "payment_id": payment_id, "reason": reason, "restored": rollback.restored }),
             );
-            rollbacks.push(rollback);
+            apply_stability_rollback(sc, &rollback);
+            rolled_back += 1;
         }
     }
-    Ok(rollbacks)
+    Ok(rolled_back)
 }
 
 /// Undo a failed stability payment's optimistic debit in memory, only while it is still in place.
@@ -1538,24 +1564,22 @@ mod tests {
         let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
 
         // A crash between the claim and the send leaves a row LDK never heard of.
-        assert!(reconcile_lost_stability_claims(&db, &[], now).unwrap().is_empty());
-        assert!(reconcile_lost_stability_claims(&db, &[details(9, PaymentStatus::Pending)], later)
-            .unwrap()
-            .is_empty());
-        assert!(reconcile_lost_stability_claims(&db, &[details(9, PaymentStatus::Succeeded)], later)
-            .unwrap()
-            .is_empty());
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], now).unwrap(), 0);
+        let pending = [details(9, PaymentStatus::Pending)];
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &pending, later).unwrap(), 0);
+        let succeeded = [details(9, PaymentStatus::Succeeded)];
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &succeeded, now).unwrap(), 0);
         assert!(db.has_pending_channel_send().unwrap());
+        assert_eq!(sc.backing_sats, 10_000);
 
-        let rollbacks = reconcile_lost_stability_claims(&db, &[], later).unwrap();
-        assert_eq!(rollbacks.len(), 1);
-        assert!(rollbacks[0].restored);
+        // The rollback reaches the saved books and the live channel in one step.
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 1);
         assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
         assert!(!db.has_pending_channel_send().unwrap());
-        assert!(apply_stability_rollback(&mut sc, &rollbacks[0]));
         assert_eq!(sc.backing_sats, 11_000);
         assert_eq!(sc.last_stability_payment, 0);
-        assert!(!apply_stability_rollback(&mut sc, &rollbacks[0]), "only the optimistic allocation is undone");
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 0);
+        assert_eq!(sc.backing_sats, 11_000, "only the optimistic allocation is undone");
     }
 
     #[test]
@@ -1566,9 +1590,9 @@ mod tests {
         let (mut sc, info) = claimed_channel(&db, &id);
         assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
-        let rollbacks =
-            reconcile_lost_stability_claims(&db, &[], now + LOST_LDK_RECORD_TIMEOUT_SECS + 1).unwrap();
-        assert!(apply_stability_rollback(&mut sc, &rollbacks[0]));
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 1);
+        assert_eq!(sc.backing_sats, 11_000);
         assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
 
         // The payment had left after all: its success event arrives after the rollback.
@@ -1602,12 +1626,34 @@ mod tests {
         let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
         assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, later).unwrap(), 1);
         assert!(db.has_pending_channel_send().unwrap(), "the in-flight payment keeps blocking");
-        // Success waits for the redelivered event, which carries the reconciliation.
+        // A fresh success waits for its event, which carries the reconciliation.
         let ldk = [details(2, PaymentStatus::Succeeded)];
-        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, later).unwrap(), 0);
+        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, now).unwrap(), 0);
         assert!(db.has_pending_channel_send().unwrap());
-        db.update_payment_status_by_pid(&format!("{}", PaymentId([2; 32])), "completed", None).unwrap();
+        // A stale one lost its event long ago (older builds acked it unsaved): complete the row.
+        assert_eq!(reconcile_pending_sent_lightning(&db, &ldk, later).unwrap(), 1);
         assert!(!db.has_pending_channel_send().unwrap());
+        assert!(db.get_recent_payments(3).unwrap().iter().any(|p| p.status == "completed"));
+    }
+
+    #[test]
+    fn a_stale_stability_claim_ldk_reports_succeeded_completes_and_keeps_its_debit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        let ldk = [details(9, PaymentStatus::Succeeded)];
+
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &ldk, now).unwrap(), 0);
+        assert!(db.has_pending_channel_send().unwrap(), "a fresh success waits for its event");
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &ldk, later).unwrap(), 0);
+        assert!(!db.has_pending_channel_send().unwrap(), "a stale one must not block spends forever");
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert_eq!(sc.backing_sats, 10_000);
     }
 
     #[test]

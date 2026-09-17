@@ -94,6 +94,30 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
+    fun zeroTargetSyncReleasesDriftInsideTheDeadbandLikeTheDesktopAndTheLsp() {
+        val identifier = "ab".repeat(32)
+        val service = DatabaseService(context)
+        // $0.50 over a $1,000 target is 0.05%: never payable, so a full exit must not retain it.
+        service.saveChannel(identifier, "7", 1_000.0, 1_000_500, null, 2_000_000, 100_000.0)
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "lsp-id",
+                expectedUsd = 0.0,
+                backingSats = 0,
+                syncVersion = 1,
+                correlation = null,
+            )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyUncorrelatedSyncIfNewer(sync, 100_000.0).status,
+        )
+        assertEquals(0L, service.loadChannel("7")!!.backingSats)
+        assertEquals(0.0, service.loadChannel("7")!!.expectedUSD, 0.0)
+        service.close()
+    }
+
+    @Test
     fun versionTwoSchemaMigratesWithoutLosingRows() {
         val legacy = SQLiteDatabase.openOrCreateDatabase(dbFile, null)
         legacy.execSQL(

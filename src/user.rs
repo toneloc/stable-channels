@@ -1014,19 +1014,14 @@ impl UserApp {
                 ) {
                     audit_event("PENDING_SEND_RECOVERY_FAILED", json!({ "error": e.to_string() }));
                 }
-                // A stability claim whose send never reached LDK is rolled back the same way.
-                match stable_channels::stable::reconcile_lost_stability_claims(
-                    &db, &ldk_payments, current_unix_time(),
-                ) {
-                    Ok(rollbacks) if !rollbacks.is_empty() => {
-                        if let Ok(mut sc) = sc_arc.lock() {
-                            for rollback in &rollbacks {
-                                stable_channels::stable::apply_stability_rollback(&mut sc, rollback);
-                            }
-                        }
+                // A stability claim whose send never reached LDK is rolled back the same way, with
+                // the channel locked so a late success cannot re-debit between the two writes.
+                if let Ok(mut sc) = sc_arc.lock() {
+                    if let Err(e) = stable_channels::stable::reconcile_lost_stability_claims(
+                        &db, &mut sc, &ldk_payments, current_unix_time(),
+                    ) {
+                        audit_event("STABILITY_CLAIM_RECOVERY_FAILED", json!({ "error": e.to_string() }));
                     }
-                    Ok(_) => {}
-                    Err(e) => audit_event("STABILITY_CLAIM_RECOVERY_FAILED", json!({ "error": e.to_string() })),
                 }
 
                 // Automatic stability payments require a freshly validated consensus price.

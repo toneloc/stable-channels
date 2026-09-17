@@ -219,8 +219,9 @@ class StabilityServiceTest {
                 StabilityAction.PAY,
                 StabilityService.checkStabilityAction(sc, price).action,
             )
-            assertTrue(
-                runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure
+            assertEquals(
+                MUST_SETTLE,
+                refusal { StabilityService.checkOutgoingAllocation(sc, price) },
             )
         }
         for (backing in listOf(0L, 249L, 250L)) {
@@ -245,9 +246,14 @@ class StabilityServiceTest {
                 backingSats = 10_000,
                 stableReceiverBTC = Bitcoin(100_000),
             )
-        for (price in listOf(110_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
-            assertTrue(
-                runCatching { StabilityService.checkOutgoingAllocation(sc, price) }.isFailure
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 110_000.0) },
+        )
+        for (price in listOf(0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertEquals(
+                NEEDS_PRICE,
+                refusal { StabilityService.checkOutgoingAllocation(sc, price) },
             )
         }
         StabilityService.checkOutgoingAllocation(sc, 90_000.0) // LSP owes the shortfall
@@ -267,12 +273,13 @@ class StabilityServiceTest {
         for (price in listOf(110_000.0, 90_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
             StabilityService.checkOutgoingAllocation(sc, price, 90_000L)
         }
-        assertTrue(
-            runCatching { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) }
-                .isFailure
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) },
         )
-        assertTrue(
-            runCatching { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) }.isFailure
+        assertEquals(
+            NEEDS_PRICE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) },
         )
     }
 
@@ -285,9 +292,9 @@ class StabilityServiceTest {
                 stableReceiverBTC = Bitcoin(3_000),
             )
         StabilityService.checkOutgoingAllocation(sc, 0.0, 2_000L)
-        assertTrue(
-            runCatching { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) }
-                .isFailure
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) },
         )
     }
 
@@ -343,5 +350,14 @@ class StabilityServiceTest {
     fun `Bitcoin fromBTC round trips correctly`() {
         val btc = Bitcoin.fromBTC(0.001)
         assertEquals(100_000L, btc.sats)
+    }
+
+    private fun refusal(block: () -> Unit): String? = runCatching(block).exceptionOrNull()?.message
+
+    private companion object {
+        const val MUST_SETTLE =
+            "A stability payment must settle before sending. Please try again shortly."
+        const val NEEDS_PRICE =
+            "Waiting for a fresh price before sending. Please try again shortly."
     }
 }

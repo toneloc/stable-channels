@@ -67,7 +67,9 @@ class DatabaseService(context: Context) :
         File(Constants.userDataDir(context), DB_FILENAME).absolutePath,
         null,
         DB_VERSION,
-    ) {
+    ),
+    // The platform helper is AutoCloseable only from API 29; `use {}` must work on API 26 too.
+    AutoCloseable {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
@@ -1452,12 +1454,22 @@ class DatabaseService(context: Context) :
             val receiverSats = row[3] as Long
             val localBacking =
                 if (sync.expectedUsd == 0.0) {
-                    StabilityService.backingAfterTargetClear(
+                    // Drift inside the deadband is never payable and is released, as on the
+                    // desktop and the LSP; actionable drift stays as backing until it settles.
+                    TradeProtocol.tradeBackingAfterDelta(
+                        receiverSats,
                         currentBacking,
                         currentExpected,
-                        receiverSats,
+                        0.0,
                         trustedPrice,
-                    ) ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                    )
+                        ?: StabilityService.backingAfterTargetClear(
+                            currentBacking,
+                            currentExpected,
+                            receiverSats,
+                            trustedPrice,
+                        )
+                        ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
                 } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)
                 } else {
@@ -2088,15 +2100,16 @@ class DatabaseService(context: Context) :
 
     private class StabilityOriginBooks(val table: String, val backingSats: Long?)
 
-    /** The origin's live books, or its archive once the channel has closed. */
+    /**
+     * The origin's live books, or its archive once the channel has closed. A live row wins over a
+     * stale archive: debiting the archive of a channel still in use would leave its surplus unpaid.
+     */
     private fun SQLiteDatabase.stabilityOriginBooks(origin: String): StabilityOriginBooks? {
-        val archived =
-            rawQuery(
-                    "SELECT 1 FROM closed_channel_books WHERE user_channel_id = ?",
-                    arrayOf(origin),
-                )
-                .use { it.moveToFirst() }
-        val table = if (archived) "closed_channel_books" else "channels"
+        val live =
+            rawQuery("SELECT 1 FROM channels WHERE user_channel_id = ?", arrayOf(origin)).use {
+                it.moveToFirst()
+            }
+        val table = if (live) "channels" else "closed_channel_books"
         return rawQuery(
                 "SELECT stable_sats FROM $table WHERE user_channel_id = ?",
                 arrayOf(origin),
@@ -2112,14 +2125,15 @@ class DatabaseService(context: Context) :
         origin: String,
         books: StabilityOriginBooks,
         amountMsat: Long,
-    ) {
-        val backing = books.backingSats ?: return
+    ): Boolean {
+        val backing = books.backingSats ?: return false
         val values =
             ContentValues().apply {
                 put("stable_sats", (backing - amountMsat / 1000L).coerceAtLeast(0L))
                 if (books.table == "channels") put("updated_at", System.currentTimeMillis() / 1000)
             }
         check(update(books.table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
+        return true
     }
 
     /**
@@ -2145,16 +2159,10 @@ class DatabaseService(context: Context) :
             delete("pending_stability_send", "id = 1", null) == 1
         }
 
-    fun releasedStabilityOrigin(paymentId: String): String? =
-        readableDatabase
-            .rawQuery(
-                "SELECT user_channel_id FROM released_stability_sends WHERE payment_id = ?",
-                arrayOf(paymentId),
-            )
-            .use { if (it.moveToFirst()) it.getString(0) else null }
-
     /** A released claim whose payment proves successful is debited from its origin exactly once. */
-    private fun SQLiteDatabase.settleReleasedStabilitySend(paymentId: String): String? {
+    private fun SQLiteDatabase.settleReleasedStabilitySend(
+        paymentId: String
+    ): Pair<String, Boolean>? {
         val (origin, amountMsat) =
             rawQuery(
                     "SELECT user_channel_id, amount_msat FROM released_stability_sends WHERE payment_id = ?",
@@ -2167,15 +2175,18 @@ class DatabaseService(context: Context) :
                     arrayOf(paymentId),
                 )
                 .use { it.moveToFirst() }
+        var debited = false
         if (!accounted) {
-            stabilityOriginBooks(origin)?.let { debitStabilityOrigin(origin, it, amountMsat) }
+            debited =
+                stabilityOriginBooks(origin)?.let { debitStabilityOrigin(origin, it, amountMsat) }
+                    ?: false
             execSQL(
                 "INSERT INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
                 arrayOf(paymentId, origin),
             )
         }
         delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
-        return origin
+        return origin to debited
     }
 
     fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean =
@@ -2451,16 +2462,17 @@ class DatabaseService(context: Context) :
         ) > 0
     }
 
-    fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
+    /** Returns the origin of a released stability claim this completion settled, if any. */
+    fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0): String? {
         val cv =
             ContentValues().apply {
                 put("status", status)
                 if (feeMsat > 0) put("fee_msat", feeMsat)
             }
-        var settledOrigin: String? = null
+        var settled: Pair<String, Boolean>? = null
         writableDatabase.transaction {
             // Every path that learns a released claim's outcome passes here: debit it or end it.
-            if (status == "completed") settledOrigin = settleReleasedStabilitySend(paymentId)
+            if (status == "completed") settled = settleReleasedStabilitySend(paymentId)
             if (status == "failed")
                 delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
             // Also adopt pending sends from before the accounting marker was introduced.
@@ -2477,13 +2489,37 @@ class DatabaseService(context: Context) :
                 )
             update("payments", cv, "payment_id = ?", arrayOf(paymentId))
         }
-        settledOrigin?.let {
+        settled?.let { (origin, debited) ->
             AuditService.log(
                 "STABILITY_RELEASED_CLAIM_SETTLED",
-                mapOf("payment_id" to paymentId, "user_channel_id" to it),
+                mapOf("payment_id" to paymentId, "user_channel_id" to origin, "debited" to debited),
             )
         }
+        return settled?.first
     }
+
+    /** True once a payment id has a history row or a settled stability origin. */
+    fun isRecordedOutgoingPayment(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                """SELECT 1 FROM payments WHERE payment_id = ?1
+                   UNION ALL SELECT 1 FROM outgoing_stability_accounting WHERE payment_id = ?1
+                   UNION ALL SELECT 1 FROM released_stability_sends WHERE payment_id = ?1""",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
+
+    /** The in-flight claim, a released claim, or a recorded stability payment carries this id. */
+    fun isKnownStabilityPaymentId(paymentId: String): Boolean =
+        paymentId.isNotBlank() &&
+            (loadPendingSend()?.paymentId == paymentId ||
+                isOutgoingStabilityPayment(paymentId) ||
+                readableDatabase
+                    .rawQuery(
+                        "SELECT 1 FROM released_stability_sends WHERE payment_id = ?",
+                        arrayOf(paymentId),
+                    )
+                    .use { it.moveToFirst() })
 
     fun isOutgoingStabilityPayment(paymentId: String): Boolean {
         val cursor =

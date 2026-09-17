@@ -945,8 +945,8 @@ class OutgoingPaymentLifecycleTest {
         assertArchive(10.0, 11_000L)
         // A balance below backing would make an ordinary-send reconcile cut the USD target.
         node.channels = listOf(channel("8", "new-channel", 4_000))
+        event(success) // LDK's record stays lost: the event alone settles the released claim
         node.payments = listOf(succeeded)
-        event(success)
         event(success)
         assertEquals("completed", payment().status)
         assertEquals(1, db.getRecentPayments().count { it.paymentId == "send" })
@@ -985,6 +985,125 @@ class OutgoingPaymentLifecycleTest {
         assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
         assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
         assertNoStabilityOriginRecorded()
+    }
+
+    @Test
+    fun stabilityMarkerWhoseIdBelongsToAnotherPaymentIsReleasedAfterTheGracePeriod() {
+        closeWithPendingStabilityAndReplace()
+        // The id resolves to a payment of another amount, so it can never settle this claim.
+        node.payments = node.payments.map { it.copy(amountMsat = 2_000_000uL) }
+        assertFalse(backgroundRecovery())
+        assertNotNull(db.loadPendingSend())
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 11_000L)
+        assertReplacementUnchanged()
+        assertNoStabilityOriginRecorded()
+        assertTrue(auditLog().contains("STABILITY_MARKER_RELEASED_MISMATCH"))
+        // The other payment's own completion must never debit this claim's channel.
+        db.updatePaymentStatus("send", "completed")
+        assertArchive(10.0, 11_000L)
+    }
+
+    @Test
+    fun stabilitySuccessDebitsTheLiveRowWhenAStaleArchiveOfTheSameChannelExists() {
+        // A transient gap in listChannels archived the books; the channel is alive and saved again.
+        db.deleteChannel("7")
+        db.saveChannel("channel", "7", 10.0, 11_000, null, 20_000, 100_000.0)
+        claimOnTheLiveChannelWithoutAnLdkRecord()
+        node.payments =
+            listOf(
+                terminal()
+                    .copy(kind = PaymentKind.Spontaneous("hash", null), amountMsat = 1_000_000uL)
+            )
+        assertTrue(backgroundRecovery())
+        // Debiting the archive instead would leave the surplus in place and pay it again.
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+    }
+
+    @Test
+    fun stabilitySuccessEventSettlesAMarkerLdkHasNoRecordOf() {
+        claimOnTheLiveChannelWithoutAnLdkRecord()
+        event(success) // the event itself proves the payment left, well inside the grace period
+        assertNull(db.loadPendingSend())
+        assertEquals("completed", payment().status)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+        // Nothing is left for the grace-period release, and a replay debits nothing more.
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        event(success)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertFalse(auditLog().contains("STABILITY_MARKER_RELEASED_NO_LDK_RECORD"))
+    }
+
+    @Test
+    fun stabilitySuccessEventInTheBackgroundSettlesAMarkerLdkHasNoRecordOf() {
+        claimOnTheLiveChannelWithoutAnLdkRecord()
+        backgroundSuccess(success)
+        backgroundSuccess(success)
+        assertNull(db.loadPendingSend())
+        assertEquals("completed", payment().status)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    @Test
+    fun stabilitySuccessWithoutAnLdkRecordIsNeverHeldBackAsAnUnresolvedTradeFee() {
+        claimOnTheLiveChannelWithoutAnLdkRecord()
+        db.writableDatabase.execSQL(
+            "INSERT INTO trades (action, amount_usd, amount_btc, btc_price, status) VALUES ('buy', 1.0, 0.00001, 100000.0, 'prepared')"
+        )
+        assertTrue(db.hasUnattachedPreparedTrade())
+        event(success)
+        assertNull(db.loadPendingSend())
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+    }
+
+    @Test
+    fun stabilityLateSuccessWithNoBooksLeftIsAuditedAsNotDebited() {
+        releaseLostRecordOnTheLiveChannel()
+        db.writableDatabase.execSQL("DELETE FROM channels WHERE user_channel_id = '7'")
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
+        val settled = auditLog().lines().single { it.contains("STABILITY_RELEASED_CLAIM_SETTLED") }
+        assertTrue(settled, settled.contains("\"debited\":false"))
+    }
+
+    @Test
+    fun stabilityLateSuccessBehindANewerClaimStillShowsItsDebit() {
+        releaseLostRecordOnTheLiveChannel()
+        assertTrue(db.claimPendingSend(500_000, 100_000.0, "7")) // a newer, unresolved claim
+        event(success)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+    }
+
+    private fun claimOnTheLiveChannelWithoutAnLdkRecord() {
+        node.channels = listOf(channel("7", "channel", 11_000))
+        price(100_000.0)
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
+        db.setPendingSendPaymentId("send")
+    }
+
+    private fun backgroundSuccess(event: Event.PaymentSuccessful) {
+        val controller = Robolectric.buildService(StabilityProcessingService::class.java).create()
+        try {
+            StabilityProcessingService::class
+                .java
+                .getDeclaredMethod(
+                    "persistPaymentSuccess",
+                    Node::class.java,
+                    Event.PaymentSuccessful::class.java,
+                )
+                .apply { isAccessible = true }
+                .invoke(controller.get(), node, event)
+        } catch (e: InvocationTargetException) {
+            throw e.targetException
+        } finally {
+            controller.destroy()
+        }
     }
 
     private fun releaseLostRecordOnTheLiveChannel() {
@@ -1078,6 +1197,27 @@ class OutgoingPaymentLifecycleTest {
         assertReplacementUnchanged()
         assertEquals("7", db.outgoingStabilityOrigin("send"))
         assertNull(db.outgoingStabilityOrigin("fee"))
+    }
+
+    @Test
+    fun stabilityAmbiguousLostIdNeverAdoptsAnAlreadyAccountedPayment() {
+        val candidate = ambiguousLostIdCandidate()
+        // An earlier stability payment of the same amount, settled and on the books.
+        db.writableDatabase.execSQL(
+            "INSERT INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES ('earlier', '7')"
+        )
+        node.payments =
+            listOf(
+                candidate.copy(
+                    id = "earlier",
+                    latestUpdateTimestamp = candidate.latestUpdateTimestamp - 3u,
+                ),
+                candidate,
+            )
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        assertArchive(10.0, 10_000L) // the unaccounted payment is ours and is debited
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
     }
 
     @Test

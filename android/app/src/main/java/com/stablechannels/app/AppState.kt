@@ -2404,11 +2404,14 @@ class AppState(private val context: Context) : ViewModel() {
                             false
                         }
                 }
+                // A stability payment's id is known before it is sent, so it is never a trade fee
+                // even when LDK has lost the record that would show its amount.
                 if (
                     !recognizedTrade &&
                         eventAmountMsat == null &&
                         try {
-                            db.hasUnattachedPreparedTrade()
+                            !db.isKnownStabilityPaymentId(paymentId) &&
+                                db.hasUnattachedPreparedTrade()
                         } catch (_: Exception) {
                             false
                         }
@@ -2655,7 +2658,7 @@ class AppState(private val context: Context) : ViewModel() {
                 // outgoing-payment path in the meantime.
                 FCMService.flagPendingPayment(context)
                 if (!paymentId.isNullOrEmpty()) {
-                    databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+                    markPaymentCompleted(paymentId, feePaidMsat)
                 }
                 _statusMessage.value = "Payment confirmed; syncing stability payment"
                 return true
@@ -2663,10 +2666,10 @@ class AppState(private val context: Context) : ViewModel() {
 
             val matchesPendingStabilityPayment =
                 !paymentId.isNullOrEmpty() && pending.paymentId == paymentId
-            val reconciled = reconcilePendingOutgoingStabilityPayment()
+            val reconciled = reconcilePendingOutgoingStabilityPayment(paymentId)
             if (matchesPendingStabilityPayment) {
                 if (reconciled) {
-                    databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
+                    markPaymentCompleted(paymentId!!, feePaidMsat)
                     refreshBalances()
                     updateStableBalances()
                     _statusMessage.value = "Payment confirmed"
@@ -2679,7 +2682,7 @@ class AppState(private val context: Context) : ViewModel() {
 
             if (!reconciled) {
                 if (!paymentId.isNullOrEmpty()) {
-                    databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+                    markPaymentCompleted(paymentId, feePaidMsat)
                 }
                 _statusMessage.value = "Payment confirmed; syncing stability payment"
                 return true
@@ -2691,17 +2694,21 @@ class AppState(private val context: Context) : ViewModel() {
                 (databaseService?.isOutgoingStabilityPayment(paymentId) == true)
         if (!isRecordedStabilityPayment) return false
 
-        synchronized(booksLock) {
-            // A claim released after LDK lost its record is debited now; show it if it is ours.
-            val released = databaseService?.releasedStabilityOrigin(paymentId!!)
-            databaseService?.updatePaymentStatus(paymentId!!, "completed", feePaidMsat ?: 0)
-            if (released != null && released == _stableChannel.value.userChannelId)
-                publishBooksFromDB()
-        }
+        markPaymentCompleted(paymentId!!, feePaidMsat)
         refreshBalances()
         updateStableBalances()
         _statusMessage.value = "Payment confirmed"
         return true
+    }
+
+    // A released stability claim is debited the moment its payment completes; show it if ours.
+    private fun markPaymentCompleted(paymentId: String, feePaidMsat: Long?) {
+        synchronized(booksLock) {
+            val settled =
+                databaseService?.updatePaymentStatus(paymentId, "completed", feePaidMsat ?: 0)
+            if (settled != null && settled == _stableChannel.value.userChannelId)
+                publishBooksFromDB()
+        }
     }
 
     private fun handleSplicePending(
@@ -3649,78 +3656,75 @@ class AppState(private val context: Context) : ViewModel() {
                 return
             }
 
-            val paymentId =
+            // Attach only the signed STABILITY_PAYMENT_V1 envelope — the legacy
+            // STABLE_CHANNEL_TLV [0x01] marker is gone (#270). If the envelope can't
+            // be built, release the claim and skip the payment entirely.
+            val signedEnvelope =
                 try {
-                    // Attach only the signed STABILITY_PAYMENT_V1 envelope — the legacy
-                    // STABLE_CHANNEL_TLV [0x01] marker is gone (#270). If the envelope can't
-                    // be built, release the claim and skip the payment entirely.
-                    val signedEnvelope =
-                        StabilityPaymentProtocol.buildSignedEnvelope(
-                            channelId = revalidated.channelId,
-                            amountMsat = amountMsat,
-                            expectedUsd = revalidated.expectedUSD.amount,
-                            sign = { payload -> nodeService.signMessage(payload) },
-                        )
-                    if (signedEnvelope == null) {
-                        try {
-                            databaseService?.clearPendingSend()
-                        } catch (_: Exception) {}
-                        AuditService.log(
-                            "STABILITY_SKIP",
-                            mapOf("reason" to "envelope_build_failed"),
-                        )
-                        return
-                    }
-                    val records =
-                        listOf(
-                            CustomTlvRecord(
-                                Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
-                                signedEnvelope.toByteArray(Charsets.UTF_8),
-                            )
-                        )
-                    nodeService.sendStabilityPayment(amountMsat, sc.counterparty, records)
-                } catch (e: NodeService.StaleLightningSyncException) {
-                    // The wrapper's send-boundary gate fired (sync went stale after the precheck
-                    // above). Send never happened — release the claim and retry next tick.
-                    try {
-                        databaseService?.clearPendingSend()
-                    } catch (_: Exception) {}
-                    AuditService.log(
-                        "STABILITY_SKIP",
-                        mapOf("reason" to "stale_lightning_sync", "sync_age_secs" to e.syncAgeSecs),
+                    StabilityPaymentProtocol.buildSignedEnvelope(
+                        channelId = revalidated.channelId,
+                        amountMsat = amountMsat,
+                        expectedUsd = revalidated.expectedUSD.amount,
+                        sign = { payload -> nodeService.signMessage(payload) },
                     )
-                    return
-                } catch (e: Exception) {
-                    // Send never happened — release the claim.
-                    try {
-                        databaseService?.clearPendingSend()
-                    } catch (_: Exception) {}
-                    AuditService.log(
-                        "STABILITY_PAYMENT_FAILED",
-                        mapOf("error" to (e.message ?: "")),
-                    )
-                    return
+                } catch (_: Exception) {
+                    null
                 }
-
-            val paymentIdString = paymentId.toString()
-            val guardSaved =
+            val db = databaseService
+            if (signedEnvelope == null || db == null) {
                 try {
-                    databaseService?.setPendingSendPaymentId(paymentIdString)
-                    true
-                } catch (e: Exception) {
-                    false
-                }
-            FCMService.getPrefs(context).edit().putLong("bg_last_stability_sent", now).commit()
-            if (!guardSaved) {
-                // The payment left the device but the marker still has an empty id — the
-                // reconcile path resolves it against LDK's payment store.
-                FCMService.flagPendingPayment(context)
-                AuditService.log(
-                    "STABILITY_PAYMENT_PERSISTENCE_FAILED",
-                    mapOf("error" to "payment_sent_but_id_guard_update_failed"),
-                )
+                    databaseService?.clearPendingSend()
+                } catch (_: Exception) {}
+                AuditService.log("STABILITY_SKIP", mapOf("reason" to "envelope_build_failed"))
                 return
             }
+            val records =
+                listOf(
+                    CustomTlvRecord(
+                        Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
+                        signedEnvelope.toByteArray(Charsets.UTF_8),
+                    )
+                )
+            // The claim carries the payment id before LDK sends, so no outcome can orphan it.
+            val outcome =
+                StabilityKeysend.send(db) { preimage ->
+                    nodeService.sendStabilityPayment(amountMsat, sc.counterparty, records, preimage)
+                }
+            when (outcome) {
+                is StabilityKeysend.Outcome.NotSent -> {
+                    // Send never happened — release the claim and retry next tick.
+                    try {
+                        db.clearPendingSend()
+                    } catch (_: Exception) {}
+                    val stale = outcome.error as? NodeService.StaleLightningSyncException
+                    if (stale != null)
+                        AuditService.log(
+                            "STABILITY_SKIP",
+                            mapOf(
+                                "reason" to "stale_lightning_sync",
+                                "sync_age_secs" to stale.syncAgeSecs,
+                            ),
+                        )
+                    else
+                        AuditService.log(
+                            "STABILITY_PAYMENT_FAILED",
+                            mapOf("error" to (outcome.error.message ?: "")),
+                        )
+                    return
+                }
+                is StabilityKeysend.Outcome.OutcomeUnknown -> {
+                    // The payment may be in flight: keep the claim for its event or the recovery.
+                    FCMService.getPrefs(context)
+                        .edit()
+                        .putLong("bg_last_stability_sent", now)
+                        .commit()
+                    FCMService.flagPendingPayment(context)
+                    _stableChannel.update { it.copy(lastStabilityPayment = now) }
+                    return
+                }
+                is StabilityKeysend.Outcome.Sent -> Unit
+            }
+            FCMService.getPrefs(context).edit().putLong("bg_last_stability_sent", now).commit()
 
             _stableChannel.update { it.copy(lastStabilityPayment = now) }
             reconcilePendingOutgoingStabilityPayment()
@@ -3734,7 +3738,9 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun reconcilePendingOutgoingStabilityPayment(): Boolean {
+    private fun reconcilePendingOutgoingStabilityPayment(
+        succeededPaymentId: String? = null
+    ): Boolean {
         val db = databaseService ?: return false
         return try {
             val pending = db.loadPendingSend() ?: return true
@@ -3744,7 +3750,12 @@ class AppState(private val context: Context) : ViewModel() {
                     node.payment(pending.paymentId)?.status == PaymentStatus.FAILED
             synchronized(booksLock) {
                 val resolved =
-                    OutgoingStabilityPaymentRecovery.reconcile(db, node, nodeService.isRunning)
+                    OutgoingStabilityPaymentRecovery.reconcile(
+                        db,
+                        node,
+                        nodeService.isRunning,
+                        succeededPaymentId,
+                    )
                 // A legacy marker learns its origin only during recovery; the ledger keeps it.
                 val origin = pending.userChannelId ?: db.outgoingStabilityOrigin(pending.paymentId)
                 if (

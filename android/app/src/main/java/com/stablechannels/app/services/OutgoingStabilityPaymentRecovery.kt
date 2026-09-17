@@ -8,13 +8,23 @@ import org.lightningdevkit.ldknode.PaymentStatus
 
 /** The same deferred-settlement policy runs in the foreground and background processes. */
 object OutgoingStabilityPaymentRecovery {
-    fun reconcile(db: DatabaseService, node: Node, channelsAuthoritative: Boolean): Boolean {
+    /**
+     * [succeededPaymentId] is a PaymentSuccessful event's id: proof even if LDK lost the record.
+     */
+    fun reconcile(
+        db: DatabaseService,
+        node: Node,
+        channelsAuthoritative: Boolean,
+        succeededPaymentId: String? = null,
+    ): Boolean {
         var pending = db.loadPendingSend() ?: return true
         if (pending.paymentId.isEmpty()) {
-            // A trade fee keysend is never the stability payment, whatever its amount.
+            // A trade fee keysend, or a payment already on the books, is never this claim's.
             val candidates =
                 node.listPayments().filter {
-                    matchesUnassigned(pending, it) && !db.tradePaymentExists(it.id)
+                    matchesUnassigned(pending, it) &&
+                        !db.tradePaymentExists(it.id) &&
+                        !db.isRecordedOutgoingPayment(it.id)
                 }
             // Amount/time matching is a legacy crash-recovery fallback, not an identity proof.
             // Every candidate carries the claimed amount, so one shared terminal outcome gives
@@ -48,19 +58,22 @@ object OutgoingStabilityPaymentRecovery {
             pending = pending.copy(paymentId = candidate.id)
         }
 
-        val payment =
-            node.payment(pending.paymentId)
-                ?: return releaseLostRecord(db, pending, channelsAuthoritative)
-        if (
-            payment.kind !is PaymentKind.Spontaneous ||
-                payment.direction != PaymentDirection.OUTBOUND ||
-                payment.amountMsat?.toLong() != pending.amountMsat
-        )
-            return false
-        when (payment.status) {
-            PaymentStatus.PENDING -> return false
-            PaymentStatus.FAILED -> return db.clearPendingSend(pending)
-            PaymentStatus.SUCCEEDED -> Unit
+        val payment = node.payment(pending.paymentId)
+        if (payment == null) {
+            if (succeededPaymentId.isNullOrEmpty() || succeededPaymentId != pending.paymentId)
+                return releaseLostRecord(db, pending, channelsAuthoritative)
+        } else {
+            if (
+                payment.kind !is PaymentKind.Spontaneous ||
+                    payment.direction != PaymentDirection.OUTBOUND ||
+                    payment.amountMsat?.toLong() != pending.amountMsat
+            )
+                return releaseMismatched(db, pending, channelsAuthoritative)
+            when (payment.status) {
+                PaymentStatus.PENDING -> return false
+                PaymentStatus.FAILED -> return db.clearPendingSend(pending)
+                PaymentStatus.SUCCEEDED -> Unit
+            }
         }
         // An old marker may outlive its atomic history/backing commit, or precede it entirely.
         // Clear proven accounting, debit only a proven origin, and otherwise keep the payment on
@@ -105,6 +118,25 @@ object OutgoingStabilityPaymentRecovery {
             if (released)
                 AuditService.log(
                     "STABILITY_MARKER_RELEASED_NO_LDK_RECORD",
+                    mapOf("payment_id" to pending.paymentId, "amount_msat" to pending.amountMsat),
+                )
+        }
+    }
+
+    // The id resolves to some other payment, so nothing can ever settle this claim. Its own
+    // payment is unknown: release without a debit and without tying the claim to that id.
+    private fun releaseMismatched(
+        db: DatabaseService,
+        pending: PendingStabilitySend,
+        storeAuthoritative: Boolean,
+    ): Boolean {
+        val ageSecs = System.currentTimeMillis() / 1000 - pending.createdAt
+        if (!storeAuthoritative || ageSecs <= LightningPaymentRecovery.LOST_LDK_RECORD_TIMEOUT_SECS)
+            return false
+        return db.clearPendingSend(pending).also { released ->
+            if (released)
+                AuditService.log(
+                    "STABILITY_MARKER_RELEASED_MISMATCH",
                     mapOf("payment_id" to pending.paymentId, "amount_msat" to pending.amountMsat),
                 )
         }

@@ -399,6 +399,7 @@ class NodeService(private val context: Context) {
         amountMsat: Long,
         toNodeId: String,
         tlvs: List<CustomTlvRecord>,
+        preimage: String,
     ): String {
         val n = node ?: throw NodeServiceError()
         val ts = n.status().latestLightningWalletSyncTimestamp?.toLong()
@@ -406,7 +407,8 @@ class NodeService(private val context: Context) {
         if (!StabilityFreshness.isFresh(ts, now)) {
             throw StaleLightningSyncException(StabilityFreshness.syncAgeSecs(ts, now))
         }
-        return n.spontaneousPayment().sendWithCustomTlvs(amountMsat.toULong(), toNodeId, null, tlvs)
+        return n.spontaneousPayment()
+            .sendWithPreimageAndCustomTlvs(amountMsat.toULong(), toNodeId, tlvs, preimage, null)
     }
 
     fun receivePayment(amountMsat: Long, description: String): Bolt11Invoice {

@@ -2710,6 +2710,7 @@ impl Database {
                 }
                 _ => false,
             };
+            // Set for every restore, proven failure or not: a success event is proof either way.
             if restored {
                 conn.execute(
                     "UPDATE payments SET backing_rolled_back = 1 WHERE id = ?1",
@@ -5893,6 +5894,20 @@ mod tests {
         let channel = db.load_channel("user-channel-1").unwrap().unwrap();
         assert_eq!(channel.backing_sats, 105_000);
         assert_eq!(channel.expected_usd, 100.0);
+    }
+
+    #[test]
+    fn late_stability_success_with_no_channel_row_left_only_completes_the_payment() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        db.delete_channel("user-channel-1").unwrap();
+
+        assert!(db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .is_none());
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
     }
 
     #[test]
