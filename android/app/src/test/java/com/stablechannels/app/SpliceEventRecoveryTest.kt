@@ -41,7 +41,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@Config(sdk = [35], shadows = [SystemCleanerShadow::class])
 class SpliceEventRecoveryTest {
     private lateinit var context: Context
     private lateinit var db: DatabaseService
@@ -193,6 +193,21 @@ class SpliceEventRecoveryTest {
     }
 
     private fun generation(state: AppState) = (read(state, "spliceGeneration") as AtomicLong).get()
+
+    /**
+     * A move out is a channel spend: the guard needs a running node listing the channel at par and
+     * a fresh price.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun installNode(state: AppState, receiver: Long = 10_000): TestNode {
+        val node =
+            TestNode().also { it.channels = listOf(channel(cid = channel, receiver = receiver)) }
+        set(state.nodeService, "node", node)
+        (read(state.nodeService, "_isRunning") as MutableStateFlow<Boolean>).value = true
+        state.priceService.seedPrice(100_000.0)
+        (read(state.priceService, "_lastUpdate") as MutableStateFlow<Date>).value = Date()
+        return node
+    }
 
     @Test
     fun negotiatedEventsSurviveBackgroundHandoffRestartAndReplayForBothDirections() {
@@ -551,6 +566,7 @@ class SpliceEventRecoveryTest {
         val id = pending()
         val state = appState()
         setChannel(state, "7")
+        installNode(state)
         resume(state)
         assertTrue(state.isSpliceInFlight)
         assertThrows(IllegalStateException::class.java) {
@@ -618,7 +634,7 @@ class SpliceEventRecoveryTest {
         expire(id)
         // A claimed send makes the tick bail out right after the release, so the release must come
         // first.
-        assertTrue(db.claimPendingSend(1_000_000, 100_000.0))
+        assertTrue(db.claimPendingSend(1_000_000, 100_000.0, "7"))
         tick(state)
         assertFalse(state.isSpliceInFlight)
         assertEquals("failed", payment(id).status)
@@ -647,11 +663,14 @@ class SpliceEventRecoveryTest {
     fun aMoveOutCompletesEndToEndFromBeginThroughNegotiationAndConfirmation() {
         val state = appState()
         setBooks(state)
+        val node = installNode(state)
         val server = MockWebServer().also { it.start() }
         var job: Job? = null
         try {
             routeEsploraTo(state, server) { MockResponse().setBody("{\"confirmed\":false}") }
             state.beginSpliceOut(1_000, "addr", 100_000.0)
+            node.channels =
+                listOf(channel(cid = channel, receiver = 9_000)) // the 1,000-sat move left
             val rowId = (read(state, "pendingSplice") as PendingSplice).paymentRowId
             handle(state, negotiated)
             job = read(state, "spliceConfirmationJob") as Job
@@ -690,6 +709,7 @@ class SpliceEventRecoveryTest {
     fun aReplayedNegotiationKeepsTheLiveOperationsMonitorAndGeneration() {
         val state = appState()
         setChannel(state, "7")
+        installNode(state)
         val server = MockWebServer().also { it.start() }
         var job: Job? = null
         try {
@@ -716,6 +736,7 @@ class SpliceEventRecoveryTest {
     fun backgroundingKeepsTheNodeAliveOnlyWhileASpliceIsStillNegotiating() {
         val state = appState()
         setChannel(state, "7")
+        installNode(state)
         val app = RuntimeEnvironment.getApplication()
         fun keepAliveReason(): String? {
             state.stopNodeForBackground()

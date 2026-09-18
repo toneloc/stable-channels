@@ -12,9 +12,11 @@ import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.LightningPaymentRecovery
+import com.stablechannels.app.services.OutgoingStabilityPaymentRecovery
 import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
 import com.stablechannels.app.services.SpliceEventRecorder
+import com.stablechannels.app.services.StabilityKeysend
 import com.stablechannels.app.services.StabilityPaymentProtocol
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
@@ -88,9 +90,20 @@ class StabilityProcessingService : Service() {
     }
 
     /** Persist successful outbound payments before acknowledging the LDK event. */
-    private fun persistPaymentSuccess(event: Event.PaymentSuccessful) {
+    private fun persistPaymentSuccess(node: Node, event: Event.PaymentSuccessful) {
         val db = DatabaseService(this)
         try {
+            // The event proves a stability marker with this id, even if LDK lost its record.
+            if (
+                !event.paymentId.isNullOrEmpty() &&
+                    db.loadPendingSend()?.paymentId == event.paymentId
+            )
+                OutgoingStabilityPaymentRecovery.reconcile(
+                    db,
+                    node,
+                    channelsAuthoritative = true,
+                    succeededPaymentId = event.paymentId,
+                )
             LightningPaymentRecovery.recordSuccess(db, event.paymentId, event.feePaidMsat?.toLong())
             AuditService.log(
                 "PAYMENT_SUCCESSFUL",
@@ -555,7 +568,7 @@ class StabilityProcessingService : Service() {
                         node.eventHandled()
                     }
                     is Event.PaymentSuccessful -> {
-                        persistPaymentSuccess(event)
+                        persistPaymentSuccess(node, event)
                         node.eventHandled()
                     }
                     is Event.SpliceNegotiated,
@@ -846,7 +859,7 @@ class StabilityProcessingService : Service() {
                         node.eventHandled()
                     }
                     is Event.PaymentSuccessful -> {
-                        persistPaymentSuccess(event)
+                        persistPaymentSuccess(node, event)
                         node.eventHandled()
                     }
                     is Event.SpliceNegotiated,
@@ -893,6 +906,23 @@ class StabilityProcessingService : Service() {
                 "Previous outgoing payment marker is unresolved — refusing to send again"
             )
         }
+        val accountingDb = DatabaseService(this)
+        try {
+            if (
+                accountingDb.hasPendingChannelSend() ||
+                    node.listPayments().any {
+                        it.direction == PaymentDirection.OUTBOUND &&
+                            it.status == PaymentStatus.PENDING &&
+                            it.kind !is PaymentKind.Onchain
+                    }
+            ) {
+                throw BackingUpdateFailed(
+                    "Outgoing payment accounting is pending — deferring stability settlement"
+                )
+            }
+        } finally {
+            accountingDb.close()
+        }
 
         // Cooldown: skip if we sent a stability payment recently
         val prefs = FCMService.getPrefs(this)
@@ -919,7 +949,7 @@ class StabilityProcessingService : Service() {
 
         val expectedUsd = channelState.expectedUsd
 
-        if (expectedUsd < 0.01) {
+        if (expectedUsd < 0.01 && channelState.backingSats == 0L) {
             Log.d(TAG, "No stable position, skipping")
             return
         }
@@ -938,7 +968,7 @@ class StabilityProcessingService : Service() {
             }
 
         val dollarsFromPar = stableUsdValue - expectedUsd
-        val percentFromPar = if (expectedUsd > 0) abs(dollarsFromPar / expectedUsd) * 100.0 else 0.0
+        val percentFromPar = abs(dollarsFromPar / maxOf(expectedUsd, 0.01)) * 100.0
 
         if (
             percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT ||
@@ -998,7 +1028,7 @@ class StabilityProcessingService : Service() {
         // Atomically claim the send before starting it. If another process (foreground timer)
         // already holds the marker, the claim is denied and we skip this tick — this is the
         // check-and-set that prevents a double send.
-        if (!claimPendingSendInDB(dbPath, amountMsat, price)) {
+        if (!claimPendingSendInDB(amountMsat, price, channelState.userChannelId)) {
             Log.d(TAG, "Pending send already claimed by another sender — skipping this tick")
             return
         }
@@ -1008,7 +1038,7 @@ class StabilityProcessingService : Service() {
         // so clear the claim rather than blocking the foreground retry.
         if (!lightningSyncIsFresh(node)) {
             try {
-                clearPendingSendInDB(dbPath)
+                clearPendingSendInDB()
             } catch (_: Exception) {}
             logStabilityGateEvent(
                 "stability_background_deferred_stale_sync",
@@ -1020,49 +1050,66 @@ class StabilityProcessingService : Service() {
             return
         }
 
-        val paymentIdString: String
-        try {
-            // Attach only the signed STABILITY_PAYMENT_V1 envelope bound to this exact
-            // amount and channel — the legacy [0x01] marker is gone (#270). If the
-            // envelope can't be built, release the claim and skip the payment entirely.
-            val signedEnvelope =
+        // Attach only the signed STABILITY_PAYMENT_V1 envelope bound to this exact
+        // amount and channel — the legacy [0x01] marker is gone (#270). If the
+        // envelope can't be built, release the claim and skip the payment entirely.
+        val signedEnvelope =
+            try {
                 StabilityPaymentProtocol.buildSignedEnvelope(
                     channelId = channelState.channelId,
                     amountMsat = amountMsat,
                     expectedUsd = channelState.expectedUsd,
                     sign = { payload -> node.signMessage(payload.map { it.toUByte() }) },
                 )
-            if (signedEnvelope == null) {
+            } catch (e: Exception) {
                 try {
-                    clearPendingSendInDB(dbPath)
+                    clearPendingSendInDB()
                 } catch (_: Exception) {}
-                Log.w(TAG, "Could not build signed stability envelope — skipping payment")
-                return
+                throw e
             }
-            val records =
-                listOf(
-                    CustomTlvRecord(
-                        Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
-                        signedEnvelope.toByteArray(Charsets.UTF_8),
-                    )
-                )
-            val paymentId =
-                node
-                    .spontaneousPayment()
-                    .sendWithCustomTlvs(
-                        amountMsat.toULong(),
-                        LspPreferencesManager.getLspPubkey(this),
-                        null,
-                        records,
-                    )
-            paymentIdString = paymentId.toString()
-        } catch (e: Exception) {
-            // sendWithCustomTlvs failed, so there is no successful payment to protect.
+        if (signedEnvelope == null) {
             try {
-                clearPendingSendInDB(dbPath)
+                clearPendingSendInDB()
             } catch (_: Exception) {}
-            Log.e(TAG, "Stability keysend failed", e)
-            throw e
+            Log.w(TAG, "Could not build signed stability envelope — skipping payment")
+            return
+        }
+        val records =
+            listOf(
+                CustomTlvRecord(
+                    Constants.SIGNED_STABILITY_TLV_TYPE.toULong(),
+                    signedEnvelope.toByteArray(Charsets.UTF_8),
+                )
+            )
+        // The claim carries the payment id before LDK sends, so no outcome can orphan it.
+        val outcome =
+            DatabaseService(this).use { db ->
+                StabilityKeysend.send(db) { preimage ->
+                    node
+                        .spontaneousPayment()
+                        .sendWithPreimageAndCustomTlvs(
+                            amountMsat.toULong(),
+                            LspPreferencesManager.getLspPubkey(this),
+                            records,
+                            preimage,
+                            null,
+                        )
+                }
+            }
+        when (outcome) {
+            is StabilityKeysend.Outcome.NotSent -> {
+                // Nothing left the node, so there is no successful payment to protect.
+                try {
+                    clearPendingSendInDB()
+                } catch (_: Exception) {}
+                Log.e(TAG, "Stability keysend failed", outcome.error)
+                throw outcome.error
+            }
+            is StabilityKeysend.Outcome.OutcomeUnknown ->
+                throw BackingUpdateFailed(
+                    "Stability payment may have been sent; its claim stays until the outcome is known"
+                )
+            is StabilityKeysend.Outcome.Sent -> Unit
         }
         // Only an accepted send counts as sent_* — denied-claim and send-failure runs must
         // not inflate the pilot's send numbers.
@@ -1074,35 +1121,27 @@ class StabilityProcessingService : Service() {
         )
         Log.d(TAG, "Stability keysend sent successfully")
 
-        try {
-            setPendingSendPaymentIdInDB(dbPath, paymentIdString)
-        } catch (e: Exception) {
-            throw BackingUpdateFailed(
-                "Payment was sent but its ID could not be persisted; marker remains unresolved — reconcile will adopt it"
-            )
-        }
         val sentAt = System.currentTimeMillis() / 1000
         FCMService.getPrefs(this).edit().putLong("bg_last_stability_sent", sentAt).commit()
 
-        val amountSats = amountMsat / 1000
-        val result =
-            recordPaymentAtomicInDB(
-                dbPath,
-                paymentIdString,
-                "stability",
-                "sent",
-                amountMsat,
-                price,
-                -amountSats,
-                userChannelId = channelState.userChannelId,
-            )
-        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
-            throw BackingUpdateFailed(
-                "Payment was sent but DB persistence failed; durable marker will drive reconciliation"
-            )
+        // Do not release backing merely because LDK accepted the send. The durable marker
+        // survives service shutdown and lets the next wake/foreground event finish settlement.
+        val settlementDeadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
+        // One connection for the whole wait: every open re-runs table creation and pruning.
+        DatabaseService(this).use { db ->
+            check(db.writableDatabase.path == dbPath)
+            while (
+                !OutgoingStabilityPaymentRecovery.reconcile(db, node, channelsAuthoritative = true)
+            ) {
+                if (System.currentTimeMillis() >= settlementDeadline) {
+                    // Throw so onStartCommand preserves the retry flag instead of clearing it.
+                    throw BackingUpdateFailed(
+                        "Stability payment is still pending; retaining its backing and retry marker"
+                    )
+                }
+                Thread.sleep(250)
+            }
         }
-        clearPendingSendInDB(dbPath)
-        Log.d(TAG, "Recorded outgoing payment and updated backingSats -= $amountSats atomically")
     }
 
     private fun lightningSyncAgeSecs(node: Node): Long? =
@@ -1136,111 +1175,11 @@ class StabilityProcessingService : Service() {
      * Resolve any leftover pending-send marker. Returns true when no unresolved marker blocks a new
      * send; false means wait (a send may still be in flight).
      */
-    private fun reconcilePendingOutgoingPayment(node: Node, dbPath: String): Boolean {
-        val pending = loadPendingSendFromDB(dbPath) ?: return true
-        var pendingPaymentId = pending.paymentId
-
-        if (pendingPaymentId.isEmpty()) {
-            // The previous sender died before persisting the payment ID. Resolve the outcome
-            // against LDK's payment store instead of blocking forever.
-            val now = System.currentTimeMillis() / 1000
-            val candidates =
-                try {
-                        node.listPayments()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "listPayments failed during reconcile: ${e.message}")
-                        return false
-                    }
-                    .filter {
-                        it.direction == PaymentDirection.OUTBOUND &&
-                            it.kind is PaymentKind.Spontaneous &&
-                            it.amountMsat?.toLong() == pending.amountMsat &&
-                            it.latestUpdateTimestamp.toLong() >= pending.createdAt - 10
-                    }
-            val succeeded = candidates.firstOrNull { it.status == PaymentStatus.SUCCEEDED }
-            val stillPending = candidates.firstOrNull { it.status == PaymentStatus.PENDING }
-            val failed = candidates.firstOrNull { it.status == PaymentStatus.FAILED }
-            when {
-                succeeded != null -> {
-                    setPendingSendPaymentIdInDB(dbPath, succeeded.id)
-                    pendingPaymentId = succeeded.id
-                    Log.d(
-                        TAG,
-                        "Reconcile: adopted succeeded keysend ${succeeded.id} for empty marker",
-                    )
-                }
-                stillPending != null -> return false // in flight — wait
-                failed != null -> {
-                    clearPendingSendInDB(dbPath)
-                    Log.w(
-                        TAG,
-                        "Reconcile: marker's keysend ${failed.id} failed — cleared marker, no debit",
-                    )
-                    return true
-                }
-                now - pending.createdAt > 120 -> {
-                    clearPendingSendInDB(dbPath)
-                    Log.w(
-                        TAG,
-                        "Reconcile: no matching keysend after ${now - pending.createdAt}s — send never left device, cleared marker",
-                    )
-                    return true
-                }
-                else -> return false // young marker — another process may be mid-send
-            }
+    private fun reconcilePendingOutgoingPayment(node: Node, dbPath: String): Boolean =
+        DatabaseService(this).use { db ->
+            check(db.writableDatabase.path == dbPath)
+            OutgoingStabilityPaymentRecovery.reconcile(db, node, channelsAuthoritative = true)
         }
-
-        if (pending.amountMsat <= 0) {
-            clearPendingSendInDB(dbPath)
-            Log.w(TAG, "Reconcile: corrupt marker (amount_msat=${pending.amountMsat}) — cleared")
-            return true
-        }
-
-        val amountSats = pending.amountMsat / 1000
-        val result =
-            recordPaymentAtomicInDB(
-                dbPath,
-                pendingPaymentId,
-                "stability",
-                "sent",
-                pending.amountMsat,
-                pending.price,
-                -amountSats,
-                userChannelId = activeUserChannelId(),
-            )
-        if (result == InsertResult.FAILED || result == InsertResult.MISSING_CHANNEL) {
-            Log.e(TAG, "Could not reconcile previously sent payment — will retry later")
-            return false
-        }
-        clearPendingSendInDB(dbPath)
-        Log.d(TAG, "Reconciled previously sent outgoing payment $pendingPaymentId")
-        return true
-    }
-
-    // --- Pending outgoing stability send marker (raw-SQLite copies of DatabaseService's
-    //     pending_stability_send operations, usable without the main app process) ---
-
-    private data class PendingSend(
-        val paymentId: String,
-        val amountMsat: Long,
-        val price: Double,
-        val createdAt: Long,
-    )
-
-    private fun ensurePendingSendTable(db: SQLiteDatabase) {
-        // IF NOT EXISTS so either process (main app or this service) can create it.
-        db.execSQL(
-            """
-            CREATE TABLE IF NOT EXISTS pending_stability_send (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                payment_id TEXT NOT NULL,
-                amount_msat INTEGER NOT NULL,
-                price REAL NOT NULL,
-                created_at INTEGER NOT NULL
-            )
-        """
-        )
-    }
 
     /**
      * Applied inbound STABILITY_PAYMENT_V1 settlement ids (replay guard). Same schema as
@@ -1257,87 +1196,14 @@ class StabilityProcessingService : Service() {
         )
     }
 
-    /**
-     * Atomic check-and-set: returns false when a marker already exists (claim denied). BEGIN
-     * IMMEDIATE holds the write lock across the SELECT + INSERT.
-     */
-    private fun claimPendingSendInDB(dbPath: String, amountMsat: Long, price: Double): Boolean {
-        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-        try {
-            ensurePendingSendTable(db)
-            db.execSQL("BEGIN IMMEDIATE")
-            try {
-                val cursor = db.rawQuery("SELECT id FROM pending_stability_send WHERE id = 1", null)
-                val exists = cursor.use { it.moveToFirst() }
-                if (exists) {
-                    db.execSQL("ROLLBACK")
-                    return false
-                }
-                db.execSQL(
-                    "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
-                    arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000),
-                )
-                db.execSQL("COMMIT")
-                return true
-            } catch (e: Exception) {
-                try {
-                    db.execSQL("ROLLBACK")
-                } catch (_: Exception) {}
-                throw e
-            }
-        } finally {
-            db.close()
-        }
-    }
+    // Use the same schema, origin requirement and transactions as the foreground process.
+    private fun claimPendingSendInDB(
+        amountMsat: Long,
+        price: Double,
+        userChannelId: String,
+    ): Boolean = DatabaseService(this).use { it.claimPendingSend(amountMsat, price, userChannelId) }
 
-    private fun setPendingSendPaymentIdInDB(dbPath: String, paymentId: String) {
-        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-        try {
-            ensurePendingSendTable(db)
-            db.execSQL(
-                "UPDATE pending_stability_send SET payment_id = ? WHERE id = 1",
-                arrayOf(paymentId),
-            )
-        } finally {
-            db.close()
-        }
-    }
-
-    private fun loadPendingSendFromDB(dbPath: String): PendingSend? {
-        if (!File(dbPath).exists()) return null
-        // READWRITE so ensurePendingSendTable can create the table on first touch.
-        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-        try {
-            ensurePendingSendTable(db)
-            val cursor =
-                db.rawQuery(
-                    "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1",
-                    null,
-                )
-            return cursor.use {
-                if (it.moveToFirst()) {
-                    PendingSend(
-                        paymentId = it.getString(0),
-                        amountMsat = it.getLong(1),
-                        price = it.getDouble(2),
-                        createdAt = it.getLong(3),
-                    )
-                } else null
-            }
-        } finally {
-            db.close()
-        }
-    }
-
-    private fun clearPendingSendInDB(dbPath: String) {
-        val db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE)
-        try {
-            ensurePendingSendTable(db)
-            db.execSQL("DELETE FROM pending_stability_send WHERE id = 1")
-        } finally {
-            db.close()
-        }
-    }
+    private fun clearPendingSendInDB() = DatabaseService(this).use { it.clearPendingSend() }
 
     private data class ChannelState(
         val expectedUsd: Double,

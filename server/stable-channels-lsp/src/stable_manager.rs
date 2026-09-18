@@ -1665,7 +1665,7 @@ impl StableChannelManager {
         // Attribute by balance drop: (index, live channel, live user-side sats).
         let mut matches: Vec<(usize, &Channel, u64)> = Vec::new();
         for (i, sc) in self.stable_channels.iter().enumerate() {
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = channels.iter().find(|c| {
@@ -1756,7 +1756,8 @@ impl StableChannelManager {
         );
     }
 
-    /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one.
+    /// 60s tick: settle actionable drift, including residual backing after the USD target clears.
+    /// A connected user above par must pay us; an offline peer receives a wake notification.
     pub async fn run_tick(
         &mut self,
         ldk: &dyn LdkServerCalls,
@@ -1798,7 +1799,7 @@ impl StableChannelManager {
         const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
 
         for sc in self.stable_channels.iter_mut() {
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
@@ -1867,7 +1868,7 @@ impl StableChannelManager {
                 sc.stable_receiver_usd.0
             };
             let target = sc.expected_usd.0;
-            let percent_from_par = (((stable_usd_value - target) / target) * 100.0).abs();
+            let percent_from_par = (((stable_usd_value - target) / target.max(0.01)) * 100.0).abs();
             let dollars_from_par = (stable_usd_value - target).abs();
 
             if percent_from_par < percent_threshold
@@ -2360,7 +2361,7 @@ impl StableChannelManager {
             else {
                 return;
             };
-            if sc.expected_usd.0 <= 0.0 || btc_price <= 0.0 {
+            if sc.backing_sats == 0 || !btc_price.is_finite() || btc_price <= 0.0 {
                 return;
             }
 
@@ -6458,6 +6459,40 @@ mod tests {
             .await;
         assert_eq!(mgr.stable_channels[0].backing_sats, 10_000);
         mgr
+    }
+
+    #[tokio::test]
+    async fn zero_target_surplus_survives_reload_and_settles_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = manager_at_par_for_signed_stability().await;
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.0, 1_000, 40_000, None).unwrap();
+        let before_payment = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            100_000, 59_000_000, true,
+        )]);
+        mgr.reconcile_from_grpc(&before_payment, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 0.0);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 1_000);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&before_payment, &push, 100_000.0).await;
+        let uid = mgr.stable_channels[0].user_channel_id;
+        assert_eq!(mgr.stability_throttle.get(&uid).unwrap().0, "check_only",
+            "a zero target must still participate in stability checks");
+
+        let after_payment = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX,
+            100_000, 60_000_000, true,
+        )]);
+        let record = signed_stability_record(&"ab".repeat(32), CHANNEL_ID_HEX, 1_000_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp, 0.0);
+        for _ in 0..2 {
+            mgr.handle_payment_received(vec![record.clone()], Some("final-settlement".into()),
+                Some(1_000_000), &after_payment, 100_000.0).await;
+            let row = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+            assert_eq!((row.expected_usd, row.backing_sats, row.native_sats), (0.0, 0, 40_000));
+        }
     }
 
     #[tokio::test]

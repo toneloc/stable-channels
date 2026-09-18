@@ -10,6 +10,7 @@ import com.stablechannels.app.models.*
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.HistoricalPrices
 import java.io.File
+import kotlin.math.abs
 
 data class PaymentPersistenceResult(
     val isNewPayment: Boolean,
@@ -55,6 +56,9 @@ data class PendingStabilitySend(
     val amountMsat: Long,
     val price: Double,
     val createdAt: Long,
+    // Nullable only for legacy markers. A missing origin must never be inferred from the active
+    // channel.
+    val userChannelId: String?,
 )
 
 class DatabaseService(context: Context) :
@@ -63,7 +67,9 @@ class DatabaseService(context: Context) :
         File(Constants.userDataDir(context), DB_FILENAME).absolutePath,
         null,
         DB_VERSION,
-    ) {
+    ),
+    // The platform helper is AutoCloseable only from API 29; `use {}` must work on API 26 too.
+    AutoCloseable {
     companion object {
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
@@ -180,6 +186,7 @@ class DatabaseService(context: Context) :
 
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
+        createOutgoingLightningAccountingTable(db)
 
         db.execSQL(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_price_history_ts ON price_history(timestamp)"
@@ -246,19 +253,77 @@ class DatabaseService(context: Context) :
         // including on databases created before this table existed.
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
+        createOutgoingLightningAccountingTable(db)
         createTradeIndexes(db)
         pruneHistoricalData(db)
     }
 
-    private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
+    private fun createOutgoingLightningAccountingTable(db: SQLiteDatabase) = db.transaction {
         db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS outgoing_lightning_accounting (
+                payment_id TEXT PRIMARY KEY,
+                completed INTEGER NOT NULL DEFAULT 0,
+                user_channel_id TEXT
+            )
+        """
+        )
+        val hasChannelId =
+            db.rawQuery("PRAGMA table_info(outgoing_lightning_accounting)", null).use { c ->
+                var found = false
+                while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
+                found
+            }
+        if (!hasChannelId)
+            db.execSQL("ALTER TABLE outgoing_lightning_accounting ADD COLUMN user_channel_id TEXT")
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS closed_channel_books (
+                user_channel_id TEXT PRIMARY KEY, channel_id TEXT,
+                expected_usd REAL, stable_sats INTEGER,
+                receiver_sats INTEGER, latest_price REAL,
+                archived_at INTEGER NOT NULL
+            )
+        """
+        )
+    }
+
+    private fun createPendingStabilitySendTable(db: SQLiteDatabase) = db.transaction {
+        execSQL(
             """
             CREATE TABLE IF NOT EXISTS pending_stability_send (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 payment_id TEXT NOT NULL,
                 amount_msat INTEGER NOT NULL,
                 price REAL NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                user_channel_id TEXT
+            )
+        """
+        )
+        val hasOrigin =
+            rawQuery("PRAGMA table_info(pending_stability_send)", null).use { c ->
+                var found = false
+                while (c.moveToNext()) if (c.getString(1) == "user_channel_id") found = true
+                found
+            }
+        if (!hasOrigin)
+            execSQL("ALTER TABLE pending_stability_send ADD COLUMN user_channel_id TEXT")
+        // Keep the origin after the in-flight marker is cleared, including payments applied
+        // to archived books. The row commits atomically with the debit and payment history.
+        execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS outgoing_stability_accounting (
+                payment_id TEXT PRIMARY KEY, user_channel_id TEXT NOT NULL
+            )
+        """
+        )
+        // A claim released because LDK lost its record; a late success still debits this origin.
+        execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS released_stability_sends (
+                payment_id TEXT PRIMARY KEY, user_channel_id TEXT NOT NULL,
+                amount_msat INTEGER NOT NULL
             )
         """
         )
@@ -386,9 +451,8 @@ class DatabaseService(context: Context) :
             val overflowSats = currentBacking - receiverSats
             val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
             val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
-            // A repair that exhausts the target closes the position: nothing backs it.
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            // Retain any final settlement backing even when the USD claim is cleared.
+            val newBacking = receiverSats
             val cv =
                 ContentValues().apply {
                     put("expected_usd", newExpected)
@@ -447,7 +511,9 @@ class DatabaseService(context: Context) :
      * refreshBalances()/updateStableBalances()) — that value reflects real channel state directly
      * and isn't subject to the same race as the in-memory backingSats copy.
      *
-     * Returns null if there was nothing to reconcile at the DB's current state (no overflow).
+     * With [paymentId], also commits accounting completion and transport success atomically, even
+     * for a native-only send. Completed ids skip balance reconciliation on replay. Returns null if
+     * there was nothing to reconcile at the DB's current state (no overflow).
      */
     fun reconcileOutgoingBacking(
         channelId: String,
@@ -456,11 +522,21 @@ class DatabaseService(context: Context) :
         receiverSats: Long,
         latestPrice: Double,
         price: Double,
+        paymentId: String? = null,
+        feeMsat: Long = 0L,
     ): OutgoingReconcileResult? {
-        if (price <= 0.0) return null
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
+            // A delayed/replayed success must never reconcile against a later send's HTLC.
+            if (
+                paymentId != null &&
+                    (isLightningAccountingComplete(paymentId) ||
+                        hasArchivedLightningAccounting(paymentId))
+            ) {
+                db.execSQL("ROLLBACK")
+                return null
+            }
             val cursor =
                 db.rawQuery(
                     "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
@@ -471,7 +547,13 @@ class DatabaseService(context: Context) :
                     if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
                     it.getDouble(0) to it.getLong(1)
                 }
-            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
+            if (currentBacking == 0L || currentBacking <= receiverSats) {
+                if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
+                db.execSQL("COMMIT")
+                return null
+            }
+            if (!price.isFinite() || price <= 0.0) {
+                check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
                 db.execSQL("ROLLBACK")
                 return null
             }
@@ -484,10 +566,8 @@ class DatabaseService(context: Context) :
             // SECOND time ($100 -> $92 -> $82) and hid a genuine below-par claim from the
             // stability check. Pinning backing to the live balance matches the LSP's own
             // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
-            // At the zero boundary the position is closed, so nothing backs it — see
-            // StabilityService.reconcileOutgoing().
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            // A cleared claim can still leave a final settlement owed to the LSP.
+            val newBacking = receiverSats
             val cv =
                 ContentValues().apply {
                     put("channel_id", channelId)
@@ -504,6 +584,7 @@ class DatabaseService(context: Context) :
                     "channel UPDATE affected $rows rows for user_channel_id=$userChannelId"
                 )
             }
+            if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
             db.execSQL("COMMIT")
             return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
         } catch (e: Exception) {
@@ -574,8 +655,42 @@ class DatabaseService(context: Context) :
         }
     }
 
+    /**
+     * Closing a channel does not settle its stable books. Archive the last allocation and
+     * unresolved sends atomically before removing the active row. No live balance is invented.
+     */
     fun deleteChannel(userChannelId: String) {
-        writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
+        if (userChannelId.isBlank()) return
+        writableDatabase.transaction {
+            // Adopt pre-upgrade markers only while this is the sole saved active channel.
+            execSQL(
+                """
+                UPDATE outgoing_lightning_accounting SET user_channel_id = ?
+                WHERE user_channel_id IS NULL AND completed = 0
+                  AND (SELECT COUNT(*) FROM channels) = 1
+                  AND EXISTS (SELECT 1 FROM channels WHERE user_channel_id = ?)
+            """,
+                arrayOf(userChannelId, userChannelId),
+            )
+            // The live books are the latest truth: replace any archive left by an earlier close.
+            execSQL(
+                """
+                INSERT OR REPLACE INTO closed_channel_books
+                SELECT user_channel_id, channel_id, expected_usd, stable_sats,
+                       receiver_sats, latest_price, strftime('%s','now')
+                FROM channels WHERE user_channel_id = ?
+            """,
+                arrayOf(userChannelId),
+            )
+            // A legacy success can outlive the channel row. Null books explicitly mean
+            // unknown, not zero debt; retain the channel identity and unresolved payment.
+            execSQL(
+                """INSERT OR IGNORE INTO closed_channel_books (user_channel_id, archived_at)
+                VALUES (?, strftime('%s','now'))""",
+                arrayOf(userChannelId),
+            )
+            delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
+        }
     }
 
     /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
@@ -1339,8 +1454,24 @@ class DatabaseService(context: Context) :
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
             val localBacking =
-                if (sync.expectedUsd == 0.0) 0L
-                else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
+                if (sync.expectedUsd == 0.0) {
+                    // Drift inside the deadband is never payable and is released, as on the
+                    // desktop and the LSP; actionable drift stays as backing until it settles.
+                    TradeProtocol.tradeBackingAfterDelta(
+                        receiverSats,
+                        currentBacking,
+                        currentExpected,
+                        0.0,
+                        trustedPrice,
+                    )
+                        ?: StabilityService.backingAfterTargetClear(
+                            currentBacking,
+                            currentExpected,
+                            receiverSats,
+                            trustedPrice,
+                        )
+                        ?: return rollbackResult(db, TradeControlApplyStatus.RETRY)
+                } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)
                 } else {
                     TradeProtocol.tradeBackingAfterDelta(
@@ -1467,6 +1598,7 @@ class DatabaseService(context: Context) :
         paymentType: String,
         amountMsat: Long,
         price: Double,
+        userChannelId: String? = null,
     ) {
         val values =
             ContentValues().apply {
@@ -1490,6 +1622,10 @@ class DatabaseService(context: Context) :
                 values.put("payment_id", paymentId)
                 db.insertOrThrow("payments", null, values)
             }
+            db.execSQL(
+                "INSERT OR REPLACE INTO outgoing_lightning_accounting (payment_id, completed, user_channel_id) VALUES (?, 0, ?)",
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }),
+            )
             db.setTransactionSuccessful()
         } finally {
             db.endTransaction()
@@ -1653,6 +1789,125 @@ class DatabaseService(context: Context) :
         return cursor.use { if (it.moveToFirst()) it.getLong(0) else null }
     }
 
+    fun pendingOutgoingPaymentAgeSecs(paymentId: String): Long =
+        readableDatabase
+            .rawQuery(
+                "SELECT strftime('%s','now') - created_at FROM payments WHERE payment_id = ? AND status = 'pending'",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst()) it.getLong(0) else 0L }
+
+    /** Transport success alone is insufficient: ordinary sends must finish their accounting. */
+    fun hasPendingChannelSend(): Boolean =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT 1 FROM payments p
+                LEFT JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+                WHERE p.direction = 'sent'
+                  AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
+                  AND (
+                    (p.payment_type IN ('lightning', 'bolt12', 'stability') AND p.status = 'pending') OR
+                    (p.payment_type IN ('lightning', 'bolt12') AND p.status != 'failed' AND a.completed = 0)
+                ) LIMIT 1
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { it.moveToFirst() }
+
+    fun isLightningAccountingComplete(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                "SELECT 1 FROM outgoing_lightning_accounting WHERE payment_id = ? AND completed = 1",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
+
+    fun getUnaccountedOutgoingLightningPaymentIds(): List<String> =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT p.payment_id FROM payments p
+                JOIN outgoing_lightning_accounting a ON a.payment_id = p.payment_id
+                WHERE p.direction = 'sent' AND p.payment_type IN ('lightning', 'bolt12')
+                  AND p.status = 'completed' AND a.completed = 0
+                  AND NOT EXISTS (SELECT 1 FROM closed_channel_books c WHERE c.user_channel_id = a.user_channel_id)
+                ORDER BY p.created_at
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { cursor -> buildList { while (cursor.moveToNext()) add(cursor.getString(0)) } }
+
+    fun lightningAccountingChannelId(paymentId: String): String? =
+        readableDatabase
+            .rawQuery(
+                "SELECT user_channel_id FROM outgoing_lightning_accounting WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst() && !it.isNull(0)) it.getString(0) else null }
+
+    fun hasArchivedLightningAccounting(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                """SELECT 1 FROM outgoing_lightning_accounting a JOIN closed_channel_books c
+           ON c.user_channel_id = a.user_channel_id WHERE a.payment_id = ?""",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
+
+    /**
+     * A terminal event can be acknowledged once this commits, even if its books must wait. Keep the
+     * original channel identity on replay; never attach an old send to a new channel.
+     */
+    fun deferLightningAccounting(paymentId: String, userChannelId: String?, feeMsat: Long) {
+        writableDatabase.transaction {
+            execSQL(
+                """INSERT OR IGNORE INTO outgoing_lightning_accounting
+                (payment_id, completed, user_channel_id) VALUES (?, 0, ?)""",
+                arrayOf(paymentId, userChannelId?.takeIf { it.isNotBlank() }),
+            )
+            execSQL(
+                """UPDATE outgoing_lightning_accounting SET user_channel_id = ?
+                WHERE payment_id = ? AND user_channel_id IS NULL""",
+                arrayOf(userChannelId?.takeIf { it.isNotBlank() }, paymentId),
+            )
+            // Legacy events can outlive their history row. Persist their identity even then.
+            execSQL(
+                """INSERT OR IGNORE INTO payments
+                (payment_id, payment_type, direction, amount_msat, status)
+                SELECT ?, 'lightning', 'sent', 0, 'completed'
+                WHERE NOT EXISTS (SELECT 1 FROM payments WHERE payment_id = ?)""",
+                arrayOf(paymentId, paymentId),
+            )
+            val values =
+                ContentValues().apply {
+                    put("status", "completed")
+                    if (feeMsat > 0L) put("fee_msat", feeMsat)
+                }
+            update("payments", values, "payment_id = ?", arrayOf(paymentId))
+        }
+    }
+
+    /** Must commit in the same transaction as the corresponding balance reconciliation. */
+    private fun completeLightningAccounting(db: SQLiteDatabase, paymentId: String, feeMsat: Long) {
+        db.execSQL(
+            "INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed) VALUES (?, 0)",
+            arrayOf(paymentId),
+        )
+        db.execSQL(
+            "UPDATE outgoing_lightning_accounting SET completed = 1 WHERE payment_id = ?",
+            arrayOf(paymentId),
+        )
+        val values =
+            ContentValues().apply {
+                put("status", "completed")
+                if (feeMsat > 0) put("fee_msat", feeMsat)
+            }
+        db.update("payments", values, "payment_id = ?", arrayOf(paymentId))
+    }
+
     // --- Pending outgoing stability send marker (single row, id = 1) ---
 
     /**
@@ -1660,10 +1915,13 @@ class DatabaseService(context: Context) :
      * already exists (another sender owns the send). BEGIN IMMEDIATE makes the check-and-insert a
      * single atomic step across processes.
      */
-    fun claimPendingSend(amountMsat: Long, price: Double): Boolean {
+    fun claimPendingSend(amountMsat: Long, price: Double, userChannelId: String): Boolean {
+        require(userChannelId.isNotBlank()) { "Stability payment requires its originating channel" }
+        require(amountMsat > 0L && amountMsat % 1000L == 0L && price.isFinite() && price > 0.0)
         val db = writableDatabase
         db.execSQL("BEGIN IMMEDIATE")
         try {
+            check(loadChannel(userChannelId) != null) { "Stability channel is not available" }
             val cursor = db.rawQuery("SELECT id FROM pending_stability_send WHERE id = 1", null)
             val exists = cursor.use { it.moveToFirst() }
             if (exists) {
@@ -1671,8 +1929,8 @@ class DatabaseService(context: Context) :
                 return false
             }
             db.execSQL(
-                "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at) VALUES (1, '', ?, ?, ?)",
-                arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000),
+                "INSERT INTO pending_stability_send (id, payment_id, amount_msat, price, created_at, user_channel_id) VALUES (1, '', ?, ?, ?, ?)",
+                arrayOf<Any?>(amountMsat, price, System.currentTimeMillis() / 1000, userChannelId),
             )
             db.execSQL("COMMIT")
             return true
@@ -1694,7 +1952,7 @@ class DatabaseService(context: Context) :
     fun loadPendingSend(): PendingStabilitySend? {
         val cursor =
             readableDatabase.rawQuery(
-                "SELECT payment_id, amount_msat, price, created_at FROM pending_stability_send WHERE id = 1",
+                "SELECT payment_id, amount_msat, price, created_at, user_channel_id FROM pending_stability_send WHERE id = 1",
                 null,
             )
         return cursor.use {
@@ -1704,6 +1962,7 @@ class DatabaseService(context: Context) :
                     amountMsat = it.getLong(1),
                     price = it.getDouble(2),
                     createdAt = it.getLong(3),
+                    userChannelId = if (it.isNull(4)) null else it.getString(4),
                 )
             } else null
         }
@@ -1711,6 +1970,275 @@ class DatabaseService(context: Context) :
 
     fun clearPendingSend() {
         writableDatabase.execSQL("DELETE FROM pending_stability_send WHERE id = 1")
+    }
+
+    /**
+     * Compare the whole claim while holding the write lock: a delayed recovery cannot remove a
+     * newer sender's marker. No backing is debited for failed/unsent payments.
+     */
+    fun clearPendingSend(expected: PendingStabilitySend): Boolean = writableDatabase.transaction {
+        if (loadPendingSend() != expected) return@transaction false
+        delete("pending_stability_send", "id = 1", null)
+        true
+    }
+
+    /**
+     * Called after transport success for a marker that predates channel identity. The old writer
+     * committed completed history and its backing debit together, then cleared the marker
+     * separately. Finish that cleanup without needing an origin or another debit.
+     */
+    fun clearAccountedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction false
+            val alreadyAccounted =
+                rawQuery(
+                        """SELECT 1 FROM payments WHERE payment_id = ?
+                AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'
+                AND amount_msat = ? LIMIT 1""",
+                        arrayOf(expected.paymentId, expected.amountMsat.toString()),
+                    )
+                    .use { it.moveToFirst() }
+            if (!alreadyAccounted) return@transaction false
+            // Check the history and the entire claim under the same write lock, so a delayed
+            // recovery cannot clear a newer send. Never assign an unknown origin to a channel.
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
+
+    /**
+     * Bind a marker that predates channel identity to its origin only on evidence: exactly one
+     * saved channel existed at the claim and its books, frozen under the marker, still reproduce
+     * the claimed amount at the claimed price. A replacement is always newer than the claim, given
+     * a device clock that did not move backwards between the two inserts.
+     */
+    fun adoptLegacyStabilityOrigin(expected: PendingStabilitySend): String? =
+        writableDatabase.transaction {
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction null
+            val candidates =
+                rawQuery(
+                        """SELECT user_channel_id, expected_usd, stable_sats FROM channels
+            WHERE user_channel_id IS NOT NULL AND created_at <= ?""",
+                        arrayOf(expected.createdAt.toString()),
+                    )
+                    .use { c ->
+                        val rows = mutableListOf<Triple<String, Double, Long>>()
+                        while (c.moveToNext()) rows.add(
+                            Triple(c.getString(0), c.getDouble(1), c.getLong(2))
+                        )
+                        rows
+                    }
+            val (origin, expectedUsd, backing) =
+                candidates.singleOrNull() ?: return@transaction null
+            // Same arithmetic as the pre-upgrade tick: surplus in USD, floored to whole sats.
+            val surplusUsd =
+                backing.toDouble() / Constants.SATS_IN_BTC * expected.price - expectedUsd
+            val claimedSats =
+                (surplusUsd / expected.price * Constants.SATS_IN_BTC * 1000.0).toLong() / 1000L
+            if (surplusUsd <= 0.0 || abs(claimedSats - expected.amountMsat / 1000L) > 1L)
+                return@transaction null
+            execSQL(
+                "UPDATE pending_stability_send SET user_channel_id = ? WHERE id = 1",
+                arrayOf(origin),
+            )
+            origin
+        }
+
+    /**
+     * A succeeded legacy payment whose origin cannot be proven: keep it on record and release the
+     * spend barrier without debiting any channel, since a guess could charge a replacement.
+     */
+    fun recordUnattributedLegacyStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (
+                expected.userChannelId != null ||
+                    expected.paymentId.isBlank() ||
+                    expected.amountMsat <= 0L ||
+                    loadPendingSend() != expected
+            )
+                return@transaction false
+            recordCompletedStabilityHistory(expected)
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
+
+    fun outgoingStabilityOrigin(paymentId: String): String? =
+        readableDatabase
+            .rawQuery(
+                "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
+                arrayOf(paymentId),
+            )
+            .use { if (it.moveToFirst()) it.getString(0) else null }
+
+    private fun stabilityHistoryValues(pending: PendingStabilitySend, status: String) =
+        ContentValues().apply {
+            put("payment_id", pending.paymentId)
+            put("payment_type", "stability")
+            put("direction", "sent")
+            put("amount_msat", pending.amountMsat)
+            put(
+                "amount_usd",
+                pending.amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * pending.price,
+            )
+            put("btc_price", pending.price)
+            put("status", status)
+        }
+
+    private fun SQLiteDatabase.recordCompletedStabilityHistory(pending: PendingStabilitySend) {
+        val values = stabilityHistoryValues(pending, "completed")
+        if (update("payments", values, "payment_id = ?", arrayOf(pending.paymentId)) == 0)
+            insertOrThrow("payments", null, values)
+    }
+
+    private class StabilityOriginBooks(val table: String, val backingSats: Long?)
+
+    /**
+     * The origin's live books, or its archive once the channel has closed. A live row wins over a
+     * stale archive: debiting the archive of a channel still in use would leave its surplus unpaid.
+     */
+    private fun SQLiteDatabase.stabilityOriginBooks(origin: String): StabilityOriginBooks? {
+        val live =
+            rawQuery("SELECT 1 FROM channels WHERE user_channel_id = ?", arrayOf(origin)).use {
+                it.moveToFirst()
+            }
+        val table = if (live) "channels" else "closed_channel_books"
+        return rawQuery(
+                "SELECT stable_sats FROM $table WHERE user_channel_id = ?",
+                arrayOf(origin),
+            )
+            .use {
+                if (!it.moveToFirst()) null
+                else StabilityOriginBooks(table, if (it.isNull(0)) null else it.getLong(0))
+            }
+    }
+
+    // Null archived backing means unknown books: never fabricate an allocation for them.
+    private fun SQLiteDatabase.debitStabilityOrigin(
+        origin: String,
+        books: StabilityOriginBooks,
+        amountMsat: Long,
+    ): Boolean {
+        val backing = books.backingSats ?: return false
+        val values =
+            ContentValues().apply {
+                put("stable_sats", (backing - amountMsat / 1000L).coerceAtLeast(0L))
+                if (books.table == "channels") put("updated_at", System.currentTimeMillis() / 1000)
+            }
+        check(update(books.table, values, "user_channel_id = ?", arrayOf(origin)) == 1)
+        return true
+    }
+
+    /**
+     * LDK has lost this payment's record, so its outcome is unknown. Keep the id on record as a
+     * stability payment and keep its origin, so a late success still debits that channel once.
+     */
+    fun releaseLostStabilitySend(expected: PendingStabilitySend): Boolean =
+        writableDatabase.transaction {
+            if (expected.paymentId.isBlank() || loadPendingSend() != expected)
+                return@transaction false
+            val known =
+                rawQuery("SELECT 1 FROM payments WHERE payment_id = ?", arrayOf(expected.paymentId))
+                    .use { it.moveToFirst() }
+            if (!known) insertOrThrow("payments", null, stabilityHistoryValues(expected, "failed"))
+            expected.userChannelId
+                ?.takeIf { it.isNotBlank() }
+                ?.let { origin ->
+                    execSQL(
+                        "INSERT OR IGNORE INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES (?, ?, ?)",
+                        arrayOf(expected.paymentId, origin, expected.amountMsat),
+                    )
+                }
+            delete("pending_stability_send", "id = 1", null) == 1
+        }
+
+    /** A released claim whose payment proves successful is debited from its origin exactly once. */
+    private fun SQLiteDatabase.settleReleasedStabilitySend(
+        paymentId: String
+    ): Pair<String, Boolean>? {
+        val (origin, amountMsat) =
+            rawQuery(
+                    "SELECT user_channel_id, amount_msat FROM released_stability_sends WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
+                .use { if (it.moveToFirst()) it.getString(0) to it.getLong(1) else return null }
+        val accounted =
+            rawQuery(
+                    "SELECT 1 FROM outgoing_stability_accounting WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
+                .use { it.moveToFirst() }
+        var debited = false
+        if (!accounted) {
+            debited =
+                stabilityOriginBooks(origin)?.let { debitStabilityOrigin(origin, it, amountMsat) }
+                    ?: false
+            execSQL(
+                "INSERT INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+                arrayOf(paymentId, origin),
+            )
+        }
+        delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
+        return origin to debited
+    }
+
+    fun adoptPendingSendPaymentId(expected: PendingStabilitySend, paymentId: String): Boolean =
+        writableDatabase.transaction {
+            if (loadPendingSend() != expected || expected.paymentId.isNotEmpty())
+                return@transaction false
+            setPendingSendPaymentId(paymentId)
+            true
+        }
+
+    /**
+     * Called only with a succeeded LDK payment. Debit its original live or archived allocation,
+     * record the origin permanently, and clear the exact claim in one transaction.
+     */
+    fun completePendingStabilitySend(
+        pending: PendingStabilitySend,
+        channelClosed: Boolean,
+    ): Boolean = writableDatabase.transaction {
+        if (loadPendingSend() != pending) return@transaction false
+        val origin = pending.userChannelId?.takeIf { it.isNotBlank() } ?: return@transaction false
+        if (pending.paymentId.isBlank() || pending.amountMsat <= 0L) return@transaction false
+        if (channelClosed) deleteChannel(origin)
+
+        val books = stabilityOriginBooks(origin) ?: return@transaction false
+        val accountedOrigin =
+            rawQuery(
+                    "SELECT user_channel_id FROM outgoing_stability_accounting WHERE payment_id = ?",
+                    arrayOf(pending.paymentId),
+                )
+                .use { if (it.moveToFirst()) it.getString(0) else null }
+        check(accountedOrigin == null || accountedOrigin == origin) {
+            "Stability payment origin mismatch"
+        }
+        // Before the origin ledger existed, this completed history row and its backing debit
+        // were written atomically by recordPaymentAndMaybeUpdateBacking / the background writer.
+        val alreadyRecorded =
+            rawQuery(
+                    """SELECT 1 FROM payments WHERE payment_id = ?
+                AND payment_type = 'stability' AND direction = 'sent' AND status = 'completed'""",
+                    arrayOf(pending.paymentId),
+                )
+                .use { it.moveToFirst() }
+        if (accountedOrigin == null && !alreadyRecorded)
+            debitStabilityOrigin(origin, books, pending.amountMsat)
+        if (!alreadyRecorded) recordCompletedStabilityHistory(pending)
+        execSQL(
+            "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+            arrayOf(pending.paymentId, origin),
+        )
+        delete("pending_stability_send", "id = 1", null)
+        true
     }
 
     fun getRecentPayments(limit: Int = 50): List<PaymentRecord> {
@@ -1935,14 +2463,64 @@ class DatabaseService(context: Context) :
         ) > 0
     }
 
-    fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
+    /** Returns the origin of a released stability claim this completion settled, if any. */
+    fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0): String? {
         val cv =
             ContentValues().apply {
                 put("status", status)
                 if (feeMsat > 0) put("fee_msat", feeMsat)
             }
-        writableDatabase.update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+        var settled: Pair<String, Boolean>? = null
+        writableDatabase.transaction {
+            // Every path that learns a released claim's outcome passes here: debit it or end it.
+            if (status == "completed") settled = settleReleasedStabilitySend(paymentId)
+            if (status == "failed")
+                delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
+            // Also adopt pending sends from before the accounting marker was introduced.
+            // Transport success (including background recovery) cannot release this barrier.
+            if (status == "completed")
+                execSQL(
+                    """
+                    INSERT OR IGNORE INTO outgoing_lightning_accounting (payment_id, completed)
+                    SELECT payment_id, 0 FROM payments WHERE payment_id = ?
+                      AND direction = 'sent' AND payment_type IN ('lightning', 'bolt12') AND status = 'pending'
+                    """
+                        .trimIndent(),
+                    arrayOf(paymentId),
+                )
+            update("payments", cv, "payment_id = ?", arrayOf(paymentId))
+        }
+        settled?.let { (origin, debited) ->
+            AuditService.log(
+                "STABILITY_RELEASED_CLAIM_SETTLED",
+                mapOf("payment_id" to paymentId, "user_channel_id" to origin, "debited" to debited),
+            )
+        }
+        return settled?.first
     }
+
+    /** True once a payment id has a history row or a settled stability origin. */
+    fun isRecordedOutgoingPayment(paymentId: String): Boolean =
+        readableDatabase
+            .rawQuery(
+                """SELECT 1 FROM payments WHERE payment_id = ?1
+                   UNION ALL SELECT 1 FROM outgoing_stability_accounting WHERE payment_id = ?1
+                   UNION ALL SELECT 1 FROM released_stability_sends WHERE payment_id = ?1""",
+                arrayOf(paymentId),
+            )
+            .use { it.moveToFirst() }
+
+    /** The in-flight claim, a released claim, or a recorded stability payment carries this id. */
+    fun isKnownStabilityPaymentId(paymentId: String): Boolean =
+        paymentId.isNotBlank() &&
+            (loadPendingSend()?.paymentId == paymentId ||
+                isOutgoingStabilityPayment(paymentId) ||
+                readableDatabase
+                    .rawQuery(
+                        "SELECT 1 FROM released_stability_sends WHERE payment_id = ?",
+                        arrayOf(paymentId),
+                    )
+                    .use { it.moveToFirst() })
 
     fun isOutgoingStabilityPayment(paymentId: String): Boolean {
         val cursor =

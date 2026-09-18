@@ -1006,6 +1006,24 @@ impl UserApp {
                     .ok()
                     .filter(|price| *price > 0.0);
 
+                // A stale `pending` row would otherwise hold the spend barrier forever, and a
+                // native-covered send needs no price, so this runs through a price outage too.
+                let ldk_payments = node_arc.list_payments();
+                if let Err(e) = stable_channels::stable::reconcile_pending_sent_lightning(
+                    &db, &ldk_payments, current_unix_time(),
+                ) {
+                    audit_event("PENDING_SEND_RECOVERY_FAILED", json!({ "error": e.to_string() }));
+                }
+                // A stability claim whose send never reached LDK is rolled back the same way, with
+                // the channel locked so a late success cannot re-debit between the two writes.
+                if let Ok(mut sc) = sc_arc.lock() {
+                    if let Err(e) = stable_channels::stable::reconcile_lost_stability_claims(
+                        &db, &mut sc, &ldk_payments, current_unix_time(),
+                    ) {
+                        audit_event("STABILITY_CLAIM_RECOVERY_FAILED", json!({ "error": e.to_string() }));
+                    }
+                }
+
                 // Automatic stability payments require a freshly validated consensus price.
                 // The last trusted cached price remains available to the UI during an outage.
                 if let Some(price) = price {
@@ -1013,7 +1031,14 @@ impl UserApp {
 
                     // Brief lock to update values
                     if let Ok(mut sc) = sc_arc.lock() {
-                        if !node_arc.list_channels().is_empty() {
+                        if !node_arc.list_channels().is_empty()
+                            && !splice_flag.load(std::sync::atomic::Ordering::Relaxed)
+                            && !stable_channels::stable::has_pending_outbound_lightning_payment(&node_arc)
+                            && !db.has_pending_channel_send().unwrap_or_else(|e| {
+                                audit_event("STABILITY_SKIP", json!({ "reason": "pending_send_check_failed", "error": e.to_string() }));
+                                true
+                            })
+                        {
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                             if stable_channels::stable::repair_overbacked_allocation_if_safe(
                                 &node_arc, &mut sc, price,
@@ -1038,38 +1063,10 @@ impl UserApp {
                                 }
                             }
 
-                            if let Some(payment_info) =
-                                stable_channels::stable::check_stability(&node_arc, &mut sc, price)
+                            // The pending row is claimed durably inside, before LDK sees the send.
+                            if stable_channels::stable::check_stability(&node_arc, &db, &mut sc, price)
+                                .is_some()
                             {
-                                // Record sent stability payment as pending (confirmed on PaymentSuccessful)
-                                let amount_usd =
-                                    (payment_info.amount_msat as f64 / 1000.0 / 100_000_000.0)
-                                        * payment_info.btc_price;
-                                if let Err(e) = db.record_pending_stability_payment(
-                                    &payment_info.payment_id,
-                                    payment_info.amount_msat,
-                                    Some(amount_usd),
-                                    payment_info.btc_price,
-                                    &payment_info.counterparty,
-                                    &sc.channel_id.to_string(),
-                                    &format!("{}", sc.user_channel_id),
-                                    sc.expected_usd.0,
-                                    payment_info.backing_sats_before,
-                                    payment_info.backing_sats_after,
-                                    sc.native_sats,
-                                    sc.note.as_deref(),
-                                ) {
-                                    audit_event(
-                                        "STABILITY_PAYMENT_PERSIST_FAILED",
-                                        json!({
-                                            "payment_id": payment_info.payment_id,
-                                            "user_channel_id": format!("{}", sc.user_channel_id),
-                                            "backing_sats_before": payment_info.backing_sats_before,
-                                            "backing_sats_after": payment_info.backing_sats_after,
-                                            "error": e.to_string(),
-                                        }),
-                                    );
-                                }
                                 payment_sent = true;
                             }
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
@@ -1548,9 +1545,36 @@ impl UserApp {
         }
     }
 
+    fn with_settled_channel<T, E: std::fmt::Display>(
+        &self,
+        maximum_debit_sats: Option<u64>,
+        send: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, String> {
+        // The stability worker holds this same lock through check/send/persist. Keep it until
+        // LDK accepts the spend so a concurrent settlement cannot invalidate our snapshot.
+        let mut sc = self.stable_channel.lock().unwrap();
+        if self.auto_splice_in_progress.load(std::sync::atomic::Ordering::Relaxed)
+            || stable::has_pending_outbound_lightning_payment(&self.node)
+            || self.db.has_pending_channel_send().map_err(|e| e.to_string())?
+        {
+            return Err("Waiting for the previous channel operation to settle. Please try again shortly.".into());
+        }
+        if !update_balances(&self.node, &mut sc).0 {
+            return Err("Could not refresh the channel balance. Please try again shortly.".into());
+        }
+        stable::check_outgoing_allocation(&sc, get_fresh_cached_price_no_fetch(), maximum_debit_sats)?;
+        send().map_err(|e| e.to_string())
+    }
+
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-            Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
+            Ok(invoice) => match self.with_settled_channel(
+                stable::maximum_lightning_debit_sats(invoice.amount_milli_satoshis().unwrap_or(0)),
+                || self.node.bolt11_payment().send(
+                    &invoice,
+                    Some(stable::route_parameters(invoice.amount_milli_satoshis().unwrap_or(0))),
+                ),
+            ) {
                 Ok(_payment_id) => {
                     let amount_text = invoice
                         .amount_milli_satoshis()
@@ -1623,13 +1647,16 @@ impl UserApp {
                             }
                         }
                     };
-                    let result = if invoice_amount_msat.is_some() {
-                        self.node.bolt11_payment().send(&invoice, None)
-                    } else {
-                        self.node
-                            .bolt11_payment()
-                            .send_using_amount(&invoice, amount_msat, None)
-                    };
+                    let result = self.with_settled_channel(stable::maximum_lightning_debit_sats(amount_msat), || {
+                        let route = Some(stable::route_parameters(amount_msat));
+                        if invoice_amount_msat.is_some() {
+                            self.node.bolt11_payment().send(&invoice, route)
+                        } else {
+                            self.node
+                                .bolt11_payment()
+                                .send_using_amount(&invoice, amount_msat, route)
+                        }
+                    });
                     match result {
                         Ok(payment_id) => {
                             let (amount_usd, btc_price_opt) = {
@@ -1700,13 +1727,15 @@ impl UserApp {
                             return false;
                         }
                     };
-                    match self.node.bolt12_payment().send_using_amount(
-                        &offer,
-                        amount_msat,
-                        None,
-                        None,
-                        None,
-                    ) {
+                    match self.with_settled_channel(stable::maximum_lightning_debit_sats(amount_msat), || {
+                        self.node.bolt12_payment().send_using_amount(
+                            &offer,
+                            amount_msat,
+                            None,
+                            None,
+                            Some(stable::route_parameters(amount_msat)),
+                        )
+                    }) {
                         Ok(payment_id) => {
                             let (amount_usd, btc_price_opt) = {
                                 let sc = self.stable_channel.lock().unwrap();
@@ -1842,16 +1871,21 @@ impl UserApp {
                                 }
                             };
 
-                            match self.node.splice_out(
-                                &ch.user_channel_id,
-                                ch.counterparty_node_id,
-                                &valid_addr,
-                                amount_sats,
-                            ) {
-                                Ok(()) => {
-                                    // Block auto-splice while this splice is in flight
+                            // LDK exposes no splice fee bound, so the whole allocation is checked.
+                            match self.with_settled_channel(None, || {
+                                let result = self.node.splice_out(
+                                    &ch.user_channel_id,
+                                    ch.counterparty_node_id,
+                                    &valid_addr,
+                                    amount_sats,
+                                );
+                                if result.is_ok() {
                                     self.auto_splice_in_progress
                                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                result
+                            }) {
+                                Ok(()) => {
                                     let onchain_sats_at_start =
                                         self.node.list_balances().total_onchain_balance_sats;
                                     self.auto_splice_onchain_at_start.store(
@@ -3411,8 +3445,24 @@ impl UserApp {
                         &event_id,
                         payment_hash,
                         fee_paid_msat,
-                    ) {
-                        Ok(_) => {
+                    )
+                    .and_then(|completed| {
+                        if completed {
+                            return Ok(());
+                        }
+                        // A row already rolled back (LDK had lost its record) gets its debit back;
+                        // the channel stays locked so the worker cannot save over the new books.
+                        let mut sc = self.stable_channel.lock().unwrap();
+                        if let Some(redebit) = self.db.settle_rolled_back_stability_payment(
+                            &event_id,
+                            payment_hash,
+                            fee_paid_msat,
+                        )? {
+                            stable::apply_stability_redebit(&mut sc, &redebit);
+                        }
+                        Ok(())
+                    }) {
+                        Ok(()) => {
                             if let Some(pid) = payment_id {
                                 self.pending_payments.remove(&pid);
                             }
@@ -4304,25 +4354,10 @@ impl UserApp {
                         match self.db.fail_pending_stability_payment(&format!("{pid}")) {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
-                                if rollback.restored {
-                                    if let (Some(uid), Some(before), Some(after)) = (
-                                        rollback.user_channel_id.as_deref(),
-                                        rollback.backing_sats_before,
-                                        rollback.backing_sats_after,
-                                    ) {
-                                        let mut sc = self.stable_channel.lock().unwrap();
-                                        if format!("{}", sc.user_channel_id) == uid
-                                            && sc.backing_sats == after
-                                        {
-                                            sc.backing_sats = before;
-                                            sc.native_sats =
-                                                sc.stable_receiver_btc.sats.saturating_sub(before);
-                                            stable::recompute_native(&mut sc);
-                                            sc.last_stability_payment = 0;
-                                            sc.payment_made = false;
-                                        }
-                                    }
-                                }
+                                stable::apply_stability_rollback(
+                                    &mut self.stable_channel.lock().unwrap(),
+                                    &rollback,
+                                );
                                 self.status_message = if rollback.restored {
                                     "Stability payment failed; allocation restored".to_string()
                                 } else {
@@ -4413,6 +4448,9 @@ impl UserApp {
                                 let _ =
                                     self.db
                                         .update_payment_status(p.payment_db_id, "failed", None);
+                            } else if let Some(pid) = payment_id {
+                                // A restart empties the map; the row must still fail.
+                                let _ = self.db.update_payment_status_by_pid(&format!("{pid}"), "failed", None);
                             }
 
                             audit_event(
@@ -4455,7 +4493,13 @@ impl UserApp {
                         if sc.user_channel_id == user_channel_id.0
                             || self.node.list_channels().is_empty()
                         {
-                            let _ = self.db.delete_channel(&format!("{}", sc.user_channel_id));
+                            // Soft-close: a stability payment settling late still debits this row.
+                            if let Err(e) = self.db.mark_channel_closed(&format!("{}", sc.user_channel_id)) {
+                                audit_event(
+                                    "CHANNEL_CLOSE_PERSIST_FAILED",
+                                    json!({ "user_channel_id": format!("{}", sc.user_channel_id), "error": e.to_string() }),
+                                );
+                            }
                             sc.expected_usd = USD::from_f64(0.0);
                             sc.backing_sats = 0;
                             sc.native_sats = 0;
@@ -12142,9 +12186,6 @@ fn local_sync_backing_sats(
     pending_trade: Option<&db::PendingTradeRow>,
 ) -> Result<u64, &'static str> {
     let expected_usd = stable::normalize_trade_expected_usd(sync.expected_usd);
-    if expected_usd == 0.0 {
-        return Ok(0);
-    }
     if let Some(stored_backing) = pending_trade.and_then(|trade| trade.new_backing_sats) {
         return if stored_backing <= live_receiver_sats {
             Ok(stored_backing)
@@ -12194,7 +12235,7 @@ fn local_sync_backing_sats(
             .saturating_sub(current_target_sats.saturating_sub(new_target_sats))
             .min(live_receiver_sats)
     };
-    (backing_sats > 0)
+    (expected_usd == 0.0 || backing_sats > 0)
         .then_some(backing_sats)
         .ok_or("nonzero sync target has no locally derived backing")
 }
@@ -12544,10 +12585,13 @@ mod tests {
             expected_usd: 0.0,
             ..sync
         };
+        assert_eq!(local_sync_backing_sats(&closed, 10_000, 100_000.0, 10.0, 20_000, None), Ok(10_000));
+        assert_eq!(local_sync_backing_sats(&closed, 10_000, 100_000.0, 0.0, 10_000, None), Ok(10_000));
+
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 60_000, None),
-            Ok(0),
-            "an authenticated full-exit sync needs no local price",
+            Err("no trusted wallet price available"),
+            "clearing a target must price the claim without discarding residual backing",
         );
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 100_001.0, 60.0, 59_999, None,),

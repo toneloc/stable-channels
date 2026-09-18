@@ -185,11 +185,8 @@ class StabilityServiceTest {
     }
 
     @Test
-    fun `reconcileOutgoing closes the position when the spend exhausts the target`() {
-        // Preserve-sats must not apply at the zero boundary: with the target exhausted nothing
-        // backs it, so the remaining sats are native. Leaving them as backing for a $0 target
-        // books them as neither stable nor native, and every repair path treats a sub-cent
-        // target as "no position" and bails — the sats would be stranded for good.
+    fun `reconcileOutgoing preserves unpaid surplus when the spend exhausts the target`() {
+        // Even an already-completed overspend must preserve the surplus still in the channel.
         val price = 100_000.0
         val sc =
             StableChannel(
@@ -201,8 +198,104 @@ class StabilityServiceTest {
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
         assertEquals(15.0, deducted!!, 0.0001)
         assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
-        assertEquals(0L, updated.backingSats)
-        assertEquals(5_000L, updated.nativeChannelBTC.sats) // the sats the user still holds
+        assertEquals(5_000L, updated.backingSats)
+        assertEquals(0L, updated.nativeChannelBTC.sats)
+    }
+
+    @Test
+    fun `zero and sub-cent claims still settle above-threshold surplus`() {
+        for ((expected, backing, price) in
+            listOf(
+                Triple(0.0, 1_000L, 100_000.0),
+                Triple(0.00085, 477L, 105_000.0),
+            )) {
+            val sc =
+                StableChannel(
+                    expectedUSD = USD(expected),
+                    backingSats = backing,
+                    stableReceiverBTC = Bitcoin(backing),
+                )
+            assertEquals(
+                StabilityAction.PAY,
+                StabilityService.checkStabilityAction(sc, price).action,
+            )
+            assertEquals(
+                MUST_SETTLE,
+                refusal { StabilityService.checkOutgoingAllocation(sc, price) },
+            )
+        }
+        for (backing in listOf(0L, 249L, 250L)) {
+            val sc =
+                StableChannel(
+                    expectedUSD = USD(0.0),
+                    backingSats = backing,
+                    stableReceiverBTC = Bitcoin(backing),
+                )
+            assertEquals(
+                if (backing < 250L) StabilityAction.STABLE else StabilityAction.PAY,
+                StabilityService.checkStabilityAction(sc, 100_000.0).action,
+            )
+        }
+    }
+
+    @Test
+    fun `spends reaching backing require payable surplus to settle and a fresh price`() {
+        val sc =
+            StableChannel(
+                expectedUSD = USD(10.0),
+                backingSats = 10_000,
+                stableReceiverBTC = Bitcoin(100_000),
+            )
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 110_000.0) },
+        )
+        for (price in listOf(0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            assertEquals(
+                NEEDS_PRICE,
+                refusal { StabilityService.checkOutgoingAllocation(sc, price) },
+            )
+        }
+        StabilityService.checkOutgoingAllocation(sc, 90_000.0) // LSP owes the shortfall
+        StabilityService.checkOutgoingAllocation(sc, 100_000.0)
+        StabilityService.checkOutgoingAllocation(sc, 102_000.0) // sub-$0.25 deadband
+        StabilityService.checkOutgoingAllocation(StableChannel(), 0.0)
+    }
+
+    @Test
+    fun `native amount including fees is allowed even with surplus or no trusted price`() {
+        val sc =
+            StableChannel(
+                expectedUSD = USD(10.0),
+                backingSats = 10_000,
+                stableReceiverBTC = Bitcoin(100_000),
+            )
+        for (price in listOf(110_000.0, 90_000.0, 0.0, Double.NaN, Double.POSITIVE_INFINITY)) {
+            StabilityService.checkOutgoingAllocation(sc, price, 90_000L)
+        }
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 110_000.0, 90_001L) },
+        )
+        assertEquals(
+            NEEDS_PRICE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 0.0, 90_001L) },
+        )
+    }
+
+    @Test
+    fun `zero target surplus is protected but native sats remain spendable`() {
+        val sc =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 1_000,
+                stableReceiverBTC = Bitcoin(3_000),
+            )
+        StabilityService.checkOutgoingAllocation(sc, 0.0, 2_000L)
+        assertEquals(
+            MUST_SETTLE,
+            refusal { StabilityService.checkOutgoingAllocation(sc, 100_000.0, 2_001L) },
+        )
     }
 
     // ---------------------------------------------------------------------------
@@ -257,5 +350,14 @@ class StabilityServiceTest {
     fun `Bitcoin fromBTC round trips correctly`() {
         val btc = Bitcoin.fromBTC(0.001)
         assertEquals(100_000L, btc.sats)
+    }
+
+    private fun refusal(block: () -> Unit): String? = runCatching(block).exceptionOrNull()?.message
+
+    private companion object {
+        const val MUST_SETTLE =
+            "A stability payment must settle before sending. Please try again shortly."
+        const val NEEDS_PRICE =
+            "Waiting for a fresh price before sending. Please try again shortly."
     }
 }
