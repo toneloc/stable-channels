@@ -1063,6 +1063,17 @@ class OutgoingPaymentLifecycleTest {
     }
 
     @Test
+    fun stabilityLateSuccessDebitsTheBooksOfTheRealCloseNotAnEarlierTransientOne() {
+        releaseLostRecordOnTheLiveChannel()
+        db.deleteChannel("7") // a transient listChannels gap archives 11,000
+        db.saveChannel("channel", "7", 10.0, 9_000, null, 20_000, 100_000.0) // back, books moved
+        db.deleteChannel("7") // the real close
+        assertArchive(10.0, 9_000L)
+        assertTrue(LightningPaymentRecovery.recordSuccess(db, "send", 123))
+        assertArchive(10.0, 8_000L)
+    }
+
+    @Test
     fun stabilityLateSuccessWithNoBooksLeftIsAuditedAsNotDebited() {
         releaseLostRecordOnTheLiveChannel()
         db.writableDatabase.execSQL("DELETE FROM channels WHERE user_channel_id = '7'")

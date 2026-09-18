@@ -4493,7 +4493,13 @@ impl UserApp {
                         if sc.user_channel_id == user_channel_id.0
                             || self.node.list_channels().is_empty()
                         {
-                            let _ = self.db.delete_channel(&format!("{}", sc.user_channel_id));
+                            // Soft-close: a stability payment settling late still debits this row.
+                            if let Err(e) = self.db.mark_channel_closed(&format!("{}", sc.user_channel_id)) {
+                                audit_event(
+                                    "CHANNEL_CLOSE_PERSIST_FAILED",
+                                    json!({ "user_channel_id": format!("{}", sc.user_channel_id), "error": e.to_string() }),
+                                );
+                            }
                             sc.expected_usd = USD::from_f64(0.0);
                             sc.backing_sats = 0;
                             sc.native_sats = 0;

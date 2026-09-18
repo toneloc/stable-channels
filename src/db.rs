@@ -2935,8 +2935,7 @@ impl Database {
         };
         let fee = fee_paid_msat.and_then(|value| i64::try_from(value).ok());
         tx.execute(
-            "UPDATE payments SET status = 'completed', backing_rolled_back = 0,
-                                 fee_msat = COALESCE(?1, fee_msat)
+            "UPDATE payments SET status = 'completed', fee_msat = COALESCE(?1, fee_msat)
              WHERE id = ?2",
             params![fee, payment_db_id],
         )?;
@@ -2960,11 +2959,13 @@ impl Database {
         let mut redebit = None;
         let mut books_before = None;
         let mut books_after = None;
+        let mut outstanding = false;
         if let (true, Some(uid), Some(before), Some(after)) =
             (rolled_back, user_channel_id.as_deref(), before, after)
         {
             let debit = before.saturating_sub(after).max(0);
             books_before = channel_books(&tx, uid)?;
+            // A closed row still takes the debit; only a purged row leaves it outstanding.
             let changed = tx.execute(
                 "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?1),
                                      updated_at = strftime('%s', 'now')
@@ -2972,13 +2973,19 @@ impl Database {
                 params![debit, uid],
             )?;
             books_after = channel_books(&tx, uid)?;
-            if changed > 0 && debit > 0 {
+            if debit > 0 && changed > 0 {
                 redebit = Some(StabilityPaymentRedebit {
                     user_channel_id: uid.to_owned(),
                     debit_sats: debit as u64,
                 });
             }
+            outstanding = debit > 0 && changed == 0;
         }
+        // History is truthful either way; the flag stays set only while the debit is unapplied.
+        tx.execute(
+            "UPDATE payments SET backing_rolled_back = ?1 WHERE id = ?2",
+            params![outstanding, payment_db_id],
+        )?;
 
         let mut refs = vec![
             LedgerRef::new("payment_id", payment_id),
@@ -3006,6 +3013,7 @@ impl Database {
                 "user_channel_id": user_channel_id,
                 "fee_paid_msat": fee_paid_msat,
                 "redebited_sats": redebit.as_ref().map(|r| r.debit_sats),
+                "redebit_outstanding": outstanding,
             }),
             refs,
         };
@@ -5897,7 +5905,24 @@ mod tests {
     }
 
     #[test]
-    fn late_stability_success_with_no_channel_row_left_only_completes_the_payment() {
+    fn late_stability_success_debits_an_origin_that_has_since_closed() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        db.mark_channel_closed("user-channel-1").unwrap();
+
+        let redebit = db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(redebit.debit_sats, 20_000);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 100_000);
+        assert!(db.load_all_channels().unwrap().is_empty(), "the row stays closed");
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
+    }
+
+    #[test]
+    fn late_stability_success_with_no_row_at_all_keeps_the_debit_outstanding() {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
         assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
@@ -5907,7 +5932,19 @@ mod tests {
             .settle_rolled_back_stability_payment("stability-1", "hash", None)
             .unwrap()
             .is_none());
+        // History is truthful, but the unapplied debit stays marked instead of vanishing.
         assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
+        let outstanding: bool = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT backing_rolled_back FROM payments WHERE payment_id = 'stability-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(outstanding);
     }
 
     #[test]

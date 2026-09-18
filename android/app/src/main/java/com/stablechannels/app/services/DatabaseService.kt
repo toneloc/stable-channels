@@ -672,9 +672,10 @@ class DatabaseService(context: Context) :
             """,
                 arrayOf(userChannelId, userChannelId),
             )
+            // The live books are the latest truth: replace any archive left by an earlier close.
             execSQL(
                 """
-                INSERT OR IGNORE INTO closed_channel_books
+                INSERT OR REPLACE INTO closed_channel_books
                 SELECT user_channel_id, channel_id, expected_usd, stable_sats,
                        receiver_sats, latest_price, strftime('%s','now')
                 FROM channels WHERE user_channel_id = ?
