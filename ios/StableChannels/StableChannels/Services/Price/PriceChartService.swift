@@ -164,4 +164,130 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
             return nil
         }
     }
+
+    // MARK: - Backfill & Seeding
+
+    private var isBackfillingHourly: Bool = false
+    private var isBackfillingDaily: Bool = false
+
+    private static let dailyDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter
+    }()
+
+    /// Fetch hourly candles from Kraken and backfill price_history for smooth 1W/1M charts.
+    func backfillHourlyPrices(priceRepo: PriceRepository) async {
+        guard !isBackfillingHourly else { return }
+        isBackfillingHourly = true
+        defer { isBackfillingHourly = false }
+
+        // Determine how far back we need data — up to 30 days
+        let thirtyDaysAgo = Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600
+        let since: Int64
+        if let oldest = try? priceRepo.getOldestPriceHistoryTimestamp(), oldest < thirtyDaysAgo {
+            // Already have old enough data, just fill gaps from the newest record
+            since = (try? priceRepo.getLatestPriceHistoryTimestamp()) ?? thirtyDaysAgo
+        } else {
+            since = thirtyDaysAgo
+        }
+
+        for attempt in 1...3 {
+            guard let candles = await fetchKrakenHourlyOHLC(since: since) else {
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                }
+                continue
+            }
+            if !candles.isEmpty {
+                do {
+                    let count = try priceRepo.backfillHourlyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) hourly price points from Kraken")
+                        await MainActor.run {
+                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                        }
+                    }
+                } catch {
+                    print("[Chart] Hourly backfill failed: \(error)")
+                }
+            }
+            break
+        }
+    }
+
+    /// Fetch daily candles from Kraken and backfill daily_prices for smooth 3M/6M/1Y/ALL charts.
+    func backfillDailyPrices(priceRepo: PriceRepository) async {
+        guard !isBackfillingDaily else { return }
+        isBackfillingDaily = true
+        defer { isBackfillingDaily = false }
+
+        // Determine how far back we need data — up to 720 days
+        let sevenTwentyDaysAgo = Int64(Date().timeIntervalSince1970) - 720 * 24 * 3600
+        let since: Int64
+
+        if let latest = try? priceRepo.getLatestDailyPriceDate(),
+           let date = Self.dailyDateFormatter.date(from: latest) {
+            let latestTs = Int64(date.timeIntervalSince1970)
+            since = max(latestTs - 86400, sevenTwentyDaysAgo)
+        } else {
+            since = sevenTwentyDaysAgo
+        }
+
+        for attempt in 1...3 {
+            guard let candles = await fetchKrakenDailyOHLC(since: since) else {
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                }
+                continue
+            }
+            if !candles.isEmpty {
+                do {
+                    let count = try priceRepo.backfillDailyPrices(candles)
+                    if count > 0 {
+                        print("[Chart] Backfilled \(count) daily price points from Kraken")
+                    }
+                    await MainActor.run {
+                        NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                    }
+                } catch {
+                    print("[Chart] Daily backfill failed: \(error)")
+                }
+            }
+            break
+        }
+    }
+
+    /// Seed historical daily prices from bundled seed data if database has not yet been seeded.
+    func seedHistoricalPrices(priceRepo: PriceRepository) {
+        let needsSeed: Bool
+        do {
+            if let oldest = try priceRepo.getOldestDailyPriceDate() {
+                needsSeed = !oldest.hasPrefix("2013")
+            } else {
+                needsSeed = true
+            }
+        } catch {
+            needsSeed = true
+        }
+
+        guard needsSeed else {
+            print("[Chart] Historical prices already seeded")
+            return
+        }
+
+        print("[Chart] Seeding historical price data (2013-present)...")
+        do {
+            let count = try priceRepo.bulkInsertDailyPrices(HistoricalPrices.seedPrices)
+            print("[Chart] Seeded \(count) historical price records")
+            if count > 0 {
+                Task { @MainActor in
+                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+                }
+            }
+        } catch {
+            print("[Chart] Failed to seed historical prices: \(error)")
+        }
+    }
 }
