@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowCircleDown
@@ -63,6 +64,13 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         if (isFlashing) {
             loadHistory()
         }
+    }
+
+    val listState = rememberLazyListState()
+    // Only jump to top when a genuinely new item appears at the head of the currently
+    // selected list — never on every reload, so scrolling through older history isn't disrupted.
+    LaunchedEffect(selectedSegment, trades.firstOrNull()?.id, payments.firstOrNull()?.id) {
+        listState.scrollToItem(0)
     }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
@@ -144,7 +152,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                 description = "Send or receive payments to see history here.",
             )
         } else {
-            LazyColumn {
+            LazyColumn(state = listState) {
                 if (selectedSegment == 0) {
                     itemsIndexed(trades, key = { _, trade -> trade.id }) { index, trade ->
                         TradeRow(trade) { selectedTrade = trade }
