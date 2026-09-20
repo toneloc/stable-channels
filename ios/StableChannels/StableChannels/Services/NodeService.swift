@@ -294,25 +294,11 @@ class NodeService: NodeServiceProtocol {
                 throw NodeServiceError.invalidStoredMnemonic
             }
             do {
-                // ROLLBACK INSURANCE is written FIRST: older builds treat "no seed
-                // files" as a brand-new wallet and wipe the channel database before
-                // generating a new identity — the historic force-close class, but
-                // worse, because the monitors are destroyed first. Ordering ahead of
-                // the Keychain store keeps every failure coherent: if this write
-                // fails, nothing has been committed and the next launch retries the
-                // same path cleanly; if the Keychain store below fails, plaintext-only
-                // is the legacy-valid state the migrator already handles. Plaintext
-                // deletion ships in a later release, once no earlier build remains
-                // installable (staged rollout, step 1 of 2).
-                do {
-                    try MnemonicMigrator.syncRollbackCopy(words: canonicalWords, legacyPath: seedPhrasePath)
-                } catch {
-                    AuditService.log("SEED_ROLLBACK_COPY_WRITE_FAILED", data: [
-                        "error": error.localizedDescription
-                    ])
-                    throw error
-                }
                 try keychain.storeMnemonic(canonicalWords)
+                // Permanently delete plaintext seed file after verified Keychain storage
+                if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
+                    try? FileManager.default.removeItem(at: seedPhrasePath)
+                }
                 self.savedMnemonic = canonicalWords
                 nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
             } catch {

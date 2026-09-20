@@ -214,15 +214,18 @@ final class WalletLifecycleManagerTests: XCTestCase {
         try mockStorage.storePendingMnemonic(otherMnemonic)
 
         var persistenceWiped = false
-        try manager.runRecoveryIfNeeded(onWipePersistence: {
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {
             persistenceWiped = true
             try self.mockStorage.deleteMnemonic()
         })
 
+        XCTAssertTrue(didRecover)
         XCTAssertTrue(persistenceWiped)
         XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
         XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
+        // Promoted recovery seed allows ready startup without requiring pre-existing database
+        XCTAssertEqual(manager.detectStartupState(), .ready)
     }
 
     func testRecoveryFromOldPersistenceWipedPhase() throws {
@@ -231,15 +234,18 @@ final class WalletLifecycleManagerTests: XCTestCase {
         try mockStorage.storePendingMnemonic(otherMnemonic)
 
         var persistenceWiped = false
-        try manager.runRecoveryIfNeeded(onWipePersistence: {
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {
             persistenceWiped = true
         })
 
+        XCTAssertTrue(didRecover)
         // In oldPersistenceWiped phase, wipe was already completed before crash
         XCTAssertFalse(persistenceWiped)
         XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
         XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
+        // Promoted recovery seed allows ready startup without requiring pre-existing database
+        XCTAssertEqual(manager.detectStartupState(), .ready)
     }
 
     func testRecoveryKeychainErrorPreservesRestorePhase() throws {

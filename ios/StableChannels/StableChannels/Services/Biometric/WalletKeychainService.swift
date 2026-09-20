@@ -50,7 +50,21 @@ protocol MnemonicStorageProtocol {
 final class WalletKeychainService: MnemonicStorageProtocol {
     static let shared = WalletKeychainService()
 
-    static var onLog: ((String, [String: Any]) -> Void)?
+    private static let logLock = NSLock()
+    private static var _onLog: ((String, [String: Any]) -> Void)?
+
+    static var onLog: ((String, [String: Any]) -> Void)? {
+        get {
+            logLock.lock()
+            defer { logLock.unlock() }
+            return _onLog
+        }
+        set {
+            logLock.lock()
+            defer { logLock.unlock() }
+            _onLog = newValue
+        }
+    }
 
     private let service: String
     private let account: String
