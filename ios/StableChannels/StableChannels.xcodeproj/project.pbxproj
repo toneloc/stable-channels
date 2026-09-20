@@ -97,6 +97,10 @@
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
+		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
+		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
+		49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */; };
+		49D1E98B36290E1046BCBD0C /* ActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2229F078D1812443B9072 /* ActionButton.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -292,6 +296,10 @@
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
+		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
+		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
+		49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNotificationBannerView.swift; sourceTree = "<group>"; };
+		49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeActionButtonsView.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -763,8 +771,12 @@
 		EC3EE79DFC487BD8FC094DF5 /* Home */ = {
 			isa = PBXGroup;
 			children = (
+				49D2229F078D1812443B9072 /* ActionButton.swift */,
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
+				49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */,
+				49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */,
+				49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
 				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
 				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
@@ -1009,6 +1021,10 @@
 				494445793053DB2400B5A146 /* PriceChartFetching.swift in Sources */,
 				88769D82377C43BCF549A52C /* HistoryView.swift in Sources */,
 				1A54F909B027D90A0AADD1AF /* HomeView.swift in Sources */,
+				49D1E98B36290E1046BCBD0C /* ActionButton.swift in Sources */,
+				49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */,
+				49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */,
+				49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */,
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
 				8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */,
 				C1911B3A7E4C92444F07A5C6 /* OnChainView.swift in Sources */,

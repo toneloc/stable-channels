@@ -4,74 +4,57 @@ import UserNotifications
 struct HomeView: View {
     @Environment(AppState.self) private var appState
     @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var showSendSheet = false
     @State private var showReceiveSheet = false
     @State private var showBuySheet = false
     @State private var showSellSheet = false
     @State private var prefillTradeAmount: Double = 0
     @State private var tradeRequest: TradeRequest?
-    @Environment(\.scenePhase) private var scenePhase
+
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
     @State private var notificationsEnabled = true
-    @State private var receivePulse = false
-    @State private var showReceiveHint = true
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 16) {
-                    // Notification warning
                     if !notificationsEnabled {
-                        notificationWarning
+                        HomeNotificationBannerView()
                     }
 
-                    // Total Balance
                     balanceSection
 
-                    // Syncing indicator
                     if appState.isSyncing {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text(String(localized: "home_syncing", defaultValue: "Syncing..."))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        syncingIndicator
                     }
 
-                    // Stable / Native Split
                     if appState.lightningBalanceSats > 0 {
                         balanceBarSection
                     }
 
-                    // On-chain balance
                     if appState.onchainBalanceSats > 0 {
-                        savingsSection
+                        HomeSavingsSectionView(showBTC: showBTC)
                     }
 
-                    // Price Chart
-                    if appState.btcPrice > 0 {
-                        PriceChartCard(compact: true)
-                            .equatable()
-                            .padding(.bottom, 8)
+                    PriceChartCard(compact: true)
+                        .equatable()
+                        .padding(.bottom, 8)
+
+                    if !appState.hasReadyChannel {
+                        receiveHintText
                     }
 
-                    // Hint text when no channel
-                    if !hasReadyChannel {
-                        Text(String(
-                            localized: "home_hint_receive",
-                            defaultValue: "Receive bitcoin over Lightning to get started"
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.bottom, 4)
-                    }
+                    HomeActionButtonsView(
+                        hasReadyChannel: appState.hasReadyChannel,
+                        onSend: { showSendSheet = true },
+                        onReceive: { showReceiveSheet = true },
+                        onBuy: { showBuySheet = true },
+                        onSell: { showSellSheet = true }
+                    )
 
-                    // Action Buttons
-                    actionButtons
-
-                    // Status
                     if !appState.statusMessage.isEmpty {
                         statusSection
                     }
@@ -98,12 +81,8 @@ struct HomeView: View {
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
-        .sheet(isPresented: $showBuySheet) {
-            BuyView(prefillAmountUSD: prefillTradeAmount)
-        }
-        .sheet(isPresented: $showSellSheet) {
-            SellView(prefillAmountUSD: prefillTradeAmount)
-        }
+        .sheet(isPresented: $showBuySheet) { BuyView(prefillAmountUSD: prefillTradeAmount) }
+        .sheet(isPresented: $showSellSheet) { SellView(prefillAmountUSD: prefillTradeAmount) }
         .sheet(item: $tradeRequest) { request in
             if request.direction == .buy {
                 BuyView(prefillAmountUSD: request.amountUSD)
@@ -113,56 +92,11 @@ struct HomeView: View {
         }
         .onChange(of: appState.paymentFlash) {
             if appState.paymentFlash {
-                withAnimation(.easeOut(duration: 0.3)) {
-                    flashScale = 1.08
-                }
+                withAnimation(.easeOut(duration: 0.3)) { flashScale = 1.08 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    withAnimation(.easeInOut(duration: 0.4)) {
-                        flashScale = 1.0
-                    }
+                    withAnimation(.easeInOut(duration: 0.4)) { flashScale = 1.0 }
                 }
             }
-        }
-    }
-
-    private func checkNotifications() {
-        UNUserNotificationCenter.current().getNotificationSettings { settings in
-            DispatchQueue.main.async {
-                notificationsEnabled = settings.authorizationStatus == .authorized
-            }
-        }
-    }
-
-    // MARK: - Notification Warning
-
-    private var notificationWarning: some View {
-        Button {
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                UIApplication.shared.open(url)
-            }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.white)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "notifications_disabled", defaultValue: "Notifications Disabled"))
-                        .font(.subheadline)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(.white)
-                    Text(String(
-                        localized: "notifications_disabled_subtitle",
-                        defaultValue: "Enable notifications for stability payments"
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.9))
-                }
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.7))
-            }
-            .padding(12)
-            .background(.red, in: RoundedRectangle(cornerRadius: 12))
         }
     }
 
@@ -309,201 +243,27 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Savings (On-Chain)
+    // MARK: - Indicators & Status
 
-    private var onchainUSD: Double {
-        appState.btcPrice > 0
-            ? Double(appState.onchainBalanceSats) / Double(Constants.satsInBTC) * appState.btcPrice
-            : 0
-    }
-
-    private var hasReadyChannel: Bool {
-        appState.hasReadyChannel
-    }
-
-    private var savingsSection: some View {
-        VStack(spacing: 6) {
-            HStack {
-                Text(String(localized: "label_on_chain", defaultValue: "Onchain Account"))
-                    .font(.caption.bold())
-                Spacer()
-                Text(showBTC
-                    ? "\(appState.onchainBalanceSats.btcSpacedFormatted) BTC"
-                    : onchainUSD.usdFormatted)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            if appState.isSweeping {
-                // 1. Splice-in in progress
-                pendingRow(kind: .sweep(txid: appState.spliceTxid))
-            } else if appState.isChannelClosing {
-                if let closeTxid = appState.transactionLinkService.lastCloseTxid, !closeTxid.isEmpty {
-                    pendingRow(kind: .close(txid: closeTxid))
-                } else {
-                    pendingRow(kind: .closeNoLink)
-                }
-            } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
-                // 2. Channel + confirmed funds — offer to sweep
-                HStack {
-                    Text(String(localized: "move_to_trading", defaultValue: "Move to Lightning Account"))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        appState.sweepToChannel()
-                    } label: {
-                        Text(String(localized: "button_swap", defaultValue: "Move"))
-                            .font(.caption.bold())
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .background(.blue.opacity(0.1))
-                            .foregroundStyle(.blue)
-                            .clipShape(Capsule())
-                    }
-                }
-            } else if appState.spendableOnchainSats == 0 {
-                if appState.isOpeningChannel, let fundingTx = appState.fundingTxid {
-                    pendingRow(kind: .deposit(txid: fundingTx))
-                } else {
-                    pendingRow(kind: .onchainReceive(txid: appState.transactionLinkService.lastReceiveTxid))
-                }
-                if !hasReadyChannel {
-                    Text(String(
-                        localized: "hint_create_wallet",
-                        defaultValue: "Get your first payment over Lightning to activate your account"
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                }
-            } else {
-                // 4. No channel, confirmed deposit — just needs a Lightning receive
-                Text(String(
-                    localized: "hint_create_wallet",
-                    defaultValue: "Get your first payment over Lightning to activate your account"
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-        }
-        .padding(10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private enum PendingRowKind {
-        case deposit(txid: String?)
-        case sweep(txid: String?)
-        case close(txid: String?)
-        case closeNoLink
-        case onchainReceive(txid: String?)
-    }
-
-    @ViewBuilder
-    private func pendingRow(kind: PendingRowKind) -> some View {
-        switch kind {
-        case .deposit(let txid):
-            pendingRowImpl(
-                text: String(localized: "status_channel_opening", defaultValue: "Deposit confirming..."),
-                txid: txid
-            )
-        case .sweep(let txid):
-            pendingRowImpl(
-                text: String(localized: "status_sweeping", defaultValue: "Move pending..."),
-                txid: txid
-            )
-        case .close(let txid):
-            pendingRowImpl(
-                text: String(localized: "status_channel_closing", defaultValue: "Channel closing…"),
-                txid: txid
-            )
-        case .closeNoLink:
-            HStack(spacing: 6) {
-                Image(systemName: "hourglass")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                Text(String(
-                    localized: "info_close_pending_confirmation",
-                    defaultValue: "Channel closing - pending confirmation"
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                Spacer()
-            }
-        case .onchainReceive(let txid):
-            pendingRowImpl(
-                text: String(localized: "status_onchain_receiving", defaultValue: "Receiving onchain..."),
-                txid: txid
-            )
-        }
-    }
-
-    private func pendingRowImpl(text: String, txid: String?) -> some View {
+    private var syncingIndicator: some View {
         HStack(spacing: 6) {
-            Image(systemName: "hourglass")
+            ProgressView()
+                .controlSize(.small)
+            Text(String(localized: "home_syncing", defaultValue: "Syncing..."))
                 .font(.caption)
-                .foregroundStyle(.orange)
-            Text(text)
-                .font(.caption2)
                 .foregroundStyle(.secondary)
-            Spacer()
-            if let txid, !txid.isEmpty {
-                if let url = Constants.txExplorerLink(for: txid) {
-                    Link(destination: url) {
-                        HStack(spacing: 2) {
-                            Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
-                                .font(.caption2)
-                            Image(systemName: "arrow.up.right.square")
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(.blue)
-                    }
-                }
-            }
         }
     }
 
-    // MARK: - Action Buttons
-
-    private var actionButtons: some View {
-        return VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                ActionButton(
-                    title: String(localized: "button_send", defaultValue: "Send"),
-                    icon: "arrow.up.circle.fill",
-                    color: .blue
-                ) {
-                    showSendSheet = true
-                }
-                ActionButton(
-                    title: String(localized: "button_receive", defaultValue: "Receive"),
-                    icon: "arrow.down.circle.fill",
-                    color: .green,
-                    pulse: !hasReadyChannel
-                ) {
-                    showReceiveSheet = true
-                }
-            }
-
-            HStack(spacing: 8) {
-                ActionButton(
-                    title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
-                    icon: "arrow.up.right.circle.fill",
-                    color: .orange
-                ) {
-                    showBuySheet = true
-                }
-                ActionButton(
-                    title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
-                    icon: "arrow.down.right.circle.fill",
-                    color: .purple
-                ) {
-                    showSellSheet = true
-                }
-            }
-        }
+    private var receiveHintText: some View {
+        Text(String(
+            localized: "home_hint_receive",
+            defaultValue: "Receive bitcoin over Lightning to get started"
+        ))
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.bottom, 4)
     }
-
-    // MARK: - Status Section
 
     private var statusSection: some View {
         Button(action: { openPaymentDetail() }) {
@@ -518,50 +278,16 @@ struct HomeView: View {
         .buttonStyle(.plain)
     }
 
+    private func checkNotifications() {
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            DispatchQueue.main.async {
+                notificationsEnabled = settings.authorizationStatus == .authorized
+            }
+        }
+    }
+
     private func openPaymentDetail() {
         guard let payment = appState.databaseService?.paymentRepo.latestReceivedPayment() else { return }
         paymentCoordinator.open(payment)
-    }
-}
-
-// MARK: - Action Button
-
-struct ActionButton: View {
-    let title: String
-    let icon: String
-    let color: Color
-    var pulse: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack {
-                Image(systemName: icon)
-                Text(title)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .foregroundStyle(color)
-        }
-        .background(color.opacity(0.1))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay {
-            if pulse {
-                PulseOverlay(color: color)
-            }
-        }
-    }
-}
-
-struct PulseOverlay: View {
-    let color: Color
-    @State private var on = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: 12)
-            .fill(color.opacity(on ? 0.25 : 0.0))
-            .animation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true), value: on)
-            .onAppear { on = true }
-            .allowsHitTesting(false)
     }
 }
