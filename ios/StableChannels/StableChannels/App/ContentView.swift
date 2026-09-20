@@ -359,8 +359,6 @@ private struct MismatchRecoverySheet: View {
             },
             onSuccess: {
                 dismiss()
-                appState.phase = .loading
-                Task { await appState.start() }
             }
         )
     }

@@ -16,23 +16,12 @@ enum MnemonicMigrationError: Error, LocalizedError, Equatable {
 
 /// Responsible solely for encrypted-first mnemonic loading and legacy plaintext migration.
 enum MnemonicMigrator {
-    /// Normalizes internal and external whitespace for canonical BIP-39 mnemonic comparison.
+    /// Normalizes casing and whitespace for canonical BIP-39 mnemonic comparison.
     static func canonicalizeMnemonic(_ mnemonic: String) -> String {
         mnemonic
+            .lowercased()
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
-    }
-
-    /// Ensures the plaintext rollback copy matches the Keychain-authoritative words.
-    /// Phase 1 of the staged migration: this file is what stops an older build from
-    /// reading "no seed files" and wiping the wallet, so a caller that cannot
-    /// maintain it must abort startup rather than run uninsured.
-    static func syncRollbackCopy(words: String, legacyPath: URL) throws {
-        let canonical = canonicalizeMnemonic(words)
-        let existing = (try? String(contentsOfFile: legacyPath.path, encoding: .utf8))
-            .map(canonicalizeMnemonic)
-        guard existing != canonical else { return }
-        try canonical.write(to: legacyPath, atomically: true, encoding: .utf8)
     }
 
     /// Loads the stored mnemonic from Keychain, or migrates an existing legacy plaintext file to Keychain.
@@ -55,10 +44,8 @@ enum MnemonicMigrator {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
                     throw MnemonicMigrationError.seedMismatch
                 }
-                // A matching plaintext file is deliberately RETAINED as rollback insurance:
-                // older builds treat "no seed files" as a brand-new wallet and wipe the
-                // channel database. Plaintext deletion ships in a later release, once no
-                // earlier build remains installable (staged rollout, step 1 of 2).
+                // Plaintext matches or is empty: permanently delete the plaintext seed file
+                try? FileManager.default.removeItem(at: legacyPath)
             }
             return canonicalKeychain
         } catch WalletKeychainError.keyNotFound {
@@ -87,8 +74,8 @@ enum MnemonicMigrator {
 
         do {
             try keychain.storeMnemonic(canonicalWords)
-            // The plaintext file is deliberately RETAINED after migration (rollback
-            // insurance for older builds — see the note above). Deletion is a later release.
+            // Permanently delete plaintext seed file after verified Keychain storage
+            try? FileManager.default.removeItem(at: legacyPath)
             return canonicalWords
         } catch {
             logError?("KEYCHAIN_MIGRATION_FAILED", ["error": error.localizedDescription])

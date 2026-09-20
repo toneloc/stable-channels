@@ -727,6 +727,7 @@ class AppState {
                     .set(nodeId, forKey: "node_id")
             }
 
+            lifecycleManager.clearRecoveredRestorePending()
             phase = .wallet
             refreshBalances()
             updateStableBalances()
@@ -1064,6 +1065,7 @@ class AppState {
                         .set(nodeId, forKey: "node_id")
                 }
 
+                lifecycleManager.clearRecoveredRestorePending()
                 await MainActor.run {
                     isSyncing = false
                     hasCompletedInitialSync = true
@@ -1103,6 +1105,8 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
+                nodeService.stop()
+                NodeDirLock.shared.release()
                 if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
                     error: error,
                     isNetworkOffline: !networkMonitor.isOnline
@@ -1159,6 +1163,8 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
+                nodeService.stop()
+                NodeDirLock.shared.release()
                 if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
                     error: error,
                     isNetworkOffline: !networkMonitor.isOnline
