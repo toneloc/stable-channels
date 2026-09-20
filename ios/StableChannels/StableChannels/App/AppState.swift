@@ -636,6 +636,7 @@ class AppState {
                     .set(nodeId, forKey: "node_id")
             }
 
+            lifecycleManager.clearRecoveredRestorePending()
             phase = .wallet
             refreshBalances()
             updateStableBalances()
@@ -966,6 +967,7 @@ class AppState {
                         .set(nodeId, forKey: "node_id")
                 }
 
+                lifecycleManager.clearRecoveredRestorePending()
                 await MainActor.run {
                     phase = .wallet
                     isSyncing = false
@@ -992,6 +994,8 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
+                nodeService.stop()
+                NodeDirLock.shared.release()
                 await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
             }
         case .newWallet:
@@ -1017,6 +1021,8 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
+                nodeService.stop()
+                NodeDirLock.shared.release()
                 await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
             }
         case .seedOnlyMismatch:

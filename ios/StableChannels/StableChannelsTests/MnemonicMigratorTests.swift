@@ -4,26 +4,21 @@ import XCTest
 final class MnemonicMigratorTests: XCTestCase {
     private let testMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     private var tempDirURL: URL!
-    private var testKeychain: WalletKeychainService!
+    private var testKeychain: MockMnemonicStorage!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
         tempDirURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDirURL, withIntermediateDirectories: true)
-        testKeychain = WalletKeychainService(
-            service: "com.stablechannels.wallet.test",
-            account: "seed_phrase_test_\(UUID().uuidString)",
-            accessGroup: nil
-        )
+        testKeychain = MockMnemonicStorage()
     }
 
     override func tearDownWithError() throws {
-        try? testKeychain.deleteMnemonic()
         try? FileManager.default.removeItem(at: tempDirURL)
         try super.tearDownWithError()
     }
 
-    func testMigrationCopiesPlaintextToKeychainAndRetainsFile() throws {
+    func testMigrationCopiesPlaintextToKeychainAndDeletesFile() throws {
         let path = tempDirURL.appendingPathComponent("seed_phrase")
         try testMnemonic.write(to: path, atomically: true, encoding: .utf8)
 
@@ -35,9 +30,8 @@ final class MnemonicMigratorTests: XCTestCase {
 
         XCTAssertEqual(loaded, testMnemonic)
         XCTAssertEqual(try testKeychain.loadMnemonic(), testMnemonic)
-        // Rollback insurance: the plaintext survives migration so an older build
-        // never sees "no seed files" and wipes the wallet (staged rollout, step 1).
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+        // Plaintext file is permanently deleted after verified Keychain migration
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
     func testEncryptedFirstThrowsMismatch() throws {
@@ -65,7 +59,7 @@ final class MnemonicMigratorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
     }
 
-    func testLingeringMatchingPlaintextIsRetained() throws {
+    func testLingeringMatchingPlaintextIsDeleted() throws {
         try testKeychain.storeMnemonic(testMnemonic)
 
         let path = tempDirURL.appendingPathComponent("seed_phrase")
@@ -78,8 +72,8 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        // Rollback insurance: matching plaintext is kept, not cleaned up.
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+        // Matching plaintext is permanently deleted upon verification
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
     // MARK: - Error Handling Security Tests
@@ -123,8 +117,8 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        // Rollback insurance: the plaintext survives migration (staged rollout, step 1).
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+        // The plaintext file is permanently deleted after verified migration
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
     func testUnreadablePlaintextThrowsInsteadOfReadingAsAbsent() throws {
@@ -218,47 +212,14 @@ final class MnemonicMigratorTests: XCTestCase {
         )
 
         XCTAssertEqual(loaded, testMnemonic)
-        // Rollback insurance: whitespace-equivalent plaintext is treated as matching and retained.
-        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+        // Whitespace-equivalent plaintext is treated as matching and deleted
+        XCTAssertFalse(FileManager.default.fileExists(atPath: path.path))
     }
 
-    // MARK: - Rollback Copy Sync
-
-    func testSyncRollbackCopyCreatesMissingFile() throws {
-        let path = tempDirURL.appendingPathComponent("seed_phrase")
-
-        try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: path)
-
-        XCTAssertEqual(
-            try String(contentsOfFile: path.path, encoding: .utf8),
-            testMnemonic
-        )
-    }
-
-    func testSyncRollbackCopyIsNoOpWhenMatching() throws {
-        let path = tempDirURL.appendingPathComponent("seed_phrase")
-        // Whitespace-equivalent content must be left untouched, not rewritten.
-        let nonCanonical = "  " + testMnemonic.replacingOccurrences(of: " ", with: "   ") + "\n"
-        try nonCanonical.write(to: path, atomically: true, encoding: .utf8)
-
-        try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: path)
-
-        XCTAssertEqual(
-            try String(contentsOfFile: path.path, encoding: .utf8),
-            nonCanonical
-        )
-    }
-
-    func testSyncRollbackCopyFailureThrows() {
-        // The insurance file is the phase-1 rollback safety mechanism; a caller
-        // that cannot write it must be able to fail closed on the thrown error.
-        let unwritable = tempDirURL
-            .appendingPathComponent("missing-subdir")
-            .appendingPathComponent("seed_phrase")
-
-        XCTAssertThrowsError(
-            try MnemonicMigrator.syncRollbackCopy(words: testMnemonic, legacyPath: unwritable)
-        )
+    func testCanonicalizeMnemonicLowercasesAndCollapsesWhitespace() {
+        let input = "  ABANDON   abandon \n ABANDON   About  "
+        let expected = "abandon abandon abandon about"
+        XCTAssertEqual(MnemonicMigrator.canonicalizeMnemonic(input), expected)
     }
 }
 

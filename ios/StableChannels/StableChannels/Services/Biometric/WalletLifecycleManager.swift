@@ -89,10 +89,14 @@ final class WalletLifecycleManager {
         let hasDb = FileManager.default.fileExists(atPath: dbPath.path)
 
         if hasSeed && hasDb {
+            clearRecoveredRestorePending()
             return .ready
         } else if !hasSeed && !hasDb {
             return .newWallet
         } else if hasSeed && !hasDb {
+            if isRecoveredRestorePending() {
+                return .ready
+            }
             return .seedOnlyMismatch
         } else {
             return .dbOnlyMismatch
@@ -104,10 +108,11 @@ final class WalletLifecycleManager {
     /// synchronous and durable, while the UserDefaults phase marker can be lost to
     /// an unflushed cache on a hard kill. A pending seed without a marker is still
     /// evidence of an in-flight restore and must never be treated as a new wallet.
-    func runRecoveryIfNeeded(onWipePersistence: () throws -> Void) throws {
+    /// Returns true if an interrupted restore seed was promoted to the active slot.
+    @discardableResult
+    func runRecoveryIfNeeded(onWipePersistence: () throws -> Void) throws -> Bool {
         guard let phase = getRestorePhase() else {
-            try recoverMarkerlessPendingIfNeeded()
-            return
+            return try recoverMarkerlessPendingIfNeeded()
         }
 
         AuditService.log("RESTORE_INTERRUPTED_RECOVERY_START", data: ["phase": phase.rawValue])
@@ -125,7 +130,7 @@ final class WalletLifecycleManager {
                 }
                 clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
-                return
+                return false
             } catch {
                 AuditService.log(
                     "RESTORE_INTERRUPTED_RECOVERY_KEYCHAIN_FAILED",
@@ -144,7 +149,7 @@ final class WalletLifecycleManager {
                 }
                 clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
-                return
+                return false
             }
 
             switch phase {
@@ -159,6 +164,9 @@ final class WalletLifecycleManager {
                     AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
                 }
                 clearRestorePhase()
+                setRecoveredRestorePending(true)
+                AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
+                return true
 
             case .oldPersistenceWiped:
                 // Old database was already wiped: promote seed to active slot
@@ -169,9 +177,10 @@ final class WalletLifecycleManager {
                     AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
                 }
                 clearRestorePhase()
+                setRecoveredRestorePending(true)
+                AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
+                return true
             }
-
-            AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
         } catch {
             AuditService.log("RESTORE_INTERRUPTED_RECOVERY_FAILED", data: ["error": error.localizedDescription])
             throw error // Retain the durable restore phase marker by propagating throw
@@ -237,18 +246,19 @@ final class WalletLifecycleManager {
             AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
         }
         clearRestorePhase()
+        setRecoveredRestorePending(true)
     }
 
     /// Reconstructs the restore state when the phase marker was lost but a pending
-    /// seed survives in the Keychain.
-    private func recoverMarkerlessPendingIfNeeded() throws {
+    /// seed survives in the Keychain. Returns true if a pending seed was promoted.
+    private func recoverMarkerlessPendingIfNeeded() throws -> Bool {
         let pending: String
         do {
             pending = try keychain.loadPendingMnemonic()
         } catch WalletKeychainError.keyNotFound {
-            return
+            return false
         }
-        guard !pending.isEmpty else { return }
+        guard !pending.isEmpty else { return false }
 
         // Fail closed on operational Keychain errors: promoting over a live wallet
         // that merely could not be read would destroy the wrong identity.
@@ -258,7 +268,7 @@ final class WalletLifecycleManager {
             // wipe — the pending copy is abandoned staging. Remove it.
             AuditService.log("RESTORE_MARKERLESS_PENDING_CLEARED", data: [:])
             try? keychain.deletePendingMnemonic()
-            return
+            return false
         }
 
         // "No active Keychain seed" does NOT prove the wipe completed: a legacy
@@ -280,7 +290,7 @@ final class WalletLifecycleManager {
                 "RESTORE_MARKERLESS_PENDING_BLOCKED_BY_LEGACY",
                 data: ["artifacts": legacyArtifacts.joined(separator: ",")]
             )
-            return
+            return false
         }
 
         // No active seed, no legacy artifacts, but a verified pending seed exists:
@@ -290,9 +300,31 @@ final class WalletLifecycleManager {
         AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
         try keychain.storeMnemonic(pending)
         try? keychain.deletePendingMnemonic()
+        setRecoveredRestorePending(true)
+        return true
     }
 
     // MARK: - Durable State Helpers
+
+    private static let recoveredRestorePendingKey = "recovered_restore_pending"
+
+    func isRecoveredRestorePending() -> Bool {
+        let ud = UserDefaults(suiteName: appGroupIdentifier)
+        return ud?.bool(forKey: Self.recoveredRestorePendingKey) == true
+    }
+
+    func setRecoveredRestorePending(_ pending: Bool) {
+        let ud = UserDefaults(suiteName: appGroupIdentifier)
+        if pending {
+            ud?.set(true, forKey: Self.recoveredRestorePendingKey)
+        } else {
+            ud?.removeObject(forKey: Self.recoveredRestorePendingKey)
+        }
+    }
+
+    func clearRecoveredRestorePending() {
+        setRecoveredRestorePending(false)
+    }
 
     private func getRestorePhase() -> RestorePhase? {
         let ud = UserDefaults(suiteName: appGroupIdentifier)
