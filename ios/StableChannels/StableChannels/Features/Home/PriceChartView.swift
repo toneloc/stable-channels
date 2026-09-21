@@ -22,8 +22,10 @@ struct PriceChartView: View {
 
     var compact: Bool = false
 
+    private let selectionFeedback = UISelectionFeedbackGenerator()
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             // Price header
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -46,21 +48,28 @@ struct PriceChartView: View {
             }
             .padding(.horizontal)
 
-            // Period selector pills — scrollable
+            // Period selector buttons
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
+                HStack(spacing: 6) {
                     ForEach(ChartPeriod.allCases, id: \.self) { period in
+                        let isSelected = chartPeriod == period
                         Button {
-                            chartPeriod = period
+                            selectionFeedback.selectionChanged()
+                            withAnimation(.spring(response: 0.28, dampingFraction: 0.8)) {
+                                chartPeriod = period
+                            }
                         } label: {
                             Text(period.rawValue)
-                                .font(.caption2.bold())
+                                .font(.system(size: 11, weight: isSelected ? .bold : .medium))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .background(chartPeriod == period ? Color.blue : Color(.systemGray5))
-                                .foregroundStyle(chartPeriod == period ? .white : .primary)
-                                .clipShape(Capsule())
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(isSelected ? Color.blue : Color(.systemGray5))
+                                )
+                                .foregroundStyle(isSelected ? Color.white : Color.primary)
                         }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal)
@@ -108,21 +117,21 @@ struct PriceChartView: View {
                         AxisValueLabel {
                             if let date = value.as(Date.self) {
                                 Text(date, format: chartPeriod.xAxisFormat)
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(Color.primary.opacity(0.65))
                             }
                         }
                     }
                 }
                 .chartYAxis {
                     AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3, dash: [4, 4]))
-                            .foregroundStyle(.secondary.opacity(0.3))
+                        AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
+                            .foregroundStyle(Color(.separator).opacity(0.5))
                         AxisValueLabel {
                             if let price = value.as(Double.self) {
                                 Text(formatYAxis(price))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.secondary)
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(Color.primary.opacity(0.75))
                             }
                         }
                     }
@@ -137,10 +146,14 @@ struct PriceChartView: View {
                                     .onChanged { value in
                                         let x = value.location.x - geometry[proxy.plotAreaFrame].origin.x
                                         guard let date: Date = proxy.value(atX: x) else { return }
-                                        selectedPricePoint = PriceChartAlgorithms.nearestRecord(
+                                        let record = PriceChartAlgorithms.nearestRecord(
                                             in: priceHistory,
                                             targetDate: date
                                         )
+                                        if selectedPricePoint?.id != record?.id {
+                                            selectedPricePoint = record
+                                            selectionFeedback.selectionChanged()
+                                        }
                                     }
                                     .onEnded { _ in
                                         selectedPricePoint = nil
@@ -264,7 +277,7 @@ struct PriceChartCard: View, Equatable {
     var body: some View { PriceChartView(compact: compact) }
 }
 
-#Preview("Collecting Price Data") {
+#Preview("Price Chart") {
     PriceChartCard(compact: false)
         .environment(AppState())
 }
