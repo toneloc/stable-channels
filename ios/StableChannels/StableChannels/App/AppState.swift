@@ -86,6 +86,7 @@ class AppState {
     let nodeService = NodeService.shared
     let priceService = PriceService()
     let priceChartService: any PriceChartFetching = PriceChartService.shared
+    var priceHistoryProvider: any PriceHistoryProviding
     let feeRateService = FeeRateService()
     var databaseService: DatabaseService?
     var tradeService: TradeService?
@@ -111,6 +112,7 @@ class AppState {
     ) {
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
+        self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
     }
 
     // MARK: - State
@@ -423,6 +425,7 @@ class AppState {
         let db = try DatabaseService(dataDir: Constants.userDataDir)
         databaseService = db
         nodeService.databaseService = databaseService
+        priceHistoryProvider = PriceHistoryService(databaseService: db)
 
         txidResolutionService.databaseService = databaseService
         txidResolutionService.mempoolWebSocketService = mempoolWebSocketService
@@ -675,6 +678,7 @@ class AppState {
         nodeService.clearSavedMnemonic()
         tradeService = nil
         databaseService = nil
+        priceHistoryProvider = PriceHistoryService(databaseService: nil)
         txidResolutionService.clearResolvers()
     }
 
