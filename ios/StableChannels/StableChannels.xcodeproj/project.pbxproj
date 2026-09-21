@@ -117,6 +117,13 @@
 		49DDB0072FF0000100000001 /* StabilitySendRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0072FF0000200000001 /* StabilitySendRepository.swift */; };
 		49DDB0082FF0000100000001 /* PendingOperationRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0082FF0000200000001 /* PendingOperationRepository.swift */; };
 		49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDB0092FF0000200000001 /* HeaderRepository.swift */; };
+		49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0013054000100B5A146 /* ChannelAllocation.swift */; };
+		49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */; };
+		49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0053054000100B5A146 /* PriceHistoryService.swift */; };
+		49DDD0083054000100B5A146 /* TactileCardButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0073054000100B5A146 /* TactileCardButtonStyle.swift */; };
+		49DDD00A3054000100B5A146 /* HomeBalanceSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */; };
+		49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */; };
+		49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */; };
 		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
 		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -316,6 +323,13 @@
 		49DDB0072FF0000200000001 /* StabilitySendRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilitySendRepository.swift; sourceTree = "<group>"; };
 		49DDB0082FF0000200000001 /* PendingOperationRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingOperationRepository.swift; sourceTree = "<group>"; };
 		49DDB0092FF0000200000001 /* HeaderRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderRepository.swift; sourceTree = "<group>"; };
+		49DDD0013054000100B5A146 /* ChannelAllocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelAllocation.swift; sourceTree = "<group>"; };
+		49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceHistoryProviding.swift; sourceTree = "<group>"; };
+		49DDD0053054000100B5A146 /* PriceHistoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceHistoryService.swift; sourceTree = "<group>"; };
+		49DDD0073054000100B5A146 /* TactileCardButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TactileCardButtonStyle.swift; sourceTree = "<group>"; };
+		49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeBalanceSectionView.swift; sourceTree = "<group>"; };
+		49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSyncStatusSectionView.swift; sourceTree = "<group>"; };
+		49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelAllocationTests.swift; sourceTree = "<group>"; };
 		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
 		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -425,6 +439,8 @@
 				499F1E563009F03E00936944 /* PaymentProgress.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
+				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
+				49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -444,6 +460,7 @@
 			children = (
 				494445783053DB2400B5A146 /* PriceChartFetching.swift */,
 				4962F9A730340E8A00852B66 /* PriceChartService.swift */,
+				49DDD0053054000100B5A146 /* PriceHistoryService.swift */,
 				49A0F0013029000000000001 /* PriceOracle.swift */,
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 			);
@@ -775,12 +792,15 @@
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */,
+				49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */,
 				49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */,
 				49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */,
+				49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
 				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
 				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
 				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
+				49DDD0073054000100B5A146 /* TactileCardButtonStyle.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -789,6 +809,7 @@
 			isa = PBXGroup;
 			children = (
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
+				49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */,
 				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
@@ -964,6 +985,7 @@
 				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 				D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */,
+				49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -972,6 +994,12 @@
 			buildActionMask = 2147483647;
 			files = (
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
+				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
+				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
+				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,
+				49DDD0083054000100B5A146 /* TactileCardButtonStyle.swift in Sources */,
+				49DDD00A3054000100B5A146 /* HomeBalanceSectionView.swift in Sources */,
+				49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */,
 				499E5371301A92900050E3F8 /* SettingsIconBadgeView.swift in Sources */,
 				499E5372301A92900050E3F8 /* SettingsBannerView.swift in Sources */,
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
