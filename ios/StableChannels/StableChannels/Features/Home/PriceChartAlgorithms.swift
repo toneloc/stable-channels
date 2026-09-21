@@ -4,79 +4,106 @@ import Foundation
 enum PriceChartAlgorithms {
     /// Binary search for the first index where record date >= targetDate.
     /// Assumes records are sorted chronologically in ascending order.
-    static func lowerBound(in records: [PriceRecord], cutoff: Date) -> Int {
+    static func lowerBound<C: RandomAccessCollection>(in records: C, cutoff: Date) -> C.Index
+        where C.Element == PriceRecord {
         records.lowerBound(target: cutoff) { $0.date }
     }
 
     /// Binary search to find the record closest in time to targetDate.
-    static func nearestRecord(in records: [PriceRecord], targetDate: Date) -> PriceRecord? {
+    static func nearestRecord<C: RandomAccessCollection>(in records: C, targetDate: Date) -> PriceRecord?
+        where C.Element == PriceRecord {
         records.binarySearchNearest(target: targetDate) { $0.date }
     }
 
     /// Single-pass min and max calculation with 2% margin padding.
-    static func chartBounds(in records: [PriceRecord]) -> (min: Double, max: Double) {
-        guard !records.isEmpty else { return (0, 100) }
+    static func chartBounds(in records: some Sequence<PriceRecord>) -> (min: Double, max: Double) {
         var lo = Double.infinity
         var hi = -Double.infinity
+        var hasElements = false
         for r in records {
+            hasElements = true
             if r.price < lo { lo = r.price }
             if r.price > hi { hi = r.price }
         }
+        guard hasElements else { return (0, 100) }
         return (lo * 0.98, hi * 1.02)
     }
 
     /// Largest Triangle Three Buckets (LTTB) downsampling algorithm.
     /// Preserves critical visual extrema (peaks and troughs).
-    static func lttbDownsample(_ records: [PriceRecord], targetCount: Int) -> [PriceRecord] {
-        guard records.count > targetCount, targetCount > 2 else {
-            return records
+    /// Accepts any RandomAccessCollection with Int indexing for zero-copy slicing.
+    static func lttbDownsample<C: RandomAccessCollection>(
+        _ records: C,
+        targetCount: Int
+    ) -> [PriceRecord] where C.Element == PriceRecord, C.Index == Int {
+        guard targetCount > 0, !records.isEmpty else {
+            return []
+        }
+        guard records.count > targetCount else {
+            return Array(records)
+        }
+        if targetCount == 1 {
+            return [records[records.startIndex]]
+        }
+        if targetCount == 2 {
+            return [records[records.startIndex], records[records.endIndex - 1]]
         }
 
         var sampled: [PriceRecord] = []
         sampled.reserveCapacity(targetCount)
 
+        let start = records.startIndex
         // Always include the first point
-        sampled.append(records[0])
+        sampled.append(records[start])
 
-        let bucketSize = Double(records.count - 2) / Double(targetCount - 2)
-        var a = 0
+        let count = records.count
+        let bucketSize = Double(count - 2) / Double(targetCount - 2)
+        var aIndex = start
 
         for i in 0..<(targetCount - 2) {
             // Calculate point average for next bucket (bucket C)
             var avgX = 0.0
             var avgY = 0.0
-            let nextBucketStart = Int(floor(Double(i + 1) * bucketSize)) + 1
-            let nextBucketEnd = min(Int(floor(Double(i + 2) * bucketSize)) + 1, records.count)
+            let nextBucketStart = start + Int(floor(Double(i + 1) * bucketSize)) + 1
+            let nextBucketEnd = min(start + Int(floor(Double(i + 2) * bucketSize)) + 1, records.endIndex)
             let nextBucketCount = Double(nextBucketEnd - nextBucketStart)
 
             if nextBucketCount > 0 {
                 for j in nextBucketStart..<nextBucketEnd {
-                    avgX += Double(records[j].timestamp)
-                    avgY += records[j].price
+                    let r = records[j]
+                    avgX += Double(r.timestamp)
+                    avgY += r.price
                 }
                 avgX /= nextBucketCount
                 avgY /= nextBucketCount
-            } else if nextBucketStart < records.count {
-                avgX = Double(records[nextBucketStart].timestamp)
-                avgY = records[nextBucketStart].price
+            } else if nextBucketStart < records.endIndex {
+                let r = records[nextBucketStart]
+                avgX = Double(r.timestamp)
+                avgY = r.price
             }
 
             // Current bucket range (bucket B)
-            let currentBucketStart = Int(floor(Double(i) * bucketSize)) + 1
-            let currentBucketEnd = min(Int(floor(Double(i + 1) * bucketSize)) + 1, records.count)
+            let currentBucketStart = start + Int(floor(Double(i) * bucketSize)) + 1
+            let currentBucketEnd = min(start + Int(floor(Double(i + 1) * bucketSize)) + 1, records.endIndex)
 
-            let pointA = records[a]
+            let pointA = records[aIndex]
             let pointAX = Double(pointA.timestamp)
             let pointAY = pointA.price
+
+            // Hoist loop invariants outside the bucket search loop
+            let dx = pointAX - avgX
+            let dy = avgY - pointAY
 
             var maxArea = -1.0
             var maxAreaIndex = currentBucketStart
 
             for j in currentBucketStart..<currentBucketEnd {
-                let currentX = Double(records[j].timestamp)
-                let currentY = records[j].price
+                let r = records[j]
+                let currentX = Double(r.timestamp)
+                let currentY = r.price
 
-                let area = abs((pointAX - avgX) * (currentY - pointAY) - (pointAX - currentX) * (avgY - pointAY)) * 0.5
+                // Invariant area calculation: omits constant 0.5 multiplication
+                let area = abs(dx * (currentY - pointAY) - (pointAX - currentX) * dy)
 
                 if area > maxArea {
                     maxArea = area
@@ -85,11 +112,11 @@ enum PriceChartAlgorithms {
             }
 
             sampled.append(records[maxAreaIndex])
-            a = maxAreaIndex
+            aIndex = maxAreaIndex
         }
 
         // Always include the last point
-        sampled.append(records[records.count - 1])
+        sampled.append(records[records.endIndex - 1])
         return sampled
     }
 }

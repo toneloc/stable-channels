@@ -35,12 +35,13 @@ struct BalanceBarView: View {
         )
     }
 
-    private var totalUSD: Double { allocation.totalUSD }
-    private var stableFraction: Double { allocation.stableFraction }
     private var interactive: Bool { onTradeRequest != nil }
 
     var body: some View {
         GeometryReader { geo in
+            let alloc = allocation
+            let stableFraction = alloc.stableFraction
+            let totalUSD = alloc.totalUSD
             let barWidth = geo.size.width
             let baseX = barWidth * stableFraction
             let maxSellOffset = min(

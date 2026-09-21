@@ -14,6 +14,8 @@ private struct LivePriceLabel: View {
 struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @State private var priceHistory: [PriceRecord] = []
+    @State private var chartMin: Double = 0
+    @State private var chartMax: Double = 100
     @State private var chartPeriod: ChartPeriod = .all
     @State private var selectedPricePoint: PriceRecord?
 
@@ -188,15 +190,6 @@ struct PriceChartView: View {
         }
     }
 
-    // MARK: - Axis Helpers
-
-    private var chartBounds: (min: Double, max: Double) {
-        PriceChartAlgorithms.chartBounds(in: priceHistory)
-    }
-
-    private var chartMin: Double { chartBounds.min }
-    private var chartMax: Double { chartBounds.max }
-
     private func formatYAxis(_ price: Double) -> String {
         if price >= 1000 {
             return "$\(Int(price / 1000))K"
@@ -209,8 +202,11 @@ struct PriceChartView: View {
 
     private func loadHistory(force: Bool = false) async {
         let records = await appState.priceHistoryProvider.fetchPriceHistory(for: chartPeriod, force: force)
+        let bounds = PriceChartAlgorithms.chartBounds(in: records)
         await MainActor.run {
             self.priceHistory = records
+            self.chartMin = bounds.min
+            self.chartMax = bounds.max
         }
     }
 }
