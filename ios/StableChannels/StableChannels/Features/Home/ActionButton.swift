@@ -2,89 +2,50 @@ import SwiftUI
 
 struct ActionButton: View {
     let title: String
-    var subtitle: String?
     let icon: String
-    var badgeColor: Color = .blue
+    var color: Color = .white
     var pulse: Bool = false
     let action: () -> Void
 
-    @Environment(\.colorScheme) private var colorScheme
     @State private var isBreathing = false
-
-    private var isDark: Bool { colorScheme == .dark }
 
     var body: some View {
         Button(action: {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             action()
         }) {
-            VStack(alignment: .leading, spacing: 0) {
-                // Top row: Icon Badge
-                HStack {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(badgeBackgroundColor)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .strokeBorder(
-                                        badgeColor.opacity(isDark ? 0.18 : 0.10),
-                                        lineWidth: 1
-                                    )
-                            )
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(color)
 
-                        Image(systemName: icon)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(badgeColor)
-                    }
-                    .frame(width: 36, height: 36)
-                    .shadow(
-                        color: pulse && isBreathing ? badgeColor.opacity(0.35) : Color.clear,
-                        radius: 6,
-                        x: 0,
-                        y: 0
-                    )
-
-                    Spacer()
-                }
-
-                Spacer(minLength: 16)
-
-                // Bottom: Title and Subtitle
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(isDark ? Color.white : Color.primary)
-
-                    if let subtitle, !subtitle.isEmpty {
-                        Text(subtitle)
-                            .font(.system(size: 12, weight: .regular))
-                            .foregroundStyle(isDark ? Color(white: 0.55) : Color.secondary)
-                            .lineLimit(1)
-                    }
-                }
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .frame(height: 110)
-            .padding(16)
+            .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
+            .frame(height: 48)
         }
         .buttonStyle(
-            FintechCardButtonStyle(
-                isDark: isDark,
+            AddToCartKeycapButtonStyle(
                 pulse: pulse,
                 isBreathing: isBreathing,
-                pulseColor: badgeColor
+                pulseColor: color
             )
         )
         .onAppear {
             if pulse {
-                withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
                     isBreathing = true
                 }
             }
         }
         .onChange(of: pulse) { _, newValue in
             if newValue {
-                withAnimation(.easeInOut(duration: 1.8).repeatForever(autoreverses: true)) {
+                withAnimation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true)) {
                     isBreathing = true
                 }
             } else {
@@ -94,23 +55,14 @@ struct ActionButton: View {
             }
         }
     }
-
-    private var badgeBackgroundColor: Color {
-        if isDark {
-            return badgeColor.opacity(0.15)
-        } else {
-            return badgeColor.opacity(0.12)
-        }
-    }
 }
 
-// MARK: - Fintech Card Button Style
+// MARK: - 3D Keycap Button Style (inspired by Opensource UI AddToCartButton)
 
-struct FintechCardButtonStyle: ButtonStyle {
-    let isDark: Bool
+struct AddToCartKeycapButtonStyle: ButtonStyle {
     var pulse: Bool = false
     var isBreathing: Bool = false
-    var pulseColor: Color = .green
+    var pulseColor: Color = .init(red: 0.25, green: 0.85, blue: 0.55)
 
     func makeBody(configuration: Configuration) -> some View {
         let isPressed = configuration.isPressed
@@ -118,45 +70,117 @@ struct FintechCardButtonStyle: ButtonStyle {
         configuration.label
             .background(
                 ZStack {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .fill(cardBackgroundColor(isPressed: isPressed))
+                    // Base background surface: neutral-800 (#262626) idle -> neutral-900 (#171717) pressed
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(isPressed ? Color(red: 0.09, green: 0.09, blue: 0.09) : Color(
+                            red: 0.15,
+                            green: 0.15,
+                            blue: 0.15
+                        ))
 
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .strokeBorder(
-                            pulse
-                                ? pulseColor.opacity(isBreathing ? 0.45 : 0.12)
-                                : perimeterBorderColor,
-                            lineWidth: pulse ? 1.5 : 1
-                        )
+                    if !isPressed {
+                        // Inset bottom recess: inset 0 -3px 6px rgba(0,0,0,0.55)
+                        VStack {
+                            Spacer()
+                            LinearGradient(
+                                colors: [Color.black.opacity(0.0), Color.black.opacity(0.55)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 10)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                        // Inset top sheen / rim: inset 0 1px 2px rgba(255,255,255,0.14)
+                        VStack {
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.16), Color.white.opacity(0.0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 4)
+                            Spacer()
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                        // Subtle outer rim highlight stroke
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(
+                                    colors: [Color.white.opacity(0.14), Color.white.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                ),
+                                lineWidth: 1
+                            )
+                    } else {
+                        // Pressed state: sunken key with top interior shadow: inset 0 2px 6px rgba(0,0,0,0.55)
+                        VStack {
+                            LinearGradient(
+                                colors: [Color.black.opacity(0.70), Color.black.opacity(0.0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 12)
+                            Spacer()
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                        // Inset bottom specular bounce: inset 0 -1px 1px rgba(255,255,255,0.06)
+                        VStack {
+                            Spacer()
+                            LinearGradient(
+                                colors: [Color.clear, Color.white.opacity(0.06)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 3)
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                        // Deep inner border
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.black.opacity(0.5), lineWidth: 1)
+                    }
+
+                    // Pulse accent border if channel requires funding
+                    if pulse {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(
+                                pulseColor.opacity(isBreathing ? 0.75 : 0.15),
+                                lineWidth: 1.5
+                            )
+                    }
                 }
             )
-            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            // Multi-tier 3D drop shadows (idle: 0 1px 1px, 0 3px 6px, 0 8px 16px; pressed: 0 1px 2px)
             .shadow(
-                color: isDark
-                    ? Color.black.opacity(isPressed ? 0.20 : 0.45)
-                    : Color.black.opacity(isPressed ? 0.02 : 0.05),
-                radius: isPressed ? 2 : 6,
+                color: isPressed ? Color.black.opacity(0.25) : Color.black.opacity(0.35),
+                radius: isPressed ? 1 : 1,
                 x: 0,
-                y: isPressed ? 1 : 3
+                y: isPressed ? 1 : 1
             )
-            .scaleEffect(isPressed ? 0.965 : 1.0)
-            .animation(.spring(response: 0.24, dampingFraction: 0.74), value: isPressed)
-    }
-
-    // Deep, dark charcoal card surface matching the reference dark mode
-    private func cardBackgroundColor(isPressed: Bool) -> Color {
-        if isDark {
-            return isPressed
-                ? Color(red: 0.065, green: 0.068, blue: 0.075) // deep obsidian pressed
-                : Color(red: 0.095, green: 0.098, blue: 0.105) // sleek dark charcoal
-        } else {
-            return isPressed
-                ? Color(red: 0.91, green: 0.915, blue: 0.925)
-                : Color(red: 0.96, green: 0.965, blue: 0.975)
-        }
-    }
-
-    private var perimeterBorderColor: Color {
-        isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.04)
+            .shadow(
+                color: isPressed ? Color.clear : Color.black.opacity(0.28),
+                radius: 3,
+                x: 0,
+                y: 3
+            )
+            .shadow(
+                color: isPressed ? Color.clear : Color.black.opacity(0.22),
+                radius: 8,
+                x: 0,
+                y: 8
+            )
+            .shadow(
+                color: pulse && isBreathing ? pulseColor.opacity(0.40) : Color.clear,
+                radius: 8,
+                x: 0,
+                y: 2
+            )
+            .offset(y: isPressed ? 1.5 : 0)
+            .scaleEffect(isPressed ? 0.985 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.75), value: isPressed)
     }
 }
