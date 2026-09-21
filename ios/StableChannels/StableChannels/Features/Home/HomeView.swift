@@ -27,7 +27,7 @@ struct HomeView: View {
 
                     HomeBalanceSectionView(showBTC: $showBTC, flashScale: flashScale)
 
-                    HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })
+                    HomeSyncSpinnerView()
 
                     if appState.lightningBalanceSats > 0 {
                         balanceBarSection
@@ -52,11 +52,14 @@ struct HomeView: View {
                         onBuy: { showBuySheet = true },
                         onSell: { showSellSheet = true }
                     )
+
+                    HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })
                 }
                 .animation(.easeInOut(duration: 0.3), value: appState.statusMessage)
                 .padding(.horizontal)
                 .padding(.bottom)
             }
+            .scrollBounceBehavior(.basedOnSize)
             .navigationBarHidden(true)
             .refreshable {
                 appState.refreshBalances()

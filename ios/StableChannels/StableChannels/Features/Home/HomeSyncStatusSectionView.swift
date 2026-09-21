@@ -1,8 +1,7 @@
 import SwiftUI
 
-struct HomeSyncStatusSectionView: View {
+struct HomeSyncSpinnerView: View {
     @Environment(AppState.self) private var appState
-    let onOpenPaymentDetail: () -> Void
 
     var body: some View {
         if appState.isSyncing {
@@ -14,7 +13,14 @@ struct HomeSyncStatusSectionView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+}
 
+struct HomeSyncStatusSectionView: View {
+    @Environment(AppState.self) private var appState
+    let onOpenPaymentDetail: () -> Void
+
+    var body: some View {
         if !appState.statusMessage.isEmpty {
             Button(action: onOpenPaymentDetail) {
                 Text(appState.statusMessage)
