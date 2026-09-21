@@ -13,7 +13,6 @@ struct TradeRequest: Identifiable {
 
 struct BalanceBarView: View {
     let stableUSD: Double
-    let nativeSats: UInt64
     let totalSats: UInt64
     let btcPrice: Double
     var maxSellUSD: Double = 0
@@ -36,7 +35,6 @@ struct BalanceBarView: View {
         )
     }
 
-    private var nativeUSD: Double { allocation.nativeUSD }
     private var totalUSD: Double { allocation.totalUSD }
     private var stableFraction: Double { allocation.stableFraction }
     private var interactive: Bool { onTradeRequest != nil }
