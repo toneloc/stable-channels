@@ -1074,6 +1074,37 @@ class OutgoingPaymentLifecycleTest {
     }
 
     @Test
+    @Suppress("UNCHECKED_CAST")
+    fun stabilityReleasedClaimIsSettledFromTheBalanceDropNotClampedAsAnOverspend() {
+        // A fully stable wallet: the $1 surplus payment leaves, LDK loses its record.
+        db.saveChannel("channel", "7", 10.0, 11_000, null, 11_000, 100_000.0)
+        claimOnTheLiveChannelWithoutAnLdkRecord()
+        ageStabilityMarker()
+        assertTrue(backgroundRecovery())
+        assertNull(db.loadPendingSend())
+        // The live balance already reflects the payment; the books still carry the surplus.
+        node.channels = listOf(channel("7", "channel", 10_000))
+        setBooks(10.0, 11_000, receiver = 10_000)
+        (field(state, "_hasReadyChannel").get(state) as MutableStateFlow<Boolean>).value = true
+        call("repairBooksAboveLiveBalance")
+        // The drop is the stability payment: debit the backing, keep the USD target.
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10_000L, state.stableChannel.value.backingSats)
+        assertEquals(10.0, state.stableChannel.value.expectedUSD.amount, 0.0)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+        assertTrue(auditLog().contains("STABILITY_RELEASED_CLAIM_SETTLED_BY_BALANCE"))
+        // The late success only completes the history row; the debit is not applied twice.
+        event(success)
+        assertEquals("completed", payment().status)
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        call("repairBooksAboveLiveBalance")
+        assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+    }
+
+    @Test
     fun stabilityLateSuccessWithNoBooksLeftIsAuditedAsNotDebited() {
         releaseLostRecordOnTheLiveChannel()
         db.writableDatabase.execSQL("DELETE FROM channels WHERE user_channel_id = '7'")
@@ -1450,6 +1481,7 @@ class OutgoingPaymentLifecycleTest {
         backing: Long,
         uid: String = "7",
         cid: String = "channel",
+        receiver: Long = 20_000,
     ) {
         (field(state, "_stableChannel").get(state) as MutableStateFlow<StableChannel>).value =
             StableChannel(
@@ -1457,7 +1489,7 @@ class OutgoingPaymentLifecycleTest {
                 channelId = cid,
                 expectedUSD = USD(expected),
                 backingSats = backing,
-                stableReceiverBTC = Bitcoin(20_000),
+                stableReceiverBTC = Bitcoin(receiver),
                 latestPrice = 100_000.0,
             )
     }

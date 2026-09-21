@@ -3048,6 +3048,15 @@ class AppState(private val context: Context) : ViewModel() {
                         )
                         false
                     } else {
+                        // A released stability claim explains part of the drop before the splice.
+                        val current = _stableChannel.value
+                        if (
+                            databaseService?.settleReleasedClaimsFromBalance(
+                                current.userChannelId,
+                                current.stableReceiverBTC.sats,
+                            ) ?: 0L > 0L
+                        )
+                            publishBooksFromDB(recomputeNative = true)
                         val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
                         val reconciled = result.first
                         if (result.second != null) {
@@ -4705,6 +4714,7 @@ class AppState(private val context: Context) : ViewModel() {
                 "old_expected_usd" to result.oldExpectedUSD,
                 "new_expected_usd" to result.newExpectedUSD,
                 "backing_sats" to result.newBackingSats,
+                "settled_obligation_sats" to result.settledObligationSats,
                 "btc_price" to price,
             ),
         )

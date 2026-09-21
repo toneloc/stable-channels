@@ -397,7 +397,77 @@ class DatabaseService(context: Context) :
         val oldExpectedUSD: Double,
         val newExpectedUSD: Double,
         val newBackingSats: Long,
+        val settledObligationSats: Long = 0,
     )
+
+    /**
+     * The one "unsettled LSP obligation" rule every balance reconciler consults first. A released
+     * stability claim (LDK lost its record) leaves the surplus on the books; a live balance below
+     * the backing is then that payment leaving, up to its amount. Debit it without touching the USD
+     * target and mark the claim settled, so a late success cannot debit it again. Whatever remains
+     * is for the caller to judge as an ordinary overspend. Runs in the caller's transaction.
+     */
+    private fun SQLiteDatabase.settleReleasedClaimsFromBalance(
+        userChannelId: String,
+        receiverSats: Long,
+    ): List<Pair<String, Long>> {
+        val backing =
+            rawQuery(
+                    "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                    arrayOf(userChannelId),
+                )
+                .use {
+                    if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else return emptyList()
+                }
+        var remaining = backing - receiverSats
+        if (remaining <= 0L) return emptyList()
+        val released =
+            rawQuery(
+                    "SELECT payment_id, amount_msat FROM released_stability_sends WHERE user_channel_id = ? ORDER BY rowid",
+                    arrayOf(userChannelId),
+                )
+                .use { c ->
+                    buildList { while (c.moveToNext()) add(c.getString(0) to c.getLong(1)) }
+                }
+        val settled = mutableListOf<Pair<String, Long>>()
+        for ((paymentId, amountMsat) in released) {
+            if (remaining <= 0L) break
+            val debit = minOf(remaining, amountMsat / 1000L)
+            execSQL(
+                "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?), updated_at = ? WHERE user_channel_id = ?",
+                arrayOf<Any>(debit, System.currentTimeMillis() / 1000, userChannelId),
+            )
+            execSQL(
+                "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+                arrayOf(paymentId, userChannelId),
+            )
+            delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
+            remaining -= debit
+            settled += paymentId to debit
+        }
+        return settled
+    }
+
+    private fun auditSettledFromBalance(userChannelId: String, settled: List<Pair<String, Long>>) {
+        for ((paymentId, debit) in settled) AuditService.log(
+            "STABILITY_RELEASED_CLAIM_SETTLED_BY_BALANCE",
+            mapOf(
+                "payment_id" to paymentId,
+                "user_channel_id" to userChannelId,
+                "debited_sats" to debit,
+            ),
+        )
+    }
+
+    /** Settle released claims against the live balance on their own, for in-memory reconcilers. */
+    fun settleReleasedClaimsFromBalance(userChannelId: String, receiverSats: Long): Long {
+        if (receiverSats < 0L) return 0L
+        val settled = writableDatabase.transaction {
+            settleReleasedClaimsFromBalance(userChannelId, receiverSats)
+        }
+        auditSettledFromBalance(userChannelId, settled)
+        return settled.sumOf { it.second }
+    }
 
     /**
      * Repair books that claim more backing than the channel actually holds.
@@ -434,6 +504,8 @@ class DatabaseService(context: Context) :
                 db.execSQL("ROLLBACK")
                 return null
             }
+            val settled = db.settleReleasedClaimsFromBalance(userChannelId, receiverSats)
+            val settledSats = settled.sumOf { it.second }
             val cursor =
                 db.rawQuery(
                     "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
@@ -445,8 +517,20 @@ class DatabaseService(context: Context) :
                     it.getDouble(0) to it.getLong(1)
                 }
             if (currentBacking <= receiverSats) {
-                db.execSQL("ROLLBACK")
-                return null
+                if (settledSats == 0L) {
+                    db.execSQL("ROLLBACK")
+                    return null
+                }
+                db.execSQL("COMMIT")
+                auditSettledFromBalance(userChannelId, settled)
+                return BackingClampResult(
+                    0L,
+                    0.0,
+                    currentExpected,
+                    currentExpected,
+                    currentBacking,
+                    settledSats,
+                )
             }
             val overflowSats = currentBacking - receiverSats
             val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
@@ -468,12 +552,14 @@ class DatabaseService(context: Context) :
                 )
             }
             db.execSQL("COMMIT")
+            auditSettledFromBalance(userChannelId, settled)
             return BackingClampResult(
                 overflowSats,
                 usdDeducted,
                 currentExpected,
                 newExpected,
                 newBacking,
+                settledSats,
             )
         } catch (e: Exception) {
             try {
@@ -489,6 +575,7 @@ class DatabaseService(context: Context) :
         val oldExpectedUSD: Double,
         val newExpectedUSD: Double,
         val newBackingSats: Long,
+        val settledObligationSats: Long = 0,
     )
 
     /**
@@ -537,6 +624,8 @@ class DatabaseService(context: Context) :
                 db.execSQL("ROLLBACK")
                 return null
             }
+            val settled = db.settleReleasedClaimsFromBalance(userChannelId, receiverSats)
+            val settledSats = settled.sumOf { it.second }
             val cursor =
                 db.rawQuery(
                     "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
@@ -550,7 +639,16 @@ class DatabaseService(context: Context) :
             if (currentBacking == 0L || currentBacking <= receiverSats) {
                 if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
                 db.execSQL("COMMIT")
-                return null
+                auditSettledFromBalance(userChannelId, settled)
+                return if (settledSats == 0L) null
+                else
+                    OutgoingReconcileResult(
+                        0.0,
+                        currentExpected,
+                        currentExpected,
+                        currentBacking,
+                        settledSats,
+                    )
             }
             if (!price.isFinite() || price <= 0.0) {
                 check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
@@ -586,7 +684,14 @@ class DatabaseService(context: Context) :
             }
             if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
             db.execSQL("COMMIT")
-            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
+            auditSettledFromBalance(userChannelId, settled)
+            return OutgoingReconcileResult(
+                usdToDeduct,
+                currentExpected,
+                newExpected,
+                newBacking,
+                settledSats,
+            )
         } catch (e: Exception) {
             try {
                 db.execSQL("ROLLBACK")

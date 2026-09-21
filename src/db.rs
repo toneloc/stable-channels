@@ -3025,6 +3025,103 @@ impl Database {
         Ok(redebit)
     }
 
+    /// The one "unsettled LSP obligation" rule every balance reconciler consults first. A rolled-back
+    /// stability claim (LDK lost its record) put the surplus back on the books; a live balance below
+    /// the backing is then that payment leaving, up to its amount. Debit it without touching the USD
+    /// target and clear the rollback flag, so a late success cannot debit it again. Returns the sats
+    /// debited; whatever overflow remains is for the caller to judge as an ordinary overspend.
+    pub fn settle_rolled_back_claims_from_balance(
+        &self,
+        user_channel_id: &str,
+        live_receiver_sats: u64,
+    ) -> SqliteResult<u64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let backing: Option<i64> = tx
+            .query_row(
+                "SELECT stable_sats FROM channels WHERE user_channel_id = ?1",
+                params![user_channel_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut remaining = backing
+            .and_then(|value| u64::try_from(value).ok())
+            .unwrap_or(0)
+            .saturating_sub(live_receiver_sats);
+        if remaining == 0 {
+            tx.commit()?;
+            return Ok(0);
+        }
+        let rows: Vec<(i64, String, Option<i64>, Option<i64>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, payment_id, backing_sats_before, backing_sats_after FROM payments
+                 WHERE user_channel_id = ?1 AND payment_type = 'stability' AND direction = 'sent'
+                   AND status = 'failed' AND backing_rolled_back = 1
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![user_channel_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<SqliteResult<_>>()?
+        };
+        let mut settled = 0u64;
+        let mut mirrors = Vec::new();
+        for (row_id, payment_id, before, after) in rows {
+            if remaining == 0 {
+                break;
+            }
+            let (Some(before), Some(after)) = (before, after) else { continue };
+            let amount = u64::try_from(before.saturating_sub(after)).unwrap_or(0);
+            let debit = amount.min(remaining);
+            tx.execute(
+                "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?1),
+                                     updated_at = strftime('%s', 'now')
+                 WHERE user_channel_id = ?2",
+                params![debit as i64, user_channel_id],
+            )?;
+            tx.execute(
+                "UPDATE payments SET backing_rolled_back = 0 WHERE id = ?1",
+                params![row_id],
+            )?;
+            remaining -= debit;
+            settled += debit;
+            let draft = LedgerEventDraft {
+                event_type: "STABILITY_CLAIM_SETTLED_FROM_BALANCE".to_owned(),
+                category: "stability".to_owned(),
+                severity: "warning".to_owned(),
+                status: "completed".to_owned(),
+                source: "desktop_wallet".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!(
+                    "desktop-wallet:stability-claim-settled-from-balance:{payment_id}"
+                )),
+                before: None,
+                after: None,
+                detail: serde_json::json!({
+                    "payment_id": payment_id,
+                    "user_channel_id": user_channel_id,
+                    "amount_sats": amount,
+                    "debited_sats": debit,
+                    "live_receiver_sats": live_receiver_sats,
+                }),
+                refs: vec![
+                    LedgerRef::new("payment_id", &payment_id),
+                    LedgerRef::new("user_channel_id", user_channel_id),
+                ],
+            };
+            let outcome = ledger::append_on_connection(&tx, &draft)?;
+            if outcome.inserted {
+                mirrors.push((draft, outcome.event_id));
+            }
+        }
+        tx.commit()?;
+        for (draft, event_id) in mirrors {
+            crate::audit::mirror_committed_ledger_event(&draft, event_id);
+        }
+        Ok(settled)
+    }
+
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
     ///
     /// The dedup check runs inside `BEGIN IMMEDIATE` so concurrent writers
@@ -5945,6 +6042,30 @@ mod tests {
             )
             .unwrap();
         assert!(outstanding);
+    }
+
+    #[test]
+    fn balance_settlement_covers_only_the_rolled_back_amount_and_only_restored_rollbacks() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
+
+        // 25,000 sats left the channel: 20,000 is the payment, 5,000 is for the caller to judge.
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 20_000);
+        let channel = db.load_channel("user-channel-1").unwrap().unwrap();
+        assert_eq!(channel.backing_sats, 100_000);
+        assert_eq!(channel.expected_usd, 100.0);
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 0);
+        assert!(db.settle_rolled_back_stability_payment("stability-1", "hash", None).unwrap().is_none());
+
+        // A rollback that restored nothing has no debit to re-apply from the balance either.
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None).unwrap();
+        assert!(!db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 60_000).unwrap(), 0);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 80_000);
     }
 
     #[test]

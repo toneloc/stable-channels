@@ -1041,7 +1041,7 @@ impl UserApp {
                         {
                             stable_channels::stable::update_balances(&node_arc, &mut sc);
                             if stable_channels::stable::repair_overbacked_allocation_if_safe(
-                                &node_arc, &mut sc, price,
+                                &node_arc, &db, &mut sc, price,
                             )
                             .is_some()
                             {
@@ -3183,7 +3183,7 @@ impl UserApp {
                 }
                 stable::update_balances(&self.node, &mut sc);
                 let price = sc.latest_price;
-                stable::repair_overbacked_allocation_if_safe(&self.node, &mut sc, price).map(|_| {
+                stable::repair_overbacked_allocation_if_safe(&self.node, &self.db, &mut sc, price).map(|_| {
                     (
                         sc.channel_id.to_string(),
                         format!("{}", sc.user_channel_id),
@@ -3363,6 +3363,7 @@ impl UserApp {
                         let mut sc = self.stable_channel.lock().unwrap();
                         let before_reconcile = sc.clone();
                         let old_expected_usd = sc.expected_usd.0;
+                        stable::settle_lost_claims_from_balance(&self.db, &mut sc);
                         let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
                         sc.native_sats =
                             sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
@@ -3650,6 +3651,7 @@ impl UserApp {
                                         );
                                         break;
                                     }
+                                    stable::settle_lost_claims_from_balance(&self.db, &mut sc);
                                     let mut reconciled = sc.clone();
                                     let usd_deducted =
                                         stable::reconcile_outgoing(&mut reconciled, price);
@@ -4765,6 +4767,7 @@ impl UserApp {
             );
             return;
         }
+        stable::settle_lost_claims_from_balance(&self.db, &mut sc);
         let mut reconciled = sc.clone();
         let (usd_deducted, source) = if let Some(splice_out_sats) = exact_splice_out_sats {
             (

@@ -152,10 +152,40 @@ pub fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
     })
 }
 
+/// Mirror `Database::settle_rolled_back_claims_from_balance` into the live channel. Returns the
+/// sats debited; the caller then judges any remaining overflow as an ordinary overspend.
+pub fn settle_lost_claims_from_balance(db: &Database, sc: &mut StableChannel) -> u64 {
+    if sc.user_channel_id == 0 || sc.backing_sats <= sc.stable_receiver_btc.sats {
+        return 0;
+    }
+    let uid = format!("{}", sc.user_channel_id);
+    match db.settle_rolled_back_claims_from_balance(&uid, sc.stable_receiver_btc.sats) {
+        Ok(0) => 0,
+        Ok(debited) => {
+            sc.backing_sats = sc.backing_sats.saturating_sub(debited);
+            sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
+            recompute_native(sc);
+            audit_event(
+                "STABILITY_CLAIM_SETTLED_FROM_BALANCE",
+                json!({ "user_channel_id": uid, "debited_sats": debited, "backing_sats": sc.backing_sats }),
+            );
+            debited
+        }
+        Err(e) => {
+            audit_event(
+                "STABILITY_CLAIM_BALANCE_SETTLEMENT_FAILED",
+                json!({ "user_channel_id": uid, "error": e.to_string() }),
+            );
+            0
+        }
+    }
+}
+
 /// Repair an over-backed allocation only when the observed capacity cannot be explained by an
-/// unresolved outbound HTLC.
+/// unresolved outbound HTLC or by a rolled-back stability payment that did leave after all.
 pub fn repair_overbacked_allocation_if_safe(
     node: &Node,
+    db: &Database,
     sc: &mut StableChannel,
     price: f64,
 ) -> Option<OverbackedRepair> {
@@ -173,7 +203,7 @@ pub fn repair_overbacked_allocation_if_safe(
         );
         return None;
     }
-
+    settle_lost_claims_from_balance(db, sc);
     repair_overbacked_allocation(sc, price)
 }
 
@@ -1152,10 +1182,10 @@ pub fn check_stability(
     {
         // Emit the common safety audit and stop the whole stability decision. Continuing with the
         // temporarily reduced capacity could initiate another payment from a false drift signal.
-        let _ = repair_overbacked_allocation_if_safe(node, sc, current_price);
+        let _ = repair_overbacked_allocation_if_safe(node, db, sc, current_price);
         return None;
     }
-    if repair_overbacked_allocation_if_safe(node, sc, current_price).is_some() {
+    if repair_overbacked_allocation_if_safe(node, db, sc, current_price).is_some() {
         return None;
     }
     sc.native_sats = sc
@@ -1607,6 +1637,36 @@ mod tests {
         // A replayed event debits nothing more.
         assert!(db.settle_rolled_back_stability_payment(&id, "hash", Some(5)).unwrap().is_none());
         assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+    }
+
+    #[test]
+    fn a_rolled_back_claim_is_settled_from_the_balance_drop_not_repaired_as_an_overspend() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        sc.stable_receiver_btc = Bitcoin::from_sats(11_000); // fully stable: no native sats
+        sc.native_sats = 0;
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 1);
+        assert_eq!(sc.backing_sats, 11_000);
+
+        // The payment had left: the live balance is down by its amount.
+        sc.stable_receiver_btc = Bitcoin::from_sats(10_000);
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 1_000);
+        assert_eq!(sc.backing_sats, 10_000);
+        assert_eq!(sc.expected_usd.0, 10.0);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert!(repair_overbacked_allocation(&mut sc, 100_000.0).is_none(), "nothing is over-backed");
+        assert_eq!(sc.expected_usd.0, 10.0);
+
+        // The late success only completes history; the debit is not applied twice.
+        assert!(db.settle_rolled_back_stability_payment(&id, "hash", None).unwrap().is_none());
+        assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
     }
 
     #[test]

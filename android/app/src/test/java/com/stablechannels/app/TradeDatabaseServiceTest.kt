@@ -679,6 +679,58 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
+    fun clampSettlesAReleasedStabilityClaimBeforeTreatingTheRestAsAnOverspend() {
+        val service = DatabaseService(context)
+        service.saveChannel("cd".repeat(32), "7", 10.0, 11_000, null, 11_000, 100_000.0)
+        service.writableDatabase.execSQL(
+            "INSERT INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES ('lost', '7', 1000000)"
+        )
+        // 1,000 sats of the drop is the released $1 payment; 500 sats is a genuine overspend.
+        val repaired =
+            service.clampBackingToLiveReceiver("7", receiverSats = 9_500, price = 100_000.0)
+        assertNotNull(repaired)
+        assertEquals(1_000L, repaired!!.settledObligationSats)
+        assertEquals(500L, repaired.overflowSats)
+        assertEquals(0.5, repaired.usdDeducted, 0.0001)
+        assertEquals(9.5, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(9_500L, service.loadChannel("7")!!.backingSats)
+        assertEquals("7", service.outgoingStabilityOrigin("lost"))
+        // Settled once: a second pass finds nothing left to attribute and nothing over-backed.
+        assertNull(service.clampBackingToLiveReceiver("7", receiverSats = 9_500, price = 100_000.0))
+        assertNull(service.updatePaymentStatus("lost", "completed"))
+        assertEquals(9_500L, service.loadChannel("7")!!.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun ordinarySendReconcileSettlesAReleasedStabilityClaimFirst() {
+        val service = DatabaseService(context)
+        service.saveChannel("cd".repeat(32), "7", 10.0, 11_000, null, 11_000, 100_000.0)
+        service.writableDatabase.execSQL(
+            "INSERT INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES ('lost', '7', 1000000)"
+        )
+        service.recordPendingLightningPayment("user-send", "lightning", 500_000, 100_000.0, "7")
+        val result =
+            service.reconcileOutgoingBacking(
+                channelId = "cd".repeat(32),
+                userChannelId = "7",
+                note = null,
+                receiverSats = 9_500,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+                paymentId = "user-send",
+            )
+        assertNotNull(result)
+        assertEquals(1_000L, result!!.settledObligationSats)
+        assertEquals(0.5, result.usdDeducted, 0.0001)
+        assertEquals(9.5, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(9_500L, service.loadChannel("7")!!.backingSats)
+        assertEquals("7", service.outgoingStabilityOrigin("lost"))
+        assertTrue(service.isLightningAccountingComplete("user-send"))
+        service.close()
+    }
+
+    @Test
     fun clampBackingToLiveReceiverHealsAStrandedWithdrawalExactlyOnce() {
         // Issue #311: a splice-out completed without its stable-books deduction, leaving backing
         // above the balance that actually backs it. The repair deducts the excess once, pins
