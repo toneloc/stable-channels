@@ -14,33 +14,37 @@ struct HomeActionButtonsView: View {
     private let sellPlum = Color(red: 0.78, green: 0.55, blue: 1.0)
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 10) {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
                 ActionButton(
                     title: String(localized: "button_send", defaultValue: "Send"),
-                    icon: "arrow.up.circle.fill",
+                    subtitle: String(localized: "action_send_subtitle", defaultValue: "Pay invoice or address"),
+                    icon: "arrow.up",
                     color: sendBlue,
                     action: onSend
                 )
                 ActionButton(
                     title: String(localized: "button_receive", defaultValue: "Receive"),
-                    icon: "arrow.down.circle.fill",
+                    subtitle: String(localized: "action_receive_subtitle", defaultValue: "Get paid instantly"),
+                    icon: "arrow.down",
                     color: receiveGreen,
                     pulse: !hasReadyChannel,
                     action: onReceive
                 )
             }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 12) {
                 ActionButton(
                     title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
-                    icon: "arrow.up.right.circle.fill",
+                    subtitle: String(localized: "action_buy_subtitle", defaultValue: "Convert USD to Bitcoin"),
+                    icon: "arrow.up.right",
                     color: buyAmber,
                     action: onBuy
                 )
                 ActionButton(
                     title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
-                    icon: "arrow.down.right.circle.fill",
+                    subtitle: String(localized: "action_sell_subtitle", defaultValue: "Lock in USD balance"),
+                    icon: "arrow.down.right",
                     color: sellPlum,
                     action: onSell
                 )
