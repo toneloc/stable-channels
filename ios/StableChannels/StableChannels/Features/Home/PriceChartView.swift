@@ -16,9 +16,6 @@ struct PriceChartView: View {
     @State private var priceHistory: [PriceRecord] = []
     @State private var chartPeriod: ChartPeriod = .all
     @State private var selectedPricePoint: PriceRecord?
-    @State private var allDailyPrices: [PriceRecord] = []
-    @State private var hourlyPrices: [PriceRecord] = []
-    @State private var dataLoaded = false
 
     var compact: Bool = false
 
@@ -180,16 +177,14 @@ struct PriceChartView: View {
         }
         .padding(.vertical, 8)
         .task {
-            loadAllData()
-            filterForPeriod()
+            await loadHistory()
         }
         .onChange(of: chartPeriod) {
             selectedPricePoint = nil
-            filterForPeriod()
+            Task { await loadHistory() }
         }
         .onReceive(NotificationCenter.default.publisher(for: .priceHistoryUpdated)) { _ in
-            loadAllData(force: true)
-            filterForPeriod()
+            Task { await loadHistory(force: true) }
         }
     }
 
@@ -212,60 +207,11 @@ struct PriceChartView: View {
 
     // MARK: - Data Loading
 
-    private func loadAllData(force: Bool = false) {
-        if dataLoaded && !force { return }
-        // Load all hourly data (up to 30 days)
-        hourlyPrices = (try? appState.databaseService?.priceRepo.getPriceHistory(hours: 24 * 30)) ?? []
-
-        // Load all daily data
-        let dailyPrices: [DailyPriceRecord] = (try? appState.databaseService?.priceRepo.getDailyPrices(days: 99999)) ??
-            []
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        allDailyPrices = dailyPrices.compactMap { daily in
-            guard let date = formatter.date(from: daily.date) else { return nil }
-            return PriceRecord(
-                id: Int64(date.timeIntervalSince1970),
-                price: daily.close,
-                source: "daily",
-                timestamp: Int64(date.timeIntervalSince1970)
-            )
+    private func loadHistory(force: Bool = false) async {
+        let records = await appState.priceHistoryProvider.fetchPriceHistory(for: chartPeriod, force: force)
+        await MainActor.run {
+            self.priceHistory = records
         }
-        if !hourlyPrices.isEmpty || !allDailyPrices.isEmpty {
-            dataLoaded = true
-        }
-    }
-
-    private func filterForPeriod() {
-        let cutoff = Date().addingTimeInterval(-Double(chartPeriod.days) * 86400)
-        let raw: [PriceRecord]
-
-        if chartPeriod.usesHourly {
-            let startIdx = PriceChartAlgorithms.lowerBound(in: hourlyPrices, cutoff: cutoff)
-            let hourlySlice = Array(hourlyPrices[startIdx...])
-            if hourlySlice.count >= 2 {
-                raw = hourlySlice
-            } else {
-                // Fallback to daily if hourly is still backfilling or empty
-                let dailyStartIdx = PriceChartAlgorithms.lowerBound(in: allDailyPrices, cutoff: cutoff)
-                let dailySlice = Array(allDailyPrices[dailyStartIdx...])
-                raw = dailySlice.count >= 2 ? dailySlice : hourlySlice
-            }
-        } else {
-            let startIdx = PriceChartAlgorithms.lowerBound(in: allDailyPrices, cutoff: cutoff)
-            let dailySlice = Array(allDailyPrices[startIdx...])
-            if dailySlice.count >= 2 {
-                raw = dailySlice
-            } else {
-                // Fallback to hourly if daily is sparse or still backfilling
-                let hourlyStartIdx = PriceChartAlgorithms.lowerBound(in: hourlyPrices, cutoff: cutoff)
-                let hourlySlice = Array(hourlyPrices[hourlyStartIdx...])
-                raw = hourlySlice.count >= 2 ? hourlySlice : dailySlice
-            }
-        }
-
-        priceHistory = PriceChartAlgorithms.lttbDownsample(raw, targetCount: 200)
     }
 }
 

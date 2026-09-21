@@ -25,11 +25,9 @@ struct HomeView: View {
                         HomeNotificationBannerView()
                     }
 
-                    balanceSection
+                    HomeBalanceSectionView(showBTC: $showBTC, flashScale: flashScale)
 
-                    if appState.isSyncing {
-                        syncingIndicator
-                    }
+                    HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })
 
                     if appState.lightningBalanceSats > 0 {
                         balanceBarSection
@@ -54,10 +52,6 @@ struct HomeView: View {
                         onBuy: { showBuySheet = true },
                         onSell: { showSellSheet = true }
                     )
-
-                    if !appState.statusMessage.isEmpty {
-                        statusSection
-                    }
                 }
                 .animation(.easeInOut(duration: 0.3), value: appState.statusMessage)
                 .padding(.horizontal)
@@ -100,97 +94,21 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Balance Section
-
-    private var displaySats: UInt64 {
-        appState.totalBalanceSats > 0
-            ? appState.totalBalanceSats
-            : appState.stableChannel.stableReceiverBTC.sats
-    }
-
-    private var balanceSection: some View {
-        let hasBalance = appState.totalBalanceUSD > 0 || displaySats > 0
-
-        return VStack(spacing: 4) {
-            Text(String(localized: "label_total_balance", defaultValue: "Total Balance"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            if !hasBalance && appState.isSyncing {
-                Text(String(localized: "label_dash", defaultValue: "—"))
-                    .font(.system(size: 42, weight: .bold, design: .rounded))
-                    .foregroundStyle(.secondary)
-
-                Text(String(localized: "loading_balance", defaultValue: "Loading balance..."))
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            } else if showBTC {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("\(displaySats.btcSpacedFormatted)")
-                        .font(.system(size: 32, weight: .bold, design: .monospaced))
-                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                        .contentTransition(.numericText())
-                        .animation(.default, value: displaySats)
-                    Text(String(localized: "label_btc", defaultValue: "BTC"))
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-
-                Text(appState.totalBalanceUSD.usdFormatted)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(appState.totalBalanceUSD.usdFormatted)
-                        .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                        .contentTransition(.numericText())
-                        .animation(.default, value: appState.totalBalanceUSD)
-                        .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
-                    Text(String(localized: "label_usd", defaultValue: "USD"))
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                }
-
-                Text("\(displaySats.btcSpacedFormatted) BTC")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .scaleEffect(flashScale)
-        .padding(.top, 8)
-        .onTapGesture {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                showBTC.toggle()
-            }
-        }
-    }
-
     // MARK: - Balance Bar (Stable / Native)
 
-    private var stableSats: UInt64 {
-        appState.btcPrice > 0
-            ? UInt64(appState.stableUSD / appState.btcPrice * Double(Constants.satsInBTC))
-            : 0
-    }
-
-    private var nativeSatsDisplay: UInt64 {
-        appState.lightningBalanceSats > stableSats
-            ? appState.lightningBalanceSats - stableSats
-            : 0
-    }
-
-    private var nativeUSD: Double {
-        appState.btcPrice > 0
-            ? Double(nativeSatsDisplay) / Double(Constants.satsInBTC) * appState.btcPrice
-            : 0.0
+    private var allocation: ChannelAllocation {
+        ChannelAllocation(
+            stableUSD: appState.stableUSD,
+            lightningBalanceSats: appState.lightningBalanceSats,
+            btcPrice: appState.btcPrice
+        )
     }
 
     private var balanceBarSection: some View {
         VStack(spacing: 6) {
             BalanceBarView(
                 stableUSD: appState.stableUSD,
-                nativeSats: nativeSatsDisplay,
+                nativeSats: allocation.nativeSats,
                 totalSats: appState.lightningBalanceSats,
                 btcPrice: appState.btcPrice,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
@@ -213,7 +131,7 @@ struct HomeView: View {
                             .font(.caption.bold())
                     }
                     .foregroundStyle(.green)
-                    Text(showBTC ? "\(stableSats.btcSpacedFormatted) BTC" : appState.stableUSD.usdFormatted)
+                    Text(showBTC ? "\(allocation.stableSats.btcSpacedFormatted) BTC" : appState.stableUSD.usdFormatted)
                         .font(.caption)
                         .foregroundStyle(.primary)
                         .contentTransition(.numericText())
@@ -229,7 +147,8 @@ struct HomeView: View {
                             .font(.caption2)
                     }
                     .foregroundStyle(.orange)
-                    Text(showBTC ? "\(nativeSatsDisplay.btcSpacedFormatted) BTC" : nativeUSD.usdFormatted)
+                    Text(showBTC ? "\(allocation.nativeSats.btcSpacedFormatted) BTC" : allocation.nativeUSD
+                        .usdFormatted)
                         .font(.caption)
                         .foregroundStyle(.primary)
                         .contentTransition(.numericText())
@@ -243,17 +162,7 @@ struct HomeView: View {
         }
     }
 
-    // MARK: - Indicators & Status
-
-    private var syncingIndicator: some View {
-        HStack(spacing: 6) {
-            ProgressView()
-                .controlSize(.small)
-            Text(String(localized: "home_syncing", defaultValue: "Syncing..."))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
+    // MARK: - Helpers
 
     private var receiveHintText: some View {
         Text(String(
@@ -263,19 +172,6 @@ struct HomeView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
         .padding(.bottom, 4)
-    }
-
-    private var statusSection: some View {
-        Button(action: { openPaymentDetail() }) {
-            Text(appState.statusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: Capsule())
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-        }
-        .buttonStyle(.plain)
     }
 
     private func checkNotifications() {

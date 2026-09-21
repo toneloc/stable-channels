@@ -28,13 +28,17 @@ struct BalanceBarView: View {
     private let thumbDiameter: CGFloat = 28
     private let barHeight: CGFloat = 20
     private let minTradeUSD: Double = 1.0
-
-    private var nativeUSD: Double {
-        btcPrice > 0 ? Double(nativeSats) / Double(Constants.satsInBTC) * btcPrice : 0
+    private var allocation: ChannelAllocation {
+        ChannelAllocation(
+            stableUSD: stableUSD,
+            lightningBalanceSats: totalSats,
+            btcPrice: btcPrice
+        )
     }
 
-    private var totalUSD: Double { stableUSD + nativeUSD }
-    private var stableFraction: Double { totalUSD > 0 ? stableUSD / totalUSD : 0 }
+    private var nativeUSD: Double { allocation.nativeUSD }
+    private var totalUSD: Double { allocation.totalUSD }
+    private var stableFraction: Double { allocation.stableFraction }
     private var interactive: Bool { onTradeRequest != nil }
 
     var body: some View {
