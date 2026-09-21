@@ -160,6 +160,20 @@ pub fn settle_lost_claims_from_balance(db: &Database, sc: &mut StableChannel) ->
         return 0;
     }
     let uid = format!("{}", sc.user_channel_id);
+    // A splice-out whose books deduction has not landed yet persists absolute snapshot values
+    // when it does; a settle in between would be overwritten and the claim consumed for nothing,
+    // so the evaluation waits. An unreadable state defers too — never settle on the unknown.
+    match db.has_unreconciled_splice_out() {
+        Ok(false) => {}
+        Ok(true) => return 0,
+        Err(e) => {
+            audit_event(
+                "STABILITY_CLAIM_BALANCE_SETTLEMENT_DEFERRED",
+                json!({ "user_channel_id": uid, "error": e.to_string() }),
+            );
+            return 0;
+        }
+    }
     match db.settle_rolled_back_claims_from_balance(&uid, sc.stable_receiver_btc.sats) {
         Ok(0) => 0,
         Ok(debited) => {
@@ -1719,6 +1733,37 @@ mod tests {
         assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
         assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
         assert_eq!(sc.backing_sats, 11_000);
+    }
+
+    #[test]
+    fn a_released_claim_waits_for_an_outstanding_splice_out_reconciliation() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        sc.stable_receiver_btc = Bitcoin::from_sats(11_000); // fully stable: no native sats
+        sc.native_sats = 0;
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 1);
+
+        // A splice-out whose books deduction has not landed yet persists absolute snapshot values
+        // when it does: a settle in between would be overwritten and the claim consumed.
+        db.record_payment(
+            Some("splice-pay"), "splice_out", "sent", 1_000_000, None, None, None,
+            "pending", Some("splice-txid"), None,
+        )
+        .unwrap();
+        sc.stable_receiver_btc = Bitcoin::from_sats(10_000);
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+
+        // Once the splice books have landed, the drop is the claim's, as before.
+        db.persist_splice_reconciliation("splice-txid", "channel", "7", 10.0, 11_000, 0, None)
+            .unwrap();
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 1_000);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
     }
 
     #[test]

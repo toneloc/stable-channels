@@ -3142,6 +3142,30 @@ impl Database {
         Ok(settled)
     }
 
+    /// A terminal failure event for an already-released claim proves its payment never left, so
+    /// it must never be settled from the balance. Mirrors Android deleting the released row.
+    pub fn clear_balance_settleable(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE payments SET balance_settleable = 0
+             WHERE payment_id = ?1 AND payment_type = 'stability' AND direction = 'sent'
+               AND status = 'failed' AND balance_settleable = 1",
+            params![payment_id],
+        )? > 0)
+    }
+
+    /// A splice-out whose books deduction has not landed yet; its reconciliation persists
+    /// absolute snapshot values, so a balance settlement must wait it out.
+    pub fn has_unreconciled_splice_out(&self) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM payments WHERE payment_type = 'splice_out'
+             AND status = 'pending' AND stable_reconciled = 0)",
+            [],
+            |row| row.get(0),
+        )
+    }
+
     /// Insert a payment and optionally update channel backing sats in one SQLite transaction.
     ///
     /// The dedup check runs inside `BEGIN IMMEDIATE` so concurrent writers
@@ -6136,6 +6160,27 @@ mod tests {
         assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 0);
         assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
         // The late success still re-applies the debit once.
+        let redebit = db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(redebit.debit_sats, 20_000);
+    }
+
+    #[test]
+    fn a_failure_event_after_a_lost_record_release_cancels_balance_settlement() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1", true).unwrap().unwrap().restored);
+        // LDK reports the payment failed only after the lost-record release already marked the
+        // row failed: the release path cannot see that event, so the flag must clear separately.
+        assert!(db.fail_pending_stability_payment("stability-1", false).unwrap().is_none());
+        assert!(db.clear_balance_settleable("stability-1").unwrap());
+        // A later balance drop is never attributed to the proven failure...
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 0);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
+        // ...the late-success re-debit flag is untouched, and a replay cancels nothing.
+        assert!(!db.clear_balance_settleable("stability-1").unwrap());
         let redebit = db
             .settle_rolled_back_stability_payment("stability-1", "hash", None)
             .unwrap()

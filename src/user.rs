@@ -4366,7 +4366,17 @@ impl UserApp {
                                 };
                                 self.show_toast("Stability payment failed", "X");
                             }
-                            Ok(None) => {}
+                            Ok(None) => {
+                                // A failure for an already-released claim proves the payment
+                                // never left; its balance-settlement eligibility must not
+                                // survive the event.
+                                if self.db.clear_balance_settleable(&format!("{pid}")).unwrap_or(false) {
+                                    audit_event(
+                                        "STABILITY_CLAIM_BALANCE_SETTLEMENT_CANCELLED",
+                                        json!({ "payment_id": format!("{pid}") }),
+                                    );
+                                }
+                            }
                             Err(e) => {
                                 handled_stability_failure = true;
                                 ack = false;
