@@ -319,14 +319,22 @@ class DatabaseService(context: Context) :
         """
         )
         // A claim released because LDK lost its record; a late success still debits this origin.
+        // balance_settleable is consumed by the claim's one evaluation against a live balance.
         execSQL(
             """
             CREATE TABLE IF NOT EXISTS released_stability_sends (
                 payment_id TEXT PRIMARY KEY, user_channel_id TEXT NOT NULL,
-                amount_msat INTEGER NOT NULL
+                amount_msat INTEGER NOT NULL, balance_settleable INTEGER NOT NULL DEFAULT 1
             )
         """
         )
+        // Upgrades from the first released-claims schema: every existing row was a lost-record
+        // release, so all of them stay balance-settleable.
+        try {
+            execSQL(
+                "ALTER TABLE released_stability_sends ADD COLUMN balance_settleable INTEGER NOT NULL DEFAULT 1"
+            )
+        } catch (_: Exception) {}
     }
 
     /**
@@ -400,56 +408,80 @@ class DatabaseService(context: Context) :
         val settledObligationSats: Long = 0,
     )
 
+    /** A balance evaluation's outcome: claims debited, and claims proven never to have left. */
+    private class ReleasedClaimSettlement(
+        val settled: List<Pair<String, Long>>,
+        val expired: List<String>,
+    ) {
+        val didWork: Boolean
+            get() = settled.isNotEmpty() || expired.isNotEmpty()
+    }
+
     /**
-     * The one "unsettled LSP obligation" rule every balance reconciler consults first. A released
-     * stability claim (LDK lost its record) leaves the surplus on the books; a live balance below
-     * the backing is then that payment leaving, up to its amount. Debit it without touching the USD
-     * target and mark the claim settled, so a late success cannot debit it again. Whatever remains
-     * is for the caller to judge as an ordinary overspend. Runs in the caller's transaction.
+     * The one "unsettled LSP obligation" rule the balance repair consults. A released stability
+     * claim (LDK lost its record, outcome unknown) leaves the surplus on the books; its first
+     * evaluation against a live balance settles it once: a drop debits the backing, up to the
+     * claim's amount, without touching the USD target, and no drop proves the payment never left —
+     * the claim becomes late-success-only. Whatever remains is for the caller to judge as an
+     * ordinary overspend. Runs in the caller's transaction.
      */
     private fun SQLiteDatabase.settleReleasedClaimsFromBalance(
         userChannelId: String,
         receiverSats: Long,
-    ): List<Pair<String, Long>> {
+    ): ReleasedClaimSettlement {
+        val released =
+            rawQuery(
+                    "SELECT payment_id, amount_msat FROM released_stability_sends WHERE user_channel_id = ? AND balance_settleable = 1 ORDER BY rowid",
+                    arrayOf(userChannelId),
+                )
+                .use { c ->
+                    buildList { while (c.moveToNext()) add(c.getString(0) to c.getLong(1)) }
+                }
+        if (released.isEmpty()) return ReleasedClaimSettlement(emptyList(), emptyList())
         val backing =
             rawQuery(
                     "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
                     arrayOf(userChannelId),
                 )
                 .use {
-                    if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else return emptyList()
+                    if (it.moveToFirst() && !it.isNull(0)) it.getLong(0)
+                    else return ReleasedClaimSettlement(emptyList(), emptyList())
                 }
-        var remaining = backing - receiverSats
-        if (remaining <= 0L) return emptyList()
-        val released =
-            rawQuery(
-                    "SELECT payment_id, amount_msat FROM released_stability_sends WHERE user_channel_id = ? ORDER BY rowid",
-                    arrayOf(userChannelId),
-                )
-                .use { c ->
-                    buildList { while (c.moveToNext()) add(c.getString(0) to c.getLong(1)) }
-                }
+        var remaining = (backing - receiverSats).coerceAtLeast(0L)
         val settled = mutableListOf<Pair<String, Long>>()
+        val expired = mutableListOf<String>()
         for ((paymentId, amountMsat) in released) {
-            if (remaining <= 0L) break
             val debit = minOf(remaining, amountMsat / 1000L)
-            execSQL(
-                "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?), updated_at = ? WHERE user_channel_id = ?",
-                arrayOf<Any>(debit, System.currentTimeMillis() / 1000, userChannelId),
-            )
-            execSQL(
-                "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
-                arrayOf(paymentId, userChannelId),
-            )
-            delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
-            remaining -= debit
-            settled += paymentId to debit
+            if (debit > 0L) {
+                execSQL(
+                    "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?), updated_at = ? WHERE user_channel_id = ?",
+                    arrayOf<Any>(debit, System.currentTimeMillis() / 1000, userChannelId),
+                )
+                execSQL(
+                    "INSERT OR IGNORE INTO outgoing_stability_accounting (payment_id, user_channel_id) VALUES (?, ?)",
+                    arrayOf(paymentId, userChannelId),
+                )
+                delete("released_stability_sends", "payment_id = ?", arrayOf(paymentId))
+                remaining -= debit
+                settled += paymentId to debit
+            } else {
+                // The sats are still there: the payment never left, so only its own late success
+                // can settle this claim.
+                execSQL(
+                    "UPDATE released_stability_sends SET balance_settleable = 0 WHERE payment_id = ?",
+                    arrayOf(paymentId),
+                )
+                expired += paymentId
+            }
         }
-        return settled
+        return ReleasedClaimSettlement(settled, expired)
     }
 
-    private fun auditSettledFromBalance(userChannelId: String, settled: List<Pair<String, Long>>) {
-        for ((paymentId, debit) in settled) AuditService.log(
+    private fun auditSettledFromBalance(
+        userChannelId: String,
+        settlement: ReleasedClaimSettlement,
+    ) {
+        for ((paymentId, debit) in settlement.settled) AuditService.log(
             "STABILITY_RELEASED_CLAIM_SETTLED_BY_BALANCE",
             mapOf(
                 "payment_id" to paymentId,
@@ -457,16 +489,54 @@ class DatabaseService(context: Context) :
                 "debited_sats" to debit,
             ),
         )
+        for (paymentId in settlement.expired) AuditService.log(
+            "STABILITY_RELEASED_CLAIM_BALANCE_EXPIRED",
+            mapOf(
+                "payment_id" to paymentId,
+                "user_channel_id" to userChannelId,
+            ),
+        )
     }
 
-    /** Settle released claims against the live balance on their own, for in-memory reconcilers. */
-    fun settleReleasedClaimsFromBalance(userChannelId: String, receiverSats: Long): Long {
-        if (receiverSats < 0L) return 0L
-        val settled = writableDatabase.transaction {
-            settleReleasedClaimsFromBalance(userChannelId, receiverSats)
+    /**
+     * Consume the balance eligibility of released claims whose payment provably never left: the
+     * live balance still covers the books. A real drop is left for the clamp, which owns debits.
+     */
+    fun expireReleasedClaimsBelowBacking(userChannelId: String, receiverSats: Long): List<String> {
+        if (receiverSats < 0L) return emptyList()
+        val expired = writableDatabase.transaction {
+            val backing =
+                rawQuery(
+                        "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                        arrayOf(userChannelId),
+                    )
+                    .use {
+                        if (it.moveToFirst() && !it.isNull(0)) it.getLong(0)
+                        else return@transaction emptyList<String>()
+                    }
+            if (backing > receiverSats) return@transaction emptyList<String>()
+            val ids =
+                rawQuery(
+                        "SELECT payment_id FROM released_stability_sends WHERE user_channel_id = ? AND balance_settleable = 1",
+                        arrayOf(userChannelId),
+                    )
+                    .use { c -> buildList { while (c.moveToNext()) add(c.getString(0)) } }
+            for (id in ids) {
+                execSQL(
+                    "UPDATE released_stability_sends SET balance_settleable = 0 WHERE payment_id = ?",
+                    arrayOf(id),
+                )
+            }
+            ids
         }
-        auditSettledFromBalance(userChannelId, settled)
-        return settled.sumOf { it.second }
+        for (id in expired) AuditService.log(
+            "STABILITY_RELEASED_CLAIM_BALANCE_EXPIRED",
+            mapOf(
+                "payment_id" to id,
+                "user_channel_id" to userChannelId,
+            ),
+        )
+        return expired
     }
 
     /**
@@ -504,8 +574,8 @@ class DatabaseService(context: Context) :
                 db.execSQL("ROLLBACK")
                 return null
             }
-            val settled = db.settleReleasedClaimsFromBalance(userChannelId, receiverSats)
-            val settledSats = settled.sumOf { it.second }
+            val settlement = db.settleReleasedClaimsFromBalance(userChannelId, receiverSats)
+            val settledSats = settlement.settled.sumOf { it.second }
             val cursor =
                 db.rawQuery(
                     "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
@@ -517,12 +587,14 @@ class DatabaseService(context: Context) :
                     it.getDouble(0) to it.getLong(1)
                 }
             if (currentBacking <= receiverSats) {
-                if (settledSats == 0L) {
+                if (!settlement.didWork) {
                     db.execSQL("ROLLBACK")
                     return null
                 }
                 db.execSQL("COMMIT")
-                auditSettledFromBalance(userChannelId, settled)
+                auditSettledFromBalance(userChannelId, settlement)
+                // An expiry-only evaluation changes no books, so there is nothing to report.
+                if (settledSats == 0L) return null
                 return BackingClampResult(
                     0L,
                     0.0,
@@ -552,7 +624,7 @@ class DatabaseService(context: Context) :
                 )
             }
             db.execSQL("COMMIT")
-            auditSettledFromBalance(userChannelId, settled)
+            auditSettledFromBalance(userChannelId, settlement)
             return BackingClampResult(
                 overflowSats,
                 usdDeducted,
@@ -575,7 +647,6 @@ class DatabaseService(context: Context) :
         val oldExpectedUSD: Double,
         val newExpectedUSD: Double,
         val newBackingSats: Long,
-        val settledObligationSats: Long = 0,
     )
 
     /**
@@ -624,8 +695,6 @@ class DatabaseService(context: Context) :
                 db.execSQL("ROLLBACK")
                 return null
             }
-            val settled = db.settleReleasedClaimsFromBalance(userChannelId, receiverSats)
-            val settledSats = settled.sumOf { it.second }
             val cursor =
                 db.rawQuery(
                     "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
@@ -639,16 +708,7 @@ class DatabaseService(context: Context) :
             if (currentBacking == 0L || currentBacking <= receiverSats) {
                 if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
                 db.execSQL("COMMIT")
-                auditSettledFromBalance(userChannelId, settled)
-                return if (settledSats == 0L) null
-                else
-                    OutgoingReconcileResult(
-                        0.0,
-                        currentExpected,
-                        currentExpected,
-                        currentBacking,
-                        settledSats,
-                    )
+                return null
             }
             if (!price.isFinite() || price <= 0.0) {
                 check(paymentId == null) { "Waiting for a trusted price to reconcile the payment" }
@@ -684,14 +744,7 @@ class DatabaseService(context: Context) :
             }
             if (paymentId != null) completeLightningAccounting(db, paymentId, feeMsat)
             db.execSQL("COMMIT")
-            auditSettledFromBalance(userChannelId, settled)
-            return OutgoingReconcileResult(
-                usdToDeduct,
-                currentExpected,
-                newExpected,
-                newBacking,
-                settledSats,
-            )
+            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
         } catch (e: Exception) {
             try {
                 db.execSQL("ROLLBACK")

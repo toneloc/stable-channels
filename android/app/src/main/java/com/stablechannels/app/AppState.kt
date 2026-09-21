@@ -3048,15 +3048,6 @@ class AppState(private val context: Context) : ViewModel() {
                         )
                         false
                     } else {
-                        // A released stability claim explains part of the drop before the splice.
-                        val current = _stableChannel.value
-                        if (
-                            databaseService?.settleReleasedClaimsFromBalance(
-                                current.userChannelId,
-                                current.stableReceiverBTC.sats,
-                            ) ?: 0L > 0L
-                        )
-                            publishBooksFromDB(recomputeNative = true)
                         val result = StabilityService.reconcileOutgoing(_stableChannel.value, price)
                         val reconciled = result.first
                         if (result.second != null) {
@@ -3567,6 +3558,10 @@ class AppState(private val context: Context) : ViewModel() {
         // where the books are already consistent — which is every tick but the broken ones.
         if (_stableChannel.value.backingSats > _stableChannel.value.stableReceiverBTC.sats) {
             repairBooksAboveLiveBalance()
+        } else {
+            // A released claim whose payment never left must not wait for a later overspend to be
+            // judged: the first tick that sees the balance still covering the books expires it.
+            expireReleasedClaimBalanceEligibility()
         }
         val sc = _stableChannel.value
         val price = priceService.currentAccountingPrice()
@@ -4641,6 +4636,18 @@ class AppState(private val context: Context) : ViewModel() {
      */
     private fun repairBooksAboveLiveBalance() {
         synchronized(nodeService.channelOperationLock) { repairBooksAboveLiveBalanceLocked() }
+    }
+
+    /** One-shot guard for the tick: a released claim the balance never dropped for is expired. */
+    private fun expireReleasedClaimBalanceEligibility() {
+        val db = databaseService ?: return
+        val sc = _stableChannel.value
+        if (sc.userChannelId.isEmpty() || !_hasReadyChannel.value) return
+        try {
+            db.expireReleasedClaimsBelowBacking(sc.userChannelId, sc.stableReceiverBTC.sats)
+        } catch (e: Exception) {
+            Log.w("AppState", "Released-claim expiry failed: ${e.message}")
+        }
     }
 
     private fun repairBooksAboveLiveBalanceLocked() {

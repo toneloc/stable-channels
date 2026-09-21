@@ -152,10 +152,11 @@ pub fn has_pending_outbound_lightning_payment(node: &Node) -> bool {
     })
 }
 
-/// Mirror `Database::settle_rolled_back_claims_from_balance` into the live channel. Returns the
-/// sats debited; the caller then judges any remaining overflow as an ordinary overspend.
+/// Mirror `Database::settle_rolled_back_claims_from_balance` into the live channel. Every call is
+/// the claim's one evaluation against the balance, drop or no drop. Returns the sats debited; the
+/// caller then judges any remaining overflow as an ordinary overspend.
 pub fn settle_lost_claims_from_balance(db: &Database, sc: &mut StableChannel) -> u64 {
-    if sc.user_channel_id == 0 || sc.backing_sats <= sc.stable_receiver_btc.sats {
+    if sc.user_channel_id == 0 {
         return 0;
     }
     let uid = format!("{}", sc.user_channel_id);
@@ -182,25 +183,27 @@ pub fn settle_lost_claims_from_balance(db: &Database, sc: &mut StableChannel) ->
 }
 
 /// Repair an over-backed allocation only when the observed capacity cannot be explained by an
-/// unresolved outbound HTLC or by a rolled-back stability payment that did leave after all.
+/// unresolved outbound HTLC or by a released stability payment that did leave after all.
 pub fn repair_overbacked_allocation_if_safe(
     node: &Node,
     db: &Database,
     sc: &mut StableChannel,
     price: f64,
 ) -> Option<OverbackedRepair> {
-    if sc.backing_sats > sc.stable_receiver_btc.sats
-        && has_pending_outbound_lightning_payment(node)
-    {
-        audit_event(
-            "OVERBACKED_REPAIR_SKIPPED_PENDING_HTLC",
-            json!({
-                "user_channel_id": format!("{}", sc.user_channel_id),
-                "live_receiver_sats": sc.stable_receiver_btc.sats,
-                "backing_sats": sc.backing_sats,
-                "reason": "outbound Lightning payment is still pending",
-            }),
-        );
+    if has_pending_outbound_lightning_payment(node) {
+        // An in-flight HTLC also fakes the drop the balance settlement below would attribute, so
+        // the whole evaluation defers, consuming nothing.
+        if sc.backing_sats > sc.stable_receiver_btc.sats {
+            audit_event(
+                "OVERBACKED_REPAIR_SKIPPED_PENDING_HTLC",
+                json!({
+                    "user_channel_id": format!("{}", sc.user_channel_id),
+                    "live_receiver_sats": sc.stable_receiver_btc.sats,
+                    "backing_sats": sc.backing_sats,
+                    "reason": "outbound Lightning payment is still pending",
+                }),
+            );
+        }
         return None;
     }
     settle_lost_claims_from_balance(db, sc);
@@ -556,7 +559,9 @@ pub fn reconcile_lost_stability_claims(
             None if stale => "no_ldk_record",
             _ => continue,
         };
-        if let Some(rollback) = db.fail_pending_stability_payment(&payment_id)? {
+        if let Some(rollback) =
+            db.fail_pending_stability_payment(&payment_id, reason == "no_ldk_record")?
+        {
             audit_event(
                 "STABILITY_CLAIM_ROLLED_BACK_ON_RECOVERY",
                 json!({ "payment_id": payment_id, "reason": reason, "restored": rollback.restored }),
@@ -679,7 +684,7 @@ pub fn send_claimed_stability_payment(
                     "counterparty": info.counterparty,
                 }),
             );
-            if let Err(e) = db.fail_pending_stability_payment(&info.payment_id) {
+            if let Err(e) = db.fail_pending_stability_payment(&info.payment_id, false) {
                 audit_event(
                     "STABILITY_PAYMENT_FAILURE_PERSIST_FAILED",
                     json!({ "payment_id": info.payment_id, "error": e.to_string() }),
@@ -1667,6 +1672,53 @@ mod tests {
         assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "completed");
         assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 10_000);
         assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
+    }
+
+    #[test]
+    fn a_lost_record_claim_the_balance_never_dropped_for_is_expired_not_later_attributed() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        sc.stable_receiver_btc = Bitcoin::from_sats(11_000); // fully stable: no native sats
+        sc.native_sats = 0;
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let later = now + LOST_LDK_RECORD_TIMEOUT_SECS + 1;
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &[], later).unwrap(), 1);
+
+        // The payment never left: the balance still covers the books. That one evaluation consumes
+        // the claim, so a drop that appears later is an ordinary overspend, never this claim.
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
+        sc.stable_receiver_btc = Bitcoin::from_sats(9_500);
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+
+        // Its late success still re-applies the debit once.
+        let redebit = db.settle_rolled_back_stability_payment(&id, "hash", None).unwrap().unwrap();
+        assert_eq!(redebit.debit_sats, 1_000);
+        assert!(apply_stability_redebit(&mut sc, &redebit));
+        assert_eq!(sc.backing_sats, 10_000);
+    }
+
+    #[test]
+    fn a_proven_failed_claim_is_never_settled_from_the_balance() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path()).unwrap();
+        let id = format!("{}", PaymentId([9; 32]));
+        let (mut sc, info) = claimed_channel(&db, &id);
+        sc.stable_receiver_btc = Bitcoin::from_sats(11_000);
+        sc.native_sats = 0;
+        assert!(send_claimed_stability_payment(&db, &mut sc, info, 1, || Ok(id.clone())).is_some());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        // LDK itself reports the payment failed: the outcome is proven, so only a success event
+        // could ever re-apply the debit — the balance rule must not touch a later drop.
+        let ldk = [details(9, PaymentStatus::Failed)];
+        assert_eq!(reconcile_lost_stability_claims(&db, &mut sc, &ldk, now).unwrap(), 1);
+        sc.stable_receiver_btc = Bitcoin::from_sats(9_500);
+        assert_eq!(settle_lost_claims_from_balance(&db, &mut sc), 0);
+        assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, 11_000);
+        assert_eq!(sc.backing_sats, 11_000);
     }
 
     #[test]

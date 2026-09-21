@@ -530,6 +530,11 @@ impl Database {
             "ALTER TABLE payments ADD COLUMN backing_rolled_back INTEGER NOT NULL DEFAULT 0",
             [],
         );
+        // Set only while a lost-record release may still be settled from a live balance drop.
+        let _ = conn.execute(
+            "ALTER TABLE payments ADD COLUMN balance_settleable INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
 
         // Migration: Add on-chain fields to payments table
         let _ = conn.execute("ALTER TABLE payments ADD COLUMN txid TEXT", []);
@@ -2646,10 +2651,12 @@ impl Database {
     }
 
     /// Mark a pending stability payment failed and restore its prior backing only if no newer
-    /// accounting transition has replaced the optimistic after-state.
+    /// accounting transition has replaced the optimistic after-state. `balance_settleable` marks
+    /// an unknown outcome (LDK lost the record) whose payment may still turn out to have left.
     pub fn fail_pending_stability_payment(
         &self,
         payment_id: &str,
+        balance_settleable: bool,
     ) -> SqliteResult<Option<StabilityPaymentRollback>> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -2711,10 +2718,13 @@ impl Database {
                 _ => false,
             };
             // Set for every restore, proven failure or not: a success event is proof either way.
+            // Balance settlement is the exception — only an unknown outcome (LDK lost the record)
+            // may ever be attributed to a balance drop; a proven failure's sats cannot leave.
             if restored {
                 conn.execute(
-                    "UPDATE payments SET backing_rolled_back = 1 WHERE id = ?1",
-                    params![payment_db_id],
+                    "UPDATE payments SET backing_rolled_back = 1, balance_settleable = ?2
+                     WHERE id = ?1",
+                    params![payment_db_id, balance_settleable],
                 )?;
             }
 
@@ -3025,10 +3035,11 @@ impl Database {
         Ok(redebit)
     }
 
-    /// The one "unsettled LSP obligation" rule every balance reconciler consults first. A rolled-back
-    /// stability claim (LDK lost its record) put the surplus back on the books; a live balance below
-    /// the backing is then that payment leaving, up to its amount. Debit it without touching the USD
-    /// target and clear the rollback flag, so a late success cannot debit it again. Returns the sats
+    /// The one "unsettled LSP obligation" rule the balance repair consults. A lost-record release
+    /// (outcome unknown) put the surplus back on the books; its first evaluation against a live
+    /// balance settles it once: a drop debits the backing, up to the claim's amount, without
+    /// touching the USD target, and no drop proves the payment never left — the claim becomes
+    /// late-success-only. Proven failures never qualify: their sats cannot leave. Returns the sats
     /// debited; whatever overflow remains is for the caller to judge as an ordinary overspend.
     pub fn settle_rolled_back_claims_from_balance(
         &self,
@@ -3037,6 +3048,22 @@ impl Database {
     ) -> SqliteResult<u64> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rows: Vec<(i64, String, Option<i64>, Option<i64>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, payment_id, backing_sats_before, backing_sats_after FROM payments
+                 WHERE user_channel_id = ?1 AND payment_type = 'stability' AND direction = 'sent'
+                   AND status = 'failed' AND balance_settleable = 1
+                 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![user_channel_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<SqliteResult<_>>()?
+        };
+        if rows.is_empty() {
+            tx.commit()?;
+            return Ok(0);
+        }
         let backing: Option<i64> = tx
             .query_row(
                 "SELECT stable_sats FROM channels WHERE user_channel_id = ?1",
@@ -3048,48 +3075,41 @@ impl Database {
             .and_then(|value| u64::try_from(value).ok())
             .unwrap_or(0)
             .saturating_sub(live_receiver_sats);
-        if remaining == 0 {
-            tx.commit()?;
-            return Ok(0);
-        }
-        let rows: Vec<(i64, String, Option<i64>, Option<i64>)> = {
-            let mut stmt = tx.prepare(
-                "SELECT id, payment_id, backing_sats_before, backing_sats_after FROM payments
-                 WHERE user_channel_id = ?1 AND payment_type = 'stability' AND direction = 'sent'
-                   AND status = 'failed' AND backing_rolled_back = 1
-                 ORDER BY id",
-            )?;
-            let rows = stmt.query_map(params![user_channel_id], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-            })?;
-            rows.collect::<SqliteResult<_>>()?
-        };
         let mut settled = 0u64;
         let mut mirrors = Vec::new();
         for (row_id, payment_id, before, after) in rows {
-            if remaining == 0 {
-                break;
-            }
-            let (Some(before), Some(after)) = (before, after) else { continue };
-            let amount = u64::try_from(before.saturating_sub(after)).unwrap_or(0);
+            let amount = match (before, after) {
+                (Some(before), Some(after)) => {
+                    u64::try_from(before.saturating_sub(after)).unwrap_or(0)
+                }
+                _ => 0,
+            };
             let debit = amount.min(remaining);
+            if debit > 0 {
+                tx.execute(
+                    "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?1),
+                                         updated_at = strftime('%s', 'now')
+                     WHERE user_channel_id = ?2",
+                    params![debit as i64, user_channel_id],
+                )?;
+                remaining -= debit;
+                settled += debit;
+            }
+            // One evaluation per claim: a debit settles it once and for all, no debit proves the
+            // payment never left and leaves the late-success re-debit flag in place.
             tx.execute(
-                "UPDATE channels SET stable_sats = MAX(0, stable_sats - ?1),
-                                     updated_at = strftime('%s', 'now')
-                 WHERE user_channel_id = ?2",
-                params![debit as i64, user_channel_id],
+                "UPDATE payments SET balance_settleable = 0, backing_rolled_back = ?1 WHERE id = ?2",
+                params![(debit == 0) as i64, row_id],
             )?;
-            tx.execute(
-                "UPDATE payments SET backing_rolled_back = 0 WHERE id = ?1",
-                params![row_id],
-            )?;
-            remaining -= debit;
-            settled += debit;
             let draft = LedgerEventDraft {
-                event_type: "STABILITY_CLAIM_SETTLED_FROM_BALANCE".to_owned(),
+                event_type: if debit > 0 {
+                    "STABILITY_CLAIM_SETTLED_FROM_BALANCE".to_owned()
+                } else {
+                    "STABILITY_CLAIM_BALANCE_SETTLEMENT_EXPIRED".to_owned()
+                },
                 category: "stability".to_owned(),
                 severity: "warning".to_owned(),
-                status: "completed".to_owned(),
+                status: if debit > 0 { "completed" } else { "expired" }.to_owned(),
                 source: "desktop_wallet".to_owned(),
                 completeness: LedgerCompleteness::Observed,
                 occurred_at_ms: Utc::now().timestamp_millis(),
@@ -5873,7 +5893,7 @@ mod tests {
             if succeeds {
                 db.complete_pending_stability_payment("final", "hash", None).unwrap();
             } else {
-                assert!(db.fail_pending_stability_payment("final").unwrap().unwrap().restored);
+                assert!(db.fail_pending_stability_payment("final", false).unwrap().unwrap().restored);
             }
             assert!(!db.has_pending_channel_send().unwrap());
             assert_eq!(db.load_channel("7").unwrap().unwrap().backing_sats, if succeeds { 0 } else { 1_000 });
@@ -5909,7 +5929,7 @@ mod tests {
         );
 
         let rollback = db
-            .fail_pending_stability_payment("stability-1")
+            .fail_pending_stability_payment("stability-1", false)
             .unwrap()
             .unwrap();
         assert!(rollback.restored);
@@ -5924,7 +5944,7 @@ mod tests {
         );
         assert_eq!(db.get_recent_payments(1).unwrap()[0].status, "failed");
         assert!(db
-            .fail_pending_stability_payment("stability-1")
+            .fail_pending_stability_payment("stability-1", false)
             .unwrap()
             .is_none());
     }
@@ -5953,7 +5973,7 @@ mod tests {
             .unwrap();
 
         let rollback = db
-            .fail_pending_stability_payment("stability-1")
+            .fail_pending_stability_payment("stability-1", false)
             .unwrap()
             .unwrap();
         assert!(!rollback.restored);
@@ -5986,7 +6006,7 @@ mod tests {
     fn late_stability_success_debits_the_amount_not_a_stale_snapshot() {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
-        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
         // The books moved on after the rollback; the payment that left still costs its amount.
         db.save_channel("channel-1", "user-channel-1", 100.0, 125_000, 20_000, None)
             .unwrap();
@@ -6005,7 +6025,7 @@ mod tests {
     fn late_stability_success_debits_an_origin_that_has_since_closed() {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
-        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
         db.mark_channel_closed("user-channel-1").unwrap();
 
         let redebit = db
@@ -6022,7 +6042,7 @@ mod tests {
     fn late_stability_success_with_no_row_at_all_keeps_the_debit_outstanding() {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
-        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
         db.delete_channel("user-channel-1").unwrap();
 
         assert!(db
@@ -6048,7 +6068,7 @@ mod tests {
     fn balance_settlement_covers_only_the_rolled_back_amount_and_only_restored_rollbacks() {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
-        assert!(db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(db.fail_pending_stability_payment("stability-1", true).unwrap().unwrap().restored);
         assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
 
         // 25,000 sats left the channel: 20,000 is the payment, 5,000 is for the caller to judge.
@@ -6063,9 +6083,113 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         pending_stability_claim(&db);
         db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None).unwrap();
-        assert!(!db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(!db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
         assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 60_000).unwrap(), 0);
         assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 80_000);
+    }
+
+    #[test]
+    fn balance_settlement_never_attributes_a_proven_failure() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        // LDK reported the payment failed: the books were restored, but the sats never left and
+        // never will. A later, unrelated overspend must not be attributed to this claim.
+        assert!(db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 0);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().expected_usd, 100.0);
+        // The late-success re-debit flag is untouched.
+        let rolled_back: bool = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT backing_rolled_back FROM payments WHERE payment_id = 'stability-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(rolled_back);
+    }
+
+    #[test]
+    fn a_lost_record_claim_the_balance_never_dropped_for_becomes_late_success_only() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1", true).unwrap().unwrap().restored);
+        // The balance still covers the books: the payment never left, so the claim can only be
+        // settled by its own late success — never from the balance.
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 120_000).unwrap(), 0);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
+        let settleable: bool = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT balance_settleable FROM payments WHERE payment_id = 'stability-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!settleable, "the one evaluation consumed the eligibility");
+        // A drop that appears later is an ordinary overspend, not this claim.
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 95_000).unwrap(), 0);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 120_000);
+        // The late success still re-applies the debit once.
+        let redebit = db
+            .settle_rolled_back_stability_payment("stability-1", "hash", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(redebit.debit_sats, 20_000);
+    }
+
+    #[test]
+    fn balance_settlement_spreads_one_drop_across_claims_oldest_first() {
+        let db = Database::open_in_memory().unwrap();
+        pending_stability_claim(&db);
+        assert!(db.fail_pending_stability_payment("stability-1", true).unwrap().unwrap().restored);
+        db.record_pending_stability_payment(
+            "stability-2",
+            20_000_000,
+            Some(20.0),
+            100_000.0,
+            "counterparty",
+            "channel-1",
+            "user-channel-1",
+            100.0,
+            120_000,
+            100_000,
+            20_000,
+            None,
+        )
+        .unwrap();
+        assert!(db.fail_pending_stability_payment("stability-2", true).unwrap().unwrap().restored);
+        // One 10,000-sat drop against two 20,000-sat claims: the oldest is consumed by a partial
+        // debit, the younger is expired for having no drop left to attribute.
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 110_000).unwrap(), 10_000);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 110_000);
+        let flags: Vec<(bool, bool)> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT backing_rolled_back, balance_settleable FROM payments
+                     WHERE payment_id IN ('stability-1', 'stability-2') ORDER BY id",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
+        };
+        assert_eq!(flags.len(), 2);
+        assert_eq!(flags[0], (false, false), "the partial debit consumed the oldest claim");
+        assert_eq!(flags[1], (true, false), "the younger claim is late-success-only");
+        // A replay attributes nothing, and the younger claim's late success still debits once.
+        assert_eq!(db.settle_rolled_back_claims_from_balance("user-channel-1", 110_000).unwrap(), 0);
+        let redebit = db
+            .settle_rolled_back_stability_payment("stability-2", "hash", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(redebit.debit_sats, 20_000);
+        assert_eq!(db.load_channel("user-channel-1").unwrap().unwrap().backing_sats, 90_000);
     }
 
     #[test]
@@ -6074,7 +6198,7 @@ mod tests {
         pending_stability_claim(&db);
         db.save_channel("channel-1", "user-channel-1", 80.0, 80_000, 40_000, None)
             .unwrap();
-        assert!(!db.fail_pending_stability_payment("stability-1").unwrap().unwrap().restored);
+        assert!(!db.fail_pending_stability_payment("stability-1", false).unwrap().unwrap().restored);
 
         // The optimistic debit was never undone, so the success only completes the history row.
         assert!(db

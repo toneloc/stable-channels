@@ -3363,7 +3363,6 @@ impl UserApp {
                         let mut sc = self.stable_channel.lock().unwrap();
                         let before_reconcile = sc.clone();
                         let old_expected_usd = sc.expected_usd.0;
-                        stable::settle_lost_claims_from_balance(&self.db, &mut sc);
                         let usd_deducted = stable::reconcile_outgoing(&mut sc, price);
                         sc.native_sats =
                             sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
@@ -3651,7 +3650,6 @@ impl UserApp {
                                         );
                                         break;
                                     }
-                                    stable::settle_lost_claims_from_balance(&self.db, &mut sc);
                                     let mut reconciled = sc.clone();
                                     let usd_deducted =
                                         stable::reconcile_outgoing(&mut reconciled, price);
@@ -4353,7 +4351,7 @@ impl UserApp {
                 } => {
                     let mut handled_stability_failure = false;
                     if let Some(pid) = payment_id {
-                        match self.db.fail_pending_stability_payment(&format!("{pid}")) {
+                        match self.db.fail_pending_stability_payment(&format!("{pid}"), false) {
                             Ok(Some(rollback)) => {
                                 handled_stability_failure = true;
                                 stable::apply_stability_rollback(
@@ -4767,7 +4765,6 @@ impl UserApp {
             );
             return;
         }
-        stable::settle_lost_claims_from_balance(&self.db, &mut sc);
         let mut reconciled = sc.clone();
         let (usd_deducted, source) = if let Some(splice_out_sats) = exact_splice_out_sats {
             (

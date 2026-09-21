@@ -703,7 +703,10 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
-    fun ordinarySendReconcileSettlesAReleasedStabilityClaimFirst() {
+    fun ordinarySendReconcileLeavesReleasedClaimsToTheClamp() {
+        // The spend guard admits an ordinary send only within what the books already cover, so any
+        // drop its reconcile sees is the user's own spend: a released claim must not eat part of
+        // it.
         val service = DatabaseService(context)
         service.saveChannel("cd".repeat(32), "7", 10.0, 11_000, null, 11_000, 100_000.0)
         service.writableDatabase.execSQL(
@@ -721,12 +724,90 @@ class TradeDatabaseServiceTest {
                 paymentId = "user-send",
             )
         assertNotNull(result)
-        assertEquals(1_000L, result!!.settledObligationSats)
-        assertEquals(0.5, result.usdDeducted, 0.0001)
-        assertEquals(9.5, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(1.5, result!!.usdDeducted, 0.0001)
+        assertEquals(8.5, service.loadChannel("7")!!.expectedUSD, 0.0001)
         assertEquals(9_500L, service.loadChannel("7")!!.backingSats)
-        assertEquals("7", service.outgoingStabilityOrigin("lost"))
         assertTrue(service.isLightningAccountingComplete("user-send"))
+        // The claim survives untouched for the balance repair, which owns it.
+        assertNull(service.outgoingStabilityOrigin("lost"))
+        service.readableDatabase
+            .rawQuery(
+                "SELECT balance_settleable FROM released_stability_sends WHERE payment_id = 'lost'",
+                null,
+            )
+            .use {
+                assertTrue(it.moveToFirst())
+                assertEquals(1, it.getInt(0))
+            }
+        service.close()
+    }
+
+    @Test
+    fun clampExpiresAReleasedClaimWhenTheBalanceNeverDropped() {
+        val service = DatabaseService(context)
+        service.saveChannel("cd".repeat(32), "7", 10.0, 11_000, null, 11_000, 100_000.0)
+        service.writableDatabase.execSQL(
+            "INSERT INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES ('lost', '7', 1000000)"
+        )
+        // The payment never left: the balance still covers the books, so there is nothing to clamp.
+        assertNull(
+            service.clampBackingToLiveReceiver("7", receiverSats = 11_000, price = 100_000.0)
+        )
+        assertEquals(10.0, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(11_000L, service.loadChannel("7")!!.backingSats)
+        // One evaluation: a drop that appears later is judged as an ordinary overspend, not the
+        // claim.
+        val repaired =
+            service.clampBackingToLiveReceiver("7", receiverSats = 10_000, price = 100_000.0)
+        assertNotNull(repaired)
+        assertEquals(0L, repaired!!.settledObligationSats)
+        assertEquals(1.0, repaired.usdDeducted, 0.0001)
+        assertEquals(9.0, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(10_000L, service.loadChannel("7")!!.backingSats)
+        assertNull(service.outgoingStabilityOrigin("lost"))
+        // The late success still settles the claim exactly once.
+        assertEquals("7", service.updatePaymentStatus("lost", "completed"))
+        assertEquals(9_000L, service.loadChannel("7")!!.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun balanceSettlementSpreadsOneDropAcrossReleasedClaimsOldestFirst() {
+        val service = DatabaseService(context)
+        service.saveChannel("cd".repeat(32), "7", 10.0, 11_000, null, 11_000, 100_000.0)
+        for ((id, msat) in
+            listOf("first" to 1_000_000L, "second" to 2_000_000L, "third" to 1_000_000L)) {
+            service.writableDatabase.execSQL(
+                "INSERT INTO released_stability_sends (payment_id, user_channel_id, amount_msat) VALUES ('$id', '7', $msat)"
+            )
+        }
+        // A 2,500-sat drop: 'first' settles fully, 'second' is consumed by a 1,500-sat partial
+        // debit, 'third' has no drop left and becomes late-success-only.
+        val repaired =
+            service.clampBackingToLiveReceiver("7", receiverSats = 8_500, price = 100_000.0)
+        assertNotNull(repaired)
+        assertEquals(2_500L, repaired!!.settledObligationSats)
+        assertEquals(0.0, repaired.usdDeducted, 0.0001)
+        assertEquals(10.0, service.loadChannel("7")!!.expectedUSD, 0.0001)
+        assertEquals(8_500L, service.loadChannel("7")!!.backingSats)
+        assertEquals("7", service.outgoingStabilityOrigin("first"))
+        assertEquals("7", service.outgoingStabilityOrigin("second"))
+        assertNull(service.outgoingStabilityOrigin("third"))
+        service.readableDatabase
+            .rawQuery(
+                "SELECT balance_settleable FROM released_stability_sends WHERE payment_id = 'third'",
+                null,
+            )
+            .use {
+                assertTrue(it.moveToFirst())
+                assertEquals(0, it.getInt(0))
+            }
+        // The partial debit consumed 'second'; its late success cannot debit again.
+        assertNull(service.updatePaymentStatus("second", "completed"))
+        assertEquals(8_500L, service.loadChannel("7")!!.backingSats)
+        // 'third' stayed late-success-only: its success event still debits once.
+        assertEquals("7", service.updatePaymentStatus("third", "completed"))
+        assertEquals(7_500L, service.loadChannel("7")!!.backingSats)
         service.close()
     }
 

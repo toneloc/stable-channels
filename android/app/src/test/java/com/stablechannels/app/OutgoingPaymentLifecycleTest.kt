@@ -1105,6 +1105,31 @@ class OutgoingPaymentLifecycleTest {
     }
 
     @Test
+    @Suppress("UNCHECKED_CAST")
+    fun stabilityReleasedClaimWhoseBalanceNeverDroppedIsExpiredNotLaterAttributed() {
+        releaseLostRecordOnTheLiveChannel()
+        setBooks(10.0, 11_000, receiver = 11_000)
+        (field(state, "_hasReadyChannel").get(state) as MutableStateFlow<Boolean>).value = true
+        call("repairBooksAboveLiveBalance")
+        // The books still match the live balance: the payment never left, so nothing is debited
+        // and the claim becomes late-success-only.
+        assertEquals(10.0, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(11_000L, db.loadChannel("7")!!.backingSats)
+        assertTrue(auditLog().contains("STABILITY_RELEASED_CLAIM_BALANCE_EXPIRED"))
+        // A drop that appears later is an ordinary overspend, never this claim.
+        node.channels = listOf(channel("7", "channel", 9_500))
+        setBooks(10.0, 11_000, receiver = 9_500)
+        call("repairBooksAboveLiveBalance")
+        assertEquals(8.5, db.loadChannel("7")!!.expectedUSD, 0.0)
+        assertEquals(9_500L, db.loadChannel("7")!!.backingSats)
+        // The late success still settles it exactly once.
+        event(success)
+        assertEquals("completed", payment().status)
+        assertEquals(8_500L, db.loadChannel("7")!!.backingSats)
+        assertEquals("7", db.outgoingStabilityOrigin("send"))
+    }
+
+    @Test
     fun stabilityLateSuccessWithNoBooksLeftIsAuditedAsNotDebited() {
         releaseLostRecordOnTheLiveChannel()
         db.writableDatabase.execSQL("DELETE FROM channels WHERE user_channel_id = '7'")
