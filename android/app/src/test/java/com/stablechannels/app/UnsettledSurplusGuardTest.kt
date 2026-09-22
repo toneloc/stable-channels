@@ -5,8 +5,8 @@ import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
 import java.util.Date
 import kotlinx.coroutines.flow.MutableStateFlow
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -54,18 +54,27 @@ class UnsettledSurplusGuardTest {
         )
 
     @Test
-    fun guardBlocksASpendIntoAnUnsettledAboveParSurplus() {
+    fun guardBlocksASpendThatExhaustsTheTargetIntoTheSurplus() {
         setChannel(surplusChannel())
         setTrustedPrice(100_000.0)
 
+        // 10,500 sats with no native balance: $10 covers the target, the extra $0.50 eats
+        // the LSP's surplus, so the spend must wait for settlement.
         val thrown =
             assertThrows(IllegalStateException::class.java) {
-                appState.ensureNoUnsettledSurplus(500_000) // 500 sats, all of it backing
+                appState.ensureNoUnsettledSurplus(10_500_000)
             }
-        assertEquals(
-            "Settle the current stability adjustment, then retry this payment.",
-            thrown.message,
-        )
+        assertTrue(thrown.message!!.contains("to the LSP is still settling"))
+    }
+
+    @Test
+    fun guardAllowsASpendWithinTheStableTarget() {
+        setChannel(surplusChannel())
+        setTrustedPrice(100_000.0)
+
+        // 9,000 sats with no native balance spends into backing, but only shrinks the $10
+        // target to $1 — the surplus owed to the LSP is untouched, so the spend is fine.
+        appState.ensureNoUnsettledSurplus(9_000_000)
     }
 
     @Test
@@ -81,7 +90,7 @@ class UnsettledSurplusGuardTest {
     fun guardFailsOpenWithoutATrustedPrice() {
         setChannel(surplusChannel())
         // PriceService starts empty and stale — same fail-open rule as the stability timer.
-        appState.ensureNoUnsettledSurplus(500_000)
+        appState.ensureNoUnsettledSurplus(10_500_000)
     }
 
     @Test
@@ -89,6 +98,6 @@ class UnsettledSurplusGuardTest {
         // Below par at $80k: the receiver checks only, nothing is owed to the LSP.
         setChannel(surplusChannel())
         setTrustedPrice(80_000.0)
-        appState.ensureNoUnsettledSurplus(500_000)
+        appState.ensureNoUnsettledSurplus(10_500_000)
     }
 }

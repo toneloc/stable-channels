@@ -7,6 +7,7 @@ import com.stablechannels.app.services.PriceService
 import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.StabilityService.StabilityAction
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -236,6 +237,47 @@ class StabilityServiceTest {
         val result = StabilityService.checkStabilityAction(sc, price = 100_000.0)
         assertEquals(StabilityAction.PAY, result.action)
         assertEquals(20.0, result.dollarsFromPar, 0.0001)
+    }
+
+    // ---------------------------------------------------------------------------
+    // spendConsumesLspSurplus — the #322 spend guard predicate
+    // ---------------------------------------------------------------------------
+
+    // $100 target, 100_000 sats backing, 100_000 native; at $110k the $10 drift is owed.
+    private fun guardChannel() =
+        StableChannel(
+            expectedUSD = USD(100.0),
+            backingSats = 100_000L,
+            stableReceiverBTC = Bitcoin(200_000L),
+            isStableReceiver = true,
+        )
+
+    @Test
+    fun `spendConsumesLspSurplus ignores spends within native or target`() {
+        val sc = guardChannel()
+        // Fully native-covered: never touches backing.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 50_000_000))
+        // 50_000 sats into backing ≈ $55 < $100 target: the target shrinks, surplus unchanged.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 150_000_000))
+        // Nothing owed below par: even a channel-emptying spend is fine.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 90_000.0, 200_000_000))
+    }
+
+    @Test
+    fun `spendConsumesLspSurplus blocks spends that exhaust the target`() {
+        val sc = guardChannel()
+        // 150_000 sats into backing ≈ $165 > $100 target: the excess eats the LSP's surplus.
+        assertTrue(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 250_000_000))
+        // At a zero target every sat of residue is surplus, so any spend past native is blocked.
+        val closed =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 1_000L,
+                stableReceiverBTC = Bitcoin(200_000L),
+                isStableReceiver = true,
+            )
+        assertTrue(StabilityService.spendConsumesLspSurplus(closed, 100_000.0, 200_000_000))
+        assertFalse(StabilityService.spendConsumesLspSurplus(closed, 100_000.0, 100_000_000))
     }
 
     // ---------------------------------------------------------------------------

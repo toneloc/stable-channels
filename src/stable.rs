@@ -461,6 +461,27 @@ pub fn settlement_owed_to_lsp(sc: &StableChannel, price: f64) -> bool {
         && allocation_drift_is_actionable(sc.backing_sats, sc.expected_usd.0, price)
 }
 
+/// Whether a spend of `amount_msat` would consume backing already owed to the LSP.
+///
+/// Only the excess over the native (non-backing) balance and the stable target itself touches
+/// the surplus: spending into backing first shrinks the target, which leaves the surplus owed
+/// to the LSP unchanged. A spend that exhausts the target eats the surplus directly.
+pub fn spend_consumes_lsp_surplus(sc: &StableChannel, price: f64, amount_msat: u64) -> bool {
+    if !settlement_owed_to_lsp(sc, price) {
+        return false;
+    }
+    let native_sats = sc
+        .stable_receiver_btc
+        .sats
+        .saturating_sub(sc.backing_sats);
+    let overflow_sats = (amount_msat / 1000).saturating_sub(native_sats);
+    if overflow_sats == 0 {
+        return false;
+    }
+    let overflow_usd = overflow_sats as f64 / SATS_IN_BTC as f64 * price;
+    overflow_usd > sc.expected_usd.0
+}
+
 /// Apply an allocation already derived by this peer.
 ///
 /// Callers must not pass a counterparty-supplied `backing_sats` value here. The shared contract is
@@ -2023,5 +2044,34 @@ mod tests {
         let mut provider = test_sc(100.0, 100_000.0, 200_000);
         provider.is_stable_receiver = false;
         assert!(!settlement_owed_to_lsp(&provider, 110_000.0));
+    }
+
+    // ================================================================
+    // spend_consumes_lsp_surplus
+    // ================================================================
+
+    #[test]
+    fn spend_guard_ignores_spends_within_native_or_target() {
+        // $100 target, 100_000 sats backing, 100_000 native; price up 10% → $10 owed.
+        let sc = test_sc(100.0, 100_000.0, 200_000);
+        // Fully native-covered: never touches backing.
+        assert!(!spend_consumes_lsp_surplus(&sc, 110_000.0, 50_000_000));
+        // 50_000 sats into backing ≈ $55 < $100 target: the target shrinks, the surplus
+        // owed to the LSP is unchanged, so the spend is allowed.
+        assert!(!spend_consumes_lsp_surplus(&sc, 110_000.0, 150_000_000));
+        // Nothing owed: even a channel-emptying spend is fine.
+        assert!(!spend_consumes_lsp_surplus(&sc, 90_000.0, 200_000_000));
+    }
+
+    #[test]
+    fn spend_guard_blocks_spends_that_exhaust_the_target() {
+        let sc = test_sc(100.0, 100_000.0, 200_000);
+        // 150_000 sats into backing ≈ $165 > $100 target: the excess eats the LSP's surplus.
+        assert!(spend_consumes_lsp_surplus(&sc, 110_000.0, 250_000_000));
+        // At a zero target every sat of residue is surplus, so any spend past native is blocked.
+        let mut closed = test_sc(0.0, 100_000.0, 200_000);
+        closed.backing_sats = 1_000;
+        assert!(spend_consumes_lsp_surplus(&closed, 100_000.0, 200_000_000));
+        assert!(!spend_consumes_lsp_surplus(&closed, 100_000.0, 100_000_000));
     }
 }
