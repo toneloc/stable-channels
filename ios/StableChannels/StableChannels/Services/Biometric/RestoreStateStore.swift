@@ -3,10 +3,9 @@ import Foundation
 /// Encapsulates durable restore-state persistence (UserDefaults I/O) for the
 /// wallet lifecycle layer.
 ///
-/// Extracted from `WalletLifecycleManager` to separate infrastructure concern
+/// Extracted from `WalletLifecycleManager` to separate infrastructure concerns
 /// (UserDefaults reads/writes for `restore_phase`, `recovered_restore_pending`)
-/// from domain logic (lifecycle state machine decisions). This keeps
-/// `WalletLifecycleManager` under the 300-line hard cap and makes the
+/// from domain logic (lifecycle state machine decisions). This makes the
 /// UserDefaults dependency explicit and testable via dependency injection.
 struct RestoreStateStore {
     private let appGroupIdentifier: String
