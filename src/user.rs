@@ -1560,7 +1560,9 @@ impl UserApp {
             .sats
             .saturating_sub(sc.backing_sats)
             .saturating_mul(1000);
-        if amount_msat > native_msat && stable::settlement_owed_to_lsp(&sc, sc.latest_price) {
+        if amount_msat > native_msat
+            && stable::settlement_owed_to_lsp(&sc, get_fresh_cached_price_no_fetch())
+        {
             return Err(
                 "Settle the current stability adjustment, then retry this payment.".to_string(),
             );

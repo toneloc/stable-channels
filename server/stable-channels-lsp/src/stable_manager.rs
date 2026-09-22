@@ -1867,7 +1867,8 @@ impl StableChannelManager {
                 sc.stable_receiver_usd.0
             };
             let target = sc.expected_usd.0;
-            let percent_from_par = (((stable_usd_value - target) / target) * 100.0).abs();
+            let percent_from_par =
+                (((stable_usd_value - target) / target.max(0.01)) * 100.0).abs();
             let dollars_from_par = (stable_usd_value - target).abs();
 
             if percent_from_par < percent_threshold
@@ -2360,7 +2361,7 @@ impl StableChannelManager {
             else {
                 return;
             };
-            if sc.expected_usd.0 <= 0.0 || btc_price <= 0.0 {
+            if (sc.expected_usd.0 <= 0.0 && sc.backing_sats == 0) || btc_price <= 0.0 {
                 return;
             }
 
