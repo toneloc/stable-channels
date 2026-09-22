@@ -16,14 +16,6 @@ enum MnemonicMigrationError: Error, LocalizedError, Equatable {
 
 /// Responsible solely for encrypted-first mnemonic loading and legacy plaintext migration.
 enum MnemonicMigrator {
-    /// Normalizes casing and whitespace for canonical BIP-39 mnemonic comparison.
-    static func canonicalizeMnemonic(_ mnemonic: String) -> String {
-        mnemonic
-            .lowercased()
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
-    }
-
     /// Loads the stored mnemonic from Keychain, or migrates an existing legacy plaintext file to Keychain.
     ///
     /// Encrypted-first rule: If a Keychain entry exists, it is authoritative.
@@ -36,10 +28,10 @@ enum MnemonicMigrator {
         // 1. Encrypted-first: an existing Keychain seed is authoritative.
         do {
             let keychainMnemonic = try keychain.loadMnemonic()
-            let canonicalKeychain = canonicalizeMnemonic(keychainMnemonic)
+            let canonicalKeychain = BIP39.canonicalize(keychainMnemonic)
             // Reconcile lingering legacy plaintext file if present
             if let plaintext = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) {
-                let canonicalPlaintext = canonicalizeMnemonic(plaintext)
+                let canonicalPlaintext = BIP39.canonicalize(plaintext)
                 if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
                     throw MnemonicMigrationError.seedMismatch
@@ -69,7 +61,7 @@ enum MnemonicMigrator {
             }
             return nil
         }
-        let canonicalWords = canonicalizeMnemonic(words)
+        let canonicalWords = BIP39.canonicalize(words)
         guard !canonicalWords.isEmpty else { return nil }
 
         do {

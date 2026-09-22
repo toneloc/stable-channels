@@ -46,7 +46,20 @@ protocol MnemonicStorageProtocol {
 
 /// Keychain-backed secure storage service for the wallet mnemonic.
 ///
-/// ...
+/// **Accessibility class: `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`**
+///
+/// This is a deliberate security choice. The `ThisDeviceOnly` variant:
+/// - Allows the Notification Service Extension to read the seed while the device is locked
+///   (required for processing inbound stability payments when the app is closed).
+/// - Prevents the seed from being synced to iCloud Keychain.
+/// - **Excludes the item from device backups** (both iCloud and encrypted local backups).
+///   A phone upgrade or restore-from-backup will therefore require re-entering the seed phrase.
+///
+/// Plain `kSecAttrAccessibleAfterFirstUnlock` (without `ThisDeviceOnly`) would satisfy the
+/// NSE-while-locked requirement identically and would ride in encrypted backups, but would
+/// weaken the guarantee that the seed never leaves the originating device. Users who want
+/// cross-device portability opt into `CloudBackupService`, which stores an AES-256-GCM
+/// encrypted copy in their private CloudKit database with `kSecAttrSynchronizable`.
 final class WalletKeychainService: MnemonicStorageProtocol {
     static let shared = WalletKeychainService()
 
@@ -148,6 +161,7 @@ final class WalletKeychainService: MnemonicStorageProtocol {
 
         let exists = try hasMnemonicInternal(accountName: accountName)
         if exists {
+            // ThisDeviceOnly: see class-level doc for rationale.
             let attributesToUpdate: [String: Any] = [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -163,6 +177,7 @@ final class WalletKeychainService: MnemonicStorageProtocol {
         } else {
             var attributes = base
             attributes[kSecValueData as String] = data
+            // ThisDeviceOnly: see class-level doc for rationale.
             attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
             let status = SecItemAdd(attributes as CFDictionary, nil)
             guard status == errSecSuccess else {

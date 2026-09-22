@@ -10,16 +10,29 @@ import Foundation
 /// rust-bip39 crate (see BIP39WordList.swift), so a valid English seed can never
 /// be falsely rejected.
 enum BIP39 {
+    /// Lowercases and collapses whitespace to produce a canonical BIP-39 form
+    /// without performing any validation (word count, wordlist membership, or
+    /// checksum). Use this when you need a stable comparison key but do not
+    /// want to reject invalid phrases -- for example, when comparing a
+    /// Keychain seed against a legacy plaintext backup during migration.
+    ///
+    /// For full validation, use ``validatedCanonicalMnemonic(_:)`` instead.
+    static func canonicalize(_ mnemonic: String) -> String {
+        mnemonic
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
     /// Returns the lowercase, single-spaced mnemonic after full BIP-39
     /// validation (word count, wordlist membership, and checksum).
     ///
-    /// Callers must pass this returned value—not the original input—to LDKNode.
+    /// Callers must pass this returned value -- not the original input -- to LDKNode.
     /// rust-bip39's parser is case-sensitive, while accepting mixed-case input is
     /// useful at the UI/storage boundary.
     static func validatedCanonicalMnemonic(_ mnemonic: String) -> String? {
-        let words = mnemonic
-            .lowercased()
-            .split(whereSeparator: \.isWhitespace)
+        let words = canonicalize(mnemonic)
+            .split(separator: " ")
             .map(String.init)
         guard [12, 15, 18, 21, 24].contains(words.count) else { return nil }
 
