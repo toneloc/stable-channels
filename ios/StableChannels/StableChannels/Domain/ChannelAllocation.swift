@@ -6,10 +6,27 @@ struct ChannelAllocation: Equatable, Sendable {
     let stableUSD: Double
     let lightningBalanceSats: UInt64
     let btcPrice: Double
+    let backingSatsOverride: UInt64?
+
+    init(
+        stableUSD: Double,
+        lightningBalanceSats: UInt64,
+        btcPrice: Double,
+        backingSatsOverride: UInt64? = nil
+    ) {
+        self.stableUSD = stableUSD
+        self.lightningBalanceSats = lightningBalanceSats
+        self.btcPrice = btcPrice
+        self.backingSatsOverride = backingSatsOverride
+    }
 
     /// Satoshis backing the stable USD position.
     var stableSats: UInt64 {
-        guard btcPrice > 0, stableUSD > 0 else { return 0 }
+        guard stableUSD > 0 else { return 0 }
+        if let backingSatsOverride, backingSatsOverride > 0 {
+            return backingSatsOverride
+        }
+        guard btcPrice > 0 else { return 0 }
         let calculated = (stableUSD / btcPrice) * Double(Constants.satsInBTC)
         return UInt64(calculated)
     }

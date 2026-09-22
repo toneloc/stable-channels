@@ -8,6 +8,10 @@ actor PriceHistoryService: PriceHistoryProviding {
     private var hourlyPrices: [PriceRecord] = []
     private var isLoaded = false
 
+    init(databaseProvider: @escaping @Sendable () -> DatabaseService?) {
+        self.databaseProvider = databaseProvider
+    }
+
     init(databaseService: DatabaseService?) {
         self.databaseProvider = { databaseService }
     }

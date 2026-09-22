@@ -2,7 +2,7 @@ import SwiftUI
 
 // MARK: - Flat Premium Button Style
 
-struct AddToCartKeycapButtonStyle: ButtonStyle {
+struct TactileKeycapButtonStyle: ButtonStyle {
     var pulse: Bool = false
     var isBreathing: Bool = false
     var pulseColor: Color = .init(red: 0.25, green: 0.85, blue: 0.55)

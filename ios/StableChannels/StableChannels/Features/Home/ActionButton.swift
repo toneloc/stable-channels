@@ -38,7 +38,7 @@ struct ActionButton: View {
             .frame(height: 48)
         }
         .buttonStyle(
-            AddToCartKeycapButtonStyle(
+            TactileKeycapButtonStyle(
                 pulse: pulse,
                 isBreathing: isBreathing,
                 pulseColor: color

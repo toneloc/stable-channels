@@ -63,4 +63,30 @@ final class ChannelAllocationTests: XCTestCase {
         XCTAssertEqual(allocation.totalUSD, 0.0)
         XCTAssertEqual(allocation.stableFraction, 0.0)
     }
+
+    func testBackingSatsOverrideTakesPrecedence() {
+        let allocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 150_000,
+            btcPrice: 100_000.0,
+            backingSatsOverride: 52_000
+        )
+
+        // Mathematical calculation would be 50,000 sats, but backingSatsOverride specifies 52,000 sats
+        XCTAssertEqual(allocation.stableSats, 52_000)
+        XCTAssertEqual(allocation.nativeSats, 98_000)
+    }
+
+    func testBackingSatsOverrideZeroWhenNoStableUSD() {
+        let allocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 150_000,
+            btcPrice: 100_000.0,
+            backingSatsOverride: 52_000
+        )
+
+        // With zero stable position, stable sats must be zero regardless of override
+        XCTAssertEqual(allocation.stableSats, 0)
+        XCTAssertEqual(allocation.nativeSats, 150_000)
+    }
 }

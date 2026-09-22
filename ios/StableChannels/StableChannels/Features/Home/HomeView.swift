@@ -103,7 +103,8 @@ struct HomeView: View {
         ChannelAllocation(
             stableUSD: appState.stableUSD,
             lightningBalanceSats: appState.lightningBalanceSats,
-            btcPrice: appState.btcPrice
+            btcPrice: appState.btcPrice,
+            backingSatsOverride: appState.stableChannel.backingSats
         )
     }
 

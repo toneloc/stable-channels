@@ -93,6 +93,7 @@ enum PriceChartAlgorithms {
             // Hoist loop invariants outside the bucket search loop
             let dx = pointAX - avgX
             let dy = avgY - pointAY
+            let c = dx * pointAY + pointAX * dy
 
             var maxArea = -1.0
             var maxAreaIndex = currentBucketStart
@@ -102,8 +103,8 @@ enum PriceChartAlgorithms {
                 let currentX = Double(r.timestamp)
                 let currentY = r.price
 
-                // Invariant area calculation: omits constant 0.5 multiplication
-                let area = abs(dx * (currentY - pointAY) - (pointAX - currentX) * dy)
+                // Invariant area calculation: omits constant 0.5 multiplication and precomputes baseline
+                let area = abs(currentX * dy + currentY * dx - c)
 
                 if area > maxArea {
                     maxArea = area
