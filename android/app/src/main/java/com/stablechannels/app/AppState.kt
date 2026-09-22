@@ -2643,11 +2643,36 @@ class AppState(private val context: Context) : ViewModel() {
         resumePendingSpliceConfirmation()
     }
 
+    /**
+     * Blocks a spend that would consume sats owed to the LSP (#322). When the position is above par
+     * the backing sats beyond the target belong to the LSP until a stability payment settles them;
+     * spending into that surplus first would leave the LSP unpayable. Only the native (non-backing)
+     * balance is spendable while a PAY is due. Fails open when no trusted price is available — the
+     * same "never block money movement on a missing price" rule the stability timer follows.
+     */
+    fun ensureNoUnsettledSurplus(amountMsat: Long) {
+        val sc = _stableChannel.value
+        if (!sc.isStableReceiver || sc.userChannelId.isEmpty()) return
+        val nativeSats = maxOf(sc.stableReceiverBTC.sats - sc.backingSats, 0L)
+        if (amountMsat <= nativeSats * 1000) return
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) return
+        if (
+            StabilityService.checkStabilityAction(sc, price).action ==
+                StabilityService.StabilityAction.PAY
+        ) {
+            throw IllegalStateException(
+                "Settle the current stability adjustment, then retry this payment."
+            )
+        }
+    }
+
     fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
         releaseStaleSpliceLock()
         if (isSweeping) {
             throw IllegalStateException("A splice is already in progress — try again shortly")
         }
+        ensureNoUnsettledSurplus(amountSats * 1000)
         val db =
             databaseService
                 ?: throw IllegalStateException(

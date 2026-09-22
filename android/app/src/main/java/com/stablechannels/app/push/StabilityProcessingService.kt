@@ -16,6 +16,7 @@ import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
 import com.stablechannels.app.services.SpliceEventRecorder
 import com.stablechannels.app.services.StabilityPaymentProtocol
+import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
@@ -919,13 +920,15 @@ class StabilityProcessingService : Service() {
 
         val expectedUsd = channelState.expectedUsd
 
-        if (expectedUsd < 0.01) {
+        // Use backingSats from DB directly — set at trade time, reset after payments
+        val backingSats = channelState.backingSats
+
+        // A sub-cent target with backing is an unsettled LSP surplus (#322), not "no position":
+        // fall through so the surplus settles as a normal above-par payment.
+        if (expectedUsd < 0.01 && backingSats == 0L) {
             Log.d(TAG, "No stable position, skipping")
             return
         }
-
-        // Use backingSats from DB directly — set at trade time, reset after payments
-        val backingSats = channelState.backingSats
 
         Log.d(TAG, "Channel state: expectedUSD=$expectedUsd, backingSats=$backingSats")
 
@@ -938,7 +941,10 @@ class StabilityProcessingService : Service() {
             }
 
         val dollarsFromPar = stableUsdValue - expectedUsd
-        val percentFromPar = if (expectedUsd > 0) abs(dollarsFromPar / expectedUsd) * 100.0 else 0.0
+        // Clamp the denominator: at a zero/tiny target an unclamped ratio would pin the residue
+        // inside the deadband (percentFromPar == 0) and block its settlement.
+        val percentFromPar =
+            abs(dollarsFromPar / maxOf(expectedUsd, StabilityService.MINIMUM_STABLE_USD)) * 100.0
 
         if (
             percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT ||

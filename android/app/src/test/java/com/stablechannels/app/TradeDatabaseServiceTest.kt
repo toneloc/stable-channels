@@ -795,8 +795,9 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
-    fun outgoingReconcileClosesThePositionWhenTheSpendExhaustsTheTarget() {
-        // Zero boundary, persisted side: nothing backs an exhausted target.
+    fun outgoingReconcilePreservesTheResidueWhenTheSpendExhaustsTheTarget() {
+        // Zero boundary, persisted side (#322): the leftover sats are an unsettled LSP surplus —
+        // they stay backing so the stability machinery settles them, never released to native BTC.
         val identifier = "1a".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
@@ -821,16 +822,16 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(result)
         assertEquals(0.0, result!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, result.newBackingSats)
+        assertEquals(5_000L, result.newBackingSats)
         val row = service.loadChannel("21")
         assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
-        assertEquals(0L, row?.backingSats) // the 5,000 sats are native, not stranded
+        assertEquals(5_000L, row?.backingSats) // residue preserved, not stranded or released
         service.close()
     }
 
     @Test
-    fun backingClampClosesThePositionWhenTheRepairExhaustsTheTarget() {
-        // Same boundary on the startup repair path.
+    fun backingClampPreservesTheResidueWhenTheRepairExhaustsTheTarget() {
+        // Same boundary on the startup repair path (#322).
         val identifier = "2b".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
@@ -848,8 +849,43 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(repaired)
         assertEquals(0.0, repaired!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, repaired.newBackingSats)
-        assertEquals(0L, service.loadChannel("22")?.backingSats)
+        assertEquals(5_000L, repaired.newBackingSats)
+        assertEquals(5_000L, service.loadChannel("22")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAtZeroTargetPreservesTheResidue() {
+        // A zero-target LSP SYNC used to zero backing unconditionally, releasing the residue to
+        // the user as native BTC (#322). It now keeps min(current backing, receiver) so the
+        // stability machinery can settle it.
+        val identifier = "6f".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "33",
+            expectedUSD = 10.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 15_000,
+            latestPrice = 100_000.0,
+        )
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "99", // the LSP's own id; the lookup keys on channel_id
+                expectedUsd = 0.0,
+                backingSats = 0,
+                syncVersion = 1,
+                correlation = null,
+            )
+        val applied = service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, applied.status)
+        assertEquals(15_000L, applied.localBackingSats) // min(20_000 backing, 15_000 receiver)
+        val row = service.loadChannel("33")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(15_000L, row?.backingSats)
         service.close()
     }
 

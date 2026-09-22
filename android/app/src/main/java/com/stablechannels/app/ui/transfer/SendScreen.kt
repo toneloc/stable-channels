@@ -774,6 +774,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val actualMsat: Long
                                         val recordPrice: Double
                                         if (invoiceMsat > 0) {
+                                            appState.ensureNoUnsettledSurplus(invoiceMsat)
                                             paymentId = appState.nodeService.sendPayment(invoice)
                                             actualMsat = invoiceMsat
                                             recordPrice = price
@@ -789,6 +790,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 accountingMsatFromUSD(enteredUSD, accountingPrice)
                                                     ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                             recordPrice = accountingPrice
+                                            appState.ensureNoUnsettledSurplus(actualMsat)
                                             paymentId =
                                                 appState.nodeService.sendPaymentUsingAmount(
                                                     invoice,
@@ -812,6 +814,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             accountingSatsFromUSD(enteredUSD, accountingPrice)
                                                 ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
+                                        appState.ensureNoUnsettledSurplus(sats * 1000)
                                         val paymentId =
                                             appState.nodeService.sendBolt12UsingAmount(
                                                 offer,
