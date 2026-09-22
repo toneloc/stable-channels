@@ -430,6 +430,18 @@ class NotificationService: UNNotificationServiceExtension {
         }
     }
 
+    // NOTE: This classifier intentionally diverges from the app's
+    // WalletLifecycleManager.detectStartupState in two ways:
+    //
+    // 1. It does NOT read `recovered_restore_pending`. The app returns .ready
+    //    for seed-present/db-absent when that flag is set, because the app can
+    //    start the node and create the DB. The NSE cannot safely do this, so
+    //    it returns .seedOnlyMismatch and defers with "Payment Pending".
+    //
+    // 2. It uses BIP39.validatedCanonicalMnemonic (with checksum) for seed
+    //    comparison, while the app uses BIP39.canonicalize (without checksum).
+    //    Both produce the same lowercase + single-spaced form, but if you
+    //    change canonicalize's normalization, update both sites.
     func classifyStartupState(
         dataDir: URL,
         sharedUD: UserDefaults? = UserDefaults(suiteName: Constants.appGroup),

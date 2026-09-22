@@ -219,7 +219,7 @@ final class MnemonicMigratorTests: XCTestCase {
     func testCanonicalizeMnemonicLowercasesAndCollapsesWhitespace() {
         let input = "  ABANDON   abandon \n ABANDON   About  "
         let expected = "abandon abandon abandon about"
-        XCTAssertEqual(MnemonicMigrator.canonicalizeMnemonic(input), expected)
+        XCTAssertEqual(BIP39.canonicalize(input), expected)
     }
 }
 

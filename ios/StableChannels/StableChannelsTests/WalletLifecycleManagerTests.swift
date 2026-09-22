@@ -18,7 +18,7 @@ final class WalletLifecycleManagerTests: XCTestCase {
         manager = WalletLifecycleManager(
             keychain: mockStorage,
             userDataDir: tempDirURL,
-            appGroupIdentifier: testAppGroup,
+            restoreStateStore: RestoreStateStore(appGroupIdentifier: testAppGroup),
             validator: { mnemonic in
                 let words = mnemonic.split(whereSeparator: \.isWhitespace)
                 guard [12, 15, 18, 21, 24].contains(words.count) else { return false }
@@ -467,7 +467,7 @@ final class ResetAndPreflightGuardTests: XCTestCase {
         manager = WalletLifecycleManager(
             keychain: mockStorage,
             userDataDir: tempDirURL,
-            appGroupIdentifier: testAppGroup,
+            restoreStateStore: RestoreStateStore(appGroupIdentifier: testAppGroup),
             validator: { mnemonic in
                 let words = mnemonic.split(whereSeparator: \.isWhitespace)
                 return words.count == 12 || words.count == 24

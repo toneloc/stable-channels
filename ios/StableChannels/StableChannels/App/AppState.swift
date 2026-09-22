@@ -729,6 +729,7 @@ class AppState {
             let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
             ud?.removeObject(forKey: "restore_phase")
             ud?.removeObject(forKey: "restore_in_progress")
+            ud?.removeObject(forKey: "recovered_restore_pending")
             ud?.removeObject(forKey: "node_id")
         }
     }
@@ -992,6 +993,7 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(nodeId, forKey: "node_id")
                 }
+                lifecycleManager.clearRecoveredRestorePending()
                 await MainActor.run {
                     phase = .wallet
                     blockHeightService.start()
