@@ -126,6 +126,16 @@ final class WalletLifecycleManager {
                         "Restore phase is active but neither pending nor active seed exists in secure storage."
                     )
                 }
+                if phase == .oldPersistenceWiped {
+                    // Old persistence was wiped and active seed is present: promotion already succeeded
+                    // before the crash, but the process terminated before or during phase cleanup.
+                    // Mark recovered_restore_pending before clearing phase so detectStartupState
+                    // classifies this as .ready rather than .seedOnlyMismatch.
+                    restoreStateStore.setRecoveredRestorePending(true)
+                    restoreStateStore.clearRestorePhase()
+                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION", data: [:])
+                    return true
+                }
                 restoreStateStore.clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
                 return false
@@ -145,6 +155,12 @@ final class WalletLifecycleManager {
                         "Restore phase is active but pending seed is empty and no active seed exists."
                     )
                 }
+                if phase == .oldPersistenceWiped {
+                    restoreStateStore.setRecoveredRestorePending(true)
+                    restoreStateStore.clearRestorePhase()
+                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION", data: [:])
+                    return true
+                }
                 restoreStateStore.clearRestorePhase()
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_NO_PENDING", data: [:])
                 return false
@@ -156,26 +172,26 @@ final class WalletLifecycleManager {
                 try onWipePersistence()
                 try restoreStateStore.setRestorePhase(.oldPersistenceWiped)
                 try keychain.storeMnemonic(pending)
+                restoreStateStore.setRecoveredRestorePending(true)
                 do {
                     try keychain.deletePendingMnemonic()
                 } catch {
                     AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
                 }
                 restoreStateStore.clearRestorePhase()
-                restoreStateStore.setRecoveredRestorePending(true)
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
                 return true
 
             case .oldPersistenceWiped:
                 // Old database was already wiped: promote seed to active slot
                 try keychain.storeMnemonic(pending)
+                restoreStateStore.setRecoveredRestorePending(true)
                 do {
                     try keychain.deletePendingMnemonic()
                 } catch {
                     AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
                 }
                 restoreStateStore.clearRestorePhase()
-                restoreStateStore.setRecoveredRestorePending(true)
                 AuditService.log("RESTORE_INTERRUPTED_RECOVERY_SUCCESS", data: [:])
                 return true
             }
@@ -194,7 +210,8 @@ final class WalletLifecycleManager {
     /// 5. Wipe old database & persistence files throwing.
     /// 6. Save durable restore phase (.oldPersistenceWiped).
     /// 7. Promote pending seed to active Keychain slot.
-    /// 8. Delete pending seed & clear durable restore phase.
+    /// 8. Mark recovered restore pending.
+    /// 9. Delete pending seed & clear durable restore phase.
     func restoreMnemonic(
         _ mnemonic: String,
         onStopNode: () -> Void,
@@ -237,14 +254,16 @@ final class WalletLifecycleManager {
             throw error
         }
 
-        // 6. Clean up pending seed and clear restore phase
+        // 6. Record recovered restore pending before deleting pending evidence and phase
+        restoreStateStore.setRecoveredRestorePending(true)
+
+        // 7. Clean up pending seed and clear restore phase
         do {
             try keychain.deletePendingMnemonic()
         } catch {
             AuditService.log("RESTORE_PENDING_DELETE_FAILED", data: ["error": error.localizedDescription])
         }
         restoreStateStore.clearRestorePhase()
-        restoreStateStore.setRecoveredRestorePending(true)
     }
 
     /// Reconstructs the restore state when the phase marker was lost but a pending

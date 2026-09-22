@@ -270,6 +270,31 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(ud?.string(forKey: "restore_phase"))
     }
 
+    func testRecoveryFromOldPersistenceWipedWithMissingPendingSeedTreatsPromotionAsCompleted() throws {
+        // Crash window regression: the active seed was already promoted, the pending seed
+        // was deleted, and the old persistence was wiped, but the process terminated
+        // before the phase marker was cleared.
+        // Recovery must mark recovered_restore_pending before clearing the phase marker
+        // so that detectStartupState classifies as .ready rather than .seedOnlyMismatch.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(RestorePhase.oldPersistenceWiped.rawValue, forKey: "restore_phase")
+        mockStorage.mockMnemonic = otherMnemonic // Active seed already promoted
+        mockStorage.mockPendingMnemonic = nil // Pending slot already deleted
+
+        var wipeCalled = false
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {
+            wipeCalled = true
+        })
+
+        XCTAssertTrue(didRecover)
+        XCTAssertFalse(wipeCalled)
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(ud?.string(forKey: "restore_phase"))
+        XCTAssertTrue(ud?.bool(forKey: "recovered_restore_pending") == true)
+        // Without an ldk_node_data.sqlite database, startup state must still be .ready
+        XCTAssertEqual(manager.detectStartupState(), .ready)
+    }
+
     func testRecoveryWithRestoreMarkerFailsClosedWhenBothPendingAndActiveSeedsMissing() throws {
         let ud = UserDefaults(suiteName: testAppGroup)
         ud?.set(RestorePhase.pendingValidation.rawValue, forKey: "restore_phase")
