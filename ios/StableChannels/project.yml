@@ -77,6 +77,9 @@ targets:
     sources:
       - path: NotificationService
       - path: StableChannels/Services/Price/PriceOracle.swift
+      - path: StableChannels/Services/Biometric/WalletKeychainService.swift
+      - path: StableChannels/Utilities/BIP39.swift
+      - path: StableChannels/Utilities/BIP39WordList.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stablechannels.app.NotificationService
