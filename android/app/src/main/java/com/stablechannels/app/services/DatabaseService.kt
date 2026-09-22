@@ -1339,10 +1339,13 @@ class DatabaseService(context: Context) :
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
             val localBacking =
-                // A zero-target sync no longer releases the residue: leftover backing is an
-                // unsettled LSP surplus (#322) that the stability machinery settles.
-                if (sync.expectedUsd == 0.0) currentBacking.coerceAtMost(receiverSats)
-                else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
+                // A zero-target sync keeps leftover backing only up to what the LSP still
+                // books: its signed residue settles via the stability machinery (#322), while
+                // a backing of 0 means the LSP already booked the close and the wallet's stale
+                // pre-exit allocation must be released, not paid away as phantom surplus.
+                if (sync.expectedUsd == 0.0) {
+                    currentBacking.coerceAtMost(sync.backingSats).coerceAtMost(receiverSats)
+                } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)
                 } else {
                     TradeProtocol.tradeBackingAfterDelta(

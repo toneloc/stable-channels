@@ -1549,23 +1549,18 @@ impl UserApp {
     }
 
     /// Block a spend that would consume an actionable stability surplus owed to the LSP.
-    /// Fails open when no trusted price is available, like the trade full-exit guard.
+    /// Spends covered by the native balance or by the stable target itself always pass;
+    /// fails open when no trusted price is available, like the trade full-exit guard.
     fn ensure_no_unsettled_surplus(&self, amount_msat: u64) -> Result<(), String> {
         let sc = self.stable_channel.lock().unwrap();
-        if !sc.is_stable_receiver {
-            return Ok(());
-        }
-        let native_msat = sc
-            .stable_receiver_btc
-            .sats
-            .saturating_sub(sc.backing_sats)
-            .saturating_mul(1000);
-        if amount_msat > native_msat
-            && stable::settlement_owed_to_lsp(&sc, get_fresh_cached_price_no_fetch())
-        {
-            return Err(
-                "Settle the current stability adjustment, then retry this payment.".to_string(),
-            );
+        let price = get_fresh_cached_price_no_fetch();
+        if stable::spend_consumes_lsp_surplus(&sc, price, amount_msat) {
+            let owed_usd =
+                sc.backing_sats as f64 / SATS_IN_BTC as f64 * price - sc.expected_usd.0;
+            return Err(format!(
+                "A stability payment of {} to the LSP is still settling — retry this payment shortly.",
+                Self::format_price(owed_usd)
+            ));
         }
         Ok(())
     }
@@ -12175,9 +12170,12 @@ fn max_sell_trade_usd_cents(
 /// `backing_sats` is intentionally not an input: a pending trade uses the allocation this wallet
 /// stored when it created the trade; other syncs preserve the wallet's existing allocation
 /// (unchanged target) or shift it by the target delta valued at the wallet's own price. The full
-/// position is never repriced, so accrued-but-unsettled stability drift survives a sync. If an
-/// authenticated, uncorrelated sync lands just outside the wallet's local capacity, reconcile it
-/// to the live balance instead of consuming the event while leaving the expected target stale.
+/// position is never repriced, so accrued-but-unsettled stability drift survives a sync. The one
+/// exception is the zero boundary: there the peer's signed backing is taken as an upper bound, so
+/// a wallet that still holds a pre-exit allocation converges to an LSP that already booked the
+/// close instead of paying the whole position away as phantom surplus. If an authenticated,
+/// uncorrelated sync lands just outside the wallet's local capacity, reconcile it to the live
+/// balance instead of consuming the event while leaving the expected target stale.
 fn local_sync_backing_sats(
     sync: &IncomingSync,
     live_receiver_sats: u64,
@@ -12195,7 +12193,9 @@ fn local_sync_backing_sats(
         };
     }
     if expected_usd == 0.0 {
-        return Ok(current_backing_sats.min(live_receiver_sats));
+        return Ok(current_backing_sats
+            .min(sync.backing_sats)
+            .min(live_receiver_sats));
     }
     let target_delta_usd = expected_usd - current_expected_usd;
     if current_backing_sats > 0 && target_delta_usd == 0.0 {
@@ -12613,6 +12613,25 @@ mod tests {
             local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 0, None),
             Ok(0),
             "a fully settled exit leaves no residue",
+        );
+
+        let closed_settled = IncomingSync {
+            backing_sats: 0,
+            ..closed.clone()
+        };
+        assert_eq!(
+            local_sync_backing_sats(&closed_settled, 100_000, 0.0, 60.0, 60_000, None),
+            Ok(0),
+            "a zero-target sync the LSP books as closed releases the pre-exit allocation",
+        );
+        let closed_residue = IncomingSync {
+            backing_sats: 500,
+            ..closed.clone()
+        };
+        assert_eq!(
+            local_sync_backing_sats(&closed_residue, 100_000, 0.0, 60.0, 60_000, None),
+            Ok(500),
+            "the LSP's signed residue, not the wallet's stale allocation, survives the sync",
         );
 
         let exit_trade = PendingTradeRow {
