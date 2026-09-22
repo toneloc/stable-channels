@@ -1665,7 +1665,7 @@ impl StableChannelManager {
         // Attribute by balance drop: (index, live channel, live user-side sats).
         let mut matches: Vec<(usize, &Channel, u64)> = Vec::new();
         for (i, sc) in self.stable_channels.iter().enumerate() {
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = channels.iter().find(|c| {
@@ -1798,7 +1798,7 @@ impl StableChannelManager {
         const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
 
         for sc in self.stable_channels.iter_mut() {
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };

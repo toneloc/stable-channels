@@ -27,7 +27,7 @@ use ureq::Agent;
 ///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` otherwise.
 pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.01 || sc.backing_sats == 0 || price <= 0.0 {
+    if sc.backing_sats == 0 || price <= 0.0 {
         return None;
     }
 
@@ -88,11 +88,7 @@ pub fn repair_overbacked_allocation(
     let expected_usd_after = (expected_usd_before - usd_deducted).max(0.0);
 
     sc.expected_usd = USD::from_f64(expected_usd_after);
-    sc.backing_sats = if expected_usd_after < 0.01 {
-        0
-    } else {
-        live_receiver_sats
-    };
+    sc.backing_sats = live_receiver_sats;
     sc.native_sats = live_receiver_sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
     sc.last_stability_payment = SystemTime::now()
@@ -191,7 +187,7 @@ pub fn reconcile_forwarded(
     total_forwarded_sats: u64,
     price: f64,
 ) -> Option<f64> {
-    if sc.expected_usd.0 <= 0.0 || price <= 0.0 {
+    if (sc.expected_usd.0 <= 0.0 && sc.backing_sats == 0) || price <= 0.0 {
         return None;
     }
 
@@ -281,9 +277,6 @@ pub fn deduct_outgoing_from_snapshot(
 
     sc.expected_usd = USD::from_f64(new_expected);
     sc.backing_sats = backing_sats_before.saturating_sub(overflow_sats);
-    if new_expected == 0.0 {
-        sc.backing_sats = 0;
-    }
     sc.native_sats = sc.stable_receiver_btc.sats.saturating_sub(sc.backing_sats);
     recompute_native(sc);
 
@@ -453,6 +446,19 @@ fn allocation_drift_is_actionable(
     }
     let drift_percent = drift_usd / expected_usd * 100.0;
     drift_usd >= STABILITY_THRESHOLD_USD && drift_percent >= STABILITY_THRESHOLD_PERCENT
+}
+
+/// Whether the stable receiver currently owes the LSP an actionable stability settlement.
+///
+/// True only when the backing allocation is worth more than the stable target by at least the
+/// usual stability deadband. A below-par allocation is the LSP's obligation, not the user's.
+pub fn settlement_owed_to_lsp(sc: &StableChannel, price: f64) -> bool {
+    if !sc.is_stable_receiver || !price.is_finite() || price <= 0.0 {
+        return false;
+    }
+    let backing_value_usd = sc.backing_sats as f64 / SATS_IN_BTC as f64 * price;
+    backing_value_usd > sc.expected_usd.0
+        && allocation_drift_is_actionable(sc.backing_sats, sc.expected_usd.0, price)
 }
 
 /// Apply an allocation already derived by this peer.
@@ -844,13 +850,13 @@ pub fn check_stability(
     // As BTC price moves, stable_usd_value = backing_sats * new_price will drift
     // from expected_usd, triggering a stability payment to rebalance.
 
-    // Skip if expected_usd is zero or very small (nothing to stabilize)
-    if sc.expected_usd.0 < 0.01 {
+    // Skip only when there is no stable target and no residual backing left to settle.
+    if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
         audit_event(
             "STABILITY_SKIP",
             json!({
                 "user_channel_id": format!("{}", sc.user_channel_id),
-                "reason": "expected_usd is too small",
+                "reason": "no stable target or residual backing",
                 "expected_usd": sc.expected_usd.0
             }),
         );
@@ -898,11 +904,8 @@ pub fn check_stability(
     // Calculate deviation: how much the stable portion has drifted from target
     // Due to price changes, the BTC backing the stable portion may be worth more or less
     let dollars_from_par = USD::from_f64(stable_usd_value - target_usd);
-    let percent_from_par = if target_usd > 0.0 {
-        ((dollars_from_par.0 / target_usd) * 100.0).abs()
-    } else {
-        0.0
-    };
+    let percent_from_par =
+        ((dollars_from_par.0 / target_usd.max(0.01)) * 100.0).abs();
     let is_receiver_below_expected = stable_usd_value < target_usd;
 
     let action = if percent_from_par < STABILITY_THRESHOLD_PERCENT
@@ -1535,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn splice_out_releases_remaining_backing_when_expected_usd_reaches_zero() {
+    fn splice_out_preserves_residual_backing_when_expected_usd_reaches_zero() {
         let mut sc = test_sc(0.005, 65_000.0, 250);
         sc.backing_sats = 500;
 
@@ -1544,8 +1547,10 @@ mod tests {
 
         assert!((deducted - 0.005).abs() < f64::EPSILON);
         assert_eq!(sc.expected_usd.0, 0.0);
-        assert_eq!(sc.backing_sats, 0);
-        assert_eq!(sc.native_sats, 250);
+        // The residue stays allocated so stability settlement can collect it; a zero
+        // target alone must not release it to native BTC.
+        assert_eq!(sc.backing_sats, 250);
+        assert_eq!(sc.native_sats, 0);
     }
 
     // ================================================================
@@ -1976,5 +1981,47 @@ mod tests {
     fn cooldown_field_default() {
         let sc = StableChannel::default();
         assert_eq!(sc.last_stability_payment, 0);
+    }
+
+    // ================================================================
+    // settlement_owed_to_lsp
+    // ================================================================
+
+    #[test]
+    fn settlement_guard_flags_actionable_user_to_lsp_drift() {
+        // $100 target allocated at $100k; price up 10% → the extra $10 is owed to the LSP.
+        let sc = test_sc(100.0, 100_000.0, 200_000);
+        assert!(settlement_owed_to_lsp(&sc, 110_000.0));
+    }
+
+    #[test]
+    fn settlement_guard_ignores_drift_inside_the_deadband() {
+        let sc = test_sc(100.0, 100_000.0, 200_000);
+        assert!(!settlement_owed_to_lsp(&sc, 100_001.0));
+    }
+
+    #[test]
+    fn settlement_guard_flags_residual_backing_at_a_zero_target() {
+        // A cleared USD target with leftover backing is entirely owed to the LSP once it
+        // exceeds the dollar threshold; check_stability pays this residue out via PAY.
+        let mut sc = test_sc(0.0, 100_000.0, 200_000);
+        sc.backing_sats = 1_000; // $1.00 of residual backing
+        assert!(allocation_drift_is_actionable(1_000, 0.0, 100_000.0));
+        assert!(settlement_owed_to_lsp(&sc, 100_000.0));
+
+        sc.backing_sats = 100; // $0.10 — inside the $0.25 deadband
+        assert!(!settlement_owed_to_lsp(&sc, 100_000.0));
+    }
+
+    #[test]
+    fn settlement_guard_ignores_below_par_drift_provider_side_and_missing_price() {
+        // Price down 10% → the LSP owes the user; spending must not be blocked.
+        let sc = test_sc(100.0, 100_000.0, 200_000);
+        assert!(!settlement_owed_to_lsp(&sc, 90_000.0));
+        assert!(!settlement_owed_to_lsp(&sc, 0.0));
+
+        let mut provider = test_sc(100.0, 100_000.0, 200_000);
+        provider.is_stable_receiver = false;
+        assert!(!settlement_owed_to_lsp(&provider, 110_000.0));
     }
 }

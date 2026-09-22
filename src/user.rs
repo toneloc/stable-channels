@@ -1548,32 +1548,60 @@ impl UserApp {
         }
     }
 
+    /// Block a spend that would consume an actionable stability surplus owed to the LSP.
+    /// Fails open when no trusted price is available, like the trade full-exit guard.
+    fn ensure_no_unsettled_surplus(&self, amount_msat: u64) -> Result<(), String> {
+        let sc = self.stable_channel.lock().unwrap();
+        if !sc.is_stable_receiver {
+            return Ok(());
+        }
+        let native_msat = sc
+            .stable_receiver_btc
+            .sats
+            .saturating_sub(sc.backing_sats)
+            .saturating_mul(1000);
+        if amount_msat > native_msat && stable::settlement_owed_to_lsp(&sc, sc.latest_price) {
+            return Err(
+                "Settle the current stability adjustment, then retry this payment.".to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn pay_invoice(&mut self) -> bool {
         match Bolt11Invoice::from_str(&self.invoice_to_pay) {
-            Ok(invoice) => match self.node.bolt11_payment().send(&invoice, None) {
-                Ok(_payment_id) => {
-                    let amount_text = invoice
-                        .amount_milli_satoshis()
-                        .map(|msat| {
-                            if self.btc_price > 0.0 {
-                                let usd =
-                                    msat as f64 / 1000.0 / SATS_IN_BTC as f64 * self.btc_price;
-                                format!("Payment sent: {}", Self::format_price(usd))
-                            } else {
-                                format!("Payment sent: {}", Self::format_msats_as_btc(msat))
-                            }
-                        })
-                        .unwrap_or_else(|| "Payment sent".to_string());
-                    self.status_message = amount_text;
-                    self.invoice_to_pay.clear();
-                    self.update_balances();
-                    true
+            Ok(invoice) => {
+                if let Err(reason) = self
+                    .ensure_no_unsettled_surplus(invoice.amount_milli_satoshis().unwrap_or(0))
+                {
+                    self.status_message = reason;
+                    return false;
                 }
-                Err(e) => {
-                    self.status_message = format!("Payment error: {}", e);
-                    false
+                match self.node.bolt11_payment().send(&invoice, None) {
+                    Ok(_payment_id) => {
+                        let amount_text = invoice
+                            .amount_milli_satoshis()
+                            .map(|msat| {
+                                if self.btc_price > 0.0 {
+                                    let usd =
+                                        msat as f64 / 1000.0 / SATS_IN_BTC as f64 * self.btc_price;
+                                    format!("Payment sent: {}", Self::format_price(usd))
+                                } else {
+                                    format!("Payment sent: {}", Self::format_msats_as_btc(msat))
+                                }
+                            })
+                            .unwrap_or_else(|| "Payment sent".to_string());
+                        self.status_message = amount_text;
+                        self.invoice_to_pay.clear();
+                        self.update_balances();
+                        true
+                    }
+                    Err(e) => {
+                        self.status_message = format!("Payment error: {}", e);
+                        false
+                    }
                 }
-            },
+            }
             Err(e) => {
                 self.status_message = format!("Invalid invoice: {}", e);
                 false
@@ -1623,6 +1651,10 @@ impl UserApp {
                             }
                         }
                     };
+                    if let Err(reason) = self.ensure_no_unsettled_surplus(amount_msat) {
+                        self.send_error = reason;
+                        return false;
+                    }
                     let result = if invoice_amount_msat.is_some() {
                         self.node.bolt11_payment().send(&invoice, None)
                     } else {
@@ -1700,6 +1732,10 @@ impl UserApp {
                             return false;
                         }
                     };
+                    if let Err(reason) = self.ensure_no_unsettled_surplus(amount_msat) {
+                        self.send_error = reason;
+                        return false;
+                    }
                     match self.node.bolt12_payment().send_using_amount(
                         &offer,
                         amount_msat,
@@ -1841,6 +1877,13 @@ impl UserApp {
                                     return false;
                                 }
                             };
+
+                            if let Err(reason) =
+                                self.ensure_no_unsettled_surplus(amount_sats * 1000)
+                            {
+                                self.send_error = reason;
+                                return false;
+                            }
 
                             match self.node.splice_out(
                                 &ch.user_channel_id,
@@ -12142,15 +12185,15 @@ fn local_sync_backing_sats(
     pending_trade: Option<&db::PendingTradeRow>,
 ) -> Result<u64, &'static str> {
     let expected_usd = stable::normalize_trade_expected_usd(sync.expected_usd);
-    if expected_usd == 0.0 {
-        return Ok(0);
-    }
     if let Some(stored_backing) = pending_trade.and_then(|trade| trade.new_backing_sats) {
         return if stored_backing <= live_receiver_sats {
             Ok(stored_backing)
         } else {
             Err("stored trade allocation exceeds the live balance")
         };
+    }
+    if expected_usd == 0.0 {
+        return Ok(current_backing_sats.min(live_receiver_sats));
     }
     let target_delta_usd = expected_usd - current_expected_usd;
     if current_backing_sats > 0 && target_delta_usd == 0.0 {
@@ -12515,7 +12558,7 @@ mod tests {
         );
         let temporarily_over_capacity = PendingTradeRow {
             new_backing_sats: Some(100_001),
-            ..pending
+            ..pending.clone()
         };
         assert_eq!(
             local_sync_backing_sats(
@@ -12546,18 +12589,39 @@ mod tests {
         };
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 60_000, None),
-            Ok(0),
-            "an authenticated full-exit sync needs no local price",
+            Ok(60_000),
+            "a zero-target sync preserves residual backing for settlement and needs no local price",
+        );
+        assert_eq!(
+            local_sync_backing_sats(&closed, 50_000, 0.0, 60.0, 60_000, None),
+            Ok(50_000),
+            "the preserved residue is clamped to the live balance",
         );
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 100_001.0, 60.0, 59_999, None,),
-            Ok(0),
-            "a full exit with insignificant drift is safe",
+            Ok(59_999),
+            "a full exit keeps even insignificant residue allocated until settlement",
         );
         assert_eq!(
             local_sync_backing_sats(&closed, 100_000, 90_000.0, 60.0, 60_000, None),
-            Ok(0),
+            Ok(60_000),
             "a signed LSP decision is reconciled rather than silently dropped",
+        );
+        assert_eq!(
+            local_sync_backing_sats(&closed, 100_000, 0.0, 60.0, 0, None),
+            Ok(0),
+            "a fully settled exit leaves no residue",
+        );
+
+        let exit_trade = PendingTradeRow {
+            new_expected_usd: 0.0,
+            new_backing_sats: Some(0),
+            ..pending.clone()
+        };
+        assert_eq!(
+            local_sync_backing_sats(&closed, 100_000, 100_000.0, 60.0, 60_000, Some(&exit_trade)),
+            Ok(0),
+            "a wallet-initiated full-exit trade acknowledgment keeps its stored allocation",
         );
     }
 
