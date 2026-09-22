@@ -384,8 +384,10 @@ class DatabaseService(context: Context) :
                 return null
             }
             val overflowSats = currentBacking - receiverSats
-            val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
-            val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
+            val usdOverflow = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdOverflow, 0.0)
+            // Report only the target drop; past the zero boundary the overflow is surplus.
+            val usdDeducted = currentExpected - newExpected
             // Even when the repair exhausts the target, the remaining sats stay backing: a $0
             // target with residue is an unsettled LSP surplus (#322), not native BTC.
             val newBacking = receiverSats
@@ -505,7 +507,13 @@ class DatabaseService(context: Context) :
                 )
             }
             db.execSQL("COMMIT")
-            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
+            // Report only the target drop; past the zero boundary the overflow is surplus.
+            return OutgoingReconcileResult(
+                currentExpected - newExpected,
+                currentExpected,
+                newExpected,
+                newBacking,
+            )
         } catch (e: Exception) {
             try {
                 db.execSQL("ROLLBACK")
@@ -1338,12 +1346,15 @@ class DatabaseService(context: Context) :
             val currentExpected = row[1] as Double
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
+            // The LSP serialises its raw target, and its reconcile can leave a sub-cent remainder;
+            // that is a zero target, as the desktop's normalize_trade_expected_usd treats it.
+            val syncExpected = TradeProtocol.normalizeExpectedUsd(sync.expectedUsd)
             val localBacking =
                 // A zero-target sync keeps leftover backing only up to what the LSP still
                 // books: its signed residue settles via the stability machinery (#322), while
                 // a backing of 0 means the LSP already booked the close and the wallet's stale
                 // pre-exit allocation must be released, not paid away as phantom surplus.
-                if (sync.expectedUsd == 0.0) {
+                if (syncExpected == 0.0) {
                     currentBacking.coerceAtMost(sync.backingSats).coerceAtMost(receiverSats)
                 } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)

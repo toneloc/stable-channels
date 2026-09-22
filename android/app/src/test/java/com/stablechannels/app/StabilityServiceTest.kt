@@ -199,7 +199,7 @@ class StabilityServiceTest {
             )
 
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
-        assertEquals(15.0, deducted!!, 0.0001)
+        assertEquals(10.0, deducted!!, 0.0001) // the target drop, not the $15 overflow
         assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
         assertEquals(5_000L, updated.backingSats) // residue kept as backing, not zeroed
         assertEquals(0L, updated.nativeChannelBTC.sats) // none of it books as native
@@ -218,7 +218,7 @@ class StabilityServiceTest {
             )
 
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
-        assertEquals(15.0, deducted!!, 0.0001)
+        assertEquals(0.0, deducted!!, 0.0001) // nothing left to deduct from the target
         assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
         assertEquals(5_000L, updated.backingSats)
         assertEquals(0L, updated.nativeChannelBTC.sats)

@@ -56,7 +56,8 @@ pub fn reconcile_outgoing(sc: &mut StableChannel, price: f64) -> Option<f64> {
         .unwrap_or_default()
         .as_secs() as i64;
 
-    Some(usd_to_deduct)
+    // Report the target drop only: past the zero boundary the rest of the overflow is surplus.
+    Some(old_expected - new_expected)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -229,7 +230,8 @@ pub fn reconcile_forwarded(
         }),
     );
 
-    Some(usd_to_deduct)
+    // Report the target drop only: past the zero boundary the rest of the overflow is surplus.
+    Some(old_expected - new_expected)
 }
 
 /// Pre-deduct stable balance for a known outgoing amount (e.g. splice-out).
@@ -2073,5 +2075,47 @@ mod tests {
         closed.backing_sats = 1_000;
         assert!(spend_consumes_lsp_surplus(&closed, 100_000.0, 200_000_000));
         assert!(!spend_consumes_lsp_surplus(&closed, 100_000.0, 100_000_000));
+    }
+
+    // ================================================================
+    // deducted USD at the zero boundary
+    // ================================================================
+
+    #[test]
+    fn outgoing_deduction_reports_only_the_target_drop_at_the_zero_boundary() {
+        // $10 target, 20_000 sats backing, receiver falls to 5_000: the overflow is worth $15
+        // but the target can only drop by $10. The residue consumed beyond it is LSP surplus,
+        // not a target cut, and must not be reported as one.
+        let mut sc = test_sc(10.0, 100_000.0, 20_000);
+        sc.backing_sats = 20_000;
+        sc.stable_receiver_btc = Bitcoin::from_sats(5_000);
+        let deducted = reconcile_outgoing(&mut sc, 100_000.0).unwrap();
+        assert!((deducted - 10.0).abs() < 1e-9, "deducted {deducted}");
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 5_000);
+
+        // At an already-zero target the spend only eats residue: Some(0.0), still a reconcile.
+        let mut residue = test_sc(0.0, 100_000.0, 5_000);
+        residue.backing_sats = 20_000;
+        let deducted = reconcile_outgoing(&mut residue, 100_000.0).unwrap();
+        assert_eq!(deducted, 0.0);
+        assert_eq!(residue.backing_sats, 5_000);
+    }
+
+    #[test]
+    fn forwarded_deduction_reports_only_the_target_drop_at_the_zero_boundary() {
+        let mut sc = test_sc(10.0, 100_000.0, 20_000);
+        sc.backing_sats = 20_000;
+        // 20_000 sats before, 15_000 forwarded: $15 of overflow against a $10 target.
+        let deducted = reconcile_forwarded(&mut sc, 20_000, 15_000, 100_000.0).unwrap();
+        assert!((deducted - 10.0).abs() < 1e-9, "deducted {deducted}");
+        assert_eq!(sc.expected_usd.0, 0.0);
+        assert_eq!(sc.backing_sats, 5_000);
+
+        let mut residue = test_sc(0.0, 100_000.0, 20_000);
+        residue.backing_sats = 20_000;
+        let deducted = reconcile_forwarded(&mut residue, 20_000, 15_000, 100_000.0).unwrap();
+        assert_eq!(deducted, 0.0);
+        assert_eq!(residue.backing_sats, 5_000);
     }
 }

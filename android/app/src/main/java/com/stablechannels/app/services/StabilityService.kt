@@ -39,7 +39,8 @@ object StabilityService {
         }
         val overflowSats = updated.backingSats - updated.stableReceiverBTC.sats
         val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
-        val newExpected = max(updated.expectedUSD.amount - usdToDeduct, 0.0)
+        val oldExpected = updated.expectedUSD.amount
+        val newExpected = max(oldExpected - usdToDeduct, 0.0)
         updated.expectedUSD = USD(newExpected)
         // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
         // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
@@ -52,7 +53,8 @@ object StabilityService {
         // above-par PAY. Zeroing it here would release the LSP's sats to the user as native BTC.
         updated.backingSats = updated.stableReceiverBTC.sats
         recomputeNative(updated)
-        return Pair(updated, usdToDeduct)
+        // Report the target drop only: past the zero boundary the rest of the overflow is surplus.
+        return Pair(updated, oldExpected - newExpected)
     }
 
     fun reconcileIncoming(sc: StableChannel): StableChannel {
@@ -72,10 +74,10 @@ object StabilityService {
     }
 
     /**
-     * Whether a spend of [amountMsat] would consume backing already owed to the LSP (#322).
-     * Only the excess over the native (non-backing) balance AND the stable target itself touches
-     * the surplus: spending into backing first shrinks the target, which leaves the surplus owed
-     * to the LSP unchanged. A spend that exhausts the target eats the surplus directly.
+     * Whether a spend of [amountMsat] would consume backing already owed to the LSP (#322). Only
+     * the excess over the native (non-backing) balance AND the stable target itself touches the
+     * surplus: spending into backing first shrinks the target, which leaves the surplus owed to the
+     * LSP unchanged. A spend that exhausts the target eats the surplus directly.
      */
     fun spendConsumesLspSurplus(sc: StableChannel, price: Double, amountMsat: Long): Boolean {
         if (checkStabilityAction(sc, price).action != StabilityAction.PAY) return false

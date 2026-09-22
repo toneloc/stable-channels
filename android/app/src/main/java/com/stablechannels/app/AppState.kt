@@ -2649,8 +2649,8 @@ class AppState(private val context: Context) : ViewModel() {
      * the backing sats beyond the target belong to the LSP until a stability payment settles them.
      * Spends covered by the native balance or by the stable target itself always pass — only a
      * spend that exhausts the target eats the surplus. Fails open when no trusted price is
-     * available — the same "never block money movement on a missing price" rule the stability
-     * timer follows.
+     * available — the same "never block money movement on a missing price" rule the stability timer
+     * follows.
      */
     fun ensureNoUnsettledSurplus(amountMsat: Long) {
         val sc = _stableChannel.value
