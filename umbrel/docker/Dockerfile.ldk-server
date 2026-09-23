@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # Production ldk-server image for the Umbrel package.
 # Builds upstream ldk-server at the exact rev the production bidaemon runs.
+# Deliberately behind the ldk-server-client pin (a56d5a9): bumping it also upgrades LDK Server's LDK Node, so it moves in its own change.
 FROM rust:1-bookworm AS build
 ARG CARGO_BUILD_JOBS=1
 ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1

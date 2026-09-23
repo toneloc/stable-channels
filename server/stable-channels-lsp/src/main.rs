@@ -1,5 +1,6 @@
 mod auth;
 mod backfill;
+mod channel_audit;
 mod channel_close;
 mod config;
 mod event_loop;
@@ -359,6 +360,7 @@ fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
         bytes_to_lower_hex(&bytes)
     } else {
         ldk_config::resolve_api_key(None, ldk_cfg_ref)
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("Could not resolve LDK Server api_key"))?
     };
 
