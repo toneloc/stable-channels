@@ -2541,13 +2541,16 @@ class AppState {
 
     private var spliceGeneration: UInt64 = 0
 
-    /// Blocks a spend that would consume sats owed to the LSP. When the position is
+    /// Blocks a spend that would consume sats owed to the LSP (#322, #344). When the position is
     /// above par the backing sats beyond the target belong to the LSP until a stability
-    /// payment settles them. Fails open when no trusted price is available.
-    private func ensureNoUnsettledSurplus(amountSats: UInt64) throws {
+    /// payment settles them. Spends covered by the native balance or by the stable target itself
+    /// always pass — only a spend that exhausts the target eats the surplus. Fails open when no trusted
+    /// price is available — the same "never block money movement on a missing price" rule the stability
+    /// timer follows.
+    func ensureNoUnsettledSurplus(amountSats: UInt64, price overridePrice: Double? = nil) throws {
         let sc = stableChannel
         guard sc.isStableReceiver, !sc.userChannelId.isEmpty else { return }
-        let price = priceService.accountingPrice
+        let price = overridePrice ?? priceService.accountingPrice
         guard price > 0.0 else { return }
         if StabilityService.spendConsumesLspSurplus(sc, price: price, amountSats: amountSats) {
             let owedUsd = Double(sc.backingSats) / Double(Constants.satsInBTC) * price
@@ -2560,6 +2563,10 @@ class AppState {
                     "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."]
             )
         }
+    }
+
+    func ensureNoUnsettledSurplus(amountMsat: UInt64, price overridePrice: Double? = nil) throws {
+        try ensureNoUnsettledSurplus(amountSats: amountMsat / 1000, price: overridePrice)
     }
 
     func beginSpliceOut(amountSats: UInt64, address: String) throws {
@@ -2706,12 +2713,15 @@ class AppState {
     }
 
     private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) {
-        let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+        let price = accountingBTCPrice
         guard price > 0.0 else {
             // Defer: without a trusted price, don't finalize or clear state. Retry on next tick.
             AuditService.log("SPLICE_RECONCILE_DEFERRED", data: ["txid": txid, "reason": "no_trusted_price"])
             return
         }
+
+        refreshBalances()
+        updateStableBalances()
 
         // Reconcile stable books FIRST, before marking row completed.
         if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
@@ -2835,7 +2845,8 @@ class AppState {
         guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
         if (try? db.spliceRepo.hasPendingSplice()) ?? true { return }
         if (try? db.stabilityRepo.loadPendingSend()) != nil { return }
-        let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+        let price = accountingBTCPrice
+        guard price > 0.0 else { return }
 
         guard let repair = StabilityService.repairBooksAboveLiveBalance(&stableChannel, price: price) else {
             return
@@ -2853,7 +2864,16 @@ class AppState {
         ])
     }
 
-    private func runStabilityCheck() {
+    /// Evaluates stability action for the current channel state, allowing both positive
+    /// targets and zero-target positions with residual backing to settle above-par surplus.
+    func evaluateStabilityAction(price: Double, hasChannels: Bool? = nil) -> StabilityService.StabilityCheckResult? {
+        let channelsAvailable = hasChannels ?? !nodeService.channels.isEmpty
+        guard stableChannel.expectedUSD.amount > 0 || stableChannel.backingSats > 0,
+              channelsAvailable else { return nil }
+        return StabilityService.checkStabilityAction(stableChannel, price: price)
+    }
+
+    func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
         let price = accountingBTCPrice
@@ -2872,13 +2892,10 @@ class AppState {
             repairBooksAboveLiveBalance()
         }
 
-        guard stableChannel.expectedUSD.amount > 0,
-              !nodeService.channels.isEmpty else { return }
-
         // Do NOT recalculate backingSats here — it's set at trade time and stays fixed.
         // As price moves, the stability check detects drift and sends payments to rebalance.
 
-        let result = StabilityService.checkStabilityAction(stableChannel, price: price)
+        guard let result = evaluateStabilityAction(price: price) else { return }
 
         guard result.action == .pay else { return }
 
@@ -3144,7 +3161,9 @@ class AppState {
             return
         }
 
-        if isChannelClosing {
+        if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
+            .contains(where: { $0.opType == "close" }) == true {
+            prevOnchainSats = currentOnchain
             return
         }
 

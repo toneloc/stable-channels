@@ -515,4 +515,98 @@ final class StabilityServiceTests: XCTestCase {
             StabilityService.spendConsumesLspSurplus(sc, price: 100_000.0, amountSats: 99_000)
         )
     }
+
+    // MARK: - AppState Tick & Spend Guard Tests
+
+    @MainActor
+    func testAppStateEvaluateStabilityActionAtZeroTargetWithBacking() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 5_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 10_000)
+
+        let result = appState.evaluateStabilityAction(price: 100_000.0, hasChannels: true)
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.action, .pay)
+    }
+
+    @MainActor
+    func testAppStateEvaluateStabilityActionAtZeroTargetWithoutBacking() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 0
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 10_000)
+
+        let result = appState.evaluateStabilityAction(price: 100_000.0, hasChannels: true)
+        XCTAssertNil(result)
+    }
+
+    @MainActor
+    func testAppStateEvaluateStabilityActionWithoutChannelsReturnsNil() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 5_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 10_000)
+
+        let result = appState.evaluateStabilityAction(price: 100_000.0, hasChannels: false)
+        XCTAssertNil(result)
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusThrowsWhenConsumingSurplus() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+
+        XCTAssertThrowsError(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 100_000.0)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("still settling"))
+        }
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusAllowsNativeSpend() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+
+        XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountMsat: 30_000_000, price: 100_000.0))
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusAtZeroTargetWithBacking() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 5_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 5_000)
+
+        XCTAssertThrowsError(try appState.ensureNoUnsettledSurplus(amountSats: 1_000, price: 100_000.0)) { error in
+            let nsError = error as NSError
+            XCTAssertTrue(nsError.localizedDescription.contains("still settling"))
+        }
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusFailsOpenWhenPriceMissing() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+
+        // Missing/zero price fails open without throwing
+        XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 0.0))
+    }
 }
