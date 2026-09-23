@@ -7,9 +7,9 @@ import org.junit.Test
 
 /**
  * NodeService's LDK event loop is strictly sequential: it won't fetch the next event until the
- * current one is acknowledged. A signed trade-sync message that can never commit (e.g. a stale
- * or not-yet-visible channel row) must not retry forever, or it silently blocks every event
- * after it, including Event.ChannelClosed. SyncRetryTracker bounds that by wall-clock time.
+ * current one is acknowledged. A signed trade-sync message that can never commit (e.g. a stale or
+ * not-yet-visible channel row) must not retry forever, or it silently blocks every event after it,
+ * including Event.ChannelClosed. SyncRetryTracker bounds that by wall-clock time.
  */
 class SyncRetryTrackerTest {
 
@@ -81,13 +81,14 @@ class SyncRetryTrackerTest {
     fun `first-attempt time survives recreating the tracker against the same backing store`() {
         val store = mutableMapOf<String, Long>()
         var now = 0L
-        fun newTracker() = SyncRetryTracker(
-            maxDurationMs = 1_000L,
-            nowMs = { now },
-            loadFirstAttempt = { key -> store[key] },
-            saveFirstAttempt = { key, ts -> store[key] = ts },
-            clearFirstAttempt = { key -> store.remove(key) }
-        )
+        fun newTracker() =
+            SyncRetryTracker(
+                maxDurationMs = 1_000L,
+                nowMs = { now },
+                loadFirstAttempt = { key -> store[key] },
+                saveFirstAttempt = { key, ts -> store[key] = ts },
+                clearFirstAttempt = { key -> store.remove(key) },
+            )
 
         // First "process": records the first attempt and persists it.
         assertFalse(newTracker().recordAttemptAndShouldGiveUp("hash1"))
@@ -108,13 +109,14 @@ class SyncRetryTrackerTest {
     fun `clear removes the persisted first-attempt time too`() {
         val store = mutableMapOf<String, Long>()
         var now = 0L
-        val tracker = SyncRetryTracker(
-            maxDurationMs = 1_000L,
-            nowMs = { now },
-            loadFirstAttempt = { key -> store[key] },
-            saveFirstAttempt = { key, ts -> store[key] = ts },
-            clearFirstAttempt = { key -> store.remove(key) }
-        )
+        val tracker =
+            SyncRetryTracker(
+                maxDurationMs = 1_000L,
+                nowMs = { now },
+                loadFirstAttempt = { key -> store[key] },
+                saveFirstAttempt = { key, ts -> store[key] = ts },
+                clearFirstAttempt = { key -> store.remove(key) },
+            )
 
         assertFalse(tracker.recordAttemptAndShouldGiveUp("hash1"))
         tracker.clear("hash1")
@@ -123,13 +125,14 @@ class SyncRetryTrackerTest {
         now = 1_500L
         // A fresh tracker (simulating a restart) sees no persisted entry, so this is a genuinely
         // new first attempt rather than an immediate give-up.
-        val restarted = SyncRetryTracker(
-            maxDurationMs = 1_000L,
-            nowMs = { now },
-            loadFirstAttempt = { key -> store[key] },
-            saveFirstAttempt = { key, ts -> store[key] = ts },
-            clearFirstAttempt = { key -> store.remove(key) }
-        )
+        val restarted =
+            SyncRetryTracker(
+                maxDurationMs = 1_000L,
+                nowMs = { now },
+                loadFirstAttempt = { key -> store[key] },
+                saveFirstAttempt = { key, ts -> store[key] = ts },
+                clearFirstAttempt = { key -> store.remove(key) },
+            )
         assertFalse(restarted.recordAttemptAndShouldGiveUp("hash1"))
     }
 }

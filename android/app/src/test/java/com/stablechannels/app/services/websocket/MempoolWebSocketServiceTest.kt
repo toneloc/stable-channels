@@ -20,8 +20,7 @@ import org.junit.runner.Description
 @OptIn(ExperimentalCoroutinesApi::class)
 class MempoolWebSocketServiceTest {
 
-    @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    @get:Rule val mainDispatcherRule = MainDispatcherRule()
 
     @Test
     fun `emits receive for tracked address and dedups duplicate message`() = runTest {
@@ -45,7 +44,8 @@ class MempoolWebSocketServiceTest {
                 }
               ]
             }
-            """.trimIndent()
+            """
+                .trimIndent()
 
         invokeHandleMessage(service, message)
         invokeHandleMessage(service, message)
@@ -76,7 +76,8 @@ class MempoolWebSocketServiceTest {
                 }
               }
             }
-            """.trimIndent()
+            """
+                .trimIndent()
 
         invokeHandleMessage(service, message)
         advanceUntilIdle()
@@ -106,7 +107,8 @@ class MempoolWebSocketServiceTest {
                 }
               }
             }
-            """.trimIndent()
+            """
+                .trimIndent()
 
         invokeHandleMessage(service, message)
         advanceUntilIdle()
@@ -129,7 +131,8 @@ class MempoolWebSocketServiceTest {
                 { "height": 810002 }
               ]
             }
-            """.trimIndent()
+            """
+                .trimIndent()
 
         invokeHandleMessage(service, message)
         advanceUntilIdle()
@@ -177,7 +180,8 @@ class MempoolWebSocketServiceTest {
                 { "txid": "short", "vout": [{ "scriptpubkey_address": "$address", "value": 1000 }] }
               ]
             }
-            """.trimIndent()
+            """
+                .trimIndent(),
         )
         advanceUntilIdle()
 
@@ -208,7 +212,8 @@ class MempoolWebSocketServiceTest {
               ],
               "block": { "height": 800001 }
             }
-            """.trimIndent()
+            """
+                .trimIndent(),
         )
         advanceUntilIdle()
 
@@ -240,7 +245,8 @@ class MempoolWebSocketServiceTest {
                 }
               ]
             }
-            """.trimIndent()
+            """
+                .trimIndent(),
         )
         advanceUntilIdle()
 
@@ -266,7 +272,8 @@ class MempoolWebSocketServiceTest {
                 { "txid": "$txid2", "vout": [{ "scriptpubkey_address": "$address", "value": 2000 }] }
               ]
             }
-            """.trimIndent()
+            """
+                .trimIndent(),
         )
         advanceUntilIdle()
 
@@ -296,7 +303,8 @@ class MempoolWebSocketServiceTest {
                 }
               }
             }
-            """.trimIndent()
+            """
+                .trimIndent(),
         )
         advanceUntilIdle()
 
@@ -306,17 +314,18 @@ class MempoolWebSocketServiceTest {
     }
 
     @Test
-    fun `multiple tracked txids can emit outspends with same spending txid and dedup repeats`() = runTest {
-        val service = MempoolWebSocketService(serviceScope = this)
-        val trackedTxid1 = validTxid('b')
-        val trackedTxid2 = validTxid('c')
-        val spendingTxid = validTxid('d')
-        val events = mutableListOf<WebSocketEvent>()
-        service.onTransactionDetected = { events.add(it) }
-        setTrackedTxids(service, setOf(trackedTxid1, trackedTxid2))
+    fun `multiple tracked txids can emit outspends with same spending txid and dedup repeats`() =
+        runTest {
+            val service = MempoolWebSocketService(serviceScope = this)
+            val trackedTxid1 = validTxid('b')
+            val trackedTxid2 = validTxid('c')
+            val spendingTxid = validTxid('d')
+            val events = mutableListOf<WebSocketEvent>()
+            service.onTransactionDetected = { events.add(it) }
+            setTrackedTxids(service, setOf(trackedTxid1, trackedTxid2))
 
-        val payload =
-            """
+            val payload =
+                """
             {
               "tracked-txs": {
                 "$trackedTxid1": {
@@ -327,16 +336,20 @@ class MempoolWebSocketServiceTest {
                 }
               }
             }
-            """.trimIndent()
+            """
+                    .trimIndent()
 
-        invokeHandleMessage(service, payload)
-        invokeHandleMessage(service, payload)
-        advanceUntilIdle()
+            invokeHandleMessage(service, payload)
+            invokeHandleMessage(service, payload)
+            advanceUntilIdle()
 
-        val outspends = events.filterIsInstance<WebSocketEvent.TrackedOutspend>()
-        assertEquals(2, outspends.size)
-        assertEquals(setOf(trackedTxid1, trackedTxid2), outspends.map { it.trackedTxid }.toSet())
-    }
+            val outspends = events.filterIsInstance<WebSocketEvent.TrackedOutspend>()
+            assertEquals(2, outspends.size)
+            assertEquals(
+                setOf(trackedTxid1, trackedTxid2),
+                outspends.map { it.trackedTxid }.toSet(),
+            )
+        }
 
     @Test
     fun `send buffer is capped at fifty while disconnected`() {
@@ -359,74 +372,74 @@ class MempoolWebSocketServiceTest {
         assertEquals(0, reconnectAttempts(service))
     }
 
-  @Test
-  fun `connect open syncs tracking and flushes queued messages`() {
-    val factory = FakeWebSocketConnectionFactory()
-    val service = MempoolWebSocketService(connectionFactory = factory)
+    @Test
+    fun `connect open syncs tracking and flushes queued messages`() {
+        val factory = FakeWebSocketConnectionFactory()
+        val service = MempoolWebSocketService(connectionFactory = factory)
 
-    setTrackedAddresses(service, setOf("bc1qflush"))
-    setTrackedTxids(service, setOf(validTxid('a')))
-    invokeSend(service, "{ \"preopen\": true }")
+        setTrackedAddresses(service, setOf("bc1qflush"))
+        setTrackedTxids(service, setOf(validTxid('a')))
+        invokeSend(service, "{ \"preopen\": true }")
 
-    service.connect()
-    assertFalse(service.isConnected)
+        service.connect()
+        assertFalse(service.isConnected)
 
-    factory.callbacks?.onOpen?.invoke()
+        factory.callbacks?.onOpen?.invoke()
 
-    val sent = factory.connection.sent
-    val blockSub = sent.first { it.contains("mempool-blocks") }
-    assertTrue(service.isConnected)
-    assertTrue(sent.any { it.contains("track-addresses") })
-    assertTrue(sent.any { it.contains("track-txs") })
-    assertTrue(sent.any { it.contains("mempool-blocks") })
-    assertFalse(blockSub.contains("\\\""))
-    assertEquals("{ \"preopen\": true }", sent.last())
-    assertEquals(0, pendingOutboundSize(service))
-  }
+        val sent = factory.connection.sent
+        val blockSub = sent.first { it.contains("mempool-blocks") }
+        assertTrue(service.isConnected)
+        assertTrue(sent.any { it.contains("track-addresses") })
+        assertTrue(sent.any { it.contains("track-txs") })
+        assertTrue(sent.any { it.contains("mempool-blocks") })
+        assertFalse(blockSub.contains("\\\""))
+        assertEquals("{ \"preopen\": true }", sent.last())
+        assertEquals(0, pendingOutboundSize(service))
+    }
 
-  @Test
-  fun `on closing schedules reconnect without attempting to echo close code`() {
-    val factory = FakeWebSocketConnectionFactory()
-    val service = MempoolWebSocketService(connectionFactory = factory)
+    @Test
+    fun `on closing schedules reconnect without attempting to echo close code`() {
+        val factory = FakeWebSocketConnectionFactory()
+        val service = MempoolWebSocketService(connectionFactory = factory)
 
-    service.connect()
-    factory.callbacks?.onOpen?.invoke()
+        service.connect()
+        factory.callbacks?.onOpen?.invoke()
 
-    factory.callbacks?.onClosing?.invoke(1001, "going away")
+        factory.callbacks?.onClosing?.invoke(1001, "going away")
 
-    assertFalse(service.isConnected)
-    assertEquals(1, reconnectAttempts(service))
-    assertNull(factory.connection.closeCode)
-    assertNull(factory.connection.closeReason)
-  }
+        assertFalse(service.isConnected)
+        assertEquals(1, reconnectAttempts(service))
+        assertNull(factory.connection.closeCode)
+        assertNull(factory.connection.closeReason)
+    }
 
-  @Test
-  fun `on failure after open schedules reconnect`() {
-    val factory = FakeWebSocketConnectionFactory()
-    val service = MempoolWebSocketService(connectionFactory = factory)
+    @Test
+    fun `on failure after open schedules reconnect`() {
+        val factory = FakeWebSocketConnectionFactory()
+        val service = MempoolWebSocketService(connectionFactory = factory)
 
-    service.connect()
-    factory.callbacks?.onOpen?.invoke()
+        service.connect()
+        factory.callbacks?.onOpen?.invoke()
 
-    factory.callbacks?.onFailure?.invoke(IllegalStateException("boom"))
+        factory.callbacks?.onFailure?.invoke(IllegalStateException("boom"))
 
-    assertFalse(service.isConnected)
-    assertEquals(1, reconnectAttempts(service))
-  }
+        assertFalse(service.isConnected)
+        assertEquals(1, reconnectAttempts(service))
+    }
 
-  @Test
-  fun `manual disconnect stops reconnect on subsequent closed callback`() {
-    val factory = FakeWebSocketConnectionFactory()
-    val service = MempoolWebSocketService(connectionFactory = factory)
+    @Test
+    fun `manual disconnect stops reconnect on subsequent closed callback`() {
+        val factory = FakeWebSocketConnectionFactory()
+        val service = MempoolWebSocketService(connectionFactory = factory)
 
-    service.connect()
-    factory.callbacks?.onOpen?.invoke()
-    service.disconnect()
-    factory.callbacks?.onClosed?.invoke(1000, "normal")
+        service.connect()
+        factory.callbacks?.onOpen?.invoke()
+        service.disconnect()
+        factory.callbacks?.onClosed?.invoke(1000, "normal")
 
-    assertFalse(service.isConnected)
-    assertEquals(0, reconnectAttempts(service))
-  }
+        assertFalse(service.isConnected)
+        assertEquals(0, reconnectAttempts(service))
+    }
 
     private fun invokeHandleMessage(service: MempoolWebSocketService, payload: String) {
         val method = service.javaClass.getDeclaredMethod("handleMessage", String::class.java)
@@ -435,9 +448,9 @@ class MempoolWebSocketServiceTest {
     }
 
     private fun invokeSend(service: MempoolWebSocketService, payload: String) {
-      val method = service.javaClass.getDeclaredMethod("send", String::class.java)
-      method.isAccessible = true
-      method.invoke(service, payload)
+        val method = service.javaClass.getDeclaredMethod("send", String::class.java)
+        method.isAccessible = true
+        method.invoke(service, payload)
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -460,69 +473,68 @@ class MempoolWebSocketServiceTest {
 
     @Suppress("UNCHECKED_CAST")
     private fun pendingOutboundSize(service: MempoolWebSocketService): Int {
-      val field = service.javaClass.getDeclaredField("pendingOutboundMessages")
-      field.isAccessible = true
-      val queue = field.get(service) as ArrayDeque<String>
-      return queue.size
+        val field = service.javaClass.getDeclaredField("pendingOutboundMessages")
+        field.isAccessible = true
+        val queue = field.get(service) as ArrayDeque<String>
+        return queue.size
     }
 
     private fun setReconnectAttempts(service: MempoolWebSocketService, value: Int) {
-      val managerField = service.javaClass.getDeclaredField("reconnectManager")
-      managerField.isAccessible = true
-      val manager = managerField.get(service)
-      val attemptsField = manager.javaClass.getDeclaredField("reconnectAttempts")
-      attemptsField.isAccessible = true
-      attemptsField.setInt(manager, value)
+        val managerField = service.javaClass.getDeclaredField("reconnectManager")
+        managerField.isAccessible = true
+        val manager = managerField.get(service)
+        val attemptsField = manager.javaClass.getDeclaredField("reconnectAttempts")
+        attemptsField.isAccessible = true
+        attemptsField.setInt(manager, value)
     }
 
     private fun reconnectAttempts(service: MempoolWebSocketService): Int {
-      val managerField = service.javaClass.getDeclaredField("reconnectManager")
-      managerField.isAccessible = true
-      val manager = managerField.get(service)
-      val attemptsField = manager.javaClass.getDeclaredField("reconnectAttempts")
-      attemptsField.isAccessible = true
-      return attemptsField.getInt(manager)
+        val managerField = service.javaClass.getDeclaredField("reconnectManager")
+        managerField.isAccessible = true
+        val manager = managerField.get(service)
+        val attemptsField = manager.javaClass.getDeclaredField("reconnectAttempts")
+        attemptsField.isAccessible = true
+        return attemptsField.getInt(manager)
     }
 
     private fun validTxid(char: Char): String = char.toString().repeat(64)
 }
 
-  private class FakeWebSocketConnectionFactory : WebSocketConnectionFactory {
+private class FakeWebSocketConnectionFactory : WebSocketConnectionFactory {
     var callbacks: WebSocketCallbacks? = null
     val connection = FakeWebSocketConnection()
 
     override fun create(endpointUrl: String, callbacks: WebSocketCallbacks): WebSocketConnection {
-      this.callbacks = callbacks
-      return connection
+        this.callbacks = callbacks
+        return connection
     }
-  }
+}
 
-  private class FakeWebSocketConnection : WebSocketConnection {
+private class FakeWebSocketConnection : WebSocketConnection {
     val sent = mutableListOf<String>()
     var closeCode: Int? = null
     var closeReason: String? = null
     var canceled = false
 
     override fun send(text: String): Boolean {
-      sent.add(text)
-      return true
+        sent.add(text)
+        return true
     }
 
     override fun close(code: Int, reason: String?): Boolean {
-      closeCode = code
-      closeReason = reason
-      return true
+        closeCode = code
+        closeReason = reason
+        return true
     }
 
     override fun cancel() {
-      canceled = true
+        canceled = true
     }
-  }
+}
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class MainDispatcherRule(
-    private val dispatcher: TestDispatcher = UnconfinedTestDispatcher()
-) : TestWatcher() {
+class MainDispatcherRule(private val dispatcher: TestDispatcher = UnconfinedTestDispatcher()) :
+    TestWatcher() {
     override fun starting(description: Description) {
         Dispatchers.setMain(dispatcher)
     }

@@ -9,9 +9,10 @@ import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeCorrelation
-import com.stablechannels.app.services.TradeProtocol
 import com.stablechannels.app.services.TradeOutcome
+import com.stablechannels.app.services.TradeProtocol
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,7 +25,6 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -60,7 +60,8 @@ class TradeDatabaseServiceTest {
                 created_at INTEGER DEFAULT (strftime('%s','now')),
                 updated_at INTEGER DEFAULT (strftime('%s','now'))
             )
-            """.trimIndent()
+            """
+                .trimIndent()
         )
         legacy.execSQL(
             """
@@ -76,30 +77,39 @@ class TradeDatabaseServiceTest {
                 status TEXT DEFAULT 'pending',
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )
-            """.trimIndent()
+            """
+                .trimIndent()
         )
         legacy.execSQL(
             "INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats) VALUES (?, ?, ?, ?)",
-            arrayOf<Any>("legacy-channel", "legacy-user-channel", 25.0, 25_000)
+            arrayOf<Any>("legacy-channel", "legacy-user-channel", 25.0, 25_000),
         )
         legacy.execSQL(
             "INSERT INTO trades (channel_id, action, amount_usd, amount_btc, btc_price) VALUES (?, ?, ?, ?, ?)",
-            arrayOf<Any>("legacy-channel", "buy", 5.0, 0.00005, 100_000.0)
+            arrayOf<Any>("legacy-channel", "buy", 5.0, 0.00005, 100_000.0),
         )
         legacy.version = 2
         legacy.close()
 
         val upgraded = DatabaseService(context)
-        val channelColumns = upgraded.readableDatabase.rawQuery(
-            "PRAGMA table_info(channels)", null
-        ).use { cursor ->
-            buildSet { while (cursor.moveToNext()) add(cursor.getString(1)) }
-        }
-        val tradeColumns = upgraded.readableDatabase.rawQuery(
-            "PRAGMA table_info(trades)", null
-        ).use { cursor ->
-            buildSet { while (cursor.moveToNext()) add(cursor.getString(1)) }
-        }
+        val channelColumns =
+            upgraded.readableDatabase
+                .rawQuery(
+                    "PRAGMA table_info(channels)",
+                    null,
+                )
+                .use { cursor ->
+                    buildSet { while (cursor.moveToNext()) add(cursor.getString(1)) }
+                }
+        val tradeColumns =
+            upgraded.readableDatabase
+                .rawQuery(
+                    "PRAGMA table_info(trades)",
+                    null,
+                )
+                .use { cursor ->
+                    buildSet { while (cursor.moveToNext()) add(cursor.getString(1)) }
+                }
         assertTrue(channelColumns.contains("sync_version"))
         assertTrue(tradeColumns.contains("trade_id"))
         assertTrue(tradeColumns.contains("uncertainty_reason"))
@@ -108,9 +118,16 @@ class TradeDatabaseServiceTest {
         channel!!
         assertEquals(25.0, channel.expectedUSD, 0.0)
         assertEquals(25_000L, channel.backingSats)
-        val tradeCount = upgraded.readableDatabase.rawQuery(
-            "SELECT COUNT(*) FROM trades", null
-        ).use { cursor -> cursor.moveToFirst(); cursor.getLong(0) }
+        val tradeCount =
+            upgraded.readableDatabase
+                .rawQuery(
+                    "SELECT COUNT(*) FROM trades",
+                    null,
+                )
+                .use { cursor ->
+                    cursor.moveToFirst()
+                    cursor.getLong(0)
+                }
         assertEquals(1L, tradeCount)
         upgraded.close()
     }
@@ -129,26 +146,28 @@ class TradeDatabaseServiceTest {
             backingSats = 55_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
-        val prepared = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(50.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 55_000
-            ),
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            now = now,
-            tradeId = tradeId
-        )
+        val prepared =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(50.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 55_000,
+                    ),
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                now = now,
+                tradeId = tradeId,
+            )
         assertNotNull(prepared)
         prepared!!
         val tradeDbId = service.recordPreparedTrade(prepared)
@@ -165,14 +184,15 @@ class TradeDatabaseServiceTest {
         assertEquals(55_000L, before.backingSats)
         assertEquals("fee_paid", service.unresolvedTradePayments()[paymentId]?.status)
 
-        val sync = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUsd = prepared.newExpectedUsd,
-            backingSats = prepared.newBackingSats + 1,
-            syncVersion = 1,
-            correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash)
-        )
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUsd = prepared.newExpectedUsd,
+                backingSats = prepared.newBackingSats + 1,
+                syncVersion = 1,
+                correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash),
+            )
         assertTrue(service.markTradeResponseNotCommittable(sync))
         assertEquals("uncertain", service.unresolvedTradePayments()[paymentId]?.status)
         val accepted = service.applyCorrelatedTradeAcceptance(sync)
@@ -190,40 +210,46 @@ class TradeDatabaseServiceTest {
         assertFalse(service.tradeIsUnresolved(tradeDbId))
         assertEquals(
             TradeControlApplyStatus.DUPLICATE,
-            service.applyCorrelatedTradeAcceptance(sync).status
+            service.applyCorrelatedTradeAcceptance(sync).status,
         )
 
-        val superseded = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(prepared.newExpectedUsd),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = prepared.newBackingSats
-            ),
-            action = "buy",
-            amountUsd = 1.0,
-            amountBtc = 0.0000099,
-            feeUsd = 0.01,
-            newExpectedUsd = prepared.newExpectedUsd - 1.0,
-            quotePrice = 100_000.0,
-            now = now + 1,
-            tradeId = "aa".repeat(32)
-        )!!
+        val superseded =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(prepared.newExpectedUsd),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = prepared.newBackingSats,
+                    ),
+                action = "buy",
+                amountUsd = 1.0,
+                amountBtc = 0.0000099,
+                feeUsd = 0.01,
+                newExpectedUsd = prepared.newExpectedUsd - 1.0,
+                quotePrice = 100_000.0,
+                now = now + 1,
+                tradeId = "aa".repeat(32),
+            )!!
         val supersededDbId = service.recordPreparedTrade(superseded)
         val supersededPaymentId = "bb".repeat(32)
         assertTrue(service.attachTradePaymentId(supersededDbId, supersededPaymentId))
-        val staleAcceptance = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUsd = superseded.newExpectedUsd,
-            backingSats = superseded.newBackingSats,
-            syncVersion = 1,
-            correlation = TradeCorrelation(
-                superseded.tradeId, supersededPaymentId, superseded.requestHash
+        val staleAcceptance =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUsd = superseded.newExpectedUsd,
+                backingSats = superseded.newBackingSats,
+                syncVersion = 1,
+                correlation =
+                    TradeCorrelation(
+                        superseded.tradeId,
+                        supersededPaymentId,
+                        superseded.requestHash,
+                    ),
             )
-        )
         val staleResult = service.applyCorrelatedTradeAcceptance(staleAcceptance)
         assertEquals(TradeControlApplyStatus.APPLIED, staleResult.status)
         assertFalse(staleResult.allocationApplied!!)
@@ -247,81 +273,96 @@ class TradeDatabaseServiceTest {
             backingSats = 55_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
         // Rejected trade: outcome must surface with the persisted reason code.
-        val rejectedTrade = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(50.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 55_000
-            ),
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            now = now,
-            tradeId = "ef".repeat(32)
-        )!!
+        val rejectedTrade =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(50.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 55_000,
+                    ),
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                now = now,
+                tradeId = "ef".repeat(32),
+            )!!
         val rejectedDbId = service.recordPreparedTrade(rejectedTrade)
         val rejectedPaymentId = "cd".repeat(32)
         assertTrue(service.attachTradePaymentId(rejectedDbId, rejectedPaymentId))
         assertNull(service.terminalTradeOutcome(rejectedPaymentId))
 
-        val rejection = TradeControlMessage.Rejected(
-            channelId = identifier,
-            correlation = TradeCorrelation(
-                rejectedTrade.tradeId, rejectedPaymentId, rejectedTrade.requestHash
-            ),
-            reasonCode = "quote_deviation",
-            decidedAt = now
-        )
+        val rejection =
+            TradeControlMessage.Rejected(
+                channelId = identifier,
+                correlation =
+                    TradeCorrelation(
+                        rejectedTrade.tradeId,
+                        rejectedPaymentId,
+                        rejectedTrade.requestHash,
+                    ),
+                reasonCode = "quote_deviation",
+                decidedAt = now,
+            )
         assertEquals(TradeControlApplyStatus.APPLIED, service.applyTradeRejection(rejection).status)
-        assertEquals(TradeOutcome(false, TradeProtocol.rejectionMessage("quote_deviation")), service.terminalTradeOutcome(rejectedPaymentId))
+        assertEquals(
+            TradeOutcome(false, TradeProtocol.rejectionMessage("quote_deviation")),
+            service.terminalTradeOutcome(rejectedPaymentId),
+        )
 
         // Accepted trade: outcome must flip to accepted with no reason code.
-        val acceptedTrade = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(50.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 55_000
-            ),
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            now = now + 1,
-            tradeId = "aa".repeat(32)
-        )!!
+        val acceptedTrade =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(50.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 55_000,
+                    ),
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                now = now + 1,
+                tradeId = "aa".repeat(32),
+            )!!
         val acceptedDbId = service.recordPreparedTrade(acceptedTrade)
         val acceptedPaymentId = "bb".repeat(32)
         assertTrue(service.attachTradePaymentId(acceptedDbId, acceptedPaymentId))
         assertNull(service.terminalTradeOutcome(acceptedPaymentId))
 
-        val sync = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUsd = acceptedTrade.newExpectedUsd,
-            backingSats = acceptedTrade.newBackingSats,
-            syncVersion = 1,
-            correlation = TradeCorrelation(
-                acceptedTrade.tradeId, acceptedPaymentId, acceptedTrade.requestHash
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUsd = acceptedTrade.newExpectedUsd,
+                backingSats = acceptedTrade.newBackingSats,
+                syncVersion = 1,
+                correlation =
+                    TradeCorrelation(
+                        acceptedTrade.tradeId,
+                        acceptedPaymentId,
+                        acceptedTrade.requestHash,
+                    ),
             )
-        )
         assertEquals(
             TradeControlApplyStatus.APPLIED,
-            service.applyCorrelatedTradeAcceptance(sync).status
+            service.applyCorrelatedTradeAcceptance(sync).status,
         )
         assertEquals(TradeOutcome(true, ""), service.terminalTradeOutcome(acceptedPaymentId))
         service.close()
@@ -332,23 +373,25 @@ class TradeDatabaseServiceTest {
         val channelId = "12".repeat(32)
         val paymentId = "34".repeat(32)
         val service = DatabaseService(context)
-        val prepared = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = channelId,
-                userChannelId = "9",
-                expectedUSD = USD(25.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 25_000
-            ),
-            action = "buy",
-            amountUsd = 5.0,
-            amountBtc = 0.0000495,
-            feeUsd = 0.05,
-            newExpectedUsd = 20.0,
-            quotePrice = 100_000.0,
-            tradeId = "56".repeat(32)
-        )
+        val prepared =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = channelId,
+                        userChannelId = "9",
+                        expectedUSD = USD(25.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 25_000,
+                    ),
+                action = "buy",
+                amountUsd = 5.0,
+                amountBtc = 0.0000495,
+                feeUsd = 0.05,
+                newExpectedUsd = 20.0,
+                quotePrice = 100_000.0,
+                tradeId = "56".repeat(32),
+            )
         assertNotNull(prepared)
         val tradeDbId = service.recordPreparedTrade(prepared!!)
 
@@ -380,40 +423,43 @@ class TradeDatabaseServiceTest {
             backingSats = 55_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
-        val prepared = TradeProtocol.prepare(
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(50.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 55_000
-            ),
-            spendableSats = 100_000,
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            tradeId = tradeId
-        )!!
+        val prepared =
+            TradeProtocol.prepare(
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(50.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 55_000,
+                    ),
+                spendableSats = 100_000,
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                tradeId = tradeId,
+            )!!
         val tradeDbId = service.recordPreparedTrade(prepared)
         service.attachTradePaymentId(tradeDbId, paymentId)
         service.deleteChannel("7")
 
-        val sync = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUsd = prepared.newExpectedUsd,
-            backingSats = prepared.newBackingSats,
-            syncVersion = 1,
-            correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash)
-        )
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUsd = prepared.newExpectedUsd,
+                backingSats = prepared.newBackingSats,
+                syncVersion = 1,
+                correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash),
+            )
         assertEquals(
             TradeControlApplyStatus.INVALID,
-            service.applyCorrelatedTradeAcceptance(sync).status
+            service.applyCorrelatedTradeAcceptance(sync).status,
         )
         service.close()
     }
@@ -429,21 +475,22 @@ class TradeDatabaseServiceTest {
             backingSats = 55_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
         service.deleteChannel("7")
 
-        val sync = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUsd = 40.0,
-            backingSats = 40_000,
-            syncVersion = 1,
-            correlation = null
-        )
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUsd = 40.0,
+                backingSats = 40_000,
+                syncVersion = 1,
+                correlation = null,
+            )
         assertEquals(
             TradeControlApplyStatus.INVALID,
-            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status,
         )
         service.close()
     }
@@ -466,34 +513,36 @@ class TradeDatabaseServiceTest {
             backingSats = 55_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
         // The demotion: same payment id, recorded as lightning with no backing delta.
-        val demoted = service.recordPaymentAndMaybeUpdateBacking(
-            paymentId = paymentId,
-            paymentType = "lightning",
-            direction = "received",
-            amountMsat = 25_000
-        )
+        val demoted =
+            service.recordPaymentAndMaybeUpdateBacking(
+                paymentId = paymentId,
+                paymentType = "lightning",
+                direction = "received",
+                amountMsat = 25_000,
+            )
         assertTrue(demoted.isNewPayment)
         assertEquals(55_000L, service.loadChannel("7")?.backingSats)
 
         // The retry, now with channel state available, cannot repair it: the payment id dedups.
-        val retry = service.recordPaymentAndMaybeUpdateBacking(
-            paymentId = paymentId,
-            paymentType = "stability",
-            direction = "received",
-            amountMsat = 25_000,
-            userChannelId = "7",
-            backingDeltaSats = 25,
-            settlementId = settlementId
-        )
+        val retry =
+            service.recordPaymentAndMaybeUpdateBacking(
+                paymentId = paymentId,
+                paymentType = "stability",
+                direction = "received",
+                amountMsat = 25_000,
+                userChannelId = "7",
+                backingDeltaSats = 25,
+                settlementId = settlementId,
+            )
         assertFalse(retry.isNewPayment)
         assertEquals(55_000L, service.loadChannel("7")?.backingSats)
         assertEquals(
             "lightning",
-            service.getRecentPayments().first { it.paymentId == paymentId }.paymentType
+            service.getRecentPayments().first { it.paymentId == paymentId }.paymentType,
         )
         service.close()
     }
@@ -516,7 +565,7 @@ class TradeDatabaseServiceTest {
             backingSats = 100_000,
             note = null,
             receiverSats = 100_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
         // Simulate the stability timer's own concurrent debit landing first: it commits
@@ -527,21 +576,22 @@ class TradeDatabaseServiceTest {
             direction = "sent",
             amountMsat = 10_000_000,
             userChannelId = "7",
-            backingDeltaSats = -10_000
+            backingDeltaSats = -10_000,
         )
         assertEquals(90_000L, service.loadChannel("7")?.backingSats)
 
         // The ordinary send's own overflow, measured against the live (post-send) receiver
         // balance and whatever backing is actually in the DB right now (90,000 sats, $90 —
         // already corrected by the timer above), not a stale pre-timer snapshot (100,000 sats).
-        val result = service.reconcileOutgoingBacking(
-            channelId = identifier,
-            userChannelId = "7",
-            note = null,
-            receiverSats = 80_000,
-            latestPrice = 100_000.0,
-            price = 100_000.0
-        )
+        val result =
+            service.reconcileOutgoingBacking(
+                channelId = identifier,
+                userChannelId = "7",
+                note = null,
+                receiverSats = 80_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
 
         assertNotNull(result)
         assertEquals(90.0, result!!.oldExpectedUSD, 0.0001)
@@ -571,11 +621,12 @@ class TradeDatabaseServiceTest {
             backingSats = 75_309,
             note = null,
             receiverSats = 75_309,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
         // A $15 withdrawal left the channel; the deduction never ran.
-        val repaired = service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0)
+        val repaired =
+            service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0)
 
         assertNotNull(repaired)
         assertEquals(6_253L, repaired!!.overflowSats)
@@ -588,11 +639,15 @@ class TradeDatabaseServiceTest {
         assertEquals(69_056L, healed?.backingSats)
 
         // Idempotent: the books now match the live balance, so nothing more is deducted.
-        assertNull(service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0))
+        assertNull(
+            service.clampBackingToLiveReceiver("11", receiverSats = 69_056, price = 100_000.0)
+        )
         assertEquals(69.0563, service.loadChannel("11")?.expectedUSD ?: -1.0, 0.0001)
 
         // A position that is merely below par is NOT an overflow — leave it alone.
-        assertNull(service.clampBackingToLiveReceiver("11", receiverSats = 80_000, price = 100_000.0))
+        assertNull(
+            service.clampBackingToLiveReceiver("11", receiverSats = 80_000, price = 100_000.0)
+        )
         assertEquals(69_056L, service.loadChannel("11")?.backingSats)
         service.close()
     }
@@ -607,34 +662,35 @@ class TradeDatabaseServiceTest {
         val service = DatabaseService(context)
         service.saveChannel(
             channelId = identifier,
-            userChannelId = "316138149017243335882538127405458540875",   // the app's own id
+            userChannelId = "316138149017243335882538127405458540875", // the app's own id
             expectedUSD = 19.7555,
             backingSats = 25_493,
             note = null,
             receiverSats = 25_493,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
-        val sync = TradeControlMessage.Sync(
-            channelId = identifier,
-            userChannelId = "317806336254983028346801304467074316335",   // the LSP's own id
-            expectedUsd = 14.6022,
-            backingSats = 18_819,
-            syncVersion = 3,
-            correlation = null
-        )
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "317806336254983028346801304467074316335", // the LSP's own id
+                expectedUsd = 14.6022,
+                backingSats = 18_819,
+                syncVersion = 3,
+                correlation = null,
+            )
         assertEquals(
             TradeControlApplyStatus.APPLIED,
-            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status,
         )
         val healed = service.loadChannel("316138149017243335882538127405458540875")
         assertEquals(14.6022, healed?.expectedUSD ?: -1.0, 0.0001)
-        assertEquals(20_340L, healed?.backingSats)   // delta applied against the app's own backing
+        assertEquals(20_340L, healed?.backingSats) // delta applied against the app's own backing
 
         // Replaying the same version changes nothing.
         assertEquals(
             TradeControlApplyStatus.DUPLICATE,
-            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status
+            service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0).status,
         )
         service.close()
     }
@@ -650,25 +706,35 @@ class TradeDatabaseServiceTest {
             channelId = identifier,
             userChannelId = "9",
             expectedUSD = 100.0,
-            backingSats = 90_000,          // below par
+            backingSats = 90_000, // below par
             note = null,
             receiverSats = 90_000,
-            latestPrice = 100_000.0
+            latestPrice = 100_000.0,
         )
 
-        val first = service.reconcileOutgoingBacking(
-            channelId = identifier, userChannelId = "9", note = null,
-            receiverSats = 82_000, latestPrice = 100_000.0, price = 100_000.0
-        )
+        val first =
+            service.reconcileOutgoingBacking(
+                channelId = identifier,
+                userChannelId = "9",
+                note = null,
+                receiverSats = 82_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
         assertNotNull(first)
         assertEquals(8.0, first!!.usdDeducted, 0.0001)
         assertEquals(92.0, first.newExpectedUSD, 0.0001)
         assertEquals(82_000L, first.newBackingSats)
 
-        val replay = service.reconcileOutgoingBacking(
-            channelId = identifier, userChannelId = "9", note = null,
-            receiverSats = 82_000, latestPrice = 100_000.0, price = 100_000.0
-        )
+        val replay =
+            service.reconcileOutgoingBacking(
+                channelId = identifier,
+                userChannelId = "9",
+                note = null,
+                receiverSats = 82_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
         assertNull(replay)
         assertEquals(92.0, service.loadChannel("9")?.expectedUSD ?: -1.0, 0.0001)
         assertEquals(82_000L, service.loadChannel("9")?.backingSats)
@@ -683,35 +749,38 @@ class TradeDatabaseServiceTest {
         val identifier = "ba".repeat(32)
         val service = DatabaseService(context)
         val now = System.currentTimeMillis() / 1000L
-        val trade = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = StableChannel(
-                channelId = identifier,
-                userChannelId = "7",
-                expectedUSD = USD(50.0),
-                stableReceiverBTC = Bitcoin(100_000),
-                backingSats = 55_000
-            ),
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            now = now,
-            tradeId = "cc".repeat(32)
-        )!!
+        val trade =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(50.0),
+                        stableReceiverBTC = Bitcoin(100_000),
+                        backingSats = 55_000,
+                    ),
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                now = now,
+                tradeId = "cc".repeat(32),
+            )!!
         val dbId = service.recordPreparedTrade(trade)
         val paymentId = "dd".repeat(32)
         assertTrue(service.attachTradePaymentId(dbId, paymentId))
-        assertNull(service.mostRecentTradeFailure(3600))   // nothing terminal yet
+        assertNull(service.mostRecentTradeFailure(3600)) // nothing terminal yet
 
-        val rejection = TradeControlMessage.Rejected(
-            channelId = identifier,
-            correlation = TradeCorrelation(trade.tradeId, paymentId, trade.requestHash),
-            reasonCode = "quote_deviation",
-            decidedAt = now
-        )
+        val rejection =
+            TradeControlMessage.Rejected(
+                channelId = identifier,
+                correlation = TradeCorrelation(trade.tradeId, paymentId, trade.requestHash),
+                reasonCode = "quote_deviation",
+                decidedAt = now,
+            )
         assertEquals(TradeControlApplyStatus.APPLIED, service.applyTradeRejection(rejection).status)
 
         val failure = service.mostRecentTradeFailure(3600)
@@ -726,45 +795,198 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
-    fun outgoingReconcileClosesThePositionWhenTheSpendExhaustsTheTarget() {
-        // Zero boundary, persisted side: nothing backs an exhausted target.
+    fun outgoingReconcilePreservesTheResidueWhenTheSpendExhaustsTheTarget() {
+        // Zero boundary, persisted side (#322): the leftover sats are an unsettled LSP surplus —
+        // they stay backing so the stability machinery settles them, never released to native BTC.
         val identifier = "1a".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "21", expectedUSD = 10.0,
-            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "21",
+            expectedUSD = 10.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 20_000,
+            latestPrice = 100_000.0,
         )
 
-        val result = service.reconcileOutgoingBacking(
-            channelId = identifier, userChannelId = "21", note = null,
-            receiverSats = 5_000, latestPrice = 100_000.0, price = 100_000.0
-        )
+        val result =
+            service.reconcileOutgoingBacking(
+                channelId = identifier,
+                userChannelId = "21",
+                note = null,
+                receiverSats = 5_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
 
         assertNotNull(result)
         assertEquals(0.0, result!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, result.newBackingSats)
+        assertEquals(5_000L, result.newBackingSats)
+        assertEquals(10.0, result.usdDeducted, 0.0001) // the target drop, not the $15 overflow
         val row = service.loadChannel("21")
         assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
-        assertEquals(0L, row?.backingSats)          // the 5,000 sats are native, not stranded
+        assertEquals(5_000L, row?.backingSats) // residue preserved, not stranded or released
         service.close()
     }
 
     @Test
-    fun backingClampClosesThePositionWhenTheRepairExhaustsTheTarget() {
-        // Same boundary on the startup repair path.
+    fun backingClampPreservesTheResidueWhenTheRepairExhaustsTheTarget() {
+        // Same boundary on the startup repair path (#322).
         val identifier = "2b".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "22", expectedUSD = 10.0,
-            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "22",
+            expectedUSD = 10.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 20_000,
+            latestPrice = 100_000.0,
         )
 
-        val repaired = service.clampBackingToLiveReceiver("22", receiverSats = 5_000, price = 100_000.0)
+        val repaired =
+            service.clampBackingToLiveReceiver("22", receiverSats = 5_000, price = 100_000.0)
 
         assertNotNull(repaired)
         assertEquals(0.0, repaired!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, repaired.newBackingSats)
-        assertEquals(0L, service.loadChannel("22")?.backingSats)
+        assertEquals(5_000L, repaired.newBackingSats)
+        assertEquals(10.0, repaired.usdDeducted, 0.0001)
+        assertEquals(5_000L, service.loadChannel("22")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAtZeroTargetPreservesTheResidue() {
+        // A zero-target LSP SYNC keeps min(current backing, the LSP's signed backing, receiver)
+        // so residue the LSP still books settles via the stability machinery (#322).
+        val identifier = "6f".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "33",
+            expectedUSD = 10.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 15_000,
+            latestPrice = 100_000.0,
+        )
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "99", // the LSP's own id; the lookup keys on channel_id
+                expectedUsd = 0.0,
+                backingSats = 20_000, // the LSP still books the residue
+                syncVersion = 1,
+                correlation = null,
+            )
+        val applied = service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, applied.status)
+        assertEquals(
+            15_000L,
+            applied.localBackingSats,
+        ) // min(20_000 backing, 20_000 signed, 15_000 receiver)
+        val row = service.loadChannel("33")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(15_000L, row?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAtZeroTargetReleasesWhatTheLspBookedAsClosed() {
+        // The divergence-repair case: the LSP applied a full exit (target 0, backing 0) and its
+        // restart SYNC reaches a wallet still holding the pre-exit allocation. The wallet must
+        // converge to 0, not keep the stale allocation and pay it away as phantom surplus.
+        val identifier = "7a".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "34",
+            expectedUSD = 60.0,
+            backingSats = 60_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0,
+        )
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "99",
+                expectedUsd = 0.0,
+                backingSats = 0, // the LSP already booked the close
+                syncVersion = 1,
+                correlation = null,
+            )
+        val applied = service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, applied.status)
+        assertEquals(0L, applied.localBackingSats)
+        val row = service.loadChannel("34")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(0L, row?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncWithASubCentTargetTakesTheZeroTargetResiduePath() {
+        // The LSP serialises its raw target and its reconcile can leave a sub-cent remainder
+        // after a spend clears the target (e.g. $0.0002). That is a zero target with residue,
+        // so it must take the residue clamp like the desktop, not the delta path, which answers
+        // RETRY whenever the residue drift is actionable and would loop on every redelivery.
+        val service = DatabaseService(context)
+        val residueChannel = "6e".repeat(32)
+        service.saveChannel(
+            channelId = residueChannel,
+            userChannelId = "35",
+            expectedUSD = 0.0002,
+            backingSats = 1_961,
+            note = null,
+            receiverSats = 1_961,
+            latestPrice = 102_000.0,
+        )
+        val residueSync =
+            TradeControlMessage.Sync(
+                channelId = residueChannel,
+                userChannelId = "99",
+                expectedUsd = 0.0004, // sub-cent, computed at the LSP's own price
+                backingSats = 1_961, // the LSP books the residue
+                syncVersion = 1,
+                correlation = null,
+            )
+        val residueApplied =
+            service.applyUncorrelatedSyncIfNewer(residueSync, trustedPrice = 102_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, residueApplied.status)
+        assertEquals(1_961L, residueApplied.localBackingSats)
+        val residueRow = service.loadChannel("35")
+        assertTrue((residueRow?.expectedUSD ?: 1.0) < 0.01)
+        assertEquals(1_961L, residueRow?.backingSats)
+
+        // And a sub-cent target the LSP books as closed still releases the stale allocation.
+        val closedChannel = "6d".repeat(32)
+        service.saveChannel(
+            channelId = closedChannel,
+            userChannelId = "36",
+            expectedUSD = 60.0,
+            backingSats = 60_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0,
+        )
+        val closedSync =
+            TradeControlMessage.Sync(
+                channelId = closedChannel,
+                userChannelId = "99",
+                expectedUsd = 0.004,
+                backingSats = 0,
+                syncVersion = 1,
+                correlation = null,
+            )
+        val closedApplied =
+            service.applyUncorrelatedSyncIfNewer(closedSync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, closedApplied.status)
+        assertEquals(0L, closedApplied.localBackingSats)
+        assertEquals(0L, service.loadChannel("36")?.backingSats)
         service.close()
     }
 
@@ -784,7 +1006,7 @@ class TradeDatabaseServiceTest {
                 amountUSD = 15.0,
                 btcPrice = 100_000.0,
                 txid = txid,
-                status = "pending"
+                status = "pending",
             )
         }
 
@@ -803,27 +1025,41 @@ class TradeDatabaseServiceTest {
         val identifier = "4d".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "31", expectedUSD = 20.0,
-            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "31",
+            expectedUSD = 20.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 20_000,
+            latestPrice = 100_000.0,
         )
         assertTrue(service.claimPendingSend(amountMsat = 5_000_000, price = 100_000.0))
         service.setPendingSendPaymentId("55".repeat(32))
 
         // The sats have left the channel: backing 20,000 vs a live balance of 15,000.
-        assertNull(service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0))
+        assertNull(
+            service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0)
+        )
         assertEquals(20_000L, service.loadChannel("31")?.backingSats)
 
         // Recovery records the payment and debits backing once, then clears the marker.
-        val persisted = service.recordPaymentAndMaybeUpdateBacking(
-            paymentId = "55".repeat(32), paymentType = "stability", direction = "sent",
-            amountMsat = 5_000_000, userChannelId = "31", backingDeltaSats = -5_000
-        )
+        val persisted =
+            service.recordPaymentAndMaybeUpdateBacking(
+                paymentId = "55".repeat(32),
+                paymentType = "stability",
+                direction = "sent",
+                amountMsat = 5_000_000,
+                userChannelId = "31",
+                backingDeltaSats = -5_000,
+            )
         assertTrue(persisted.isNewPayment)
         assertEquals(15_000L, persisted.backingSats)
         service.clearPendingSend()
 
         // Now the books match the live balance, so the repair has nothing left to take.
-        assertNull(service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0))
+        assertNull(
+            service.clampBackingToLiveReceiver("31", receiverSats = 15_000, price = 100_000.0)
+        )
         assertEquals(15_000L, service.loadChannel("31")?.backingSats)
         service.close()
     }
@@ -836,30 +1072,49 @@ class TradeDatabaseServiceTest {
         val identifier = "5e".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "32", expectedUSD = 20.0,
-            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "32",
+            expectedUSD = 20.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 20_000,
+            latestPrice = 100_000.0,
         )
         val txid = "6f".repeat(32)
         service.recordPayment(
-            paymentId = "splice-resume", paymentType = "splice_out", direction = "sent",
-            amountMsat = 5_000_000, amountUSD = 5.0, btcPrice = 100_000.0,
-            txid = txid, status = "pending"
+            paymentId = "splice-resume",
+            paymentType = "splice_out",
+            direction = "sent",
+            amountMsat = 5_000_000,
+            amountUSD = 5.0,
+            btcPrice = 100_000.0,
+            txid = txid,
+            status = "pending",
         )
 
         // First attempt: deduction lands, then the process dies before completeSplice().
-        val first = service.reconcileOutgoingBacking(
-            channelId = identifier, userChannelId = "32", note = null,
-            receiverSats = 15_000, latestPrice = 100_000.0, price = 100_000.0
-        )
+        val first =
+            service.reconcileOutgoingBacking(
+                channelId = identifier,
+                userChannelId = "32",
+                note = null,
+                receiverSats = 15_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
         assertNotNull(first)
         assertEquals(15.0, first!!.newExpectedUSD, 0.0001)
-        assertTrue(service.hasPendingSpliceFor(txid))   // still resumable
+        assertTrue(service.hasPendingSpliceFor(txid)) // still resumable
 
         // Resume: the reconcile is idempotent, and only now is the row completed.
         assertNull(
             service.reconcileOutgoingBacking(
-                channelId = identifier, userChannelId = "32", note = null,
-                receiverSats = 15_000, latestPrice = 100_000.0, price = 100_000.0
+                channelId = identifier,
+                userChannelId = "32",
+                note = null,
+                receiverSats = 15_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
             )
         )
         assertEquals(15.0, service.loadChannel("32")?.expectedUSD ?: -1.0, 0.0001)
@@ -874,8 +1129,13 @@ class TradeDatabaseServiceTest {
         val identifier = "7a".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "33", expectedUSD = 5.0,
-            backingSats = 5_000, note = null, receiverSats = 5_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "33",
+            expectedUSD = 5.0,
+            backingSats = 5_000,
+            note = null,
+            receiverSats = 5_000,
+            latestPrice = 100_000.0,
         )
 
         val repaired = service.clampBackingToLiveReceiver("33", receiverSats = 0, price = 100_000.0)
@@ -894,14 +1154,20 @@ class TradeDatabaseServiceTest {
         val identifier = "8b".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
-            channelId = identifier, userChannelId = "34", expectedUSD = 20.0,
-            backingSats = 20_000, note = null, receiverSats = 20_000, latestPrice = 100_000.0
+            channelId = identifier,
+            userChannelId = "34",
+            expectedUSD = 20.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 20_000,
+            latestPrice = 100_000.0,
         )
 
         assertNull(service.clampBackingToLiveReceiver("34", receiverSats = 15_000, price = 0.0))
-        assertEquals(20_000L, service.loadChannel("34")?.backingSats)   // nothing lost
+        assertEquals(20_000L, service.loadChannel("34")?.backingSats) // nothing lost
 
-        val repaired = service.clampBackingToLiveReceiver("34", receiverSats = 15_000, price = 100_000.0)
+        val repaired =
+            service.clampBackingToLiveReceiver("34", receiverSats = 15_000, price = 100_000.0)
         assertNotNull(repaired)
         assertEquals(15_000L, repaired!!.newBackingSats)
         assertEquals(15.0, repaired.newExpectedUSD, 0.0001)
@@ -909,8 +1175,9 @@ class TradeDatabaseServiceTest {
     }
 
     private fun deleteDatabaseFiles() {
-        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm"))
-            .forEach { file -> if (file.exists()) assertTrue(file.delete()) }
+        listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
+            if (file.exists()) assertTrue(file.delete())
+        }
         assertFalse(dbFile.exists())
     }
 }

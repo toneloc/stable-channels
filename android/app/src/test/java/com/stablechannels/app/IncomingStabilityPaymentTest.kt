@@ -9,6 +9,7 @@ import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.MissingChannelRowException
 import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.util.Constants
+import java.io.File
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,7 +21,6 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
-import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -45,13 +45,23 @@ class IncomingStabilityPaymentTest {
     }
 
     private fun seed(backing: Long = 9_000, target: Double = 10.0) {
-        db.saveChannel("ab".repeat(32), "7", target, backing, null,
-            receiverSats = backing, latestPrice = 200_000.0)
+        db.saveChannel(
+            "ab".repeat(32),
+            "7",
+            target,
+            backing,
+            null,
+            receiverSats = backing,
+            latestPrice = 200_000.0,
+        )
     }
 
     private fun receive(inBackground: Boolean, amount: Long = 5_000): Boolean {
         val result = persistReceipt(inBackground, amount = amount)
-        assertTrue("Unexpected persistence result: $result", result in listOf("INSERTED", "DUPLICATE"))
+        assertTrue(
+            "Unexpected persistence result: $result",
+            result in listOf("INSERTED", "DUPLICATE"),
+        )
         return result == "INSERTED"
     }
 
@@ -61,16 +71,21 @@ class IncomingStabilityPaymentTest {
         price: Double = 100_000.0,
         paymentId: String = "payment",
         settlementId: String = "settlement",
-        userChannelId: String = "7"
+        userChannelId: String = "7",
     ): String {
         if (!inBackground) {
             return try {
-                val result = db.recordPaymentAndMaybeUpdateBacking(
-                    paymentId = paymentId, paymentType = "stability", direction = "received",
-                    amountMsat = amount * 1000, btcPrice = price,
-                    userChannelId = userChannelId, backingDeltaSats = amount,
-                    settlementId = settlementId
-                )
+                val result =
+                    db.recordPaymentAndMaybeUpdateBacking(
+                        paymentId = paymentId,
+                        paymentType = "stability",
+                        direction = "received",
+                        amountMsat = amount * 1000,
+                        btcPrice = price,
+                        userChannelId = userChannelId,
+                        backingDeltaSats = amount,
+                        settlementId = settlementId,
+                    )
                 if (result.isNewPayment) "INSERTED" else "DUPLICATE"
             } catch (_: MissingChannelRowException) {
                 "MISSING_CHANNEL"
@@ -78,11 +93,28 @@ class IncomingStabilityPaymentTest {
                 "FAILED"
             }
         }
-        val method = StabilityProcessingService::class.java.declaredMethods.single {
-            it.name == "recordPaymentAtomicInDB"
-        }.apply { isAccessible = true }
-        return method.invoke(background, dbFile.absolutePath, paymentId, "stability",
-            "received", amount * 1000, price, amount, userChannelId, settlementId)!!.toString()
+        val method =
+            StabilityProcessingService::class
+                .java
+                .declaredMethods
+                .single {
+                    it.name == "recordPaymentAtomicInDB"
+                }
+                .apply { isAccessible = true }
+        return method
+            .invoke(
+                background,
+                dbFile.absolutePath,
+                paymentId,
+                "stability",
+                "received",
+                amount * 1000,
+                price,
+                amount,
+                userChannelId,
+                settlementId,
+            )!!
+            .toString()
     }
 
     private fun assertExcessStaysNative(inBackground: Boolean) {
@@ -91,13 +123,19 @@ class IncomingStabilityPaymentTest {
         val saved = db.loadChannel("7")!!
         assertEquals(10_000L, saved.backingSats)
         assertEquals(10.0, saved.expectedUSD, 0.0)
-        val channel = StableChannel(expectedUSD = USD(saved.expectedUSD),
-            backingSats = saved.backingSats, stableReceiverBTC = Bitcoin(14_000),
-            isStableReceiver = true)
+        val channel =
+            StableChannel(
+                expectedUSD = USD(saved.expectedUSD),
+                backingSats = saved.backingSats,
+                stableReceiverBTC = Bitcoin(14_000),
+                isStableReceiver = true,
+            )
         StabilityService.recomputeNative(channel)
         assertEquals(4_000L, channel.nativeChannelBTC.sats)
-        assertEquals(StabilityService.StabilityAction.STABLE,
-            StabilityService.checkStabilityAction(channel, 100_000.0).action)
+        assertEquals(
+            StabilityService.StabilityAction.STABLE,
+            StabilityService.checkStabilityAction(channel, 100_000.0).action,
+        )
         assertFalse(receive(inBackground))
         assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
         assertEquals(1, db.getRecentPayments().size)
@@ -105,6 +143,7 @@ class IncomingStabilityPaymentTest {
     }
 
     @Test fun foregroundExcessStaysNative() = assertExcessStaysNative(false)
+
     @Test fun backgroundExcessStaysNative() = assertExcessStaysNative(true)
 
     private fun assertExistingSurplusIsPreserved(inBackground: Boolean) {
@@ -114,6 +153,7 @@ class IncomingStabilityPaymentTest {
     }
 
     @Test fun foregroundPreservesExistingSurplus() = assertExistingSurplusIsPreserved(false)
+
     @Test fun backgroundPreservesExistingSurplus() = assertExistingSurplusIsPreserved(true)
 
     private fun bothPaths(test: (Boolean) -> Unit) {
@@ -125,17 +165,31 @@ class IncomingStabilityPaymentTest {
         }
     }
 
-    private fun count(table: String): Long = db.readableDatabase.rawQuery(
-        "SELECT COUNT(*) FROM $table", null
-    ).use { it.moveToFirst(); it.getLong(0) }
+    private fun count(table: String): Long =
+        db.readableDatabase
+            .rawQuery(
+                "SELECT COUNT(*) FROM $table",
+                null,
+            )
+            .use {
+                it.moveToFirst()
+                it.getLong(0)
+            }
 
     @Test
     fun partialAndExactReceiptsOnlyFillTheShortfall() = bothPaths { background ->
         seed()
         assertTrue(receive(background, 500))
         assertEquals(9_500L, db.loadChannel("7")!!.backingSats)
-        assertEquals("INSERTED", persistReceipt(background, amount = 500,
-            paymentId = "second", settlementId = "second"))
+        assertEquals(
+            "INSERTED",
+            persistReceipt(
+                background,
+                amount = 500,
+                paymentId = "second",
+                settlementId = "second",
+            ),
+        )
         assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
     }
 
@@ -164,27 +218,48 @@ class IncomingStabilityPaymentTest {
         assertTrue(receive(background))
         assertEquals(0L, db.loadChannel("7")!!.backingSats)
         seed(backing = 2_000, target = 0.0)
-        assertEquals("INSERTED", persistReceipt(background,
-            paymentId = "retained", settlementId = "retained"))
+        assertEquals(
+            "INSERTED",
+            persistReceipt(
+                background,
+                paymentId = "retained",
+                settlementId = "retained",
+            ),
+        )
         assertEquals(2_000L, db.loadChannel("7")!!.backingSats)
     }
 
     @Test
-    fun duplicatePaymentAndSettlementIdsStayIdempotentAcrossRestartAndPaths() = bothPaths { background ->
-        seed()
-        assertEquals("INSERTED", persistReceipt(background, amount = 200))
-        db.close()
-        db = DatabaseService(RuntimeEnvironment.getApplication())
-        // Still below target: repeating the credit would incorrectly add another 200 sats.
-        // Dedup succeeds even if the price is temporarily unavailable on replay.
-        assertEquals("DUPLICATE", persistReceipt(!background, amount = 200, price = 0.0,
-            settlementId = "different"))
-        assertEquals("DUPLICATE", persistReceipt(!background, amount = 200, price = 0.0,
-            paymentId = "different"))
-        assertEquals(9_200L, db.loadChannel("7")!!.backingSats)
-        assertEquals(1L, count("payments"))
-        assertEquals(1L, count("stability_settlements"))
-    }
+    fun duplicatePaymentAndSettlementIdsStayIdempotentAcrossRestartAndPaths() =
+        bothPaths { background ->
+            seed()
+            assertEquals("INSERTED", persistReceipt(background, amount = 200))
+            db.close()
+            db = DatabaseService(RuntimeEnvironment.getApplication())
+            // Still below target: repeating the credit would incorrectly add another 200 sats.
+            // Dedup succeeds even if the price is temporarily unavailable on replay.
+            assertEquals(
+                "DUPLICATE",
+                persistReceipt(
+                    !background,
+                    amount = 200,
+                    price = 0.0,
+                    settlementId = "different",
+                ),
+            )
+            assertEquals(
+                "DUPLICATE",
+                persistReceipt(
+                    !background,
+                    amount = 200,
+                    price = 0.0,
+                    paymentId = "different",
+                ),
+            )
+            assertEquals(9_200L, db.loadChannel("7")!!.backingSats)
+            assertEquals(1L, count("payments"))
+            assertEquals(1L, count("stability_settlements"))
+        }
 
     @Test
     fun unavailablePriceLeavesReceiptRetryable() = bothPaths { background ->
@@ -202,10 +277,13 @@ class IncomingStabilityPaymentTest {
     @Test
     fun failedBackingWriteRollsBackHistoryAndReplayGuard() = bothPaths { background ->
         seed()
-        db.writableDatabase.execSQL("""
+        db.writableDatabase.execSQL(
+            """
             CREATE TRIGGER reject_backing BEFORE UPDATE OF stable_sats ON channels
             BEGIN SELECT RAISE(ABORT, 'temporary write failure'); END
-        """.trimIndent())
+            """
+                .trimIndent()
+        )
         try {
             assertEquals("FAILED", persistReceipt(background))
             assertEquals(9_000L, db.loadChannel("7")!!.backingSats)
@@ -226,14 +304,24 @@ class IncomingStabilityPaymentTest {
         assertEquals(0L, count("stability_settlements"))
         // A newer unrelated row must never receive this payment's backing credit.
         seed()
-        db.saveChannel("cd".repeat(32), "8", 20.0, 19_000, null,
-            receiverSats = 50_000, latestPrice = 100_000.0)
+        db.saveChannel(
+            "cd".repeat(32),
+            "8",
+            20.0,
+            19_000,
+            null,
+            receiverSats = 50_000,
+            latestPrice = 100_000.0,
+        )
         assertTrue(receive(background))
         assertEquals(10_000L, db.loadChannel("7")!!.backingSats)
         assertEquals(19_000L, db.loadChannel("8")!!.backingSats)
     }
 
-    private fun assertReceiptBeforeOutgoingAccounting(background: Boolean, belowSavedBacking: Boolean) {
+    private fun assertReceiptBeforeOutgoingAccounting(
+        background: Boolean,
+        belowSavedBacking: Boolean,
+    ) {
         val price = if (belowSavedBacking) 100_000.0 else 50_000.0
         val amount = if (belowSavedBacking) 1_000L else 10_000L
         val liveReceiver = if (belowSavedBacking) 5_000L else 15_000L
@@ -242,25 +330,66 @@ class IncomingStabilityPaymentTest {
         // Both transfers settled in LDK, but the receipt event is processed first. In the
         // second case BTC fell after the send was admitted, so #322's pre-spend guard
         // cannot prevent the incoming top-up from crossing that already-in-flight send.
-        assertEquals("FAILED", persistReceipt(background, amount = amount,
-            price = 0.0))
+        assertEquals(
+            "FAILED",
+            persistReceipt(
+                background,
+                amount = amount,
+                price = 0.0,
+            ),
+        )
         assertEquals(0L, count("stability_settlements"))
-        assertEquals("INSERTED", persistReceipt(background, amount = amount,
-            price = price))
-        db.reconcileOutgoingBacking("ab".repeat(32), "7", null,
-            receiverSats = liveReceiver, latestPrice = price, price = price)
+        assertEquals(
+            "INSERTED",
+            persistReceipt(
+                background,
+                amount = amount,
+                price = price,
+            ),
+        )
+        db.reconcileOutgoingBacking(
+            "ab".repeat(32),
+            "7",
+            null,
+            receiverSats = liveReceiver,
+            latestPrice = price,
+            price = price,
+        )
         assertEquals(expectedAfterSend, db.loadChannel("7")!!.expectedUSD, 0.0)
         assertEquals(liveReceiver, db.loadChannel("7")!!.backingSats)
         // A retry or foreground/background handoff cannot restore the spent claim.
-        assertEquals("DUPLICATE", persistReceipt(!background, amount = amount,
-            price = price))
-        db.reconcileOutgoingBacking("ab".repeat(32), "7", null,
-            receiverSats = liveReceiver, latestPrice = price, price = price)
+        assertEquals(
+            "DUPLICATE",
+            persistReceipt(
+                !background,
+                amount = amount,
+                price = price,
+            ),
+        )
+        db.reconcileOutgoingBacking(
+            "ab".repeat(32),
+            "7",
+            null,
+            receiverSats = liveReceiver,
+            latestPrice = price,
+            price = price,
+        )
         assertEquals(expectedAfterSend, db.loadChannel("7")!!.expectedUSD, 0.0)
     }
 
-    @Test fun foregroundReceiptDoesNotHideLaterSpend() = assertReceiptBeforeOutgoingAccounting(false, false)
-    @Test fun backgroundReceiptDoesNotHideLaterSpend() = assertReceiptBeforeOutgoingAccounting(true, false)
-    @Test fun foregroundReceiptCanPrecedeBackingDeduction() = assertReceiptBeforeOutgoingAccounting(false, true)
-    @Test fun backgroundReceiptCanPrecedeBackingDeduction() = assertReceiptBeforeOutgoingAccounting(true, true)
+    @Test
+    fun foregroundReceiptDoesNotHideLaterSpend() =
+        assertReceiptBeforeOutgoingAccounting(false, false)
+
+    @Test
+    fun backgroundReceiptDoesNotHideLaterSpend() =
+        assertReceiptBeforeOutgoingAccounting(true, false)
+
+    @Test
+    fun foregroundReceiptCanPrecedeBackingDeduction() =
+        assertReceiptBeforeOutgoingAccounting(false, true)
+
+    @Test
+    fun backgroundReceiptCanPrecedeBackingDeduction() =
+        assertReceiptBeforeOutgoingAccounting(true, true)
 }

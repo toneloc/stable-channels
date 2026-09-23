@@ -23,13 +23,15 @@ class StableChannelsApp : Application() {
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            STABILITY_CHANNEL_ID,
-            "Stability Processing",
-            NotificationManager.IMPORTANCE_LOW
-        ).apply {
-            description = "Background stability payment processing"
-        }
+        val channel =
+            NotificationChannel(
+                    STABILITY_CHANNEL_ID,
+                    "Stability Processing",
+                    NotificationManager.IMPORTANCE_LOW,
+                )
+                .apply {
+                    description = "Background stability payment processing"
+                }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(channel)
     }

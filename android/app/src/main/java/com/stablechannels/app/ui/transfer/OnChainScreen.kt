@@ -1,36 +1,35 @@
 package com.stablechannels.app.ui.transfer
 
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.*
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.platform.LocalContext
-import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
-import com.stablechannels.app.util.btcSpacedFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -57,43 +56,41 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     val satsFromUSD = accountingSatsFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
-    val feeVbytes = if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
-    val feeEstimateText = feeRateSatVb?.let { rate ->
-        val feeSats = rate * feeVbytes
-        "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
-    } ?: "Estimating network fee..."
+    val feeVbytes =
+        if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES
+        else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
+    val feeEstimateText =
+        feeRateSatVb?.let { rate ->
+            val feeSats = rate * feeVbytes
+            "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
+        } ?: "Estimating network fee..."
 
     LaunchedEffect(Unit) {
         feeRateSatVb = withContext(Dispatchers.IO) { appState.currentFeeRateSatVb() ?: 2L }
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding()
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier = Modifier.fillMaxSize().navigationBarsPadding().padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Toolbar (Cancel button, centered title)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             if (result == null) {
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
-                    colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (isSystemInDarkTheme()) {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        } else {
-                            Color(0xFFE5E5EA)
-                        },
-                        contentColor = MaterialTheme.colorScheme.primary
-                    ),
+                    colors =
+                        ButtonDefaults.textButtonColors(
+                            containerColor =
+                                if (isSystemInDarkTheme()) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    Color(0xFFE5E5EA)
+                                },
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 ) {
                     Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
@@ -102,7 +99,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 text = "Onchain Send",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier.align(Alignment.Center),
             )
         }
         Spacer(Modifier.height(16.dp))
@@ -113,61 +110,68 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 imageVector = Icons.Filled.CheckCircle,
                 contentDescription = "Success",
                 tint = Color(0xFF10B981),
-                modifier = Modifier.size(64.dp)
+                modifier = Modifier.size(64.dp),
             )
             Spacer(Modifier.height(16.dp))
-            Text("Sent!", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text(
+                "Sent!",
+                style = MaterialTheme.typography.headlineMedium,
+                fontWeight = FontWeight.Bold,
+            )
             Spacer(Modifier.height(12.dp))
             Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                    } else {
-                        Color(0xFFF2F2F7)
-                    }
-                ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            } else {
+                                Color(0xFFF2F2F7)
+                            }
+                    ),
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
                         text = result!!,
                         style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
                     )
                     if (successTxid != null) {
                         Spacer(Modifier.height(12.dp))
                         Text(
                             text = "Transaction ID",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
                             text = successTxid!!,
                             style = MaterialTheme.typography.bodySmall,
                             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             }
             Spacer(Modifier.weight(1f))
-            Button(
-                onClick = onDismiss
-            ) {
+            Button(onClick = onDismiss) {
                 Text("Done")
             }
         } else {
             if (hasChannel && !sendAll) {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
-                    modifier = Modifier.fillMaxWidth()
+                    colors =
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer
+                        ),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         "Will use splice-out via your Lightning channel for faster settlement.",
                         modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
                 Spacer(Modifier.height(12.dp))
@@ -175,14 +179,17 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             if (appState.isChannelClosing) {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer),
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    colors =
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer
+                        ),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 ) {
                     Text(
                         "Channel is closing — you should sweep your remaining onchain funds.",
                         modifier = Modifier.padding(12.dp),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer
+                        color = MaterialTheme.colorScheme.onErrorContainer,
                     )
                 }
                 Spacer(Modifier.height(8.dp))
@@ -192,25 +199,33 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 value = address,
                 onValueChange = { address = it },
                 label = { Text("Bitcoin Address") },
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false
-                ),
-                modifier = Modifier.fillMaxWidth()
+                keyboardOptions =
+                    KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                    ),
+                modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(16.dp))
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(
+                    "Amount (USD)",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 TextButton(
                     onClick = { sendAll = !sendAll },
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
-                    Text(if (sendAll) "Enter Amount" else "Send Max", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        if (sendAll) "Enter Amount" else "Send Max",
+                        style = MaterialTheme.typography.labelMedium,
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -219,20 +234,23 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 Row(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountUSDStr,
-                        onValueChange = { amountUSDStr = it.filter { c -> c.isDigit() || c == '.' } },
+                        onValueChange = {
+                            amountUSDStr = it.filter { c -> c.isDigit() || c == '.' }
+                        },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        textStyle = TextStyle(
-                            fontSize = 44.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Start
-                        ),
+                        textStyle =
+                            TextStyle(
+                                fontSize = 44.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Start,
+                            ),
                         singleLine = true,
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         modifier = Modifier.width(IntrinsicSize.Min),
@@ -241,42 +259,50 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (amountUSDStr.isEmpty()) {
                                     Text(
                                         text = "0.00",
-                                        style = TextStyle(
-                                            fontSize = 44.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                            textAlign = TextAlign.Start
-                                        )
+                                        style =
+                                            TextStyle(
+                                                fontSize = 44.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color =
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                        alpha = 0.5f
+                                                    ),
+                                                textAlign = TextAlign.Start,
+                                            ),
                                     )
                                 }
                                 innerTextField()
                             }
-                        }
+                        },
                     )
                 }
 
                 if (satsFromUSD > 0) {
                     Spacer(Modifier.height(4.dp))
-                    Text("~ ${satsFromUSD.satsFormatted()} sats", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "~ ${satsFromUSD.satsFormatted()} sats",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             } else {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         text = onchainUSD.usdFormatted(),
                         fontSize = 44.sp,
                         fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.primary,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = onchainSats.btcSpacedFormatted() + " BTC",
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     )
                 }
             }
@@ -285,12 +311,16 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             Text(
                 feeEstimateText,
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
             error?.let {
                 Spacer(Modifier.height(8.dp))
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -305,14 +335,19 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                         // both on-chain and Lightning sends). This screen previously had
                         // no gate at all, letting withdrawals and splice-outs bypass
                         // biometric confirmation entirely regardless of the toggle.
-                        val requiresAuth = AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain = true)
+                        val requiresAuth =
+                            AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain = true)
                         if (requiresAuth) {
                             if (activity == null) {
                                 error = "Authentication required to send"
                                 isSending = false
                                 return@launch
                             }
-                            val authResult = BiometricService.authenticate(activity, "Confirm onchain withdrawal")
+                            val authResult =
+                                BiometricService.authenticate(
+                                    activity,
+                                    "Confirm onchain withdrawal",
+                                )
                             if (authResult != BiometricService.AuthResult.SUCCESS) {
                                 error = "Authentication required to send"
                                 isSending = false
@@ -321,67 +356,104 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                         }
                         withContext(Dispatchers.IO) {
                             try {
-                                val addr = QRCodeUtils.normalizeAddress(QRCodeUtils.stripUriPrefix(address))
+                                val addr =
+                                    QRCodeUtils.normalizeAddress(
+                                        QRCodeUtils.stripUriPrefix(address)
+                                    )
                                 val price = btcPrice
                                 if (sendAll) {
                                     val txid = appState.nodeService.sendAllOnchain(addr)
                                     val sendSats = onchainSats
-                                    appState.onchainSendBroadcasted(sendSats, isSendAll = true, txid = txid)
+                                    appState.onchainSendBroadcasted(
+                                        sendSats,
+                                        isSendAll = true,
+                                        txid = txid,
+                                    )
                                     appState.databaseService?.recordPayment(
-                                        paymentId = txid, paymentType = "onchain", direction = "sent",
+                                        paymentId = txid,
+                                        paymentType = "onchain",
+                                        direction = "sent",
                                         amountMsat = sendSats * 1000,
-                                        amountUSD = if (price > 0) (sendSats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                                        amountUSD =
+                                            if (price > 0)
+                                                (sendSats.toDouble() / Constants.SATS_IN_BTC) *
+                                                    price
+                                            else null,
                                         btcPrice = if (price > 0) price else null,
-                                        txid = txid, address = addr
+                                        txid = txid,
+                                        address = addr,
                                     )
                                     result = "All funds sent successfully."
                                     successTxid = txid
                                 } else {
-                                    val usd = amountUSDStr.toDoubleOrNull() ?: throw Exception("Enter amount")
+                                    val usd =
+                                        amountUSDStr.toDoubleOrNull()
+                                            ?: throw Exception("Enter amount")
                                     // Money movement converts USD at the trusted accounting price,
                                     // never the raw display price (iOS parity). The same captured
                                     // price is recorded so history reflects the rate actually used.
-                                    val accountingPrice = appState.priceService.currentAccountingPrice()
-                                    val sats = accountingSatsFromUSD(usd, accountingPrice)
-                                        ?: throw Exception("A trusted BTC/USD price is required")
+                                    val accountingPrice =
+                                        appState.priceService.currentAccountingPrice()
+                                    val sats =
+                                        accountingSatsFromUSD(usd, accountingPrice)
+                                            ?: throw Exception(
+                                                "A trusted BTC/USD price is required"
+                                            )
                                     if (hasChannel) {
-                                        if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                         val sc = appState.stableChannel.value
                                         appState.beginSpliceOut(sats, addr, accountingPrice)
                                         try {
-                                            appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, addr, sats)
+                                            appState.nodeService.spliceOut(
+                                                sc.userChannelId,
+                                                sc.counterparty,
+                                                addr,
+                                                sats,
+                                            )
                                         } catch (e: Exception) {
                                             appState.cancelPendingSpliceStart()
                                             throw e
                                         }
-                                        result = "Splice-out initiated for ${sats.satsFormatted()} sats."
+                                        result =
+                                            "Splice-out initiated for ${sats.satsFormatted()} sats."
                                         successTxid = null
                                     } else {
                                         val txid = appState.nodeService.sendOnchain(addr, sats)
-                                        appState.onchainSendBroadcasted(sats, isSendAll = false, txid = txid)
+                                        appState.onchainSendBroadcasted(
+                                            sats,
+                                            isSendAll = false,
+                                            txid = txid,
+                                        )
                                         appState.databaseService?.recordPayment(
-                                            paymentId = txid, paymentType = "onchain", direction = "sent",
+                                            paymentId = txid,
+                                            paymentType = "onchain",
+                                            direction = "sent",
                                             amountMsat = sats * 1000,
-                                            amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                            amountUSD =
+                                                (sats.toDouble() / Constants.SATS_IN_BTC) *
+                                                    accountingPrice,
                                             btcPrice = accountingPrice,
-                                            txid = txid, address = addr
+                                            txid = txid,
+                                            address = addr,
                                         )
                                         result = "Sent successfully."
                                         successTxid = txid
                                     }
                                 }
                             } catch (e: Exception) {
-                                error = WalletErrorMessages.operation(e, "The withdrawal could not complete. Check History before trying again.")
+                                error =
+                                    WalletErrorMessages.operation(
+                                        e,
+                                        "The withdrawal could not complete. Check History before trying again.",
+                                    )
                             }
                         }
                         isSending = false
                     }
                 },
                 enabled = !isSending && address.isNotBlank() && (sendAll || satsFromUSD > 0),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                if (isSending) CircularProgressIndicator(Modifier.size(20.dp))
-                else Text("Send")
+                if (isSending) CircularProgressIndicator(Modifier.size(20.dp)) else Text("Send")
             }
         }
     }

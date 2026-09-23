@@ -4,8 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowCircleDown
@@ -66,18 +66,21 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(16.dp)
-    ) {
+    val listState = rememberLazyListState()
+    // Only jump to top when a genuinely new item appears at the head of the currently
+    // selected list — never on every reload, so scrolling through older history isn't disrupted.
+    LaunchedEffect(selectedSegment, trades.firstOrNull()?.id, payments.firstOrNull()?.id) {
+        listState.scrollToItem(0)
+    }
+
+    Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         // Title — same position as Settings and Home
         Text(
             text = "History",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(12.dp))
 
@@ -86,94 +89,98 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         val activeBg = if (isDark) Color(0xFF3A3A3C) else Color.White
         val inactiveBg = if (isDark) Color(0xFF1C1C1E) else Color(0xFFE5E5EA)
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(inactiveBg, shape = RoundedCornerShape(8.dp))
-                .padding(2.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier =
+                Modifier.fillMaxWidth()
+                    .background(inactiveBg, shape = RoundedCornerShape(8.dp))
+                    .padding(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .background(
-                        color = if (selectedSegment == 0) activeBg else Color.Transparent,
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                    .clickable { selectedSegment = 0 }
-                    .padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center
+                modifier =
+                    Modifier.weight(1f)
+                        .background(
+                            color = if (selectedSegment == 0) activeBg else Color.Transparent,
+                            shape = RoundedCornerShape(6.dp),
+                        )
+                        .clickable { selectedSegment = 0 }
+                        .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = "Orders",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    color = if (selectedSegment == 0) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    color =
+                        if (selectedSegment == 0) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .background(
-                        color = if (selectedSegment == 1) activeBg else Color.Transparent,
-                        shape = RoundedCornerShape(6.dp)
-                    )
-                    .clickable { selectedSegment = 1 }
-                    .padding(vertical = 8.dp),
-                contentAlignment = Alignment.Center
+                modifier =
+                    Modifier.weight(1f)
+                        .background(
+                            color = if (selectedSegment == 1) activeBg else Color.Transparent,
+                            shape = RoundedCornerShape(6.dp),
+                        )
+                        .clickable { selectedSegment = 1 }
+                        .padding(vertical = 8.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = "Payments",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    color = if (selectedSegment == 1) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant
+                    color =
+                        if (selectedSegment == 1) MaterialTheme.colorScheme.onSurface
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
 
-            Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(16.dp))
 
-            if (selectedSegment == 0 && trades.isEmpty()) {
-                EmptyStateView(
-                    icon = Icons.Default.SwapHoriz,
-                    title = "No Orders",
-                    description = "Convert BTC to see orders here."
-                )
-            } else if (selectedSegment == 1 && payments.isEmpty()) {
-                EmptyStateView(
-                    icon = Icons.Default.ElectricBolt,
-                    title = "No Payments",
-                    description = "Send or receive payments to see history here."
-                )
-            } else {
-                LazyColumn {
-                    if (selectedSegment == 0) {
-                        itemsIndexed(trades) { index, trade ->
-                            TradeRow(trade) { selectedTrade = trade }
-                            if (index < trades.lastIndex) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(start = 68.dp),
-                                    color = MaterialTheme.colorScheme.outlineVariant,
-                                    thickness = 0.5.dp
-                                )
-                            }
-                        }
-                    } else {
-                        itemsIndexed(payments) { index, payment ->
-                            PaymentRow(payment, currentPrice) { selectedPayment = payment }
-                            if (index < payments.lastIndex) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(start = 68.dp),
-                                    color = MaterialTheme.colorScheme.outlineVariant,
-                                    thickness = 0.5.dp
-                                )
-                            }
+        if (selectedSegment == 0 && trades.isEmpty()) {
+            EmptyStateView(
+                icon = Icons.Default.SwapHoriz,
+                title = "No Orders",
+                description = "Convert BTC to see orders here.",
+            )
+        } else if (selectedSegment == 1 && payments.isEmpty()) {
+            EmptyStateView(
+                icon = Icons.Default.ElectricBolt,
+                title = "No Payments",
+                description = "Send or receive payments to see history here.",
+            )
+        } else {
+            LazyColumn(state = listState) {
+                if (selectedSegment == 0) {
+                    itemsIndexed(trades, key = { _, trade -> trade.id }) { index, trade ->
+                        TradeRow(trade) { selectedTrade = trade }
+                        if (index < trades.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 68.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                                thickness = 0.5.dp,
+                            )
                         }
                     }
-                    // Bottom padding for nav bar
-                    item { Spacer(Modifier.height(80.dp)) }
+                } else {
+                    itemsIndexed(payments, key = { _, payment -> payment.id }) { index, payment ->
+                        PaymentRow(payment, currentPrice) { selectedPayment = payment }
+                        if (index < payments.lastIndex) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 68.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                                thickness = 0.5.dp,
+                            )
+                        }
+                    }
                 }
+                // Bottom padding for nav bar
+                item { Spacer(Modifier.height(80.dp)) }
             }
         }
+    }
 
     // Detail bottom sheets
     selectedTrade?.let { trade ->
@@ -191,20 +198,25 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
     val iconColor = if (isBuy) Color(0xFFF59E0B) else Color(0xFF8B5CF6)
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier =
+            Modifier.fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         // Icon with colored background
         Surface(
             shape = RoundedCornerShape(10.dp),
             color = iconColor.copy(alpha = 0.12f),
-            modifier = Modifier.size(40.dp)
+            modifier = Modifier.size(40.dp),
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = iconColor,
+                    modifier = Modifier.size(22.dp),
+                )
             }
         }
 
@@ -215,12 +227,12 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
             Text(
                 text = if (isBuy) "USD → BTC" else "BTC → USD",
                 style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
             )
             Text(
                 text = trade.date.relativeString(),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
@@ -229,7 +241,7 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
             Text(
                 text = trade.amountUSD.usdFormatted(),
                 style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
             )
             StatusBadge(trade.status)
         }
@@ -241,32 +253,38 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
     val isIncoming = payment.isIncoming
     val icon = if (isIncoming) Icons.Default.ArrowCircleDown else Icons.Default.ArrowCircleUp
     val iconColor = if (isIncoming) Color(0xFF10B981) else Color(0xFF3B82F6)
-    val typeLabel = when (payment.paymentType) {
-        "stability" -> "Settlement"
-        "lightning" -> "Lightning"
-        "splice_in" -> "Splice In"
-        "splice_out" -> "Splice Out"
-        "onchain" -> "Onchain"
-        "channel_close" -> "Channel Close"
-        "bolt12" -> "Bolt12"
-        else -> payment.paymentType
-    }
+    val typeLabel =
+        when (payment.paymentType) {
+            "stability" -> "Settlement"
+            "lightning" -> "Lightning"
+            "splice_in" -> "Splice In"
+            "splice_out" -> "Splice Out"
+            "onchain" -> "Onchain"
+            "channel_close" -> "Channel Close"
+            "bolt12" -> "Bolt12"
+            else -> payment.paymentType
+        }
 
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 12.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier =
+            Modifier.fillMaxWidth()
+                .clickable(onClick = onClick)
+                .padding(vertical = 12.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         // Icon with colored background
         Surface(
             shape = RoundedCornerShape(10.dp),
             color = iconColor.copy(alpha = 0.12f),
-            modifier = Modifier.size(40.dp)
+            modifier = Modifier.size(40.dp),
         ) {
             Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                Icon(icon, contentDescription = null, tint = iconColor, modifier = Modifier.size(22.dp))
+                Icon(
+                    icon,
+                    contentDescription = null,
+                    tint = iconColor,
+                    modifier = Modifier.size(22.dp),
+                )
             }
         }
 
@@ -277,27 +295,32 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
             Text(
                 text = if (isIncoming) "Received" else "Sent",
                 style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
             )
             Text(
                 text = "$typeLabel · ${payment.date.relativeString()}",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
         // Amount + status
         Column(horizontalAlignment = Alignment.End) {
-            val displayUsd = payment.amountUSD ?: run {
-                val price = payment.btcPrice?.takeIf { it > 0.0 } ?: currentPrice.takeIf { it > 0.0 }
-                price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
-            }
-            val amountText = displayUsd?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+            val displayUsd =
+                payment.amountUSD
+                    ?: run {
+                        val price =
+                            payment.btcPrice?.takeIf { it > 0.0 }
+                                ?: currentPrice.takeIf { it > 0.0 }
+                        price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
+                    }
+            val amountText =
+                displayUsd?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
             Text(
                 text = (if (isIncoming) "+" else "-") + amountText,
                 style = MaterialTheme.typography.bodyLarge,
                 fontWeight = FontWeight.Medium,
-                color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
+                color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface,
             )
             val statusLabel = payment.historyStatusLabel()
             val statusColor = payment.historyStatusColor()
@@ -308,22 +331,32 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
 
 @Composable
 private fun StatusBadge(status: String, color: Color? = null) {
-    val resolvedColor = color ?: when (status.lowercase()) {
-        "completed", "accepted" -> Color(0xFF10B981)
-        "pending", "prepared", "sent", "fee_paid", "uncertain" -> Color(0xFFF59E0B)
-        "failed", "send_failed", "rejected" -> Color(0xFFEF4444)
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
+    val resolvedColor =
+        color
+            ?: when (status.lowercase()) {
+                "completed",
+                "accepted" -> Color(0xFF10B981)
+                "pending",
+                "prepared",
+                "sent",
+                "fee_paid",
+                "uncertain" -> Color(0xFFF59E0B)
+                "failed",
+                "send_failed",
+                "rejected" -> Color(0xFFEF4444)
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            }
     Text(
-        text = when (status) {
-            "send_failed" -> "Failed"
-            "fee_paid" -> "Awaiting result"
-            "uncertain" -> "Result delayed"
-            else -> status
-        },
+        text =
+            when (status) {
+                "send_failed" -> "Failed"
+                "fee_paid" -> "Awaiting result"
+                "uncertain" -> "Result delayed"
+                else -> status
+            },
         style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.Medium,
-        color = resolvedColor
+        color = resolvedColor,
     )
 }
 
@@ -369,26 +402,24 @@ private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
 private fun EmptyStateView(
     icon: ImageVector,
     title: String,
-    description: String
+    description: String,
 ) {
     Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 80.dp),
-        contentAlignment = Alignment.Center
+        modifier = Modifier.fillMaxWidth().padding(top = 80.dp),
+        contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.size(64.dp)
+                modifier = Modifier.size(64.dp),
             ) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
                     Icon(
                         icon,
                         contentDescription = null,
                         modifier = Modifier.size(32.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
@@ -396,14 +427,14 @@ private fun EmptyStateView(
             Text(
                 title,
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(4.dp))
             Text(
                 description,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
             )
         }
     }
