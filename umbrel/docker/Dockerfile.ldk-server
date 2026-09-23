@@ -9,7 +9,7 @@ ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends git protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
-    && git checkout a56d5a96397bb7c596f8833829508d8a66d66212
+    && git checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
 # experimental-lsps2-support: without it the [liquidity.lsps2_service] config
 # is dead code and JIT-channel requests are rejected ("without LSPS2 service
 # handler configured").
@@ -17,10 +17,12 @@ RUN cargo build --release --locked -j "$CARGO_BUILD_JOBS" -p ldk-server --featur
     && cp /src/target/release/ldk-server /tmp/ldk-server
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 && rm -rf /var/lib/apt/lists/*
 COPY --from=build /tmp/ldk-server /usr/local/bin/ldk-server
+COPY umbrel/docker/ldk-server-entrypoint.py /usr/local/bin/ldk-server-entrypoint.py
 EXPOSE 9735 3536
-# Run LDK Server directly so Docker's SIGTERM reaches its graceful-shutdown
-# handler. Never mutate channel or LSPS state automatically after a failed
-# startup; recovery must be an explicit operator action against a backup.
+# This image's pinned LDK supports detailed history. Older images have no such
+# entrypoint, so the host hook must not insert the new field. Python 3.11's
+# tomllib validates the one-line migration before exec'ing LDK for SIGTERM.
+ENTRYPOINT ["python3", "/usr/local/bin/ldk-server-entrypoint.py"]
 CMD ["/usr/local/bin/ldk-server", "/etc/ldk-server/ldk-server.toml"]

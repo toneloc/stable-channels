@@ -29,7 +29,10 @@ services:
     stop_grace_period: 2m
     user: "1000:1000"
     volumes:
-      - ${APP_DATA_DIR}/data/config:/etc/ldk-server:ro
+      # Rebuilt LDK images migrate a missing history mode atomically here.
+      # Mount the directory writable (a single-file mount cannot be replaced).
+      # The older pinned image has no migrator and keeps its original config.
+      - ${APP_DATA_DIR}/data/config:/etc/ldk-server
       - ${APP_DATA_DIR}/data/ldk-server:/data/ldk-server
     ports:
       # Lightning P2P must be host-published so remote peers (the wallet
