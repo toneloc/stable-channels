@@ -119,12 +119,22 @@ class AppState {
     var btcPrice: Double { priceService.currentPrice }
     var accountingBTCPrice: Double { priceService.accountingPrice }
     var statusMessage: String = ""
+    private let syncStatusMessages: Set<String> = [
+        "Syncing wallet...",
+        "Network unstable. Retrying wallet sync...",
+        "Finishing background sync..."
+    ]
+
+    func clearSyncStatusMessage() {
+        if syncStatusMessages.contains(statusMessage) {
+            statusMessage = ""
+        }
+    }
+
     var paymentFlash: Bool = false
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
-    private var isBackfillingHourly: Bool = false
-    private var isBackfillingDaily: Bool = false
     private enum BalanceCacheKey {
         static let lightning = "cached_lightning_sats"
         static let onchain = "cached_onchain_sats"
@@ -1071,6 +1081,7 @@ class AppState {
             mempoolWebSocketService.connect()
             updateStableBalances()
             resumePendingSpliceConfirmation()
+            clearSyncStatusMessage()
             return
         }
         print("[App] Restarting node from foreground")
@@ -1093,6 +1104,7 @@ class AppState {
             reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
+            clearSyncStatusMessage()
         } catch {
             print("[App] Node restart failed: \(error)")
         }
@@ -1541,8 +1553,7 @@ class AppState {
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
                     "reason": reason.map { "\($0)" } ?? "unknown"
                 ])
-                let reasonStr = reason.map { "\($0)" } ?? "unknown"
-                statusMessage = "Payment failed: \(reasonStr)"
+                statusMessage = WalletErrorMessages.paymentFailure(reason)
             }
 
         case .spliceNegotiated(let channelId, let userChannelId, _, let newFundingTxo):
@@ -2530,6 +2541,27 @@ class AppState {
 
     private var spliceGeneration: UInt64 = 0
 
+    /// Blocks a spend that would consume sats owed to the LSP. When the position is
+    /// above par the backing sats beyond the target belong to the LSP until a stability
+    /// payment settles them. Fails open when no trusted price is available.
+    private func ensureNoUnsettledSurplus(amountSats: UInt64) throws {
+        let sc = stableChannel
+        guard sc.isStableReceiver, !sc.userChannelId.isEmpty else { return }
+        let price = priceService.accountingPrice
+        guard price > 0.0 else { return }
+        if StabilityService.spendConsumesLspSurplus(sc, price: price, amountSats: amountSats) {
+            let owedUsd = Double(sc.backingSats) / Double(Constants.satsInBTC) * price
+                - sc.expectedUSD.amount
+            let formatted = owedUsd.formatted(.currency(code: "USD"))
+            throw NSError(
+                domain: "",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."]
+            )
+        }
+    }
+
     func beginSpliceOut(amountSats: UInt64, address: String) throws {
         guard !isSweeping else {
             throw NSError(
@@ -2538,6 +2570,7 @@ class AppState {
                 userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
             )
         }
+        try ensureNoUnsettledSurplus(amountSats: amountSats)
         guard let db = databaseService else {
             throw NSError(
                 domain: "",
@@ -2673,21 +2706,30 @@ class AppState {
     }
 
     private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) {
+        let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+        guard price > 0.0 else {
+            // Defer: without a trusted price, don't finalize or clear state. Retry on next tick.
+            AuditService.log("SPLICE_RECONCILE_DEFERRED", data: ["txid": txid, "reason": "no_trusted_price"])
+            return
+        }
+
+        // Reconcile stable books FIRST, before marking row completed.
+        if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+            stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
+            saveChannelToDB()
+            AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
+                "usd_deducted": "\(usdDeducted)",
+                "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
+                "btc_price": "\(price)"
+            ])
+        }
+
         let completed = databaseService?.spliceRepo.completeSplice(txid: txid) == true
         if completed {
+            // History only reloads when this epoch moves; bump to ensure confirmation badge updates.
+            confirmationUpdateEpoch += 1
             refreshBalances()
             updateStableBalances()
-
-            let price = stableChannel.latestPrice
-            if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
-                stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
-                AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
-                    "usd_deducted": "\(usdDeducted)",
-                    "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
-                    "btc_price": "\(price)"
-                ])
-            }
-            saveChannelToDB()
         }
 
         if spliceGeneration == expectedGeneration {
@@ -2784,6 +2826,33 @@ class AppState {
         }
     }
 
+    /// Heal books that claim more backing than the channel holds.
+    /// backing > receiver cannot happen in normal operation: the backing is a slice of that
+    /// balance. It means a withdrawal moved sats out without its stable-books deduction.
+    private func repairBooksAboveLiveBalance() {
+        guard let db = databaseService else { return }
+        guard !stableChannel.userChannelId.isEmpty, hasReadyChannel else { return }
+        guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
+        if (try? db.spliceRepo.hasPendingSplice()) ?? true { return }
+        if (try? db.stabilityRepo.loadPendingSend()) != nil { return }
+        let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+
+        guard let repair = StabilityService.repairBooksAboveLiveBalance(&stableChannel, price: price) else {
+            return
+        }
+        saveChannelToDB()
+
+        AuditService.log("BOOKS_REPAIRED_ABOVE_LIVE_BALANCE", data: [
+            "user_channel_id": stableChannel.userChannelId,
+            "overflow_sats": "\(repair.overflowSats)",
+            "usd_deducted": "\(repair.usdDeducted)",
+            "old_expected_usd": "\(repair.oldExpectedUSD)",
+            "new_expected_usd": "\(repair.newExpectedUSD)",
+            "backing_sats": "\(stableChannel.backingSats)",
+            "btc_price": "\(price)"
+        ])
+    }
+
     private func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
@@ -2797,6 +2866,11 @@ class AppState {
 
         refreshBalances()
         updateStableBalances()
+
+        // Retry a repair that was deferred
+        if stableChannel.backingSats > stableChannel.stableReceiverBTC.sats {
+            repairBooksAboveLiveBalance()
+        }
 
         guard stableChannel.expectedUSD.amount > 0,
               !nodeService.channels.isEmpty else { return }
@@ -2836,6 +2910,27 @@ class AppState {
         guard databaseService.stabilityRepo.claimPendingSend(amountMsat: amountMsat, price: price) else {
             AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
                 "reason": "pending_send_already_claimed"
+            ])
+            return
+        }
+
+        // Re-validate books from DB now that the send is claimed.
+        // The decision above was made on the tick-top snapshot; an ordinary-send reconcile or
+        // incoming settlement may have committed since, leaving the books already on par.
+        loadChannelFromDB()
+        let recheck = StabilityService.checkStabilityAction(stableChannel, price: price)
+        let recheckedAmountMsat: UInt64
+        if recheck.action == .pay {
+            recheckedAmountMsat = (USD(amount: abs(recheck.dollarsFromPar)).toMsats(price: price) / 1000) * 1000
+        } else {
+            recheckedAmountMsat = 0
+        }
+        if recheckedAmountMsat != amountMsat {
+            databaseService.stabilityRepo.clearPendingSend()
+            AuditService.log("STABILITY_SKIP", data: [
+                "reason": "books_changed_after_decision",
+                "claimed_amount_msat": "\(amountMsat)",
+                "rechecked_amount_msat": "\(recheckedAmountMsat)"
             ])
             return
         }
@@ -2896,7 +2991,7 @@ class AppState {
         }
 
         do {
-            let persistence = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            _ = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: paymentIdString,
                 paymentType: "stability",
                 direction: "sent",
@@ -2907,13 +3002,12 @@ class AppState {
                 userChannelId: stableChannel.userChannelId,
                 backingDeltaSats: -Int64(amountMsat / 1000)
             )
-            guard let backing = persistence.backingSats else {
-                throw DatabaseError.executeFailed("DB did not return backing after outgoing stability payment")
-            }
+            // Reload books directly from the row: recordPaymentAndMaybeUpdateBacking
+            // atomically decremented backing_sats in SQLite. Re-reading from DB ensures we
+            // do not overwrite any concurrent ordinary-send reconcile with stale in-memory state.
+            loadChannelFromDB()
             stableChannel.lastStabilityPayment = now
             stableChannel.paymentMade = true
-            stableChannel.backingSats = backing
-            saveChannelToDB(preserveBacking: true)
             databaseService.stabilityRepo.clearPendingSend()
 
             AuditService.log("STABILITY_PAYMENT_SENT", data: [
@@ -3021,11 +3115,9 @@ class AppState {
                 userChannelId: stableChannel.userChannelId,
                 backingDeltaSats: -Int64(pending.amountMsat / 1000)
             )
-            guard let backing = persistence.backingSats else {
-                throw DatabaseError.executeFailed("DB did not return backing during outgoing reconciliation")
-            }
-            stableChannel.backingSats = backing
-            saveChannelToDB(preserveBacking: true)
+            // Same rule as runStabilityCheck(): reload books from the DB row rather than
+            // overwriting DB state with an in-memory snapshot.
+            loadChannelFromDB()
             databaseService.stabilityRepo.clearPendingSend()
             return true
         } catch {
@@ -3044,16 +3136,19 @@ class AppState {
         // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
         let currentOnchain = onchainBalanceSats
 
-        // Skip detection while a channel close is in flight: LDK sweeps the
-        // channel balance to the on-chain wallet, which makes onchainBalanceSats
-        // jump and would otherwise be recorded as a phantom "Received on-chain"
-        // row. The real close row is written by handleCloseTxidResolved.
-        if isChannelClosing {
-            prevOnchainSats = currentOnchain
+        // Deposits are deferred (not dropped) while a splice/close is in flight, since the
+        // on-chain balance can swing for unrelated reasons then. prevOnchainSats is NOT advanced
+        // while deferred, so a deposit landing mid-operation is picked up once it clears instead
+        // of being lost.
+        if isSweeping || pendingSplice != nil {
             return
         }
 
-        if currentOnchain > prevOnchainSats && !isSweeping && pendingSplice == nil {
+        if isChannelClosing {
+            return
+        }
+
+        if currentOnchain > prevOnchainSats {
             let depositSats = currentOnchain - prevOnchainSats
             // Ignore tiny fluctuations from fee estimation changes
             guard depositSats >= 1000 else {
@@ -3138,7 +3233,12 @@ class AppState {
             }
 
         case .receive(let target, let txid, let amountSats):
-            guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
+            // Fires only for our own tracked receive address, so unlike the balance-delta
+            // fallback it cannot be confused with a splice/close's own movement — safe to
+            // record regardless of splice/close state.
+            if (try? db.paymentRepo.paymentExists(forTxid: txid)) == true {
+                return
+            }
 
             // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
             if amountSats >= 1000 {
@@ -3664,130 +3764,21 @@ class AppState {
         }
     }
 
-    // MARK: - Hourly Price Backfill
+    // MARK: - Price Backfill & Seeding
 
-    /// Fetch hourly candles from Kraken and backfill price_history for smooth 1D/1W/1M charts.
     private func backfillHourlyPrices() async {
-        guard let db = databaseService else { return }
-        guard !isBackfillingHourly else { return }
-        isBackfillingHourly = true
-        defer { isBackfillingHourly = false }
-
-        // Determine how far back we need data — up to 30 days
-        let thirtyDaysAgo = Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600
-        let since: Int64
-        if let oldest = try? db.priceRepo.getOldestPriceHistoryTimestamp(), oldest < thirtyDaysAgo {
-            // Already have old enough data, just fill gaps from the newest record
-            since = (try? db.priceRepo.getLatestPriceHistoryTimestamp()) ?? thirtyDaysAgo
-        } else {
-            since = thirtyDaysAgo
-        }
-
-        for attempt in 1...3 {
-            guard let candles = await priceChartService.fetchKrakenHourlyOHLC(since: since) else {
-                if attempt < 3 {
-                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
-                }
-                continue
-            }
-            if !candles.isEmpty {
-                do {
-                    let count = try db.priceRepo.backfillHourlyPrices(candles)
-                    if count > 0 {
-                        print("[Chart] Backfilled \(count) hourly price points from Kraken")
-                        await MainActor.run {
-                            NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                        }
-                    }
-                } catch {
-                    print("[Chart] Hourly backfill failed: \(error)")
-                }
-            }
-            break
-        }
+        guard let priceRepo = databaseService?.priceRepo else { return }
+        await priceChartService.backfillHourlyPrices(priceRepo: priceRepo)
     }
 
-    // MARK: - Daily Price Backfill
-
-    /// Fetch daily candles from Kraken and backfill daily_prices for smooth 3M/6M/1Y/ALL charts.
     private func backfillDailyPrices() async {
-        guard let db = databaseService else { return }
-        guard !isBackfillingDaily else { return }
-        isBackfillingDaily = true
-        defer { isBackfillingDaily = false }
-
-        // Determine how far back we need data — up to 720 days
-        let sevenTwentyDaysAgo = Int64(Date().timeIntervalSince1970) - 720 * 24 * 3600
-        let since: Int64
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-
-        if let latest = try? db.priceRepo.getLatestDailyPriceDate(),
-           let date = formatter.date(from: latest) {
-            let latestTs = Int64(date.timeIntervalSince1970)
-            since = max(latestTs - 86400, sevenTwentyDaysAgo)
-        } else {
-            since = sevenTwentyDaysAgo
-        }
-
-        for attempt in 1...3 {
-            guard let candles = await priceChartService.fetchKrakenDailyOHLC(since: since) else {
-                if attempt < 3 {
-                    try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
-                }
-                continue
-            }
-            if !candles.isEmpty {
-                do {
-                    let count = try db.priceRepo.backfillDailyPrices(candles)
-                    if count > 0 {
-                        print("[Chart] Backfilled \(count) daily price points from Kraken")
-                    }
-                    await MainActor.run {
-                        NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                    }
-                } catch {
-                    print("[Chart] Daily backfill failed: \(error)")
-                }
-            }
-            break
-        }
+        guard let priceRepo = databaseService?.priceRepo else { return }
+        await priceChartService.backfillDailyPrices(priceRepo: priceRepo)
     }
-
-    // MARK: - Historical Price Seeding
 
     private func seedHistoricalPrices() {
-        guard let db = databaseService else { return }
-
-        let needsSeed: Bool
-        do {
-            if let oldest = try db.priceRepo.getOldestDailyPriceDate() {
-                needsSeed = !oldest.hasPrefix("2013")
-            } else {
-                needsSeed = true
-            }
-        } catch {
-            needsSeed = true
-        }
-
-        guard needsSeed else {
-            print("[Chart] Historical prices already seeded")
-            return
-        }
-
-        print("[Chart] Seeding historical price data (2013-present)...")
-        do {
-            let count = try db.priceRepo.bulkInsertDailyPrices(HistoricalPrices.seedPrices)
-            print("[Chart] Seeded \(count) historical price records")
-            if count > 0 {
-                Task { @MainActor in
-                    NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
-                }
-            }
-        } catch {
-            print("[Chart] Failed to seed historical prices: \(error)")
-        }
+        guard let priceRepo = databaseService?.priceRepo else { return }
+        priceChartService.seedHistoricalPrices(priceRepo: priceRepo)
     }
 
     // MARK: - LSP Configuration
