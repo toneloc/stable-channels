@@ -54,7 +54,7 @@ fn now_millis() -> u128 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DispatchOutcome {
+pub(crate) enum DispatchOutcome {
     Continue,
     Reconnect,
 }
@@ -213,7 +213,17 @@ async fn dispatch(
     // reconnecting here would lose the event because LDK Server does not replay its stream.
     let mut mgr = StableChannelManager::lock_for_event(&state.stable_manager, ldk).await;
     let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-    match envelope.event {
+    dispatch_event(envelope.event, &mut mgr, &state.db, ldk, btc_price).await
+}
+
+pub(crate) async fn dispatch_event(
+    event: Option<EventVariant>,
+    mgr: &mut crate::stable_manager::StableChannelManager,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    btc_price: f64,
+) -> DispatchOutcome {
+    match event {
         Some(EventVariant::ChannelStateChanged(e)) => {
             if e.state == ChannelState::Ready as i32 {
                 mgr.handle_channel_ready(
@@ -301,7 +311,7 @@ async fn dispatch(
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
             let mut settlement_handled = false;
             if let Some(payment_id) = payment_id.as_deref() {
-                match state.db.mark_trade_response_delivered(
+                match db.mark_trade_response_delivered(
                     payment_id,
                     crate::stable_manager::StableChannelManager::unix_time_secs(),
                 ) {
@@ -319,12 +329,11 @@ async fn dispatch(
                         return DispatchOutcome::Reconnect;
                     }
                 }
-                let known_settlement = state
-                    .db
+                let known_settlement = db
                     .settlement_exists(payment_id)
                     .ok()
                     .unwrap_or(false);
-                match state.db.mark_settlement_succeeded(
+                match db.mark_settlement_succeeded(
                     payment_id,
                     amount_msat,
                     fee_paid_msat,
@@ -364,7 +373,20 @@ async fn dispatch(
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
             if let Some(payment_id) = payment_id.as_deref() {
-                if let Err(error) = state.db.mark_trade_response_failed(
+                // Persist the failure before continuing. The retry tick derives ordinary SYNC
+                // obligations from these outcomes, including after a restart or reconnect.
+                if let Err(error) = db.mark_sync_payment_failed(payment_id) {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({
+                            "op": "mark_sync_payment_failed",
+                            "payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return DispatchOutcome::Reconnect;
+                }
+                if let Err(error) = db.mark_trade_response_failed(
                     payment_id,
                     crate::stable_manager::StableChannelManager::unix_time_secs(),
                 ) {
@@ -387,7 +409,7 @@ async fn dispatch(
                 .map(|rollback| rollback.user_channel_id.clone())
                 .or_else(|| {
                     payment_id.as_deref()
-                        .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten())
+                        .and_then(|pid| db.get_settlement_channel(pid).ok().flatten())
                 });
             stable_channels::audit::audit_event(
                 "PAYMENT_FAILED",

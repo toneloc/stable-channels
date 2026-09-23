@@ -237,7 +237,7 @@ async fn reconcile_pending_settlement_outcomes(
     let pending = db
         .list_pending_settlements()
         .map_err(|error| format!("failed to list pending settlements: {error}"))?;
-    for (payment_id, _) in pending {
+    for (payment_id, kind) in pending {
         let response = ldk
             .get_payment_details(GetPaymentDetailsRequest {
                 payment_id: payment_id.clone(),
@@ -249,6 +249,11 @@ async fn reconcile_pending_settlement_outcomes(
         let Some(payment) = response.payment else {
             continue;
         };
+        if kind == "sync" && payment.status == PaymentStatus::Failed as i32 {
+            db.mark_sync_payment_failed(&payment_id)
+                .map_err(|error| format!("failed to persist failed SYNC {payment_id}: {error}"))?;
+            continue;
+        }
         if payment.status != PaymentStatus::Succeeded as i32 {
             continue;
         }
