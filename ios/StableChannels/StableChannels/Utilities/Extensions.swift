@@ -41,12 +41,26 @@ enum AppFormatters {
         shortDate.string(from: date)
     }
 
-    static func formatSats(_ satsValue: UInt64) -> String {
-        sats.string(from: NSNumber(value: satsValue)) ?? "0"
+    static func formatSats(_ satsValue: UInt64, locale: Locale? = nil) -> String {
+        guard let locale else {
+            return sats.string(from: NSNumber(value: satsValue)) ?? "0"
+        }
+        let custom = NumberFormatter()
+        custom.locale = locale
+        custom.numberStyle = .decimal
+        return custom.string(from: NSNumber(value: satsValue)) ?? "\(satsValue)"
     }
 
-    static func formatUSD(_ amount: Double) -> String {
-        usd.string(from: NSNumber(value: amount)) ?? "$0.00"
+    static func formatUSD(_ amount: Double, locale: Locale? = nil) -> String {
+        guard let locale else {
+            return usd.string(from: NSNumber(value: amount)) ?? "$0.00"
+        }
+        let custom = NumberFormatter()
+        custom.locale = locale
+        custom.numberStyle = .currency
+        custom.currencyCode = "USD"
+        custom.maximumFractionDigits = 2
+        return custom.string(from: NSNumber(value: amount)) ?? "$0.00"
     }
 }
 
@@ -65,9 +79,13 @@ extension Date {
 // MARK: - Number Formatting
 
 extension UInt64 {
-    var satsFormatted: String {
-        let formatted = AppFormatters.formatSats(self)
+    func satsFormatted(locale: Locale? = nil) -> String {
+        let formatted = AppFormatters.formatSats(self, locale: locale)
         return "\(formatted) sats"
+    }
+
+    var satsFormatted: String {
+        satsFormatted(locale: nil)
     }
 
     var btcFormatted: String {
@@ -105,8 +123,12 @@ extension UInt64 {
 }
 
 extension Double {
+    func usdFormatted(locale: Locale? = nil) -> String {
+        AppFormatters.formatUSD(self, locale: locale)
+    }
+
     var usdFormatted: String {
-        AppFormatters.formatUSD(self)
+        usdFormatted(locale: nil)
     }
 }
 
