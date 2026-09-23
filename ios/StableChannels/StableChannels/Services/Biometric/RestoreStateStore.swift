@@ -53,12 +53,12 @@ struct RestoreStateStore {
 
     func setRestorePhase(_ phase: RestorePhase) throws {
         guard let ud = UserDefaults(suiteName: appGroupIdentifier) else {
-            throw WalletRestoreError.wipeFailed("UserDefaults app group is inaccessible")
+            throw WalletRestoreError.persistenceFailed("UserDefaults app group is inaccessible")
         }
         ud.set(phase.rawValue, forKey: Self.restorePhaseKey)
         ud.set(true, forKey: Self.legacyRestoreInProgressKey)
         guard ud.string(forKey: Self.restorePhaseKey) == phase.rawValue else {
-            throw WalletRestoreError.wipeFailed("Failed to persist restore phase marker")
+            throw WalletRestoreError.persistenceFailed("Failed to persist restore phase marker")
         }
     }
 
