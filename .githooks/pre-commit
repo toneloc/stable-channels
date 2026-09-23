@@ -140,6 +140,38 @@ else
     fi
 fi
 
+# ─── 7. ktfmt (Android) ──────────────────────────────────────────────
+
+ANDROID_STAGED=$(echo "$STAGED" | grep '^android/.*\.kt$')
+if [ -z "$ANDROID_STAGED" ]; then
+    skip "ktfmt (no Android .kt changes)"
+else
+    KTFMT="$(command -v ktfmt 2>/dev/null)"
+    if [ -z "$KTFMT" ]; then
+        skip "ktfmt (not installed — brew install ktfmt)"
+    else
+        # Refuse autoformatting if files have unstaged changes to preserve hunks and prevent secrets scan bypass
+        HAS_UNSTAGED=false
+        for file in $ANDROID_STAGED; do
+            if ! git diff --quiet -- "$file" 2>/dev/null; then
+                HAS_UNSTAGED=true
+                break
+            fi
+        done
+
+        if [ "$HAS_UNSTAGED" = true ]; then
+            fail "ktfmt (cannot format files with unstaged changes; stage or stash before committing)"
+        else
+            if echo "$ANDROID_STAGED" | xargs ktfmt --kotlinlang-style 2>/dev/null; then
+                echo "$ANDROID_STAGED" | xargs git add
+                pass "ktfmt"
+            else
+                fail "ktfmt (formatting failed; check syntax in staged Kotlin files)"
+            fi
+        fi
+    fi
+fi
+
 # ─── Result ──────────────────────────────────────────────────────────
 
 echo ""

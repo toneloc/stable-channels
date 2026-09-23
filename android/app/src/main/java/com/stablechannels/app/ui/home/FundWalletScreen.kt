@@ -3,12 +3,12 @@ package com.stablechannels.app.ui.home
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
@@ -51,32 +51,30 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier =
+            Modifier.fillMaxWidth()
+                .navigationBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Toolbar (Back button, centered title)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             TextButton(
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.CenterStart),
-                colors = ButtonDefaults.textButtonColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    } else {
-                        Color(0xFFE5E5EA)
-                    },
-                    contentColor = MaterialTheme.colorScheme.primary
-                ),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
                 shape = RoundedCornerShape(20.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 Text("Back", style = MaterialTheme.typography.bodyMedium)
             }
@@ -84,7 +82,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                 text = "Onchain Receive",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier.align(Alignment.Center),
             )
         }
 
@@ -98,25 +96,27 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                 Image(
                     bitmap = qrBitmap.asImageBitmap(),
                     contentDescription = "QR Code",
-                    modifier = Modifier.size(200.dp)
+                    modifier = Modifier.size(200.dp),
                 )
             }
             Spacer(Modifier.height(24.dp))
 
             // Address container with background
             Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    ),
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
+                modifier =
+                    Modifier.fillMaxWidth().clickable {
                         clipboardManager.setText(AnnotatedString(addr))
                         isCopied = true
-                    }
+                    },
             ) {
                 Row(
                     modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     SelectionContainer(modifier = Modifier.weight(1f)) {
                         Text(
@@ -124,7 +124,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                             fontFamily = FontFamily.Monospace,
                             style = MaterialTheme.typography.bodySmall,
                             textAlign = TextAlign.Start,
-                            maxLines = 2
+                            maxLines = 2,
                         )
                     }
                     Spacer(Modifier.width(8.dp))
@@ -135,9 +135,12 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                         }
                     ) {
                         Icon(
-                            imageVector = if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
+                            imageVector =
+                                if (isCopied) Icons.Default.Check else Icons.Default.ContentCopy,
                             contentDescription = "Copy Address",
-                            tint = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface
+                            tint =
+                                if (isCopied) Color(0xFF10B981)
+                                else MaterialTheme.colorScheme.onSurface,
                         )
                     }
                 }
@@ -146,11 +149,13 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
             Text(
                 text = if (isCopied) "Address Copied!" else "Tap here to copy address",
                 style = MaterialTheme.typography.labelSmall,
-                color = if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clickable {
-                    clipboardManager.setText(AnnotatedString(addr))
-                    isCopied = true
-                }
+                color =
+                    if (isCopied) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier =
+                    Modifier.clickable {
+                        clipboardManager.setText(AnnotatedString(addr))
+                        isCopied = true
+                    },
             )
         } else {
             Box(Modifier.height(300.dp), contentAlignment = Alignment.Center) {
@@ -164,12 +169,19 @@ fun generateQRCode(text: String, size: Int = 512): Bitmap? {
     return try {
         val writer = QRCodeWriter()
         val bitMatrix = writer.encode(text, BarcodeFormat.QR_CODE, size, size)
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap.setPixel(x, y, if (bitMatrix.get(x, y)) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+        val pixels = IntArray(size * size)
+        val black = android.graphics.Color.BLACK
+        val white = android.graphics.Color.WHITE
+        for (y in 0 until size) {
+            val offset = y * size
+            for (x in 0 until size) {
+                pixels[offset + x] = if (bitMatrix.get(x, y)) black else white
             }
         }
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.RGB_565)
+        bitmap.setPixels(pixels, 0, size, 0, 0, size, size)
         bitmap
-    } catch (_: Exception) { null }
+    } catch (_: Exception) {
+        null
+    }
 }

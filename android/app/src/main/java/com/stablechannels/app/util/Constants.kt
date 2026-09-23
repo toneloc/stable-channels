@@ -31,13 +31,16 @@ object Constants {
 
     const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
     const val FALLBACK_CHAIN_URL = "https://mempool.space/api"
-    const val DEFAULT_LSP_PUBKEY = "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
+    const val DEFAULT_LSP_PUBKEY =
+        "0388948c5c7775a5eda3ee4a96434a270f20f5beeed7e9c99f242f21b87d658850"
     const val DEFAULT_LSP_ADDRESS = "stablechannels.com:9735"
 
     const val PRICE_CACHE_REFRESH_SECS: Long = 15
     const val PRICE_FETCH_TIMEOUT_SECS: Long = 3
-    /** Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
-     *  than a single-price ticker and must not share the short per-feed ticker timeout. */
+    /**
+     * Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
+     * than a single-price ticker and must not share the short per-feed ticker timeout.
+     */
     const val CHART_FETCH_TIMEOUT_SECS: Long = 30
 
     const val ONCHAIN_WALLET_SYNC_INTERVAL_SECS: Long = 120
@@ -92,5 +95,5 @@ object Constants {
 data class PriceFeedConfig(
     val name: String,
     val urlFormat: String,
-    val jsonPath: List<String>
+    val jsonPath: List<String>,
 )

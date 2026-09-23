@@ -25,6 +25,26 @@ use stable_channels::trade::TradeRejectionReason;
 use stable_channels::types::{Bitcoin, StableChannel, USD};
 use tracing::{error, info};
 
+/// Ordinary SYNC retries back off per accepted-then-failed attempt since the last delivery.
+pub(crate) const SYNC_RETRY_BACKOFF_BASE_SECS: u64 = 60;
+pub(crate) const SYNC_RETRY_BACKOFF_MAX_SECS: u64 = 3600;
+/// Consecutive undelivered attempts after which retries stop until a SYNC is delivered.
+pub(crate) const SYNC_RETRY_MAX_ATTEMPTS: u64 = 10;
+/// An accepted SYNC with no terminal outcome after this long is treated as failed.
+pub(crate) const SYNC_PENDING_TIMEOUT_SECS: u64 = 3600;
+
+/// The first retry is immediate; later ones double from the base until the cap.
+fn sync_retry_delay_secs(attempts: u64) -> u64 {
+    if attempts < 2 {
+        return 0;
+    }
+    let doublings = attempts - 2;
+    if doublings >= 32 {
+        return SYNC_RETRY_BACKOFF_MAX_SECS;
+    }
+    (SYNC_RETRY_BACKOFF_BASE_SECS << doublings).min(SYNC_RETRY_BACKOFF_MAX_SECS)
+}
+
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
 /// assigns the funder's current commitment fee to the remote peer.
@@ -259,6 +279,17 @@ impl LdkServerCalls for LdkServerClient {
     }
 }
 
+/// A correction already calculated from an observed balance. Preserve it across save failures:
+/// recalculating after another payment can erase the original deduction.
+#[derive(Clone)]
+struct PendingBookUpdate {
+    channel_id: String,
+    proposed: StableChannel,
+    context: &'static str,
+    audits: Vec<(&'static str, serde_json::Value)>,
+    needs_sync: bool,
+}
+
 /// In-memory list of stable channels plus a handle to the shared sqlite channels table.
 pub struct StableChannelManager {
     pub stable_channels: Vec<StableChannel>,
@@ -268,12 +299,17 @@ pub struct StableChannelManager {
     data_dir: PathBuf,
     /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
     spend_debounce: std::collections::HashMap<u128, u8>,
+    /// Splice events still awaiting a usable snapshot or a committed correction.
+    pending_splices: std::collections::HashMap<u128, Option<String>>,
+    pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
     /// Channels awaiting a startup SYNC or retry. Accepted attempts and terminal outcomes are
     /// persisted in settlement_payments; this set also covers failures before an ID is recorded.
     startup_sync_pending: std::collections::HashSet<u128>,
     startup_sync_initialized: bool,
+    /// Channels whose failure-driven SYNC retries stopped at the cap, audited once each.
+    sync_retry_exhausted: std::collections::HashSet<u128>,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -284,6 +320,98 @@ pub struct EditOutcome {
 }
 
 impl StableChannelManager {
+    /// Keep the next event with its caller until earlier corrections commit. Return the lock
+    /// itself so a tick or settings edit cannot overtake the event after the check.
+    pub(crate) async fn lock_for_event<'a>(
+        manager: &'a tokio::sync::Mutex<Self>,
+        ldk: &dyn LdkServerCalls,
+    ) -> tokio::sync::MutexGuard<'a, Self> {
+        loop {
+            let mut mgr = manager.lock().await;
+            let price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
+            if mgr.retry_pending_reconciliations(ldk, price).await {
+                return mgr;
+            }
+            drop(mgr);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    fn persist_pending_book_update(&mut self, uid: u128) -> bool {
+        let Some(pending) = self.pending_book_updates.get(&uid).cloned() else {
+            return true;
+        };
+        let Some(idx) = self
+            .stable_channels
+            .iter()
+            .position(|sc| sc.user_channel_id == uid)
+        else {
+            self.pending_book_updates.remove(&uid);
+            self.pending_splices.remove(&uid);
+            return true;
+        };
+        let sc = &pending.proposed;
+        if let Err(error) = self.db.save_channel(
+            &pending.channel_id,
+            &uid.to_string(),
+            sc.expected_usd.0,
+            sc.backing_sats,
+            sc.native_sats,
+            sc.note.as_deref(),
+        ) {
+            tracing::error!(
+                "[stable] pending {} save failed: {}",
+                pending.context,
+                error
+            );
+            stable_channels::audit::audit_event(
+                "DB_WRITE_FAILED",
+                serde_json::json!({
+                    "op": "save_channel", "context": pending.context,
+                    "channel_id": pending.channel_id, "user_channel_id": uid.to_string(),
+                    "error": error.to_string(),
+                }),
+            );
+            return false;
+        }
+        self.stable_channels[idx] = pending.proposed;
+        self.pending_book_updates.remove(&uid);
+        self.pending_splices.remove(&uid);
+        self.spend_debounce.remove(&uid);
+        for (event, data) in pending.audits {
+            stable_channels::audit::audit_event(event, data);
+        }
+        if pending.needs_sync {
+            self.startup_sync_pending.insert(uid);
+        }
+        true
+    }
+
+    async fn retry_pending_reconciliations(
+        &mut self,
+        ldk: &dyn LdkServerCalls,
+        price: f64,
+    ) -> bool {
+        if self.pending_book_updates.is_empty() && self.pending_splices.is_empty() {
+            return true;
+        }
+        let updates: Vec<_> = self.pending_book_updates.keys().copied().collect();
+        for uid in updates {
+            self.persist_pending_book_update(uid);
+        }
+        let splices = self.pending_splices.clone();
+        for (uid, funding_txo) in splices {
+            if !self.pending_book_updates.contains_key(&uid) {
+                self.handle_channel_ready_splice(uid, funding_txo.as_deref(), ldk, price)
+                    .await;
+            }
+        }
+        self.retry_startup_sync(ldk).await;
+        // Only a calculated correction is an ordering barrier. A splice with no snapshot
+        // must not hold the event stream: a later ChannelClosed may be what removes it.
+        self.pending_book_updates.is_empty()
+    }
+
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
     }
@@ -547,9 +675,12 @@ impl StableChannelManager {
             db,
             data_dir,
             spend_debounce: std::collections::HashMap::new(),
+            pending_splices: std::collections::HashMap::new(),
+            pending_book_updates: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
+            sync_retry_exhausted: std::collections::HashSet::new(),
         }
     }
 
@@ -562,6 +693,12 @@ impl StableChannelManager {
         ldk_server: &dyn LdkServerCalls,
         btc_price: f64,
     ) -> EditOutcome {
+        if !self.retry_pending_reconciliations(ldk_server, btc_price).await {
+            return EditOutcome {
+                ok: false,
+                status: "Balance correction is pending; retry the edit after it is saved".to_owned(),
+            };
+        }
         let channels_resp = match ldk_server.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r,
             Err(e) => {
@@ -726,6 +863,8 @@ impl StableChannelManager {
         });
         if let Some(t) = target {
             self.spend_debounce.remove(&t);
+            self.pending_splices.remove(&t);
+            self.pending_book_updates.remove(&t);
             self.stability_throttle.remove(&t);
         }
         if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
@@ -757,6 +896,9 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
+        if !self.retry_pending_reconciliations(ldk, btc_price).await {
+            return;
+        }
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
             Err(e) => {
@@ -871,9 +1013,7 @@ impl StableChannelManager {
             tracing::warn!("[stable] SYNC outcome reconciliation failed: {}", error);
         }
         match self.db.list_failed_sync_channels() {
-            Ok(channels) => self.startup_sync_pending.extend(
-                channels.iter().filter_map(|uid| parse_user_channel_id(uid)),
-            ),
+            Ok(channels) => self.queue_due_sync_retries(&channels),
             Err(error) => {
                 tracing::error!("[stable] failed to load SYNC retries: {}", error);
                 return;
@@ -893,7 +1033,11 @@ impl StableChannelManager {
         let syncs: Vec<_> = self
             .stable_channels
             .iter()
-            .filter(|sc| self.startup_sync_pending.contains(&sc.user_channel_id))
+            .filter(|sc| {
+                self.startup_sync_pending.contains(&sc.user_channel_id)
+                    && !self.pending_splices.contains_key(&sc.user_channel_id)
+                    && !self.pending_book_updates.contains_key(&sc.user_channel_id)
+            })
             .map(|sc| {
                 (
                     sc.user_channel_id,
@@ -903,7 +1047,27 @@ impl StableChannelManager {
                 )
             })
             .collect();
+        if syncs.is_empty() {
+            return;
+        }
+        // An offline peer cannot take a keysend: keep the obligation queued and consume no version.
+        let usable: std::collections::HashSet<u128> =
+            match ldk.list_channels(ListChannelsRequest {}).await {
+                Ok(response) => response
+                    .channels
+                    .iter()
+                    .filter(|c| c.is_usable)
+                    .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
+                    .collect(),
+                Err(error) => {
+                    tracing::warn!("[stable] SYNC retry skipped, list_channels failed: {}", error);
+                    return;
+                }
+            };
         for (uid, channel_id, live_sats, counterparty) in syncs {
+            if !usable.contains(&uid) {
+                continue;
+            }
             // Rebuild the correction from committed books, never from the failed payload or
             // an in-memory allocation whose database save may have failed.
             let record = match self.db.load_channel(&uid.to_string()) {
@@ -928,8 +1092,41 @@ impl StableChannelManager {
         }
     }
 
+    /// Queue a failed channel's retry once its backoff has elapsed. Past the attempt cap the
+    /// channel waits for a delivered SYNC from any path, audited once rather than every tick.
+    fn queue_due_sync_retries(&mut self, failed: &[String]) {
+        let now = Self::unix_time_secs();
+        let mut exhausted = std::collections::HashSet::new();
+        for user_channel_id in failed {
+            let Some(uid) = parse_user_channel_id(user_channel_id) else { continue };
+            let (attempts, last_attempt_at) = match self.db.sync_retry_attempts(user_channel_id) {
+                Ok(state) => state,
+                Err(error) => {
+                    tracing::error!("[stable] failed to load SYNC attempts for {}: {}", uid, error);
+                    continue;
+                }
+            };
+            if attempts >= SYNC_RETRY_MAX_ATTEMPTS {
+                if !self.sync_retry_exhausted.contains(&uid) {
+                    stable_channels::audit::audit_event(
+                        "SYNC_RETRY_EXHAUSTED",
+                        serde_json::json!({ "user_channel_id": user_channel_id, "attempts": attempts }),
+                    );
+                }
+                exhausted.insert(uid);
+                continue;
+            }
+            let due_at = last_attempt_at.saturating_add(sync_retry_delay_secs(attempts) as i64);
+            if now >= due_at {
+                self.startup_sync_pending.insert(uid);
+            }
+        }
+        self.sync_retry_exhausted = exhausted;
+    }
+
     async fn reconcile_sync_outcomes(&self, ldk: &dyn LdkServerCalls) -> anyhow::Result<()> {
-        for payment_id in self.db.list_pending_sync_payment_ids()? {
+        let now = Self::unix_time_secs();
+        for (payment_id, recorded_at) in self.db.list_pending_sync_payments()? {
             let response = match ldk
                 .get_payment_details(GetPaymentDetailsRequest {
                     payment_id: payment_id.clone(),
@@ -942,16 +1139,28 @@ impl StableChannelManager {
                     continue;
                 }
             };
-            let Some(payment) = response.payment else { continue };
-            if payment.status == PaymentStatus::Failed as i32 {
+            let status = response.payment.as_ref().map(|payment| payment.status);
+            if status == Some(PaymentStatus::Failed as i32) {
                 self.db.mark_sync_payment_failed(&payment_id)?;
-            } else if payment.status == PaymentStatus::Succeeded as i32 {
+            } else if status == Some(PaymentStatus::Succeeded as i32) {
+                let payment = response.payment.unwrap_or_default();
                 self.db.mark_settlement_succeeded(
                     &payment_id,
                     payment.amount_msat,
                     payment.fee_paid_msat,
                     Some("outbound"),
                 )?;
+            } else if now.saturating_sub(recorded_at) > SYNC_PENDING_TIMEOUT_SECS as i64 {
+                // No outcome after the timeout: LDK lost the payment or its HTLC is stuck. Replace it.
+                self.db.mark_sync_payment_failed(&payment_id)?;
+                stable_channels::audit::audit_event(
+                    "SYNC_PENDING_ABANDONED",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "age_secs": now.saturating_sub(recorded_at),
+                        "ldk_status": status,
+                    }),
+                );
             }
         }
         Ok(())
@@ -959,6 +1168,10 @@ impl StableChannelManager {
 
     /// Self-heal: if the in-memory list is empty (startup/reconnect reconcile skipped on a cold price cache), rebuild it from truth; a populated list is left untouched so a transient empty snapshot can't wipe it.
     pub async fn reconcile_if_empty(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
+        // run_tick owns retries here and skips settlement on a tick that commits a correction.
+        if !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty() {
+            return;
+        }
         if self.stable_channels.is_empty() {
             self.reconcile_from_grpc(ldk, btc_price).await;
         } else {
@@ -1810,6 +2023,12 @@ impl StableChannelManager {
         push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>,
         btc_price: f64,
     ) {
+        let had_pending = !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty();
+        if !self.retry_pending_reconciliations(ldk, btc_price).await || had_pending {
+            // Give the event loop a chance to process the events held behind this correction
+            // before considering another balance-based deduction or stability payment.
+            return;
+        }
         // LDK Server's event stream is not replayable. Finish any receive that was durably
         // registered before a transient channel/signature/DB failure.
         self.retry_pending_signed_stability(ldk, btc_price).await;
@@ -1845,17 +2064,22 @@ impl StableChannelManager {
         const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
 
         for sc in self.stable_channels.iter_mut() {
+            if self.pending_splices.contains_key(&sc.user_channel_id) {
+                // A failed splice save must finish before a tick can change these books.
+                continue;
+            }
             if sc.expected_usd.0 < 0.01 {
                 continue;
             }
             let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
 
             let (our_sats, their_sats) = channel_peer_balances(c);
-            sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
-            sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-            sc.latest_price = btc_price;
+            let mut proposed = sc.clone();
+            proposed.stable_provider_btc = Bitcoin::from_sats(our_sats);
+            proposed.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+            proposed.stable_provider_usd = USD::from_bitcoin(proposed.stable_provider_btc, btc_price);
+            proposed.stable_receiver_usd = USD::from_bitcoin(proposed.stable_receiver_btc, btc_price);
+            proposed.latest_price = btc_price;
 
             // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced since outbound_capacity excludes in-flight HTLCs.
             let uid = sc.user_channel_id;
@@ -1866,10 +2090,37 @@ impl StableChannelManager {
                     *cnt
                 };
                 if count >= BACKSTOP_DEBOUNCE_TICKS {
-                    self.spend_debounce.remove(&uid);
                     if let Some(usd_deducted) =
-                        stable_channels::stable::reconcile_outgoing(sc, btc_price)
+                        stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price)
                     {
+                        if let Err(e) = self.db.save_channel(
+                            &c.channel_id,
+                            &format!("{}", uid),
+                            proposed.expected_usd.0,
+                            proposed.backing_sats,
+                            proposed.native_sats,
+                            proposed.note.as_deref(),
+                        ) {
+                            tracing::error!("[stable] backstop save_channel failed: {}", e);
+                            stable_channels::audit::audit_event(
+                                "DB_WRITE_FAILED",
+                                serde_json::json!({ "op": "save_channel", "context": "backstop", "user_channel_id": format!("{}", uid), "channel_id": c.channel_id, "error": e.to_string() }),
+                            );
+                            let data = serde_json::json!({
+                                "channel_id": c.channel_id, "user_channel_id": uid.to_string(),
+                                "their_sats": their_sats, "usd_deducted": usd_deducted,
+                                "new_expected_usd": proposed.expected_usd.0,
+                                "new_backing_sats": proposed.backing_sats,
+                            });
+                            self.pending_book_updates.insert(uid, PendingBookUpdate {
+                                channel_id: c.channel_id.clone(), proposed,
+                                context: "backstop",
+                                audits: vec![("BACKSTOP_STABLE_DEDUCTED", data)],
+                                needs_sync: true,
+                            });
+                            // Preserve the exact failed correction and leave published books intact.
+                            continue;
+                        }
                         stable_channels::audit::audit_event(
                             "BACKSTOP_STABLE_DEDUCTED",
                             serde_json::json!({
@@ -1877,36 +2128,24 @@ impl StableChannelManager {
                                 "user_channel_id": format!("{}", uid),
                                 "their_sats": their_sats,
                                 "usd_deducted": usd_deducted,
-                                "new_expected_usd": sc.expected_usd.0,
-                                "new_backing_sats": sc.backing_sats,
+                                "new_expected_usd": proposed.expected_usd.0,
+                                "new_backing_sats": proposed.backing_sats,
                             }),
                         );
-                        if let Err(e) = self.db.save_channel(
-                            &c.channel_id,
-                            &format!("{}", uid),
-                            sc.expected_usd.0,
-                            sc.backing_sats,
-                            sc.native_sats,
-                            sc.note.as_deref(),
-                        ) {
-                            tracing::error!("[stable] backstop save_channel failed: {}", e);
-                            stable_channels::audit::audit_event(
-                                "DB_WRITE_FAILED",
-                                serde_json::json!({ "op": "save_channel", "context": "backstop", "user_channel_id": format!("{}", uid), "channel_id": c.channel_id, "error": e.to_string() }),
-                            );
-                        }
                         backstop_syncs.push((
                             uid,
                             c.channel_id.clone(),
-                            sc.expected_usd.0,
-                            sc.backing_sats,
-                            sc.counterparty.to_string(),
+                            proposed.expected_usd.0,
+                            proposed.backing_sats,
+                            proposed.counterparty.to_string(),
                         ));
                     }
+                    self.spend_debounce.remove(&uid);
                 }
             } else {
                 self.spend_debounce.remove(&uid);
             }
+            *sc = proposed;
 
             let stable_usd_value = if sc.backing_sats > 0 {
                 (sc.backing_sats as f64 / 100_000_000.0) * btc_price
@@ -2505,6 +2744,25 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
+        if self.pending_book_updates.contains_key(&uid) {
+            if self.persist_pending_book_update(uid) {
+                self.retry_startup_sync(ldk).await;
+            }
+            return;
+        }
+        let Some(idx) = self
+            .stable_channels
+            .iter()
+            .position(|sc| sc.user_channel_id == uid)
+        else {
+            self.pending_splices.remove(&uid);
+            return;
+        };
+        self.pending_splices
+            .insert(uid, funding_txo.map(str::to_owned));
+        if btc_price <= 0.0 {
+            return;
+        }
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
             Err(e) => {
@@ -2526,81 +2784,34 @@ impl StableChannelManager {
         let channel_id_hex = c.channel_id.clone();
         let new_channel_id_bytes = parse_channel_id_hex(&c.channel_id);
 
-        let persisted = {
-            let Some(sc) = self
-                .stable_channels
-                .iter_mut()
-                .find(|sc| sc.user_channel_id == uid)
-            else {
-                return;
-            };
-            let before_receiver_sats = sc.stable_receiver_btc.sats;
-            let (splice_direction, splice_amount_sats) =
-                splice_balance_change(before_receiver_sats, their_sats);
-            // Refresh receiver balance from the new snapshot but PRESERVE backing_sats so reconcile_outgoing can infer the overflow.
-            sc.channel_id =
-                ldk_node::lightning::ln::types::ChannelId::from_bytes(new_channel_id_bytes);
-            sc.stable_provider_btc = Bitcoin::from_sats(our_sats);
-            sc.stable_receiver_btc = Bitcoin::from_sats(their_sats);
-            sc.stable_provider_usd = USD::from_bitcoin(sc.stable_provider_btc, btc_price);
-            sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
-            sc.latest_price = btc_price;
-            stable_channels::stable::recompute_native(sc);
-
-            let counterparty_hex = sc.counterparty.to_string();
-            let usd_deducted = stable_channels::stable::reconcile_outgoing(sc, btc_price);
-            if let Some(d) = usd_deducted {
-                stable_channels::audit::audit_event(
-                    "SPLICE_OUT_STABLE_DEDUCTED",
-                    serde_json::json!({
-                        "channel_id": channel_id_hex,
-                        "user_channel_id": format!("{}", uid),
-                        "usd_deducted": d,
-                        "new_expected_usd": sc.expected_usd.0,
-                    }),
-                );
-            }
-            (
-                format!("{}", sc.user_channel_id),
-                sc.expected_usd.0,
-                sc.backing_sats,
-                sc.native_sats,
-                sc.note.clone(),
-                counterparty_hex,
-                usd_deducted.is_some(),
-                splice_direction,
-                splice_amount_sats,
-                before_receiver_sats,
-            )
-        };
-
-        let (
-            ucid_str,
-            expected_usd_f,
-            backing,
-            native,
-            note,
-            counterparty_hex,
-            deducted,
-            splice_direction,
-            splice_amount_sats,
-            before_receiver_sats,
-        ) = persisted;
-        if let Err(e) = self.db.save_channel(
-            &channel_id_hex,
-            &ucid_str,
-            expected_usd_f,
-            backing,
-            native,
-            note.as_deref(),
-        ) {
-            error!("[splice] db.save_channel failed: {}", e);
-            stable_channels::audit::audit_event(
-                "DB_WRITE_FAILED",
-                serde_json::json!({ "op": "save_channel", "context": "handle_channel_ready_splice", "channel_id": channel_id_hex, "user_channel_id": ucid_str, "error": e.to_string() }),
-            );
+        // Reconcile a copy so a failed save also preserves the old channel id and cooldown.
+        let mut proposed = self.stable_channels[idx].clone();
+        let before_receiver_sats = proposed.stable_receiver_btc.sats;
+        let (splice_direction, splice_amount_sats) =
+            splice_balance_change(before_receiver_sats, their_sats);
+        proposed.channel_id =
+            ldk_node::lightning::ln::types::ChannelId::from_bytes(new_channel_id_bytes);
+        proposed.stable_provider_btc = Bitcoin::from_sats(our_sats);
+        proposed.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+        proposed.stable_provider_usd = USD::from_bitcoin(proposed.stable_provider_btc, btc_price);
+        proposed.stable_receiver_usd = USD::from_bitcoin(proposed.stable_receiver_btc, btc_price);
+        proposed.latest_price = btc_price;
+        stable_channels::stable::recompute_native(&mut proposed);
+        let usd_deducted = stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price);
+        let ucid_str = uid.to_string();
+        let mut audits = Vec::new();
+        if let Some(d) = usd_deducted {
+            audits.push((
+                "SPLICE_OUT_STABLE_DEDUCTED",
+                serde_json::json!({
+                    "channel_id": channel_id_hex,
+                    "user_channel_id": ucid_str,
+                    "usd_deducted": d,
+                    "new_expected_usd": proposed.expected_usd.0,
+                }),
+            ));
         }
-        stable_channels::audit::audit_event(
+        audits.push((
             "CHANNEL_READY_SPLICE",
             serde_json::json!({
                 "channel_id": channel_id_hex,
@@ -2613,23 +2824,21 @@ impl StableChannelManager {
                 "after_live_receiver_sats": their_sats,
                 "before_btc_price": btc_price,
                 "btc_price": btc_price,
-                "deducted": deducted,
+                "deducted": usd_deducted.is_some(),
             }),
+        ));
+        self.pending_book_updates.insert(
+            uid,
+            PendingBookUpdate {
+                channel_id: channel_id_hex,
+                proposed,
+                context: "handle_channel_ready_splice",
+                audits,
+                needs_sync: usd_deducted.is_some(),
+            },
         );
-        if deducted {
-            let sent = self
-                .send_sync_message(
-                    ldk,
-                    uid,
-                    &channel_id_hex,
-                    expected_usd_f,
-                    backing,
-                    &counterparty_hex,
-                )
-                .await;
-            if !sent {
-                self.startup_sync_pending.insert(uid);
-            }
+        if self.persist_pending_book_update(uid) {
+            self.retry_startup_sync(ldk).await;
         }
     }
 
@@ -4453,6 +4662,537 @@ mod tests {
         );
     }
 
+    fn seed_persisted_save_test_channel(mgr: &mut StableChannelManager, expected: f64) {
+        let backing = if expected > 0.0 { 10_000 } else { 0 };
+        seed_channel(
+            mgr,
+            USER_CHANNEL_ID_DECIMAL.parse().unwrap(),
+            COUNTERPARTY_HEX,
+            CHANNEL_ID_HEX,
+            expected,
+            backing,
+            50_000 - backing,
+            50_000,
+            100_000.0,
+        );
+        mgr.db
+            .save_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_DECIMAL,
+                expected,
+                backing,
+                50_000 - backing,
+                None,
+            )
+            .unwrap();
+    }
+
+    fn save_test_connection(mgr: &StableChannelManager) -> rusqlite::Connection {
+        rusqlite::Connection::open(mgr.data_dir().join(stable_channels::db::DB_FILENAME)).unwrap()
+    }
+
+    fn assert_saved_books(mgr: &StableChannelManager, expected: f64, backing: u64, native: u64) {
+        let sc = &mgr.stable_channels[0];
+        // Read through a new connection, as a restarted process would.
+        let reopened = Database::open(mgr.data_dir()).unwrap();
+        let saved = reopened
+            .load_channel(USER_CHANNEL_ID_DECIMAL)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sc.expected_usd.0, expected);
+        assert_eq!(sc.backing_sats, backing);
+        assert_eq!(sc.native_sats, native);
+        assert_eq!(saved.expected_usd, expected);
+        assert_eq!(saved.backing_sats, backing);
+        assert_eq!(saved.native_sats, native);
+        assert_eq!(saved.channel_id, sc.channel_id.to_string());
+    }
+
+    fn committed_book_count(conn: &rusqlite::Connection) -> u64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM ledger_events
+             WHERE event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn assert_book_sync(fake: &FakeLdkServer, expected: f64, backing: u64) {
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&sends[0].custom_tlvs[0].value).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["type"], "SYNC_V1");
+        assert_eq!(payload["expected_usd"], expected);
+        assert_eq!(payload["backing_sats"], backing);
+    }
+
+    #[tokio::test]
+    async fn backstop_save_failure_preserves_books_and_retries() {
+        let mut mgr = make_manager();
+        seed_persisted_save_test_channel(&mut mgr, 10.0);
+        let conn = save_test_connection(&mgr);
+        // Fail after UPDATE channels, to exercise rollback of the full save transaction.
+        conn.execute_batch(
+            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
+             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
+        )
+        .unwrap();
+        let before_commits = committed_book_count(&conn);
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
+        )]);
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        let before = serde_json::to_string(&mgr.stable_channels[0]).unwrap();
+        // Price drift also exercises the requirement to skip settlement after a failed save.
+        for _ in 0..3 {
+            mgr.run_tick(&fake, &push, 80_000.0).await;
+            assert_eq!(
+                serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
+                before
+            );
+            assert_saved_books(&mgr, 10.0, 10_000, 40_000);
+            assert!(fake.sends.lock().unwrap().is_empty());
+            assert!(fake.sign_calls.lock().unwrap().is_empty());
+            assert_eq!(committed_book_count(&conn), before_commits);
+        }
+
+        conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+        // Save the original $4 correction calculated at $80k; a later price must not reprice it.
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_saved_books(&mgr, 6.0, 5_000, 0);
+        assert_eq!(committed_book_count(&conn), before_commits + 1);
+        assert_book_sync(&fake, 6.0, 5_000);
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_saved_books(&mgr, 6.0, 5_000, 0);
+        assert_eq!(committed_book_count(&conn), before_commits + 1);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn splice_save_failure_preserves_books_and_tick_retries() {
+        for failure in [
+            "CREATE TRIGGER reject_book_save BEFORE UPDATE ON channels
+             BEGIN SELECT RAISE(ABORT, 'forced channel failure'); END;",
+            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
+             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
+        ] {
+            // Cover stable-spending splice-out, splice-in, and a channel with no USD target.
+            for (target, outbound_msat, expected, backing, native) in [
+                (10.0, 95_000_000, 5.0, 5_000, 0),
+                // Preserve the existing persisted allocation policy on splice-in;
+                // recompute_native updates the live native projection separately.
+                (10.0, 20_000_000, 10.0, 10_000, 40_000),
+                (0.0, 20_000_000, 0.0, 0, 50_000),
+            ] {
+                let mut mgr = make_manager();
+                seed_persisted_save_test_channel(&mut mgr, target);
+                let before = serde_json::to_string(&mgr.stable_channels[0]).unwrap();
+                let conn = save_test_connection(&mgr);
+                conn.execute_batch(failure).unwrap();
+                let before_commits = committed_book_count(&conn);
+                let new_channel_id = "ab".repeat(32);
+                let fake = FakeLdkServer::new(vec![make_channel(
+                    &new_channel_id,
+                    USER_CHANNEL_ID_DECIMAL,
+                    COUNTERPARTY_HEX,
+                    100_000,
+                    outbound_msat,
+                    true,
+                )]);
+                let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+                    &crate::config::PushConfig::default(),
+                    mgr.data_dir(),
+                )));
+                mgr.handle_channel_ready(
+                    new_channel_id.clone(),
+                    USER_CHANNEL_ID_DECIMAL.to_owned(),
+                    Some("save-failure-splice:0".to_owned()),
+                    &fake,
+                    100_000.0,
+                )
+                .await;
+                assert_eq!(
+                    serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
+                    before
+                );
+                let uid = USER_CHANNEL_ID_DECIMAL.parse().unwrap();
+                mgr.startup_sync_pending.insert(uid);
+                // The normal tick runner retries startup SYNCs before run_tick. An unresolved
+                // splice must block that send too, even though the cached balance is still high.
+                mgr.reconcile_if_empty(&fake, 100_000.0).await;
+                assert!(fake.sends.lock().unwrap().is_empty());
+                mgr.startup_sync_pending.remove(&uid);
+                for _ in 0..3 {
+                    mgr.run_tick(&fake, &push, 100_000.0).await;
+                    assert_eq!(
+                        serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
+                        before
+                    );
+                    let old_backing = if target > 0.0 { 10_000 } else { 0 };
+                    assert_saved_books(&mgr, target, old_backing, 50_000 - old_backing);
+                    assert!(fake.sends.lock().unwrap().is_empty());
+                    assert!(fake.sign_calls.lock().unwrap().is_empty());
+                    assert_eq!(committed_book_count(&conn), before_commits);
+                }
+
+                conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+                // No second ChannelReady event: the periodic tick must finish the save.
+                mgr.run_tick(&fake, &push, 100_000.0).await;
+                assert_saved_books(&mgr, expected, backing, native);
+                assert_eq!(
+                    mgr.stable_channels[0].channel_id.to_string(),
+                    new_channel_id
+                );
+                assert_eq!(
+                    mgr.stable_channels[0].native_channel_btc.sats,
+                    (100_000 - outbound_msat / 1000) - backing,
+                );
+                assert_eq!(committed_book_count(&conn), before_commits + 1);
+                let sync_count = usize::from(expected < target);
+                assert_eq!(fake.sends.lock().unwrap().len(), sync_count);
+                if sync_count > 0 {
+                    assert_book_sync(&fake, expected, backing);
+                }
+
+                mgr.handle_channel_ready(
+                    new_channel_id.clone(),
+                    USER_CHANNEL_ID_DECIMAL.to_owned(),
+                    Some("save-failure-splice:0".to_owned()),
+                    &fake,
+                    100_000.0,
+                )
+                .await;
+                mgr.run_tick(&fake, &push, 100_000.0).await;
+                assert_saved_books(&mgr, expected, backing, native);
+                assert_eq!(committed_book_count(&conn), before_commits + 1);
+                assert_eq!(fake.sends.lock().unwrap().len(), sync_count);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn splice_retry_waits_for_price_and_snapshot() {
+        let mut mgr = make_manager();
+        seed_persisted_save_test_channel(&mut mgr, 10.0);
+        let before = serde_json::to_string(&mgr.stable_channels[0]).unwrap();
+        let fake = FakeLdkServer::new(vec![]);
+        mgr.handle_channel_ready(
+            CHANNEL_ID_HEX.to_owned(),
+            USER_CHANNEL_ID_DECIMAL.to_owned(),
+            Some("delayed-snapshot:0".to_owned()),
+            &fake,
+            0.0,
+        )
+        .await;
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_eq!(
+            serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
+            before
+        );
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
+        )];
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_saved_books(&mgr, 5.0, 5_000, 0);
+        assert_book_sync(&fake, 5.0, 5_000);
+        assert!(mgr.pending_splices.is_empty());
+    }
+
+    struct BufferedTestSource(tokio::sync::mpsc::Receiver<crate::event_loop::EventItem>);
+
+    #[async_trait]
+    impl crate::event_loop::EventSource for BufferedTestSource {
+        async fn next_event(&mut self) -> Option<crate::event_loop::EventItem> {
+            self.0.recv().await
+        }
+    }
+
+    async fn failed_correction_before_forward(splice: bool, hold_database_failure: bool) {
+        let mut mgr = make_manager();
+        seed_persisted_save_test_channel(&mut mgr, 10.0);
+        let conn = save_test_connection(&mgr);
+        let commits_before = committed_book_count(&conn);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
+             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
+        )
+        .unwrap();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
+        )]);
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        if splice {
+            mgr.handle_channel_ready(
+                CHANNEL_ID_HEX.to_owned(),
+                USER_CHANNEL_ID_DECIMAL.to_owned(),
+                Some("splice-before-forward:0".to_owned()),
+                &fake,
+                100_000.0,
+            )
+            .await;
+        } else {
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        assert_saved_books(&mgr, 10.0, 10_000, 40_000);
+        assert!(fake.sends.lock().unwrap().is_empty());
+        if !hold_database_failure {
+            conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+        }
+
+        // A new successful payment is already reflected in live capacity. Keep its handler
+        // behind the original correction, using the same lock as live event dispatch.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            97_000_000,
+            true,
+        )];
+        let shared = tokio::sync::Mutex::new(mgr);
+        let next_event = async {
+            let mut mgr = StableChannelManager::lock_for_event(&shared, &fake).await;
+            mgr.handle_payment_forwarded(
+                USER_CHANNEL_ID_DECIMAL.to_owned(),
+                Some("next-ucid".to_owned()),
+                CHANNEL_ID_HEX.to_owned(),
+                "next-channel".to_owned(),
+                COUNTERPARTY_HEX.to_owned(),
+                "next-node".to_owned(),
+                2_000_000,
+                0,
+                &fake,
+                100_000.0,
+            )
+            .await;
+        };
+        tokio::pin!(next_event);
+        let mut buffered_burst = None;
+        if hold_database_failure {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), &mut next_event,)
+                    .await
+                    .is_err(),
+                "the event must wait, not complete or be discarded"
+            );
+            {
+                let mut mgr = shared.lock().await;
+                let before = serde_json::to_string(&mgr.stable_channels[0]).unwrap();
+                // Reconnect hydration and a settings edit must not replace the saved proposal.
+                mgr.reconcile_from_grpc(&fake, 80_000.0).await;
+                let edit = mgr
+                    .edit_stable_channel(CHANNEL_ID_HEX, Some(9.0), None, &fake, 100_000.0)
+                    .await;
+                assert!(!edit.ok);
+                assert_eq!(
+                    serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
+                    before
+                );
+                assert_saved_books(&mgr, 10.0, 10_000, 40_000);
+                assert!(fake.sends.lock().unwrap().is_empty());
+                assert_eq!(committed_book_count(&conn), commits_before);
+            }
+            // Model the server's bounded subscriber queue. More than its 1,024-event
+            // broadcast capacity must drain locally even while the database is still failing.
+            let (sender, source) = tokio::sync::mpsc::channel(64);
+            let (mut reader, receiver) =
+                crate::event_loop::buffer_events(BufferedTestSource(source));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                use ldk_server_client::ldk_server_grpc::events::{
+                    event_envelope::Event, ChannelStateChanged, EventEnvelope,
+                };
+                for n in 0..2048 {
+                    sender
+                        .send(Ok(EventEnvelope {
+                            event: Some(Event::ChannelStateChanged(ChannelStateChanged {
+                                user_channel_id: n.to_string(),
+                                ..Default::default()
+                            })),
+                        }))
+                        .await
+                        .unwrap();
+                }
+                drop(sender);
+                reader.join_next().await.unwrap().unwrap();
+            })
+            .await
+            .expect("the subscription reader must keep draining while accounting waits");
+            assert_eq!(receiver.len(), 2048);
+            buffered_burst = Some(receiver);
+            conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), &mut next_event)
+            .await
+            .expect("the retained event should resume after the database recovers");
+        if let Some(mut receiver) = buffered_burst {
+            for n in 0..2048 {
+                let event = receiver.recv().await.unwrap().unwrap();
+                let Some(ldk_server_client::ldk_server_grpc::events::event_envelope::Event::ChannelStateChanged(channel)) = event.event else {
+                    panic!("unexpected buffered event");
+                };
+                assert_eq!(
+                    channel.user_channel_id,
+                    n.to_string(),
+                    "events must retain their order"
+                );
+            }
+            assert!(receiver.recv().await.is_none());
+        }
+        let mut mgr = shared.lock().await;
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_saved_books(&mgr, 3.0, 3_000, 0);
+        assert_eq!(committed_book_count(&conn), commits_before + 2);
+        assert!(mgr.pending_book_updates.is_empty());
+        assert!(mgr.pending_splices.is_empty());
+        let sends = fake.sends.lock().unwrap();
+        let payloads: Vec<serde_json::Value> = sends
+            .iter()
+            .map(|send| {
+                let envelope: serde_json::Value =
+                    serde_json::from_slice(&send.custom_tlvs[0].value).unwrap();
+                serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap()
+            })
+            .collect();
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0]["expected_usd"], 5.0);
+        assert_eq!(payloads[0]["backing_sats"], 5_000);
+        assert_eq!(payloads[1]["expected_usd"], 3.0);
+        assert_eq!(payloads[1]["backing_sats"], 3_000);
+    }
+
+    #[tokio::test]
+    async fn failed_splice_is_committed_before_a_later_forward() {
+        failed_correction_before_forward(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn splice_retry_preserves_the_correction_when_live_balance_grows() {
+        let mut mgr = make_manager();
+        seed_persisted_save_test_channel(&mut mgr, 10.0);
+        let conn = save_test_connection(&mgr);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
+             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
+        )
+        .unwrap();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            95_000_000,
+            true,
+        )]);
+        mgr.handle_channel_ready(
+            CHANNEL_ID_HEX.to_owned(),
+            USER_CHANNEL_ID_DECIMAL.to_owned(),
+            Some("splice-before-deposit:0".to_owned()),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+        // Later BTC arriving and a new price must not erase or reprice the failed deduction.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            100_000,
+            85_000_000,
+            true,
+        )];
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(),
+            mgr.data_dir(),
+        )));
+        mgr.run_tick(&fake, &push, 80_000.0).await;
+        assert_saved_books(&mgr, 5.0, 5_000, 0);
+        assert_book_sync(&fake, 5.0, 5_000);
+        assert!(mgr.pending_book_updates.is_empty());
+        assert!(mgr.pending_splices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_backstop_is_committed_before_a_later_forward() {
+        failed_correction_before_forward(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn failed_correction_holds_the_event_until_database_recovery() {
+        failed_correction_before_forward(true, true).await;
+        failed_correction_before_forward(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn splice_retry_is_removed_when_channel_closes() {
+        let mut mgr = make_manager();
+        seed_persisted_save_test_channel(&mut mgr, 10.0);
+        let fake = FakeLdkServer::new(vec![]);
+        mgr.handle_channel_ready(
+            CHANNEL_ID_HEX.to_owned(),
+            USER_CHANNEL_ID_DECIMAL.to_owned(),
+            Some("closed-splice:0".to_owned()),
+            &fake,
+            100_000.0,
+        )
+        .await;
+        assert_eq!(mgr.pending_splices.len(), 1);
+        let shared = tokio::sync::Mutex::new(mgr);
+        let mut mgr = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            StableChannelManager::lock_for_event(&shared, &fake),
+        )
+        .await
+        .expect("a missing snapshot must not block the channel's close event");
+        mgr.handle_channel_closed(
+            CHANNEL_ID_HEX.to_owned(),
+            USER_CHANNEL_ID_DECIMAL.to_owned(),
+            None,
+            None,
+            0,
+            None,
+        );
+        assert!(mgr.pending_splices.is_empty());
+        assert!(mgr.stable_channels.is_empty());
+    }
+
     #[tokio::test]
     async fn backstop_deducts_and_syncs_after_two_low_ticks() {
         let mut mgr = make_manager();
@@ -4791,6 +5531,132 @@ mod tests {
         fake.channels.lock().unwrap().clear();
         mgr.reconcile_if_empty(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sync_retry_delay_is_immediate_once_then_doubles_to_a_cap() {
+        assert_eq!(sync_retry_delay_secs(0), 0);
+        assert_eq!(sync_retry_delay_secs(1), 0);
+        assert_eq!(sync_retry_delay_secs(2), SYNC_RETRY_BACKOFF_BASE_SECS);
+        assert_eq!(sync_retry_delay_secs(3), 2 * SYNC_RETRY_BACKOFF_BASE_SECS);
+        assert_eq!(sync_retry_delay_secs(7), 32 * SYNC_RETRY_BACKOFF_BASE_SECS);
+        assert_eq!(sync_retry_delay_secs(8), SYNC_RETRY_BACKOFF_MAX_SECS);
+        assert_eq!(sync_retry_delay_secs(64), SYNC_RETRY_BACKOFF_MAX_SECS);
+        assert_eq!(sync_retry_delay_secs(u64::MAX), SYNC_RETRY_BACKOFF_MAX_SECS);
+    }
+
+    fn age_sync_attempts(dir: &tempfile::TempDir, secs: i64) {
+        let conn = rusqlite::Connection::open(dir.path().join(stable_channels::db::DB_FILENAME)).unwrap();
+        conn.execute(
+            "UPDATE settlement_payments SET recorded_at = recorded_at - ?1 WHERE kind = 'sync'",
+            rusqlite::params![secs],
+        ).unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_retry_waits_until_the_channel_is_usable() {
+        let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        fake.channels.lock().unwrap()[0].is_usable = false;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt while the peer is offline");
+        assert_eq!(mgr.db.get_sync_version("7").unwrap(), Some(1), "no version consumed offline");
+        assert!(mgr.startup_sync_pending.contains(&7), "the obligation stays queued");
+        fake.channels.lock().unwrap()[0].is_usable = true;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2);
+        assert_eq!(sent_sync_payload(&fake, 1)["sync_version"], 2);
+    }
+
+    #[tokio::test]
+    async fn sync_retry_backs_off_after_repeated_delivery_failures() {
+        let (dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2, "the first retry is immediate");
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-2", false).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2, "the second retry waits one backoff step");
+        age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 3);
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-3", false).await;
+        age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 3, "the third retry waits twice the base");
+        age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 4);
+        assert_eq!(sent_sync_payload(&fake, 3)["sync_version"], 4);
+    }
+
+    #[tokio::test]
+    async fn sync_retry_stops_at_the_attempt_cap_until_a_sync_is_delivered() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        stable_channels::audit::enable_test_capture();
+        let (dir, mut mgr, fake) = sync_delivery_fixture().await;
+        let mut newest = "fake-payment-id".to_string();
+        for attempt in 1..SYNC_RETRY_MAX_ATTEMPTS {
+            dispatch_sync_outcome(&mut mgr, &fake, &newest, false).await;
+            age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
+            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+            assert_eq!(fake.sends.lock().unwrap().len() as u64, attempt + 1, "attempt {attempt} retried");
+            newest = format!("fake-payment-id-{}", attempt + 1);
+        }
+        dispatch_sync_outcome(&mut mgr, &fake, &newest, false).await;
+        age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len() as u64, SYNC_RETRY_MAX_ATTEMPTS, "no attempt past the cap");
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let exhausted: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_EXHAUSTED").collect();
+        assert_eq!(exhausted.len(), 1, "exhaustion is audited once, not every tick");
+        assert_eq!(exhausted[0].1["user_channel_id"], "7");
+
+        assert!(mgr.send_sync_message(&fake, 7, CHANNEL_ID_HEX, 25.0, 31_250, COUNTERPARTY_HEX).await);
+        let delivered = format!("fake-payment-id-{}", SYNC_RETRY_MAX_ATTEMPTS + 1);
+        dispatch_sync_outcome(&mut mgr, &fake, &delivered, true).await;
+        assert!(mgr.send_sync_message(&fake, 7, CHANNEL_ID_HEX, 25.0, 31_250, COUNTERPARTY_HEX).await);
+        let failed = format!("fake-payment-id-{}", SYNC_RETRY_MAX_ATTEMPTS + 2);
+        dispatch_sync_outcome(&mut mgr, &fake, &failed, false).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len() as u64, SYNC_RETRY_MAX_ATTEMPTS + 3,
+            "retries resume once a SYNC is delivered");
+    }
+
+    #[tokio::test]
+    async fn sync_pending_attempt_is_abandoned_after_the_timeout() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        stable_channels::audit::enable_test_capture();
+        let (dir, mut mgr, fake) = sync_delivery_fixture().await;
+        fake.payments.lock().unwrap().push(GrpcPayment {
+            id: "fake-payment-id".into(), status: PaymentStatus::Pending as i32,
+            direction: 1, amount_msat: Some(1), ..Default::default()
+        });
+        age_sync_attempts(&dir, SYNC_PENDING_TIMEOUT_SECS as i64 - 10);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "a young pending attempt is still awaited");
+        age_sync_attempts(&dir, 20);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2, "an abandoned attempt is replaced");
+        assert_eq!(mgr.db.list_pending_settlements().unwrap(),
+            vec![("fake-payment-id-2".into(), "sync".into())]);
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(events.iter().any(|(event, data)|
+            event == "SYNC_PENDING_ABANDONED" && data["payment_id"] == "fake-payment-id"));
+    }
+
+    #[tokio::test]
+    async fn sync_pending_attempt_unknown_to_ldk_is_abandoned_after_the_timeout() {
+        let (dir, mut mgr, fake) = sync_delivery_fixture().await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "an unknown young attempt is still awaited");
+        age_sync_attempts(&dir, SYNC_PENDING_TIMEOUT_SECS as i64 + 10);
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2);
+        assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty(), "the replacement supersedes it");
     }
 
     #[tokio::test]

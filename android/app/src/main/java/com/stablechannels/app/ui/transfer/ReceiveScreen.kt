@@ -1,26 +1,26 @@
 package com.stablechannels.app.ui.transfer
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -29,6 +29,7 @@ import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -51,9 +52,10 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
 
     val enteredUSD = amountUSD.toDoubleOrNull() ?: 0.0
-    val enteredSats = if (btcPrice > 0 && enteredUSD > 0) {
-        (enteredUSD / btcPrice * Constants.SATS_IN_BTC).toLong()
-    } else 0L
+    val enteredSats =
+        if (btcPrice > 0 && enteredUSD > 0) {
+            (enteredUSD / btcPrice * Constants.SATS_IN_BTC).toLong()
+        } else 0L
 
     if (showOnChain) {
         FundWalletScreen(appState, onBack = { showOnChain = false })
@@ -61,33 +63,31 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     }
 
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier =
+            Modifier.fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Toolbar (Done button, centered title, top-right Onchain button)
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             TextButton(
                 onClick = onDismiss,
                 modifier = Modifier.align(Alignment.CenterStart),
-                colors = ButtonDefaults.textButtonColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    } else {
-                        Color(0xFFE5E5EA)
-                    },
-                    contentColor = MaterialTheme.colorScheme.primary
-                ),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
                 shape = RoundedCornerShape(20.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 Text("Done", style = MaterialTheme.typography.bodyMedium)
             }
@@ -95,21 +95,23 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 text = "Receive",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier.align(Alignment.Center),
             )
             TextButton(
                 onClick = { showOnChain = true },
                 modifier = Modifier.align(Alignment.CenterEnd),
-                colors = ButtonDefaults.textButtonColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    } else {
-                        Color(0xFFE5E5EA)
-                    },
-                    contentColor = MaterialTheme.colorScheme.primary
-                ),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
                 shape = RoundedCornerShape(20.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             ) {
                 Text("Onchain", style = MaterialTheme.typography.bodyMedium)
             }
@@ -123,12 +125,16 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             if (invoiceAmountSats != null && invoiceAmountSats!! > 0) {
                 if (btcPrice > 0) {
                     val usd = invoiceAmountSats!!.toDouble() / Constants.SATS_IN_BTC * btcPrice
-                    Text(usd.usdFormatted(), style = MaterialTheme.typography.headlineMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Text(
+                        usd.usdFormatted(),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    )
                 }
                 Text(
-                    invoiceAmountSats!!.btcSpacedFormatted(),
+                    invoiceAmountSats!!.btcSpacedFormatted() + " BTC",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(12.dp))
             }
@@ -138,7 +144,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 Image(
                     bitmap = qrBitmap.asImageBitmap(),
                     contentDescription = "QR Code",
-                    modifier = Modifier.size(200.dp)
+                    modifier = Modifier.size(200.dp),
                 )
             }
             Spacer(Modifier.height(12.dp))
@@ -146,61 +152,77 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 text = inv.take(30) + "..." + inv.takeLast(10),
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall,
-                textAlign = TextAlign.Center
+                textAlign = TextAlign.Center,
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = {
-                    clipboardManager.setText(AnnotatedString(inv))
-                    isCopied = true
-                }) { Text(if (isCopied) "Copied!" else "Copy") }
-                OutlinedButton(onClick = {
-                    invoice = null
-                    invoiceAmountSats = null
-                    isCopied = false
-                }) { Text("New Invoice") }
+                Button(
+                    onClick = {
+                        clipboardManager.setText(AnnotatedString(inv))
+                        isCopied = true
+                    }
+                ) {
+                    Text(if (isCopied) "Copied!" else "Copy")
+                }
+                OutlinedButton(
+                    onClick = {
+                        invoice = null
+                        invoiceAmountSats = null
+                        isCopied = false
+                    }
+                ) {
+                    Text("New Invoice")
+                }
             }
         } else {
             if (!hasChannel) {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
-                    modifier = Modifier.fillMaxWidth()
+                    colors =
+                        CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer
+                        ),
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         "Receive a payment over Lightning to activate your account.",
                         modifier = Modifier.padding(12.dp),
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
                     )
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
                     "$${Constants.MAX_CHANNEL_USD.toInt()} Maximum",
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(16.dp))
             }
 
-            Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                "Amount (USD)",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(12.dp))
- 
+
             Row(
                 horizontalArrangement = Arrangement.Center,
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.width(2.dp))
                 BasicTextField(
                     value = amountUSD,
-                    onValueChange = { amountUSD = it.filter { c -> c.isDigit() || c == '.' } },
+                    onValueChange = { amountUSD = InputSanitizer.decimal(it) },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    textStyle = TextStyle(
-                        fontSize = 44.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Start
-                    ),
+                    textStyle =
+                        TextStyle(
+                            fontSize = 44.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            textAlign = TextAlign.Start,
+                        ),
                     singleLine = true,
                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier.width(IntrinsicSize.Min),
@@ -209,26 +231,30 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                             if (amountUSD.isEmpty()) {
                                 Text(
                                     text = "0.00",
-                                    style = TextStyle(
-                                        fontSize = 44.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                        textAlign = TextAlign.Start
-                                    )
+                                    style =
+                                        TextStyle(
+                                            fontSize = 44.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color =
+                                                MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                    alpha = 0.5f
+                                                ),
+                                            textAlign = TextAlign.Start,
+                                        ),
                                 )
                             }
                             innerTextField()
                         }
-                    }
+                    },
                 )
             }
 
             if (enteredSats > 0) {
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "${enteredSats.btcSpacedFormatted()}",
+                    "${enteredSats.btcSpacedFormatted()} BTC",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
@@ -237,13 +263,17 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 Text(
                     "Amount exceeds $${Constants.MAX_CHANNEL_USD.toInt()} channel limit",
                     color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodySmall
+                    style = MaterialTheme.typography.bodySmall,
                 )
             }
 
             error?.let {
                 Spacer(Modifier.height(8.dp))
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -254,24 +284,38 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                     scope.launch(Dispatchers.IO) {
                         try {
                             val sats = enteredSats
-                            val inv = if (!hasChannel && sats > 0) {
-                                appState.nodeService.receiveViaJitChannel(sats * 1000, "Stable Channels")
-                            } else if (sats > 0) {
-                                appState.nodeService.receivePayment(sats * 1000, "Stable Channels")
-                            } else {
-                                appState.nodeService.receiveVariablePayment("Stable Channels")
-                            }
+                            val inv =
+                                if (!hasChannel && sats > 0) {
+                                    appState.nodeService.receiveViaJitChannel(
+                                        sats * 1000,
+                                        "Stable Channels",
+                                    )
+                                } else if (sats > 0) {
+                                    appState.nodeService.receivePayment(
+                                        sats * 1000,
+                                        "Stable Channels",
+                                    )
+                                } else {
+                                    appState.nodeService.receiveVariablePayment("Stable Channels")
+                                }
                             invoiceAmountSats = if (sats > 0) sats else null
                             invoice = inv.toString()
                             appState.isWaitingForPayment = true
                         } catch (e: Exception) {
-                            error = WalletErrorMessages.operation(e, "The invoice could not be created. Try again later.")
+                            error =
+                                WalletErrorMessages.operation(
+                                    e,
+                                    "The invoice could not be created. Try again later.",
+                                )
                         }
                         isGenerating = false
                     }
                 },
-                enabled = !isGenerating && enteredSats > 0 && (hasChannel || enteredUSD <= Constants.MAX_CHANNEL_USD),
-                modifier = Modifier.fillMaxWidth()
+                enabled =
+                    !isGenerating &&
+                        enteredSats > 0 &&
+                        (hasChannel || enteredUSD <= Constants.MAX_CHANNEL_USD),
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 if (isGenerating) CircularProgressIndicator(Modifier.size(20.dp))
                 else Text("Generate Invoice")
@@ -285,19 +329,26 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                         error = null
                         scope.launch(Dispatchers.IO) {
                             try {
-                                val inv = appState.nodeService.receiveVariablePayment("Stable Channels")
+                                val inv =
+                                    appState.nodeService.receiveVariablePayment("Stable Channels")
                                 invoiceAmountSats = null
                                 invoice = inv.toString()
                                 appState.isWaitingForPayment = true
                             } catch (e: Exception) {
-                                error = WalletErrorMessages.operation(e, "The invoice could not be created. Try again later.")
+                                error =
+                                    WalletErrorMessages.operation(
+                                        e,
+                                        "The invoice could not be created. Try again later.",
+                                    )
                             }
                             isGenerating = false
                         }
                     },
                     enabled = !isGenerating,
-                    modifier = Modifier.fillMaxWidth()
-                ) { Text("Any Amount") }
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Any Amount")
+                }
             }
         }
     }

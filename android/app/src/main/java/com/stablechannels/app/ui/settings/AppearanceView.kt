@@ -2,9 +2,9 @@ package com.stablechannels.app.ui.settings
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,59 +21,55 @@ fun AppearanceView() {
     val context = LocalContext.current
     var selectedTheme by remember { mutableStateOf(ThemePreference.load(context)) }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(
             text = "Theme",
             style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.height(8.dp))
         Text(
             text = "Choose how the app looks. Changes apply immediately.",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(20.dp))
 
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Column(Modifier.selectableGroup().padding(vertical = 4.dp)) {
                 ThemePreference.entries.forEach { preference ->
                     Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .defaultMinSize(minHeight = 56.dp)
-                            .selectable(
-                                selected = (selectedTheme == preference),
-                                onClick = {
-                                    selectedTheme = preference
-                                    ThemePreference.save(context, preference)
-                                },
-                                role = Role.RadioButton
-                            )
-                            .padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        modifier =
+                            Modifier.fillMaxWidth()
+                                .defaultMinSize(minHeight = 56.dp)
+                                .selectable(
+                                    selected = (selectedTheme == preference),
+                                    onClick = {
+                                        selectedTheme = preference
+                                        ThemePreference.save(context, preference)
+                                    },
+                                    role = Role.RadioButton,
+                                )
+                                .padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
                         RadioButton(
                             selected = (selectedTheme == preference),
                             onClick = null,
-                            colors = RadioButtonDefaults.colors(
-                                selectedColor = Color(0xFF10B981),
-                                unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            colors =
+                                RadioButtonDefaults.colors(
+                                    selectedColor = Color(0xFF10B981),
+                                    unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                ),
                         )
                         Spacer(Modifier.width(16.dp))
                         Text(
                             text = preference.label,
-                            style = MaterialTheme.typography.bodyLarge
+                            style = MaterialTheme.typography.bodyLarge,
                         )
                     }
                 }

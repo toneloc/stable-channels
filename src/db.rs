@@ -639,11 +639,11 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN sync_version INTEGER",
             [],
         );
-        conn.execute(
+        let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_settlement_sync_version
              ON settlement_payments(user_channel_id, sync_version) WHERE kind = 'sync'",
             [],
-        )?;
+        );
 
         // Authenticated stability-payment inbox. The settlement id prevents the same signed
         // authorization being reused with another keysend, while payment_id makes LDK event
@@ -3630,13 +3630,32 @@ impl Database {
         )? == 1)
     }
 
-    pub fn list_pending_sync_payment_ids(&self) -> SqliteResult<Vec<String>> {
+    /// Accepted ordinary SYNC attempts still awaiting a terminal outcome, with their unix
+    /// `recorded_at` so a long-stuck attempt can be aged out.
+    pub fn list_pending_sync_payments(&self) -> SqliteResult<Vec<(String, i64)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT payment_id FROM settlement_payments WHERE kind = 'sync' AND outcome = 'pending'",
+            "SELECT payment_id, recorded_at FROM settlement_payments
+             WHERE kind = 'sync' AND outcome = 'pending'",
         )?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
+    }
+
+    /// Ordinary SYNC attempts since the last delivered one, and the newest attempt's unix
+    /// `recorded_at`, so retries can back off and stop instead of repeating every tick.
+    pub fn sync_retry_attempts(&self, user_channel_id: &str) -> SqliteResult<(u64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let (attempts, last_attempt_at): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(recorded_at), 0) FROM settlement_payments
+             WHERE kind = 'sync' AND user_channel_id = ?1
+               AND COALESCE(sync_version, 0) > COALESCE((
+                 SELECT MAX(COALESCE(sync_version, 0)) FROM settlement_payments
+                 WHERE kind = 'sync' AND user_channel_id = ?1 AND outcome = 'succeeded'), -1)",
+            params![user_channel_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((attempts.max(0) as u64, last_attempt_at))
     }
 
     /// Only the newest ordinary SYNC attempt can require a retry. A newer pending or delivered
@@ -4797,7 +4816,10 @@ mod tests {
         let db = Database::open(dir.path()).unwrap();
         db.save_channel("channel-seven", "7", 25.0, 31_250, 0, None).unwrap();
         db.save_channel("channel-eight", "8", 25.0, 31_250, 0, None).unwrap();
-        assert_eq!(db.list_pending_sync_payment_ids().unwrap(), vec!["legacy-sync"]);
+        let pending = db.list_pending_sync_payments().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "legacy-sync");
+        assert!(pending[0].1 > 0, "recorded_at is exposed for age-out");
         assert!(db.mark_sync_payment_failed("legacy-sync").unwrap());
         assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"]);
 
@@ -4819,6 +4841,32 @@ mod tests {
         db.mark_settlement_succeeded("retry", Some(1), None, Some("outbound")).unwrap();
         assert!(!db.mark_sync_payment_failed("retry").unwrap());
         assert!(db.list_failed_sync_channels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_retry_attempts_count_since_the_last_delivered_sync() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("chan-seven", "7", 25.0, 31_250, 0, None).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap(), (0, 0));
+
+        db.record_sync_payment("a", "7", 1).unwrap();
+        db.mark_sync_payment_failed("a").unwrap();
+        let (attempts, last_attempt_at) = db.sync_retry_attempts("7").unwrap();
+        assert_eq!(attempts, 1);
+        assert!(last_attempt_at > 0, "the newest attempt's recorded_at drives the backoff");
+
+        db.record_sync_payment("b", "7", 2).unwrap();
+        db.mark_settlement_succeeded("b", Some(1), None, Some("outbound")).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 0, "a delivered SYNC resets the count");
+
+        db.record_sync_payment("c", "7", 3).unwrap();
+        db.mark_sync_payment_failed("c").unwrap();
+        db.record_sync_payment("d", "7", 4).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 2, "pending attempts count too");
+
+        db.record_sync_payment("other", "8", 9).unwrap();
+        db.mark_sync_payment_failed("other").unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 2, "channels are isolated");
     }
 
     #[test]

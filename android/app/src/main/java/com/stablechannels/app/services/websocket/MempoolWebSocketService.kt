@@ -1,6 +1,8 @@
 package com.stablechannels.app.services.websocket
 
 import android.util.Log
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -8,20 +10,20 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 class MempoolWebSocketService(
     private val endpointUrl: String = "wss://mempool.space/api/v1/ws",
     private val serviceScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val dedupStore: ProcessedTxStore = ProcessedTxStore(),
     private val matcher: TransactionMatcher = TransactionMatcher(),
-    private val client: OkHttpClient = OkHttpClient.Builder()
-        .pingInterval(30, TimeUnit.SECONDS)
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS)
-        .build(),
-    private val connectionFactory: WebSocketConnectionFactory = OkHttpWebSocketConnectionFactory(client)
+    private val client: OkHttpClient =
+        OkHttpClient.Builder()
+            .pingInterval(30, TimeUnit.SECONDS)
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.MILLISECONDS)
+            .build(),
+    private val connectionFactory: WebSocketConnectionFactory =
+        OkHttpWebSocketConnectionFactory(client),
 ) : MempoolWebSocketClient {
 
     companion object {
@@ -56,15 +58,13 @@ class MempoolWebSocketService(
     private fun logInfo(message: String) {
         try {
             Log.i(TAG, message)
-        } catch (_: Throwable) {
-        }
+        } catch (_: Throwable) {}
     }
 
     private fun logWarn(message: String) {
         try {
             Log.w(TAG, message)
-        } catch (_: Throwable) {
-        }
+        } catch (_: Throwable) {}
     }
 
     override fun connect() {
@@ -79,34 +79,36 @@ class MempoolWebSocketService(
         webSocket?.cancel()
         webSocket = null
 
-        webSocket = connectionFactory.create(
-            endpointUrl,
-            WebSocketCallbacks(
-                onOpen = {
-                    socketConnecting.set(false)
-                    socketConnected.set(true)
-                    reconnectManager.connected()
-                    logInfo("WebSocket connected")
+        webSocket =
+            connectionFactory.create(
+                endpointUrl,
+                WebSocketCallbacks(
+                    onOpen = {
+                        socketConnecting.set(false)
+                        socketConnected.set(true)
+                        reconnectManager.connected()
+                        logInfo("WebSocket connected")
 
-                    syncTracking()
-                    subscribeToBlocks()
-                    flushPendingMessages()
-                },
-                onMessage = { text ->
-                    handleMessage(text)
-                },
-                onClosing = { code, reason ->
-                    // Do not echo peer close codes; some reserved codes (e.g. 1005) are invalid to send.
-                    handleDisconnection("onClosing: $code $reason")
-                },
-                onClosed = { code, reason ->
-                    handleDisconnection("onClosed: $code $reason")
-                },
-                onFailure = { throwable ->
-                    handleDisconnection("onFailure: ${throwable.message}")
-                }
+                        syncTracking()
+                        subscribeToBlocks()
+                        flushPendingMessages()
+                    },
+                    onMessage = { text ->
+                        handleMessage(text)
+                    },
+                    onClosing = { code, reason ->
+                        // Do not echo peer close codes; some reserved codes (e.g. 1005) are invalid
+                        // to send.
+                        handleDisconnection("onClosing: $code $reason")
+                    },
+                    onClosed = { code, reason ->
+                        handleDisconnection("onClosed: $code $reason")
+                    },
+                    onFailure = { throwable ->
+                        handleDisconnection("onFailure: ${throwable.message}")
+                    },
+                ),
             )
-        )
         logInfo("Connecting to $endpointUrl")
     }
 
@@ -225,12 +227,13 @@ class MempoolWebSocketService(
     }
 
     private fun handleMessage(text: String) {
-        val msg = try {
-            json.decodeFromString<MempoolWSMessage>(text)
-        } catch (_: Exception) {
-            logWarn("Failed to decode message: ${text.take(200)}")
-            return
-        }
+        val msg =
+            try {
+                json.decodeFromString<MempoolWSMessage>(text)
+            } catch (_: Exception) {
+                logWarn("Failed to decode message: ${text.take(200)}")
+                return
+            }
 
         val trackedAddressesSnapshot = synchronized(trackedAddresses) { trackedAddresses.toSet() }
         val trackedTxidsSnapshot = synchronized(trackedTxids) { trackedTxids.toSet() }
@@ -240,25 +243,28 @@ class MempoolWebSocketService(
             if (!isValidTxid(tx.txid)) {
                 return@forEach
             }
-            val matches = matcher.matchAll(
-                trackedAddresses = trackedAddressesSnapshot,
-                trackedTxids = trackedTxidsSnapshot,
-                msg = msg,
-                tx = tx
-            )
+            val matches =
+                matcher.matchAll(
+                    trackedAddresses = trackedAddressesSnapshot,
+                    trackedTxids = trackedTxidsSnapshot,
+                    msg = msg,
+                    tx = tx,
+                )
             // isTxid matches (spends of a tracked txid) are handled by the dedicated
             // tracked-txs/utxoSpent branch below via TrackedOutspend; only address
             // matches represent an actual incoming receive.
-            matches.filterNot { it.isTxid }.forEach { match ->
-                val dedupKey = "${tx.txid}_${match.target}"
-                if (dedupStore.isRecentlyProcessed(dedupKey)) {
-                    return@forEach
-                }
-                dedupStore.recordProcessedTx(dedupKey)
+            matches
+                .filterNot { it.isTxid }
+                .forEach { match ->
+                    val dedupKey = "${tx.txid}_${match.target}"
+                    if (dedupStore.isRecentlyProcessed(dedupKey)) {
+                        return@forEach
+                    }
+                    dedupStore.recordProcessedTx(dedupKey)
 
-                val amountSats = sumAmount(tx, match.target)
-                notifyTransaction(WebSocketEvent.Receive(match.target, tx.txid, amountSats))
-            }
+                    val amountSats = sumAmount(tx, match.target)
+                    notifyTransaction(WebSocketEvent.Receive(match.target, tx.txid, amountSats))
+                }
         }
 
         handleRemovedTransactions(msg, trackedAddressesSnapshot)
@@ -304,7 +310,7 @@ class MempoolWebSocketService(
 
     private fun handleRemovedTransactions(
         msg: MempoolWSMessage,
-        trackedAddressesSnapshot: Set<String>
+        trackedAddressesSnapshot: Set<String>,
     ) {
         msg.multiAddressTransactions?.forEach { (addr, txGroup) ->
             if (!trackedAddressesSnapshot.contains(addr)) {

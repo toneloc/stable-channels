@@ -1,9 +1,10 @@
 package com.stablechannels.app.ui.history
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
@@ -18,12 +19,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.TradeOutcome
-import com.stablechannels.app.util.usdFormatted
-import com.stablechannels.app.util.shortString
-import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.Constants
-import androidx.compose.foundation.isSystemInDarkTheme
-import java.util.Locale
+import com.stablechannels.app.util.btcSpacedFormatted
+import com.stablechannels.app.util.shortString
+import com.stablechannels.app.util.usdFormatted
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,34 +31,32 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White
+        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 24.dp, start = 24.dp, end = 24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
+            modifier =
+                Modifier.fillMaxWidth()
+                    .navigationBarsPadding()
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 24.dp, start = 24.dp, end = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Header Row (Item 32: cancel button in bottomsheet, Item 12: title at center)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-            ) {
+            Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
-                    colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (isSystemInDarkTheme()) {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        } else {
-                            Color(0xFFE5E5EA)
-                        }
-                    ),
+                    colors =
+                        ButtonDefaults.textButtonColors(
+                            containerColor =
+                                if (isSystemInDarkTheme()) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    Color(0xFFE5E5EA)
+                                }
+                        ),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 ) {
                     Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
@@ -67,7 +64,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                     text = "Order Details",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    modifier = Modifier.align(Alignment.Center)
+                    modifier = Modifier.align(Alignment.Center),
                 )
             }
 
@@ -75,42 +72,81 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
 
             // Details rows in a nice rounded block matching iOS list look
             Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    } else {
-                        Color(0xFFF2F2F7)
-                    }
-                ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            } else {
+                                Color(0xFFF2F2F7)
+                            }
+                    ),
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     DetailRow("Action", if (trade.action == "buy") "USD → BTC" else "BTC → USD")
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
                     DetailRow("Amount", trade.amountUSD.usdFormatted())
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("BTC Amount", Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted())
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    DetailRow(
+                        "BTC Amount",
+                        Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted(),
+                    )
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
                     DetailRow("BTC Price", trade.btcPrice.usdFormatted())
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
                     DetailRow("Fee", trade.feeUSD.usdFormatted())
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                    DetailRow("Status", when (trade.status) {
-                        "send_failed" -> "Failed"
-                        "fee_paid" -> "Awaiting provider result"
-                        "uncertain" -> "Result delayed"
-                        else -> trade.status.replaceFirstChar { it.uppercase() }
-                    })
-                    TradeOutcome.fromStored(trade.status, trade.reasonCode)?.takeIf { !it.accepted }?.let {
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        Text(it.message, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error)
-                    }
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
+                    DetailRow(
+                        "Status",
+                        when (trade.status) {
+                            "send_failed" -> "Failed"
+                            "fee_paid" -> "Awaiting provider result"
+                            "uncertain" -> "Result delayed"
+                            else -> trade.status.replaceFirstChar { it.uppercase() }
+                        },
+                    )
+                    TradeOutcome.fromStored(trade.status, trade.reasonCode)
+                        ?.takeIf { !it.accepted }
+                        ?.let {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(vertical = 8.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant,
+                            )
+                            Text(
+                                it.message,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    HorizontalDivider(
+                        modifier = Modifier.padding(vertical = 8.dp),
+                        color = MaterialTheme.colorScheme.outlineVariant,
+                    )
                     DetailRow("Date", trade.date.shortString())
                     trade.paymentId?.let { pid ->
-                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-                        val displayPid = if (pid.length > 16) pid.take(8) + "..." + pid.takeLast(8) else pid
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                        )
+                        val displayPid =
+                            if (pid.length > 16) pid.take(8) + "..." + pid.takeLast(8) else pid
                         CopyableDetailRow("Payment ID", displayPid, pid)
                     }
                 }
@@ -122,7 +158,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
             Button(
                 onClick = onDismiss,
                 modifier = Modifier.fillMaxWidth(0.6f),
-                shape = RoundedCornerShape(12.dp)
+                shape = RoundedCornerShape(12.dp),
             ) {
                 Text("Done", fontWeight = FontWeight.Bold)
             }
@@ -135,9 +171,13 @@ fun DetailRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(value, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
     }
 }
@@ -157,18 +197,22 @@ fun CopyableDetailRow(label: String, value: String, fullValue: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.End
+            horizontalArrangement = Arrangement.End,
         ) {
             Text(
                 text = value,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
-                maxLines = 1
+                maxLines = 1,
             )
             Spacer(Modifier.width(6.dp))
             IconButton(
@@ -176,13 +220,13 @@ fun CopyableDetailRow(label: String, value: String, fullValue: String) {
                     clipboardManager.setText(AnnotatedString(fullValue))
                     copied = true
                 },
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(24.dp),
             ) {
                 Icon(
                     imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
                     contentDescription = "Copy",
                     modifier = Modifier.size(14.dp),
-                    tint = if (copied) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                    tint = if (copied) Color(0xFF10B981) else MaterialTheme.colorScheme.primary,
                 )
             }
         }

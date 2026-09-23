@@ -36,12 +36,7 @@ fun ChannelView(appState: AppState) {
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
     val channels = appState.nodeService.channels
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (channels.isNotEmpty() && !isClosing) {
             val ch = channels.first()
 
@@ -49,20 +44,23 @@ fun ChannelView(appState: AppState) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text("Status", style = MaterialTheme.typography.bodyLarge)
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         color = if (ch.isChannelReady) Color(0xFF10B981) else Color(0xFFF59E0B),
-                        modifier = Modifier.size(8.dp)
+                        modifier = Modifier.size(8.dp),
                     ) {}
                     Text(
                         text = if (ch.isChannelReady) "Ready" else "Pending",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium,
-                        color = if (ch.isChannelReady) Color(0xFF10B981) else Color(0xFFF59E0B)
+                        color = if (ch.isChannelReady) Color(0xFF10B981) else Color(0xFFF59E0B),
                     )
                 }
             }
@@ -87,27 +85,33 @@ fun ChannelView(appState: AppState) {
                     Surface(
                         shape = MaterialTheme.shapes.medium,
                         tonalElevation = 1.dp,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             Text(
                                 text = "Funding Transaction",
                                 style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Spacer(Modifier.height(4.dp))
                             Text(
                                 text = "${txid.take(8)}...${txid.takeLast(8)}",
                                 style = MaterialTheme.typography.bodyMedium,
-                                fontFamily = FontFamily.Monospace
+                                fontFamily = FontFamily.Monospace,
                             )
                             Spacer(Modifier.height(8.dp))
                             TextButton(
                                 onClick = {
-                                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://mempool.space/tx/${txid.substringBefore(":")}"))
+                                    val intent =
+                                        Intent(
+                                            Intent.ACTION_VIEW,
+                                            Uri.parse(
+                                                "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                            ),
+                                        )
                                     context.startActivity(intent)
                                 },
-                                contentPadding = PaddingValues(0.dp)
+                                contentPadding = PaddingValues(0.dp),
                             ) {
                                 Text("View on explorer ↗", color = Color(0xFF3B82F6))
                             }
@@ -121,10 +125,8 @@ fun ChannelView(appState: AppState) {
                 OutlinedButton(
                     onClick = { showCloseConfirm = true },
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = Color(0xFFEF4444)
-                    ),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444))
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444)),
                 ) {
                     Text("Close channel")
                 }
@@ -134,36 +136,36 @@ fun ChannelView(appState: AppState) {
             Spacer(Modifier.height(32.dp))
             Column(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(48.dp),
-                    color = Color(0xFFF59E0B)
+                    color = Color(0xFFF59E0B),
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
                     text = "Closing channel...",
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Medium
+                    fontWeight = FontWeight.Medium,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     text = "Funds will be swept to your onchain wallet",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         } else {
             Text(
                 text = "No channel open yet",
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(8.dp))
             Text(
                 text = "Receive bitcoin over Lightning to open your first channel.",
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
@@ -174,27 +176,35 @@ fun ChannelView(appState: AppState) {
             containerColor = MaterialTheme.colorScheme.surface,
             tonalElevation = 3.dp,
             title = { Text("Close channel") },
-            text = { Text("This will cooperatively close the channel and return your funds to your onchain wallet after confirmation.") },
+            text = {
+                Text(
+                    "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
+                )
+            },
             confirmButton = {
-                TextButton(onClick = {
-                    showCloseConfirm = false
-                    appState.isChannelClosing = true
-                    appState.setStatus("Closing channel...")
-                    appState.prepareChannelCloseTracking(sc.userChannelId)
-                    scope.launch(Dispatchers.IO) {
-                        try {
-                            appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
-                            appState.refreshBalances()
-                        } catch (e: Exception) {
-                            appState.setStatus("Close failed: ${e.message}")
-                            appState.isChannelClosing = false
+                TextButton(
+                    onClick = {
+                        showCloseConfirm = false
+                        appState.isChannelClosing = true
+                        appState.setStatus("Closing channel...")
+                        appState.prepareChannelCloseTracking(sc.userChannelId)
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                appState.nodeService.closeChannel(sc.userChannelId, sc.counterparty)
+                                appState.refreshBalances()
+                            } catch (e: Exception) {
+                                appState.setStatus("Close failed: ${e.message}")
+                                appState.isChannelClosing = false
+                            }
                         }
                     }
-                }) { Text("Close channel", color = MaterialTheme.colorScheme.error) }
+                ) {
+                    Text("Close channel", color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
                 TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
-            }
+            },
         )
     }
 }
@@ -204,9 +214,13 @@ private fun ChannelDetailRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(text = label, style = MaterialTheme.typography.bodyLarge)
-        Text(text = value, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyLarge,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }

@@ -11,36 +11,36 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.QuestionMark
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.*
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.fragment.app.FragmentActivity
-import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.BarcodeScannerOptions
+import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import com.stablechannels.app.AppState
@@ -49,6 +49,7 @@ import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -65,13 +66,18 @@ private const val TAG = "SendScreen"
 // on very large photos before handing it to ML Kit.
 private const val MAX_QR_DECODE_DIMENSION_PX = 2000
 
-enum class InputType { BOLT11, BOLT12, ONCHAIN, UNKNOWN }
+enum class InputType {
+    BOLT11,
+    BOLT12,
+    ONCHAIN,
+    UNKNOWN,
+}
 
 /**
- * Decodes a [Bitmap] from a picked image [Uri], downsampling it so its longest side does not
- * exceed [maxDimension]. Avoids OutOfMemoryError on very large photos and avoids relying on
- * [InputImage.fromFilePath], which opens the content URI stream twice (once for bounds/EXIF,
- * once for pixel data) and can throw FileNotFoundException on some OEM content providers for
+ * Decodes a [Bitmap] from a picked image [Uri], downsampling it so its longest side does not exceed
+ * [maxDimension]. Avoids OutOfMemoryError on very large photos and avoids relying on
+ * [InputImage.fromFilePath], which opens the content URI stream twice (once for bounds/EXIF, once
+ * for pixel data) and can throw FileNotFoundException on some OEM content providers for
  * photo-picker URIs. Returns null if the URI could not be opened or decoded.
  */
 private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): Bitmap? {
@@ -80,10 +86,11 @@ private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): 
     // inJustDecodeBounds only fills outWidth/outHeight and always returns a null bitmap, so
     // detect success from the stream opening and the resulting dimensions, not the return value.
     val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    val opened = resolver.openInputStream(uri)?.use { stream ->
-        BitmapFactory.decodeStream(stream, null, boundsOptions)
-        true
-    } ?: false
+    val opened =
+        resolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(stream, null, boundsOptions)
+            true
+        } ?: false
     if (!opened || boundsOptions.outWidth <= 0 || boundsOptions.outHeight <= 0) return null
 
     var sampleSize = 1
@@ -92,7 +99,9 @@ private fun decodeSampledBitmap(context: Context, uri: Uri, maxDimension: Int): 
     if (width > maxDimension || height > maxDimension) {
         val halfWidth = width / 2
         val halfHeight = height / 2
-        while ((halfWidth / sampleSize) >= maxDimension || (halfHeight / sampleSize) >= maxDimension) {
+        while (
+            (halfWidth / sampleSize) >= maxDimension || (halfHeight / sampleSize) >= maxDimension
+        ) {
             sampleSize *= 2
         }
     }
@@ -143,12 +152,16 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val paymentOutcomes by appState.paymentOutcomes.collectAsState()
-    val paymentOutcome = pendingPaymentId?.let { paymentOutcomes[it] }
-        ?.takeIf { it.belongsToAttempt(attemptStartedAtNanos) }
+    val paymentOutcome =
+        pendingPaymentId
+            ?.let { paymentOutcomes[it] }
+            ?.takeIf { it.belongsToAttempt(attemptStartedAtNanos) }
 
     LaunchedEffect(pendingPaymentId, attemptStartedAtNanos) {
         val pid = pendingPaymentId ?: return@LaunchedEffect
-        while (appState.paymentOutcomes.value[pid]?.belongsToAttempt(attemptStartedAtNanos) != true) {
+        while (
+            appState.paymentOutcomes.value[pid]?.belongsToAttempt(attemptStartedAtNanos) != true
+        ) {
             appState.refreshPaymentOutcome(pid, attemptStartedAtNanos)
             kotlinx.coroutines.delay(2_000)
         }
@@ -168,37 +181,55 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         }
     }
 
-    val inputType = remember(input) {
-        val lower = input.trim().lowercase()
-        when {
-            lower.startsWith("lnbc") || lower.startsWith("lntb") || lower.startsWith("lnts") -> InputType.BOLT11
-            lower.startsWith("lno") -> InputType.BOLT12
-            lower.startsWith("bc1") || lower.startsWith("tb1") || lower.startsWith("bcrt1") || lower.startsWith("1") || lower.startsWith("3") -> InputType.ONCHAIN
-            else -> InputType.UNKNOWN
+    val inputType =
+        remember(input) {
+            val lower = input.trim().lowercase()
+            when {
+                lower.startsWith("lnbc") || lower.startsWith("lntb") || lower.startsWith("lnts") ->
+                    InputType.BOLT11
+                lower.startsWith("lno") -> InputType.BOLT12
+                lower.startsWith("bc1") ||
+                    lower.startsWith("tb1") ||
+                    lower.startsWith("bcrt1") ||
+                    lower.startsWith("1") ||
+                    lower.startsWith("3") -> InputType.ONCHAIN
+                else -> InputType.UNKNOWN
+            }
         }
-    }
 
-    val parsedBolt11Msat = remember(input) {
-        if (inputType != InputType.BOLT11) null
-        else try { Bolt11Invoice.fromStr(input.trim()).amountMilliSatoshis()?.toLong() } catch (_: Exception) { null }
-    }
+    val parsedBolt11Msat =
+        remember(input) {
+            if (inputType != InputType.BOLT11) null
+            else
+                try {
+                    Bolt11Invoice.fromStr(input.trim()).amountMilliSatoshis()?.toLong()
+                } catch (_: Exception) {
+                    null
+                }
+        }
 
-    val isAmountlessBolt11 = inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
+    val isAmountlessBolt11 =
+        inputType == InputType.BOLT11 && parsedBolt11Msat == null && input.isNotBlank()
 
     val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
     val manualAmountMsat: Long = accountingMsatFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
     val manualAmountSats = manualAmountMsat / 1000
 
-    val needsAmount = when {
-        inputType == InputType.BOLT11 && !isAmountlessBolt11 -> false
-        else -> manualAmountMsat == 0L
-    }
+    val needsAmount =
+        when {
+            inputType == InputType.BOLT11 && !isAmountlessBolt11 -> false
+            else -> manualAmountMsat == 0L
+        }
 
-    val displaySats: Long = when (inputType) {
-        InputType.BOLT11 -> if ((parsedBolt11Msat ?: 0) > 0) (parsedBolt11Msat ?: 0) / 1000 else manualAmountSats
-        InputType.BOLT12, InputType.ONCHAIN -> manualAmountSats
-        InputType.UNKNOWN -> 0
-    }
+    val displaySats: Long =
+        when (inputType) {
+            InputType.BOLT11 ->
+                if ((parsedBolt11Msat ?: 0) > 0) (parsedBolt11Msat ?: 0) / 1000
+                else manualAmountSats
+            InputType.BOLT12,
+            InputType.ONCHAIN -> manualAmountSats
+            InputType.UNKNOWN -> 0
+        }
     fun saturatingMultiply(lhs: Long, rhs: Long): Long {
         if (lhs <= 0L || rhs <= 0L) return 0L
         return if (lhs > Long.MAX_VALUE / rhs) Long.MAX_VALUE else lhs * rhs
@@ -209,41 +240,49 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         return lhs + rhs
     }
 
-    val displayUSD = if (btcPrice > 0 && displaySats > 0) (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
+    val displayUSD =
+        if (btcPrice > 0 && displaySats > 0)
+            (displaySats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+        else null
     val forwardingChannel = appState.nodeService.channels.firstOrNull { it.isChannelReady }
-    val forwardingFeeBaseMsat = forwardingChannel
-        ?.counterpartyForwardingInfoFeeBaseMsat
-        ?.toLong()
-        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT
-    val forwardingFeeProportionalMillionths = forwardingChannel
-        ?.counterpartyForwardingInfoFeeProportionalMillionths
-        ?.toLong()
-        ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS
-    val lightningFeeSats = if (displaySats > 0) {
-        val amountMsat = saturatingMultiply(displaySats, 1_000L)
-        val proportionalMsat = saturatingMultiply(amountMsat, forwardingFeeProportionalMillionths) / 1_000_000L
-        val feeMsat = saturatingAdd(forwardingFeeBaseMsat, proportionalMsat)
-        saturatingAdd(feeMsat, 999L) / 1_000L
-    } else {
-        0L
-    }
-    val lightningFeeText = if (lightningFeeSats == 0L) {
-        "Expected fee: none"
-    } else if (lightningFeeSats > 0) {
-        val feeUsd = if (btcPrice > 0) {
-            " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
+    val forwardingFeeBaseMsat =
+        forwardingChannel?.counterpartyForwardingInfoFeeBaseMsat?.toLong()
+            ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_BASE_MSAT
+    val forwardingFeeProportionalMillionths =
+        forwardingChannel?.counterpartyForwardingInfoFeeProportionalMillionths?.toLong()
+            ?: Constants.LIGHTNING_DEFAULT_FORWARDING_FEE_PROPORTIONAL_MILLIONTHS
+    val lightningFeeSats =
+        if (displaySats > 0) {
+            val amountMsat = saturatingMultiply(displaySats, 1_000L)
+            val proportionalMsat =
+                saturatingMultiply(amountMsat, forwardingFeeProportionalMillionths) / 1_000_000L
+            val feeMsat = saturatingAdd(forwardingFeeBaseMsat, proportionalMsat)
+            saturatingAdd(feeMsat, 999L) / 1_000L
         } else {
-            ""
+            0L
         }
-        "Expected fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
-    } else {
-        "Expected fee: depends on amount"
-    }
-    val onchainVbytes = if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
-    val onchainFeeText = feeRateSatVb?.let { rate ->
-        val feeSats = rate * onchainVbytes
-        "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
-    } ?: "Estimating network fee..."
+    val lightningFeeText =
+        if (lightningFeeSats == 0L) {
+            "Expected fee: none"
+        } else if (lightningFeeSats > 0) {
+            val feeUsd =
+                if (btcPrice > 0) {
+                    " (${((lightningFeeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice).usdFormatted()})"
+                } else {
+                    ""
+                }
+            "Expected fee: ~${lightningFeeSats.btcSpacedFormatted()} BTC$feeUsd"
+        } else {
+            "Expected fee: depends on amount"
+        }
+    val onchainVbytes =
+        if (isSendMax) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES
+        else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
+    val onchainFeeText =
+        feeRateSatVb?.let { rate ->
+            val feeSats = rate * onchainVbytes
+            "Expected network fee: ~${feeSats.btcSpacedFormatted()} BTC ($rate sat/vB)"
+        } ?: "Estimating network fee..."
 
     LaunchedEffect(inputType) {
         if (inputType == InputType.ONCHAIN && feeRateSatVb == null) {
@@ -258,65 +297,84 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     }
 
     // Photo picker launcher for QR extraction (Task 7.4)
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickVisualMedia()
-    ) { uri ->
-        appState.isPickingMedia = false
-        if (uri == null) return@rememberLauncherForActivityResult
+    val photoPickerLauncher =
+        rememberLauncherForActivityResult(contract = ActivityResultContracts.PickVisualMedia()) {
+            uri ->
+            appState.isPickingMedia = false
+            if (uri == null) return@rememberLauncherForActivityResult
 
-        isExtractingQR = true
-        scope.launch {
-            try {
-                val bitmap = withContext(Dispatchers.IO) {
-                    decodeSampledBitmap(context, uri, MAX_QR_DECODE_DIMENSION_PX)
-                }
-                if (bitmap == null) {
-                    Log.w(TAG, "Could not decode a bitmap from picked image URI: $uri")
-                    Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG).show()
-                    return@launch
-                }
+            isExtractingQR = true
+            scope.launch {
+                try {
+                    val bitmap =
+                        withContext(Dispatchers.IO) {
+                            decodeSampledBitmap(context, uri, MAX_QR_DECODE_DIMENSION_PX)
+                        }
+                    if (bitmap == null) {
+                        Log.w(TAG, "Could not decode a bitmap from picked image URI: $uri")
+                        Toast.makeText(
+                                context,
+                                "Could not read the selected image",
+                                Toast.LENGTH_LONG,
+                            )
+                            .show()
+                        return@launch
+                    }
 
-                val inputImage = InputImage.fromBitmap(bitmap, 0)
-                val options = BarcodeScannerOptions.Builder()
-                    .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
-                    .build()
-                val scanner = BarcodeScanning.getClient(options)
+                    val inputImage = InputImage.fromBitmap(bitmap, 0)
+                    val options =
+                        BarcodeScannerOptions.Builder()
+                            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                            .build()
+                    val scanner = BarcodeScanning.getClient(options)
 
-                val barcodes = try {
-                    scanner.process(inputImage).await()
+                    val barcodes =
+                        try {
+                            scanner.process(inputImage).await()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "QR barcode scan failed: ${e.message}", e)
+                            Toast.makeText(
+                                    context,
+                                    "No QR code was found in that image",
+                                    Toast.LENGTH_LONG,
+                                )
+                                .show()
+                            return@launch
+                        }
+
+                    // Find first valid payment string
+                    val validPayload =
+                        barcodes
+                            .mapNotNull { it.rawValue }
+                            .map { QRCodeUtils.stripUriPrefix(it) }
+                            .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
+
+                    when {
+                        validPayload != null -> input = validPayload
+                        barcodes.isNotEmpty() ->
+                            Toast.makeText(
+                                    context,
+                                    "QR code found, but it's not a Lightning invoice or Bitcoin address",
+                                    Toast.LENGTH_LONG,
+                                )
+                                .show()
+                        else ->
+                            Toast.makeText(
+                                    context,
+                                    "No QR code was found in that image",
+                                    Toast.LENGTH_LONG,
+                                )
+                                .show()
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "QR barcode scan failed: ${e.message}", e)
-                    Toast.makeText(context, "No QR code was found in that image", Toast.LENGTH_LONG).show()
-                    return@launch
+                    Log.w(TAG, "Failed to read image for QR extraction: ${e.message}", e)
+                    Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG)
+                        .show()
+                } finally {
+                    isExtractingQR = false
                 }
-
-                // Find first valid payment string
-                val validPayload = barcodes
-                    .mapNotNull { it.rawValue }
-                    .map { QRCodeUtils.stripUriPrefix(it) }
-                    .firstOrNull { QRCodeUtils.isValidPaymentString(it) }
-
-                when {
-                    validPayload != null -> input = validPayload
-                    barcodes.isNotEmpty() -> Toast.makeText(
-                        context,
-                        "QR code found, but it's not a Lightning invoice or Bitcoin address",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    else -> Toast.makeText(
-                        context,
-                        "No QR code was found in that image",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed to read image for QR extraction: ${e.message}", e)
-                Toast.makeText(context, "Could not read the selected image", Toast.LENGTH_LONG).show()
-            } finally {
-                isExtractingQR = false
             }
         }
-    }
 
     // Show full-screen scanner overlay (Task 7.5)
     if (showScanner) {
@@ -327,41 +385,39 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             },
             onCancel = {
                 showScanner = false
-            }
+            },
         )
         return
     }
 
     val isDark = MaterialTheme.colorScheme.background == Color.Black
     Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding()
-            .imePadding()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+        modifier =
+            Modifier.fillMaxSize()
+                .navigationBarsPadding()
+                .imePadding()
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Header row
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
+        Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             if (result == null) {
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
-                    colors = ButtonDefaults.textButtonColors(
-                        containerColor = if (isDark) {
-                            MaterialTheme.colorScheme.surfaceVariant
-                        } else {
-                            Color(0xFFE5E5EA)
-                        },
-                        contentColor = MaterialTheme.colorScheme.primary
-                    ),
+                    colors =
+                        ButtonDefaults.textButtonColors(
+                            containerColor =
+                                if (isDark) {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                } else {
+                                    Color(0xFFE5E5EA)
+                                },
+                            contentColor = MaterialTheme.colorScheme.primary,
+                        ),
                     shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 ) {
                     Text("Cancel", style = MaterialTheme.typography.bodyMedium)
                 }
@@ -370,22 +426,23 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 text = "Send",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.Center)
+                modifier = Modifier.align(Alignment.Center),
             )
             if (result == null) {
                 Row(
-                    modifier = Modifier
-                        .align(Alignment.CenterEnd)
-                        .background(
-                            color = if (isDark) {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            } else {
-                                Color(0xFFE5E5EA)
-                            },
-                            shape = RoundedCornerShape(20.dp)
-                        )
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    modifier =
+                        Modifier.align(Alignment.CenterEnd)
+                            .background(
+                                color =
+                                    if (isDark) {
+                                        MaterialTheme.colorScheme.surfaceVariant
+                                    } else {
+                                        Color(0xFFE5E5EA)
+                                    },
+                                shape = RoundedCornerShape(20.dp),
+                            )
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     // Photo library button
                     IconButton(
@@ -393,44 +450,47 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                             // Set the flag only after launch() returns, so a thrown exception
                             // (e.g. launcher unregistered) never leaves it stuck true.
                             photoPickerLauncher.launch(
-                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                                )
                             )
                             appState.isPickingMedia = true
                         },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(36.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Default.PhotoLibrary,
                             contentDescription = "Import from photo library",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(18.dp),
                         )
                     }
 
                     // Divider
                     Box(
-                        modifier = Modifier
-                            .width(0.5.dp)
-                            .height(20.dp)
-                            .background(
-                                color = if (isDark) {
-                                    Color(0xFF38383A)
-                                } else {
-                                    Color(0xFFC7C7CC)
-                                }
-                            )
+                        modifier =
+                            Modifier.width(0.5.dp)
+                                .height(20.dp)
+                                .background(
+                                    color =
+                                        if (isDark) {
+                                            Color(0xFF38383A)
+                                        } else {
+                                            Color(0xFFC7C7CC)
+                                        }
+                                )
                     )
 
                     // QR Scanner button
                     IconButton(
                         onClick = { showScanner = true },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(36.dp),
                     ) {
                         Icon(
                             imageVector = Icons.Default.QrCodeScanner,
                             contentDescription = "Scan QR code",
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(18.dp),
                         )
                     }
                 }
@@ -446,47 +506,47 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(64.dp),
                     color = Color(0xFFF59E0B),
-                    strokeWidth = 4.dp
+                    strokeWidth = 4.dp,
                 )
             } else {
                 Icon(
                     imageVector = Icons.Filled.CheckCircle,
                     contentDescription = "Success",
                     tint = Color(0xFF10B981),
-                    modifier = Modifier.size(64.dp)
+                    modifier = Modifier.size(64.dp),
                 )
             }
             Spacer(Modifier.height(16.dp))
             Text(
                 text = if (isSending) "Sending..." else "Sent!",
                 style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.Bold,
             )
             Spacer(Modifier.height(12.dp))
             Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (isSystemInDarkTheme()) {
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
-                    } else {
-                        Color(0xFFF2F2F7)
-                    }
-                ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            if (isSystemInDarkTheme()) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+                            } else {
+                                Color(0xFFF2F2F7)
+                            }
+                    ),
                 shape = RoundedCornerShape(12.dp),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
             ) {
                 Text(
                     text = result!!,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(16.dp),
-                    textAlign = TextAlign.Center
+                    textAlign = TextAlign.Center,
                 )
             }
             Spacer(Modifier.weight(1f))
             // Done stays visible while sending: the outcome is durable and lands in History.
-            Button(
-                onClick = onDismiss
-            ) {
+            Button(onClick = onDismiss) {
                 Text("Done")
             }
         } else {
@@ -496,7 +556,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.Center,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
@@ -512,10 +572,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 placeholder = { Text("Invoice or onchain address") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 2,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false
-                )
+                keyboardOptions =
+                    KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                    ),
             )
 
             // Color-coded input type indicator (Task 7.5)
@@ -528,49 +589,64 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             if (inputType == InputType.BOLT11 && (parsedBolt11Msat ?: 0) > 0) {
                 Spacer(Modifier.height(8.dp))
                 displayUSD?.let {
-                    Text(it.usdFormatted(), style = MaterialTheme.typography.titleMedium, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                    Text(
+                        it.usdFormatted(),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    )
                 }
                 Text(
-                    displaySats.btcSpacedFormatted(),
+                    displaySats.btcSpacedFormatted() + " BTC",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
                     lightningFeeText,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
 
             // Amount input (USD) — for amountless bolt11, bolt12, onchain
-            if (isAmountlessBolt11 || inputType == InputType.BOLT12 || inputType == InputType.ONCHAIN) {
+            if (
+                isAmountlessBolt11 ||
+                    inputType == InputType.BOLT12 ||
+                    inputType == InputType.ONCHAIN
+            ) {
                 Spacer(Modifier.height(16.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text("Amount (USD)", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "Amount (USD)",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     TextButton(
                         onClick = {
-                            val maxUSD = if (inputType == InputType.ONCHAIN) {
-                                val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
-                                val maxSats = if (hasChannel) lightningSats else spendableOnchainSats
-                                (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                            } else {
-                                val sc = appState.stableChannel.value
-                                if (sc.expectedUSD.amount > 0.0) {
-                                    sc.expectedUSD.amount
-                                } else {
-                                    val maxSats = maxOf(lightningSats, spendableOnchainSats)
+                            val maxUSD =
+                                if (inputType == InputType.ONCHAIN) {
+                                    val hasChannel =
+                                        appState.nodeService.channels.any { it.isChannelReady }
+                                    val maxSats =
+                                        if (hasChannel) lightningSats else spendableOnchainSats
                                     (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                                } else {
+                                    val sc = appState.stableChannel.value
+                                    if (sc.expectedUSD.amount > 0.0) {
+                                        sc.expectedUSD.amount
+                                    } else {
+                                        val maxSats = maxOf(lightningSats, spendableOnchainSats)
+                                        (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                                    }
                                 }
-                            }
                             amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
                             isSendMax = true
                         },
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                     ) {
                         Text("Send Max", style = MaterialTheme.typography.labelMedium)
                     }
@@ -580,23 +656,24 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 Row(
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("$", fontSize = 44.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.width(2.dp))
                     BasicTextField(
                         value = amountUSDStr,
-                        onValueChange = { 
-                            amountUSDStr = it.filter { c -> c.isDigit() || c == '.' }
+                        onValueChange = {
+                            amountUSDStr = InputSanitizer.decimal(it)
                             isSendMax = false
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                        textStyle = TextStyle(
-                            fontSize = 44.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            textAlign = TextAlign.Start
-                        ),
+                        textStyle =
+                            TextStyle(
+                                fontSize = 44.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Start,
+                            ),
                         singleLine = true,
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         modifier = Modifier.width(IntrinsicSize.Min),
@@ -605,39 +682,47 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (amountUSDStr.isEmpty()) {
                                     Text(
                                         text = "0.00",
-                                        style = TextStyle(
-                                            fontSize = 44.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                            textAlign = TextAlign.Start
-                                        )
+                                        style =
+                                            TextStyle(
+                                                fontSize = 44.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color =
+                                                    MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                                        alpha = 0.5f
+                                                    ),
+                                                textAlign = TextAlign.Start,
+                                            ),
                                     )
                                 }
                                 innerTextField()
                             }
-                        }
+                        },
                     )
                 }
 
                 if (manualAmountSats > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        manualAmountSats.btcSpacedFormatted(),
+                        manualAmountSats.btcSpacedFormatted() + " BTC",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         if (inputType == InputType.ONCHAIN) onchainFeeText else lightningFeeText,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
 
             error?.let {
                 Spacer(Modifier.height(8.dp))
-                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
 
             Spacer(Modifier.height(16.dp))
@@ -651,14 +736,16 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     scope.launch {
                         // Auth gate: check if authentication is required
                         val isOnChain = inputType == InputType.ONCHAIN
-                        val requiresAuth = AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain)
+                        val requiresAuth =
+                            AppAccessPreferencesManager.shouldRequireAuth(context, isOnChain)
 
                         if (requiresAuth && activity != null) {
-                            val reason = if (isOnChain) {
-                                "Confirm onchain withdrawal"
-                            } else {
-                                "Confirm payment of $displaySats sats"
-                            }
+                            val reason =
+                                if (isOnChain) {
+                                    "Confirm onchain withdrawal"
+                                } else {
+                                    "Confirm payment of $displaySats sats"
+                                }
                             val authResult = BiometricService.authenticate(activity, reason)
                             if (authResult != BiometricService.AuthResult.SUCCESS) {
                                 error = "Authentication required to send"
@@ -681,7 +768,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 when (inputType) {
                                     InputType.BOLT11 -> {
                                         val invoice = Bolt11Invoice.fromStr(trimmed)
-                                        val invoiceMsat = invoice.amountMilliSatoshis()?.toLong() ?: 0L
+                                        val invoiceMsat =
+                                            invoice.amountMilliSatoshis()?.toLong() ?: 0L
                                         val paymentId: String
                                         val actualMsat: Long
                                         val recordPrice: Double
@@ -695,76 +783,119 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             // same captured price is recorded so payment history
                                             // reflects the rate actually used.
                                             if (enteredUSD <= 0) throw Exception("Enter amount")
-                                            val accountingPrice = appState.priceService.currentAccountingPrice()
-                                            actualMsat = accountingMsatFromUSD(enteredUSD, accountingPrice)
-                                                ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
+                                            val accountingPrice =
+                                                appState.priceService.currentAccountingPrice()
+                                            actualMsat =
+                                                accountingMsatFromUSD(enteredUSD, accountingPrice)
+                                                    ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                             recordPrice = accountingPrice
-                                            paymentId = appState.nodeService.sendPaymentUsingAmount(invoice, actualMsat)
+                                            paymentId =
+                                                appState.nodeService.sendPaymentUsingAmount(
+                                                    invoice,
+                                                    actualMsat,
+                                                )
                                         }
                                         pendingPaymentId = paymentId
-                                        appState.recordOutgoingLightningPayment(paymentId, "lightning", actualMsat, recordPrice)
+                                        appState.recordOutgoingLightningPayment(
+                                            paymentId,
+                                            "lightning",
+                                            actualMsat,
+                                            recordPrice,
+                                        )
                                         result = "Sending payment..."
                                     }
                                     InputType.BOLT12 -> {
                                         if (enteredUSD <= 0) throw Exception("Enter amount")
-                                        val accountingPrice = appState.priceService.currentAccountingPrice()
-                                        val sats = accountingSatsFromUSD(enteredUSD, accountingPrice)
-                                            ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
+                                        val accountingPrice =
+                                            appState.priceService.currentAccountingPrice()
+                                        val sats =
+                                            accountingSatsFromUSD(enteredUSD, accountingPrice)
+                                                ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
-                                        val paymentId = appState.nodeService.sendBolt12UsingAmount(offer, sats * 1000)
+                                        val paymentId =
+                                            appState.nodeService.sendBolt12UsingAmount(
+                                                offer,
+                                                sats * 1000,
+                                            )
                                         pendingPaymentId = paymentId
-                                        appState.recordOutgoingLightningPayment(paymentId, "bolt12", sats * 1000, accountingPrice)
+                                        appState.recordOutgoingLightningPayment(
+                                            paymentId,
+                                            "bolt12",
+                                            sats * 1000,
+                                            accountingPrice,
+                                        )
                                         result = "Sending payment..."
                                     }
                                     InputType.ONCHAIN -> {
                                         if (enteredUSD <= 0) throw Exception("Enter amount")
-                                        val accountingPrice = appState.priceService.currentAccountingPrice()
-                                        val sats = accountingSatsFromUSD(enteredUSD, accountingPrice)
-                                            ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
-                                        val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+                                        val accountingPrice =
+                                            appState.priceService.currentAccountingPrice()
+                                        val sats =
+                                            accountingSatsFromUSD(enteredUSD, accountingPrice)
+                                                ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
+                                        val hasChannel =
+                                            appState.nodeService.channels.any { it.isChannelReady }
                                         if (hasChannel) {
-                                            if (appState.isSpliceInFlight) throw Exception("A splice is already in progress — try again shortly")
                                             val sc = appState.stableChannel.value
                                             appState.beginSpliceOut(sats, trimmed, accountingPrice)
                                             try {
-                                                appState.nodeService.spliceOut(sc.userChannelId, sc.counterparty, trimmed, sats)
+                                                appState.nodeService.spliceOut(
+                                                    sc.userChannelId,
+                                                    sc.counterparty,
+                                                    trimmed,
+                                                    sats,
+                                                )
                                             } catch (e: Exception) {
                                                 appState.cancelPendingSpliceStart()
                                                 throw e
                                             }
                                             result = "Splice-out initiated"
                                         } else {
-                                            val txid = if (isSendMax) {
-                                                appState.nodeService.sendAllOnchain(trimmed)
-                                            } else {
-                                                appState.nodeService.sendOnchain(trimmed, sats)
-                                            }
-                                            appState.onchainSendBroadcasted(sats, isSendAll = isSendMax, txid = txid)
+                                            val txid =
+                                                if (isSendMax) {
+                                                    appState.nodeService.sendAllOnchain(trimmed)
+                                                } else {
+                                                    appState.nodeService.sendOnchain(trimmed, sats)
+                                                }
+                                            appState.onchainSendBroadcasted(
+                                                sats,
+                                                isSendAll = isSendMax,
+                                                txid = txid,
+                                            )
                                             appState.databaseService?.recordPayment(
-                                                paymentId = null, paymentType = "onchain",
-                                                direction = "sent", amountMsat = sats * 1000,
-                                                amountUSD = (sats.toDouble() / Constants.SATS_IN_BTC) * accountingPrice,
+                                                paymentId = null,
+                                                paymentType = "onchain",
+                                                direction = "sent",
+                                                amountMsat = sats * 1000,
+                                                amountUSD =
+                                                    (sats.toDouble() / Constants.SATS_IN_BTC) *
+                                                        accountingPrice,
                                                 btcPrice = accountingPrice,
-                                                txid = txid, address = trimmed
+                                                txid = txid,
+                                                address = trimmed,
                                             )
                                             result = "Onchain tx sent: $txid"
                                         }
                                     }
-                                    InputType.UNKNOWN -> throw Exception("Enter a valid invoice, offer, or address")
+                                    InputType.UNKNOWN ->
+                                        throw Exception("Enter a valid invoice, offer, or address")
                                 }
                             } catch (e: Exception) {
                                 Log.w("SendScreen", "Send operation failed", e)
-                                error = WalletErrorMessages.operation(e, "The payment could not be sent. Check History before trying again.")
+                                error =
+                                    WalletErrorMessages.operation(
+                                        e,
+                                        "The payment could not be sent. Check History before trying again.",
+                                    )
                             }
                             isSending = false
                         }
                     }
                 },
                 enabled = !isSending && input.isNotBlank() && !needsAmount,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                if (isSending) CircularProgressIndicator(Modifier.size(20.dp))
-                else Text("Send")
+                if (isSending) CircularProgressIndicator(Modifier.size(20.dp)) else Text("Send")
             }
         }
     }
@@ -779,55 +910,59 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
  */
 @Composable
 private fun InputTypeIndicator(inputType: InputType) {
-    val (icon, label, tint) = when (inputType) {
-        InputType.BOLT11 -> Triple(
-            Icons.Default.Link,
-            "Lightning Invoice",
-            Color(0xFF2196F3) // Blue
-        )
-        InputType.BOLT12 -> Triple(
-            Icons.Default.Link,
-            "Lightning Offer",
-            Color(0xFF9C27B0) // Purple
-        )
-        InputType.ONCHAIN -> Triple(
-            Icons.Default.Link,
-            "Bitcoin Address",
-            Color(0xFFFF9800) // Orange
-        )
-        InputType.UNKNOWN -> Triple(
-            Icons.Default.QuestionMark,
-            "Unrecognized format",
-            Color.Gray
-        )
-    }
+    val (icon, label, tint) =
+        when (inputType) {
+            InputType.BOLT11 ->
+                Triple(
+                    Icons.Default.Link,
+                    "Lightning Invoice",
+                    Color(0xFF2196F3), // Blue
+                )
+            InputType.BOLT12 ->
+                Triple(
+                    Icons.Default.Link,
+                    "Lightning Offer",
+                    Color(0xFF9C27B0), // Purple
+                )
+            InputType.ONCHAIN ->
+                Triple(
+                    Icons.Default.Link,
+                    "Bitcoin Address",
+                    Color(0xFFFF9800), // Orange
+                )
+            InputType.UNKNOWN ->
+                Triple(
+                    Icons.Default.QuestionMark,
+                    "Unrecognized format",
+                    Color.Gray,
+                )
+        }
 
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Start,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = tint,
-            modifier = Modifier.size(16.dp)
+            modifier = Modifier.size(16.dp),
         )
         Spacer(Modifier.width(4.dp))
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
-            color = tint
+            color = tint,
         )
     }
 }
 
-
 /**
- * Walks up the Context wrapper chain to find the hosting FragmentActivity.
- * Works even inside ModalBottomSheet where LocalContext is a ContextThemeWrapper.
- * Internal (not private) so other send screens, e.g. OnChainScreen, can reuse it for
- * their own biometric auth gate instead of duplicating this walk.
+ * Walks up the Context wrapper chain to find the hosting FragmentActivity. Works even inside
+ * ModalBottomSheet where LocalContext is a ContextThemeWrapper. Internal (not private) so other
+ * send screens, e.g. OnChainScreen, can reuse it for their own biometric auth gate instead of
+ * duplicating this walk.
  */
 internal fun android.content.Context.findActivity(): FragmentActivity? {
     var ctx = this

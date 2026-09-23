@@ -1,4 +1,4 @@
-name: Rust Tests
+name: "Core: Rust Tests"
 
 on:
   pull_request:
@@ -17,16 +17,26 @@ on:
       - "server/**"
       - ".github/workflows/rust-tests.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: rust-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
+    name: Rust Workspace Tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 1
+      RUSTFLAGS: "-C link-arg=-Wl,--no-keep-memory"
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 

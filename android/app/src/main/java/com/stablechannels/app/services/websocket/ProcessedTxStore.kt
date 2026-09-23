@@ -4,12 +4,11 @@ import java.util.concurrent.ConcurrentHashMap
 
 class ProcessedTxStore(
     private val ttlMs: Long = 900_000L,
-    private val maxEntries: Int = 500
+    private val maxEntries: Int = 500,
 ) {
     private val entries = ConcurrentHashMap<String, Long>()
 
-    @Volatile
-    private var lastPurgeAtMs: Long = 0L
+    @Volatile private var lastPurgeAtMs: Long = 0L
 
     private val purgeIntervalMs: Long = 300_000L
 

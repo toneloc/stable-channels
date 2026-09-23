@@ -7,8 +7,44 @@ use tracing::{info, warn};
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event as EventVariant;
 use ldk_server_client::ldk_server_grpc::events::{ChannelState, EventEnvelope};
 
-use crate::stable_manager::LdkServerCalls;
+use crate::stable_manager::{LdkServerCalls, StableChannelManager};
 use crate::state::AppState;
+
+pub(crate) type EventItem = Result<EventEnvelope, ldk_server_client::error::LdkServerError>;
+
+#[async_trait::async_trait]
+pub(crate) trait EventSource: Send + 'static {
+    async fn next_event(&mut self) -> Option<EventItem>;
+}
+
+#[async_trait::async_trait]
+impl EventSource for ldk_server_client::client::EventStream {
+    async fn next_event(&mut self) -> Option<EventItem> {
+        self.next_message().await
+    }
+}
+
+/// Keep draining the subscription while accounting retries. A bounded queue here would push
+/// the wait back to LDK Server, whose broadcast stream silently drops events when it falls behind.
+/// The caller owns the JoinSet so reconnect/cancellation also stops the old reader.
+pub(crate) fn buffer_events(
+    mut source: impl EventSource,
+) -> (
+    tokio::task::JoinSet<()>,
+    tokio::sync::mpsc::UnboundedReceiver<EventItem>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut reader = tokio::task::JoinSet::new();
+    reader.spawn(async move {
+        while let Some(item) = source.next_event().await {
+            let failed = item.is_err();
+            if sender.send(item).is_err() || failed {
+                break;
+            }
+        }
+    });
+    (reader, receiver)
+}
 
 fn now_millis() -> u128 {
     std::time::SystemTime::now()
@@ -47,7 +83,7 @@ async fn run(state: AppState) {
     let mut backoff = Duration::from_secs(1);
     let mut gap_correlation_id: Option<String> = None;
     loop {
-        let mut stream = match state.ldk_server.subscribe_events().await {
+        let stream = match state.ldk_server.subscribe_events().await {
             Ok(s) => {
                 backoff = Duration::from_secs(1);
                 s
@@ -79,6 +115,7 @@ async fn run(state: AppState) {
                 continue;
             },
         };
+        let (_reader, mut events) = buffer_events(stream);
         info!("[event_loop] subscribed");
         stable_channels::audit::audit_event(
             "EVENT_STREAM_CONNECTED",
@@ -92,17 +129,21 @@ async fn run(state: AppState) {
                     "scopes": ["channels", "payments", "forwards", "peers", "sweeps"],
                 }),
             );
+            // Finish failed accounting writes before reconnect hydration or backfill can
+            // change the same books. The existing stream remains open while we retry.
+            let mut mgr = StableChannelManager::lock_for_event(
+                &state.stable_manager,
+                state.ldk_server.as_ref(),
+            )
+            .await;
             let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
             if btc_price > 0.0 {
-                state
-                    .stable_manager
-                    .lock()
-                    .await
-                    .reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
+                mgr.reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
                     .await;
             } else {
                 warn!("[event_loop] reconnect reconcile skipped: price cache cold");
             }
+            drop(mgr);
             let counts = crate::backfill::reconcile_event_history(
                 state.ldk_server.as_ref(),
                 state.db.as_ref(),
@@ -133,7 +174,7 @@ async fn run(state: AppState) {
                 }
             }
         }
-        while let Some(item) = stream.next_message().await {
+        while let Some(item) = events.recv().await {
             if dispatch(item, &state).await == DispatchOutcome::Reconnect {
                 break;
             }
@@ -167,9 +208,11 @@ async fn dispatch(
             return DispatchOutcome::Reconnect;
         },
     };
-    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-    let mut mgr = state.stable_manager.lock().await;
     let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
+    // Keep this envelope on the stack while an earlier correction is unsaved. Returning or
+    // reconnecting here would lose the event because LDK Server does not replay its stream.
+    let mut mgr = StableChannelManager::lock_for_event(&state.stable_manager, ldk).await;
+    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
     dispatch_event(envelope.event, &mut mgr, &state.db, ldk, btc_price).await
 }
 

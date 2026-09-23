@@ -33,15 +33,13 @@ class FCMService : FirebaseMessagingService() {
             getPrefs(context).edit().putString(KEY_FCM_TOKEN, token).apply()
         }
 
-        fun getToken(context: Context): String? =
-            getPrefs(context).getString(KEY_FCM_TOKEN, null)
+        fun getToken(context: Context): String? = getPrefs(context).getString(KEY_FCM_TOKEN, null)
 
         fun saveNodeId(context: Context, nodeId: String) {
             getPrefs(context).edit().putString(KEY_NODE_ID, nodeId).apply()
         }
 
-        fun getNodeId(context: Context): String? =
-            getPrefs(context).getString(KEY_NODE_ID, null)
+        fun getNodeId(context: Context): String? = getPrefs(context).getString(KEY_NODE_ID, null)
 
         fun flagPendingPayment(context: Context) {
             getPrefs(context).edit().putBoolean(KEY_PENDING_PUSH_PAYMENT, true).apply()
@@ -61,18 +59,16 @@ class FCMService : FirebaseMessagingService() {
 
         fun registerTokenWithLSP(token: String, nodeId: String) {
             try {
-                val json = JSONObject().apply {
-                    put("device_token", token)
-                    put("platform", "android")
-                    put("node_id", nodeId)
-                    put("environment", "production")
-                }
-                val body = json.toString()
-                    .toRequestBody("application/json".toMediaType())
-                val request = Request.Builder()
-                    .url(Constants.LSP_PUSH_REGISTER_URL)
-                    .post(body)
-                    .build()
+                val json =
+                    JSONObject().apply {
+                        put("device_token", token)
+                        put("platform", "android")
+                        put("node_id", nodeId)
+                        put("environment", "production")
+                    }
+                val body = json.toString().toRequestBody("application/json".toMediaType())
+                val request =
+                    Request.Builder().url(Constants.LSP_PUSH_REGISTER_URL).post(body).build()
                 httpClient.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
                         Log.d(TAG, "Push token registered with LSP: ${response.code}")
@@ -100,11 +96,12 @@ class FCMService : FirebaseMessagingService() {
         Log.d(TAG, "Push received: ${message.data}")
 
         val stabilityData = message.data["stability"] ?: return
-        val direction = try {
-            JSONObject(stabilityData).optString("direction", "lsp_to_user")
-        } catch (_: Exception) {
-            "lsp_to_user"
-        }
+        val direction =
+            try {
+                JSONObject(stabilityData).optString("direction", "lsp_to_user")
+            } catch (_: Exception) {
+                "lsp_to_user"
+            }
 
         val prefs = getPrefs(this)
         val lastActive = prefs.getLong(KEY_MAIN_APP_LAST_ACTIVE, 0)
@@ -125,9 +122,10 @@ class FCMService : FirebaseMessagingService() {
 
         // Main app not running — start ForegroundService
         Log.d(TAG, "Starting StabilityProcessingService direction=$direction")
-        val intent = Intent(this, StabilityProcessingService::class.java).apply {
-            putExtra("direction", direction)
-        }
+        val intent =
+            Intent(this, StabilityProcessingService::class.java).apply {
+                putExtra("direction", direction)
+            }
         startForegroundService(intent)
     }
 }

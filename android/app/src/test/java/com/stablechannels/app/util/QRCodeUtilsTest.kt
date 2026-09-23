@@ -33,7 +33,7 @@ class QRCodeUtilsTest {
     fun `uppercase bech32 mainnet is lowercased`() {
         assertEquals(
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            QRCodeUtils.normalizeAddress("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
+            QRCodeUtils.normalizeAddress("BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"),
         )
     }
 
@@ -41,7 +41,7 @@ class QRCodeUtilsTest {
     fun `uppercase bech32 testnet is lowercased`() {
         assertEquals(
             "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx",
-            QRCodeUtils.normalizeAddress("TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX")
+            QRCodeUtils.normalizeAddress("TB1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KXPJZSX"),
         )
     }
 
@@ -49,7 +49,7 @@ class QRCodeUtilsTest {
     fun `uppercase bech32 regtest is lowercased`() {
         assertEquals(
             "bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080",
-            QRCodeUtils.normalizeAddress("BCRT1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KYGT080")
+            QRCodeUtils.normalizeAddress("BCRT1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KYGT080"),
         )
     }
 
@@ -57,7 +57,7 @@ class QRCodeUtilsTest {
     fun `mixed-case bech32 is lowercased`() {
         assertEquals(
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            QRCodeUtils.normalizeAddress("Bc1Qw508d6qejXTDG4Y5R3ZARVARY0C5XW7KV8F3T4")
+            QRCodeUtils.normalizeAddress("Bc1Qw508d6qejXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"),
         )
     }
 
@@ -93,7 +93,7 @@ class QRCodeUtilsTest {
     fun `whitespace around address is trimmed`() {
         assertEquals(
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            QRCodeUtils.normalizeAddress("  bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4  ")
+            QRCodeUtils.normalizeAddress("  bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4  "),
         )
     }
 
@@ -119,7 +119,7 @@ class QRCodeUtilsTest {
     fun `strips bitcoin colon prefix`() {
         assertEquals(
             "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
-            QRCodeUtils.stripUriPrefix("bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")
+            QRCodeUtils.stripUriPrefix("bitcoin:bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"),
         )
     }
 
@@ -127,7 +127,7 @@ class QRCodeUtilsTest {
     fun `strips BITCOIN colon prefix case-insensitively`() {
         assertEquals(
             "bc1qtest",
-            QRCodeUtils.stripUriPrefix("BITCOIN:BC1QTEST")
+            QRCodeUtils.stripUriPrefix("BITCOIN:BC1QTEST"),
         )
     }
 
@@ -135,7 +135,7 @@ class QRCodeUtilsTest {
     fun `strips bitcoin double-slash prefix`() {
         assertEquals(
             "bc1qtest",
-            QRCodeUtils.stripUriPrefix("bitcoin://BC1QTEST")
+            QRCodeUtils.stripUriPrefix("bitcoin://BC1QTEST"),
         )
     }
 
@@ -143,7 +143,7 @@ class QRCodeUtilsTest {
     fun `strips lightning colon prefix`() {
         assertEquals(
             "lnbc1pvjluezpp5",
-            QRCodeUtils.stripUriPrefix("lightning:lnbc1pvjluezpp5")
+            QRCodeUtils.stripUriPrefix("lightning:lnbc1pvjluezpp5"),
         )
     }
 
@@ -151,7 +151,7 @@ class QRCodeUtilsTest {
     fun `strips lightning double-slash prefix`() {
         assertEquals(
             "lnbc1pvjluezpp5",
-            QRCodeUtils.stripUriPrefix("lightning://lnbc1pvjluezpp5")
+            QRCodeUtils.stripUriPrefix("lightning://lnbc1pvjluezpp5"),
         )
     }
 
@@ -159,7 +159,7 @@ class QRCodeUtilsTest {
     fun `strips query parameters after question mark`() {
         assertEquals(
             "bc1qtest",
-            QRCodeUtils.stripUriPrefix("bitcoin:BC1QTEST?amount=0.001&label=test")
+            QRCodeUtils.stripUriPrefix("bitcoin:BC1QTEST?amount=0.001&label=test"),
         )
     }
 
@@ -191,7 +191,7 @@ class QRCodeUtilsTest {
     fun `plain address without prefix is normalized`() {
         assertEquals(
             "bc1qtest",
-            QRCodeUtils.stripUriPrefix("BC1QTEST")
+            QRCodeUtils.stripUriPrefix("BC1QTEST"),
         )
     }
 
@@ -209,7 +209,7 @@ class QRCodeUtilsTest {
     fun `generates uri without amount`() {
         assertEquals(
             "bitcoin:bc1qtest",
-            QRCodeUtils.generateBitcoinUri("bc1qtest")
+            QRCodeUtils.generateBitcoinUri("bc1qtest"),
         )
     }
 
@@ -217,7 +217,7 @@ class QRCodeUtilsTest {
     fun `generates uri with amount`() {
         assertEquals(
             "bitcoin:bc1qtest?amount=0.001",
-            QRCodeUtils.generateBitcoinUri("bc1qtest", "0.001")
+            QRCodeUtils.generateBitcoinUri("bc1qtest", "0.001"),
         )
     }
 
@@ -225,7 +225,7 @@ class QRCodeUtilsTest {
     fun `normalizes uppercase address in uri`() {
         assertEquals(
             "bitcoin:bc1qtest",
-            QRCodeUtils.generateBitcoinUri("BC1QTEST")
+            QRCodeUtils.generateBitcoinUri("BC1QTEST"),
         )
     }
 
@@ -233,7 +233,7 @@ class QRCodeUtilsTest {
     fun `blank amount treated as no amount`() {
         assertEquals(
             "bitcoin:bc1qtest",
-            QRCodeUtils.generateBitcoinUri("bc1qtest", "")
+            QRCodeUtils.generateBitcoinUri("bc1qtest", ""),
         )
     }
 
@@ -241,7 +241,7 @@ class QRCodeUtilsTest {
     fun `null amount treated as no amount`() {
         assertEquals(
             "bitcoin:bc1qtest",
-            QRCodeUtils.generateBitcoinUri("bc1qtest", null)
+            QRCodeUtils.generateBitcoinUri("bc1qtest", null),
         )
     }
 
@@ -249,7 +249,7 @@ class QRCodeUtilsTest {
     fun `preserves base58 case in uri`() {
         assertEquals(
             "bitcoin:1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
-            QRCodeUtils.generateBitcoinUri("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa")
+            QRCodeUtils.generateBitcoinUri("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"),
         )
     }
 
