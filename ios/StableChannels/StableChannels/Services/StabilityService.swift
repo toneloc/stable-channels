@@ -5,26 +5,70 @@ import LDKNode
 enum StabilityService {
     // MARK: - Reconciliation
 
+    /// Below this the position counts as zero-target; a zero target with no backing is closed.
+    static let minimumStableUSD: Double = 0.01
+
     /// Reconcile an outgoing payment against the stable position.
-    /// Returns the USD amount deducted from stable, or nil if fully covered by native BTC.
+    /// Returns the USD amount the stable target dropped by, or nil if fully covered by native BTC.
     static func reconcileOutgoing(_ sc: inout StableChannel, price: Double) -> Double? {
-        guard sc.expectedUSD.amount > 0.01, sc.backingSats > 0, price > 0.0 else { return nil }
+        guard sc.backingSats > 0, price > 0.0 else { return nil }
 
         let userSats = sc.stableReceiverBTC.sats
         guard sc.backingSats > userSats else { return nil }
 
         let overflowSats = sc.backingSats - userSats
-        let usdToDeduct = Double(overflowSats) / Double(Constants.satsInBTC) * price
-        let newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
+        let usdOverflow = Double(overflowSats) / Double(Constants.satsInBTC) * price
+        let oldExpected = sc.expectedUSD.amount
+        let newExpected = max(oldExpected - usdOverflow, 0.0)
 
         sc.expectedUSD = USD(amount: newExpected)
-        let btcAmount = newExpected / price
-        sc.backingSats = UInt64(btcAmount * 100_000_000.0)
-        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
-            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
+        // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
+        // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
+        // the live balance whenever the position was below par.
+        // At the zero boundary the residue stays backing: a $0 target with sats still backing it
+        // is an unsettled LSP surplus, which checkStabilityAction now settles as a normal
+        // above-par PAY. Zeroing it here would release the LSP's sats to the user as native BTC.
+        sc.backingSats = userSats
         recomputeNative(&sc)
 
-        return usdToDeduct
+        // Report only the target drop; past the zero boundary the rest of the overflow is surplus.
+        return oldExpected - newExpected
+    }
+
+    struct RepairResult: Equatable {
+        let overflowSats: UInt64
+        let usdDeducted: Double
+        let oldExpectedUSD: Double
+        let newExpectedUSD: Double
+    }
+
+    /// Heal books that claim more backing than the channel holds.
+    /// Backing > receiver cannot happen in normal operation: backing is a slice of that
+    /// balance. It means a withdrawal moved sats out without its stable-books deduction.
+    @discardableResult
+    static func repairBooksAboveLiveBalance(_ sc: inout StableChannel, price: Double) -> RepairResult? {
+        let receiverSats = sc.stableReceiverBTC.sats
+        guard sc.backingSats > receiverSats, price > 0.0 else { return nil }
+
+        let overflowSats = sc.backingSats - receiverSats
+        let usdOverflow = Double(overflowSats) / Double(Constants.satsInBTC) * price
+        let oldExpected = sc.expectedUSD.amount
+        let newExpected = max(oldExpected - usdOverflow, 0.0)
+
+        sc.expectedUSD = USD(amount: newExpected)
+        // At the zero boundary the residue stays backing: a $0 target with sats still backing
+        // it is an unsettled LSP surplus, which the stability machinery settles as a
+        // normal above-par payment -- see reconcileOutgoing().
+        sc.backingSats = receiverSats
+        recomputeNative(&sc)
+
+        // Report only the target drop; past the zero boundary the overflow is surplus.
+        return RepairResult(
+            overflowSats: overflowSats,
+            usdDeducted: oldExpected - newExpected,
+            oldExpectedUSD: oldExpected,
+            newExpectedUSD: newExpected
+        )
     }
 
     /// Reconcile a forwarded payment on the LSP side.
@@ -59,26 +103,18 @@ enum StabilityService {
         return usdToDeduct
     }
 
-    /// Pre-deduct stable balance for a known outgoing amount (e.g. splice-out).
-    /// Returns the USD amount deducted, or nil if fully covered by native.
-    static func deductOutgoing(_ sc: inout StableChannel, amountSats: UInt64, price: Double) -> Double? {
-        guard sc.expectedUSD.amount > 0.01, price > 0.0 else { return nil }
-
-        let nativeSats = sc.nativeChannelBTC.sats
-        guard amountSats > nativeSats else { return nil }
-
-        let overflowSats = amountSats - nativeSats
-        let usdToDeduct = Double(overflowSats) / Double(Constants.satsInBTC) * price
-        let newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
-
-        sc.expectedUSD = USD(amount: newExpected)
-        let btcAmount = newExpected / price
-        sc.backingSats = UInt64(btcAmount * 100_000_000.0)
-        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
+    /// Whether a spend of `amountSats` would consume sats owed to the LSP. Only
+    /// the excess over the native (non-backing) balance AND the stable target itself touches
+    /// the surplus: spending into backing first shrinks the target, which leaves the surplus
+    /// owed to the LSP unchanged. A spend that exhausts the target eats the surplus directly.
+    static func spendConsumesLspSurplus(_ sc: StableChannel, price: Double, amountSats: UInt64) -> Bool {
+        guard checkStabilityAction(sc, price: price).action == .pay else { return false }
+        let nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
             ? sc.stableReceiverBTC.sats - sc.backingSats : 0
-        recomputeNative(&sc)
-
-        return usdToDeduct
+        let overflowSats = Int64(amountSats) - Int64(nativeSats)
+        guard overflowSats > 0 else { return false }
+        let overflowUsd = Double(overflowSats) / Double(Constants.satsInBTC) * price
+        return overflowUsd > sc.expectedUSD.amount
     }
 
     /// Recompute native BTC from receiver sats and backing sats.
@@ -87,6 +123,7 @@ enum StabilityService {
             ? sc.stableReceiverBTC.sats - sc.backingSats
             : 0
         sc.nativeChannelBTC = Bitcoin(sats: nativeSats)
+        sc.nativeSats = nativeSats
     }
 
     /// Reconcile an incoming payment — backingSats stays the same, native absorbs the increase.
@@ -128,7 +165,10 @@ enum StabilityService {
     static func checkStabilityAction(_ sc: StableChannel, price: Double) -> StabilityCheckResult {
         let targetUSD = sc.expectedUSD.amount
 
-        // No backing means no stable position — nothing to drift.
+        // No backing means no stable position -- nothing to drift.
+        // A sub-cent target with no backing is a closed position. A sub-cent target WITH
+        // backing is not: those sats are an unsettled LSP surplus and must settle
+        // like any other above-par balance instead of being stranded by this bail.
         guard sc.backingSats > 0 else {
             return StabilityCheckResult(
                 action: .stable,
@@ -142,7 +182,9 @@ enum StabilityService {
         let stableUSDValue = Double(sc.backingSats) / 100_000_000.0 * price
 
         let dollarsFromPar = stableUSDValue - targetUSD
-        let percentFromPar = targetUSD > 0.0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
+        // Clamp the denominator: at a zero/tiny target an unclamped ratio is 0 (or explodes),
+        // which would pin percentFromPar inside the deadband and block settlement of the residue.
+        let percentFromPar = abs(dollarsFromPar / max(targetUSD, minimumStableUSD)) * 100.0
         let isReceiverBelowExpected = stableUSDValue < targetUSD
 
         let action: StabilityAction
