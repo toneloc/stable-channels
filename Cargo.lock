@@ -3345,7 +3345,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-client"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server?rev=0e4434d7083ae9926c73f26e7cd52f00bde44d37#0e4434d7083ae9926c73f26e7cd52f00bde44d37"
+source = "git+https://github.com/lightningdevkit/ldk-server?rev=a56d5a96397bb7c596f8833829508d8a66d66212#a56d5a96397bb7c596f8833829508d8a66d66212"
 dependencies = [
  "bitcoin_hashes",
  "hex-conservative",
@@ -3363,7 +3363,7 @@ dependencies = [
 [[package]]
 name = "ldk-server-grpc"
 version = "0.1.0"
-source = "git+https://github.com/lightningdevkit/ldk-server?rev=0e4434d7083ae9926c73f26e7cd52f00bde44d37#0e4434d7083ae9926c73f26e7cd52f00bde44d37"
+source = "git+https://github.com/lightningdevkit/ldk-server?rev=a56d5a96397bb7c596f8833829508d8a66d66212#a56d5a96397bb7c596f8833829508d8a66d66212"
 dependencies = [
  "bytes",
  "http 1.4.0",

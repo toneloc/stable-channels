@@ -75,6 +75,16 @@ fn claimable_audit_data(
     data
 }
 
+/// Decode LDK's PaymentFailureReason for the audit row; unknown values keep their raw number.
+fn payment_failure_reason_name(reason: Option<i32>) -> Option<String> {
+    use ldk_server_client::ldk_server_grpc::events::PaymentFailureReason;
+    reason.map(|value| {
+        PaymentFailureReason::from_i32(value)
+            .map(|r| crate::channel_close::short(r.as_str_name(), "PAYMENT_FAILURE_REASON_"))
+            .unwrap_or_else(|| format!("UNKNOWN({})", value))
+    })
+}
+
 pub fn spawn(state: AppState) {
     tokio::spawn(async move { run(state).await });
 }
@@ -246,11 +256,13 @@ pub(crate) async fn dispatch_event(
             } else if e.state == ChannelState::Pending as i32 {
                 stable_channels::audit::audit_event(
                     "CHANNEL_PENDING",
-                    serde_json::json!({
-                        "channel_id": e.channel_id,
-                        "user_channel_id": e.user_channel_id,
-                        "counterparty_node_id": e.counterparty_node_id,
-                    }),
+                    crate::channel_audit::pending_audit_data(
+                        &e.channel_id,
+                        &e.user_channel_id,
+                        e.counterparty_node_id.as_deref(),
+                        e.funding_txo.as_deref(),
+                        e.former_temporary_channel_id.as_deref(),
+                    ),
                 );
             } else if e.state == ChannelState::OpenFailed as i32 {
                 stable_channels::audit::audit_event(
@@ -298,6 +310,7 @@ pub(crate) async fn dispatch_event(
                     next.and_then(|h| h.node_id.clone()).unwrap_or_default(),
                     fp.outbound_amount_forwarded_msat.unwrap_or(0),
                     fp.total_fee_earned_msat.unwrap_or(0),
+                    fp.skimmed_fee_msat,
                     ldk,
                     btc_price,
                 )
@@ -420,6 +433,7 @@ pub(crate) async fn dispatch_event(
                     "direction": direction,
                     "user_channel_id": user_channel_id,
                     "stability_rollback_applied": rollback.map(|rollback| rollback.applied),
+                    "reason": payment_failure_reason_name(e.reason),
                 }),
             );
         },
@@ -432,7 +446,21 @@ pub(crate) async fn dispatch_event(
                 claimable_audit_data(payment_id.as_deref(), amount_msat, has_custom_records),
             );
         },
-        _ => {},
+        // Audit-only: balances are reconciled when the spliced channel re-fires Ready.
+        Some(EventVariant::SpliceNegotiated(e)) => {
+            stable_channels::audit::audit_event(
+                "SPLICE_NEGOTIATED",
+                crate::channel_audit::splice_negotiated_audit_data(&e),
+            );
+        },
+        Some(EventVariant::SpliceNegotiationFailed(e)) => {
+            stable_channels::audit::audit_event(
+                "SPLICE_NEGOTIATION_FAILED",
+                crate::channel_audit::splice_failed_audit_data(&e),
+            );
+        },
+        // prost decodes a oneof variant this pin does not know as None.
+        None => warn!("[event_loop] unrecognized event variant; LDK Server is likely newer than this daemon's ldk-server-client pin"),
     }
     DispatchOutcome::Continue
 }
@@ -455,6 +483,21 @@ mod tests {
         let d = claimable_audit_data(Some("abc123"), None, false);
         assert!(d.get("amount_msat").is_none());
         assert_eq!(d["payment_id"], "abc123");
+    }
+
+    #[test]
+    fn failure_reason_decodes_ldk_variants_and_keeps_unknown_numbers() {
+        use ldk_server_client::ldk_server_grpc::events::PaymentFailureReason;
+        assert_eq!(
+            payment_failure_reason_name(Some(PaymentFailureReason::RouteNotFound as i32)).as_deref(),
+            Some("ROUTE_NOT_FOUND")
+        );
+        assert_eq!(
+            payment_failure_reason_name(Some(PaymentFailureReason::RecipientRejected as i32)).as_deref(),
+            Some("RECIPIENT_REJECTED")
+        );
+        assert_eq!(payment_failure_reason_name(Some(99)).as_deref(), Some("UNKNOWN(99)"));
+        assert_eq!(payment_failure_reason_name(None), None);
     }
 
     #[test]

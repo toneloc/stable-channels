@@ -454,6 +454,7 @@ impl StableChannelManager {
                 amount_msat: 1,
                 node_id: response.counterparty.clone(),
                 route_parameters: None,
+                preimage: None,
                 custom_tlvs: vec![CustomTlvRecord {
                     type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
                     value: response.response_envelope.clone().into_bytes().into(),
@@ -1285,14 +1286,15 @@ impl StableChannelManager {
             return;
         }
         self.stable_channels.push(new_sc);
-        stable_channels::audit::audit_event(
-            "CHANNEL_READY_TRACKED",
-            serde_json::json!({
-                "channel_id": channel_id,
-                "user_channel_id": user_channel_id,
-                "funding_txo": funding_txo,
-            }),
-        );
+        let mut ready_detail = serde_json::json!({
+            "channel_id": channel_id,
+            "user_channel_id": user_channel_id,
+            "funding_txo": funding_txo,
+        });
+        if let Some(detail) = ready_detail.as_object_mut() {
+            detail.extend(crate::channel_audit::channel_snapshot_fields(&c));
+        }
+        stable_channels::audit::audit_event("CHANNEL_READY_TRACKED", ready_detail);
     }
 
     /// On PaymentReceived, route a STABLE_CHANNEL_TLV to the trade handler. A plain payment (no
@@ -2287,6 +2289,7 @@ impl StableChannelManager {
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
+                        preimage: None,
                         // Keep the marker during the mobile rollout. Upgraded receivers must
                         // prefer and validate the signed record whenever both are present.
                         custom_tlvs: vec![
@@ -2507,6 +2510,7 @@ impl StableChannelManager {
             amount_msat: 1,
             node_id: counterparty.to_string(),
             route_parameters: None,
+            preimage: None,
             custom_tlvs: vec![CustomTlvRecord {
                 type_num: stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
                 value: envelope.into_bytes().into(),
@@ -2565,6 +2569,7 @@ impl StableChannelManager {
         next_node_id: String,
         outbound_amount_forwarded_msat: u64,
         fee_msat: u64,
+        skimmed_fee_msat: Option<u64>,
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
@@ -2578,6 +2583,7 @@ impl StableChannelManager {
             "next_node_id": next_node_id,
             "forwarded_msat": outbound_amount_forwarded_msat,
             "fee_msat": fee_msat,
+            "skimmed_fee_msat": skimmed_fee_msat,
             "total_sats": total_sats,
         });
         let fingerprint = stable_channels::db::forward_fingerprint(
@@ -4164,6 +4170,7 @@ mod tests {
             "next-node-1".to_string(),
             45_000_000, // outbound_amount_forwarded_msat
             0,          // fee_msat
+            None,       // skimmed_fee_msat
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -4217,6 +4224,7 @@ mod tests {
             "next-node".to_string(),
             7_578_000,
             0,
+            None,
             &fake as &dyn LdkServerCalls,
             66_000.96,
         )
@@ -4246,6 +4254,7 @@ mod tests {
             "next-node-2".to_string(),
             20_000_000,
             0,
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -4279,6 +4288,7 @@ mod tests {
             "next-node-3".to_string(),
             45_000_000,
             0,
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -4305,6 +4315,7 @@ mod tests {
             "next-node-4".to_string(),
             45_000_000, // outbound_amount_forwarded_msat
             0,          // fee_msat
+            None,       // skimmed_fee_msat
             &fake as &dyn LdkServerCalls,
             100_000.0,
         )
@@ -4335,6 +4346,7 @@ mod tests {
             "next-node-pubkey".to_string(),
             45_000_000,
             0,
+            None,
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -4998,6 +5010,7 @@ mod tests {
                 "next-node".to_owned(),
                 2_000_000,
                 0,
+                None,
                 &fake,
                 100_000.0,
             )
@@ -5366,7 +5379,7 @@ mod tests {
         let event = if succeeded {
             Event::PaymentSuccessful(PaymentSuccessful { payment })
         } else {
-            Event::PaymentFailed(PaymentFailed { payment })
+            Event::PaymentFailed(PaymentFailed { payment, reason: None })
         };
         let db = mgr.db.clone();
         crate::event_loop::dispatch_event(Some(event), mgr, &db, fake, 80_000.0).await
@@ -8176,5 +8189,222 @@ mod tests {
                 && d.get("candidates").and_then(|v| v.as_u64()) == Some(2)),
             "the miss must be audited with the candidate count"
         );
+    }
+
+    const SPLICE_TXO: &str = "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b:1";
+
+    fn ledger_for(db: &stable_channels::db::Database, identifier: &str) -> Vec<stable_channels::ledger::LedgerEvent> {
+        db.list_ledger_events(&stable_channels::ledger::LedgerQuery {
+            identifier: Some(identifier.into()),
+            limit: 50,
+            ..Default::default()
+        })
+        .unwrap()
+        .events
+    }
+
+    #[tokio::test]
+    async fn splice_lifecycle_events_land_in_the_user_channel_ledger() {
+        use ldk_server_client::ldk_server_grpc::events::{
+            event_envelope::Event, SpliceNegotiated, SpliceNegotiationFailed,
+        };
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let db = mgr.db.clone();
+        stable_channels::audit::set_audit_ledger((*db).clone());
+        let fake = FakeLdkServer::new(vec![]);
+        let negotiated = Event::SpliceNegotiated(SpliceNegotiated {
+            channel_id: CHANNEL_ID_HEX.into(),
+            user_channel_id: USER_CHANNEL_ID_DECIMAL.into(),
+            counterparty_node_id: COUNTERPARTY_HEX.into(),
+            new_funding_txo: SPLICE_TXO.into(),
+        });
+        let failed = Event::SpliceNegotiationFailed(SpliceNegotiationFailed {
+            channel_id: CHANNEL_ID_HEX.into(),
+            user_channel_id: USER_CHANNEL_ID_DECIMAL.into(),
+            counterparty_node_id: COUNTERPARTY_HEX.into(),
+        });
+        for event in [negotiated.clone(), negotiated, failed] {
+            let outcome = crate::event_loop::dispatch_event(Some(event), &mut mgr, &db, &fake, 80_000.0).await;
+            assert_eq!(outcome, crate::event_loop::DispatchOutcome::Continue);
+        }
+        let events = ledger_for(&db, USER_CHANNEL_ID_DECIMAL);
+        let negotiated: Vec<_> = events.iter().filter(|e| e.event_type == "SPLICE_NEGOTIATED").collect();
+        assert_eq!(negotiated.len(), 1, "a replayed SpliceNegotiated is recorded once");
+        assert_eq!(negotiated[0].category, "channel");
+        assert!(negotiated[0].refs.iter().any(|r| r.role == "transaction_id" && r.value == SPLICE_TXO));
+        let failed = events.iter().find(|e| e.event_type == "SPLICE_NEGOTIATION_FAILED").expect("failed round must be audited");
+        assert_eq!(failed.category, "channel");
+        assert_eq!(failed.status, "failed");
+        assert_eq!(failed.detail["counterparty_node_id"], COUNTERPARTY_HEX);
+        assert!(mgr.stable_channels.is_empty(), "splice events are audit-only");
+        assert!(fake.sends.lock().unwrap().is_empty(), "splice events are audit-only");
+    }
+
+    #[tokio::test]
+    async fn failed_payment_row_records_the_ldk_failure_reason() {
+        use ldk_server_client::ldk_server_grpc::events::{
+            event_envelope::Event, PaymentFailed, PaymentFailureReason,
+        };
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let db = mgr.db.clone();
+        stable_channels::audit::set_audit_ledger((*db).clone());
+        let fake = FakeLdkServer::new(vec![]);
+        for (id, reason) in [("route-miss", Some(PaymentFailureReason::RouteNotFound as i32)), ("no-reason", None)] {
+            let event = Event::PaymentFailed(PaymentFailed {
+                payment: Some(GrpcPayment {
+                    id: id.into(),
+                    amount_msat: Some(1),
+                    direction: 1,
+                    status: PaymentStatus::Failed as i32,
+                    ..Default::default()
+                }),
+                reason,
+            });
+            crate::event_loop::dispatch_event(Some(event), &mut mgr, &db, &fake, 80_000.0).await;
+        }
+        let row = |id: &str| ledger_for(&db, id).into_iter().find(|e| e.event_type == "PAYMENT_FAILED").unwrap();
+        assert_eq!(row("route-miss").detail["reason"], "ROUTE_NOT_FOUND");
+        assert!(row("no-reason").detail["reason"].is_null());
+    }
+
+    #[tokio::test]
+    async fn pending_channel_row_records_funding_outpoint_and_temporary_id() {
+        use ldk_server_client::ldk_server_grpc::events::{
+            event_envelope::Event, ChannelState, ChannelStateChanged,
+        };
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let db = mgr.db.clone();
+        stable_channels::audit::set_audit_ledger((*db).clone());
+        let fake = FakeLdkServer::new(vec![]);
+        let event = Event::ChannelStateChanged(ChannelStateChanged {
+            channel_id: CHANNEL_ID_HEX.into(),
+            user_channel_id: USER_CHANNEL_ID_DECIMAL.into(),
+            counterparty_node_id: Some(COUNTERPARTY_HEX.into()),
+            state: ChannelState::Pending as i32,
+            funding_txo: Some(SPLICE_TXO.into()),
+            former_temporary_channel_id: Some("7e3a8b".into()),
+            ..Default::default()
+        });
+        crate::event_loop::dispatch_event(Some(event), &mut mgr, &db, &fake, 80_000.0).await;
+        let row = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
+            .into_iter()
+            .find(|e| e.event_type == "CHANNEL_PENDING")
+            .unwrap();
+        assert_eq!(row.detail["funding_txo"], SPLICE_TXO);
+        assert_eq!(row.detail["former_temporary_channel_id"], "7e3a8b");
+        assert!(row.refs.iter().any(|r| r.role == "transaction_id" && r.value == SPLICE_TXO));
+    }
+
+    fn channel_with_snapshot_fields() -> GrpcChannel {
+        use ldk_server_client::ldk_server_grpc::types::{ChannelShutdownState, ReserveType};
+        GrpcChannel {
+            short_channel_id: Some(934_190_049_236_975_617),
+            outbound_scid_alias: Some(17_592_186_044_417),
+            inbound_htlc_minimum_msat: 1_000,
+            reserve_type: Some(ReserveType::Adaptive as i32),
+            channel_shutdown_state: Some(ChannelShutdownState::NotShuttingDown as i32),
+            ..make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 40_000_000, true)
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_tracked_row_records_channel_snapshot_fields() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let db = mgr.db.clone();
+        stable_channels::audit::set_audit_ledger((*db).clone());
+        let fake = FakeLdkServer::new(vec![channel_with_snapshot_fields()]);
+        mgr.handle_channel_ready(
+            CHANNEL_ID_HEX.into(),
+            USER_CHANNEL_ID_DECIMAL.into(),
+            Some(SPLICE_TXO.into()),
+            &fake,
+            80_000.0,
+        )
+        .await;
+        let row = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
+            .into_iter()
+            .find(|e| e.event_type == "CHANNEL_READY_TRACKED")
+            .unwrap();
+        assert_eq!(row.detail["short_channel_id"], 934_190_049_236_975_617u64);
+        assert_eq!(row.detail["outbound_scid_alias"], 17_592_186_044_417u64);
+        assert_eq!(row.detail["inbound_htlc_minimum_msat"], 1_000u64);
+        assert_eq!(row.detail["reserve_type"], "ADAPTIVE");
+        assert_eq!(row.detail["channel_shutdown_state"], "NOT_SHUTTING_DOWN");
+        assert_eq!(row.detail["funding_txo"], SPLICE_TXO);
+    }
+
+    #[tokio::test]
+    async fn reconstructed_channel_row_records_channel_snapshot_fields() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let fake = FakeLdkServer::new(vec![channel_with_snapshot_fields()]);
+        crate::backfill::reconcile_event_history(&fake, &db).await;
+        let row = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
+            .into_iter()
+            .find(|e| e.event_type == "CHANNEL_RECONSTRUCTED")
+            .unwrap();
+        assert_eq!(row.detail["short_channel_id"], 934_190_049_236_975_617u64);
+        assert_eq!(row.detail["reserve_type"], "ADAPTIVE");
+        assert_eq!(row.detail["channel_shutdown_state"], "NOT_SHUTTING_DOWN");
+        crate::backfill::reconcile_event_history(&fake, &db).await;
+        let rows = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
+            .into_iter()
+            .filter(|e| e.event_type == "CHANNEL_RECONSTRUCTED")
+            .count();
+        assert_eq!(rows, 1, "an unchanged snapshot is not reconstructed again");
+    }
+
+    #[tokio::test]
+    async fn shutdown_stage_rows_reach_the_ledger_once_across_restarts() {
+        use ldk_server_client::ldk_server_grpc::types::ChannelShutdownState;
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let closing = GrpcChannel {
+            channel_shutdown_state: Some(ChannelShutdownState::ShutdownInitiated as i32),
+            ..make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 40_000_000, false)
+        };
+        let seen = crate::observability::record_shutdown_stages(&std::collections::HashMap::new(), &[closing.clone()]);
+        // A daemon restart forgets the in-memory baseline and sees the same stage again.
+        crate::observability::record_shutdown_stages(&std::collections::HashMap::new(), &[closing.clone()]);
+        let resolving = GrpcChannel {
+            channel_shutdown_state: Some(ChannelShutdownState::ResolvingHtlcs as i32),
+            ..closing
+        };
+        crate::observability::record_shutdown_stages(&seen, &[resolving]);
+        let rows: Vec<_> = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
+            .into_iter()
+            .filter(|e| e.event_type == "CHANNEL_SHUTDOWN_STATE_CHANGED")
+            .collect();
+        let mut stages: Vec<_> = rows.iter().map(|e| e.detail["shutdown_state"].as_str().unwrap().to_owned()).collect();
+        stages.sort();
+        assert_eq!(stages, vec!["RESOLVING_HTLCS", "SHUTDOWN_INITIATED"]);
+        assert!(rows.iter().all(|e| e.category == "channel"));
+    }
+
+    #[tokio::test]
+    async fn forwarded_rows_record_the_jit_skimmed_fee() {
+        use ldk_server_client::ldk_server_grpc::events::{event_envelope::Event, PaymentForwarded};
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let db = mgr.db.clone();
+        stable_channels::audit::set_audit_ledger((*db).clone());
+        let live = GrpcForwardedPayment { skimmed_fee_msat: Some(2_500), total_fee_earned_msat: Some(3_000), ..fwd("live-prev", "live-next", 90_000) };
+        let missed = GrpcForwardedPayment { skimmed_fee_msat: Some(4_000), total_fee_earned_msat: Some(4_500), ..fwd("gap-prev", "gap-next", 80_000) };
+        let fake = FakeLdkServer::new(vec![]).with_forwarded(vec![missed]);
+        let event = Event::PaymentForwarded(PaymentForwarded { forwarded_payment: Some(live) });
+        crate::event_loop::dispatch_event(Some(event), &mut mgr, &db, &fake, 80_000.0).await;
+        crate::backfill::backfill_forwards(&fake, &db).await;
+        let live_row = ledger_for(&db, "live-prev").into_iter().find(|e| e.event_type == "PAYMENT_FORWARDED").unwrap();
+        assert_eq!(live_row.detail["skimmed_fee_msat"], 2_500u64);
+        let backfill_row = ledger_for(&db, "gap-prev").into_iter().find(|e| e.event_type == "PAYMENT_FORWARDED_BACKFILL").unwrap();
+        assert_eq!(backfill_row.detail["skimmed_fee_msat"], 4_000u64);
     }
 }
