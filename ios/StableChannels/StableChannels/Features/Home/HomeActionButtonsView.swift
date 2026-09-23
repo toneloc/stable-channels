@@ -20,14 +20,14 @@ struct HomeActionButtonsView: View {
                     title: String(localized: "button_send", defaultValue: "Send"),
                     icon: "arrow.up",
                     color: sendBlue,
-                    textColor: .white,
+                    textColor: .primary,
                     action: onSend
                 )
                 ActionButton(
                     title: String(localized: "button_receive", defaultValue: "Receive"),
                     icon: "arrow.down",
                     color: receiveGreen,
-                    textColor: !hasReadyChannel ? receiveGreen : .white,
+                    textColor: !hasReadyChannel ? receiveGreen : .primary,
                     pulse: !hasReadyChannel,
                     action: onReceive
                 )
@@ -38,14 +38,14 @@ struct HomeActionButtonsView: View {
                     title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
                     icon: "arrow.up.right",
                     color: buyAmber,
-                    textColor: .white,
+                    textColor: .primary,
                     action: onBuy
                 )
                 ActionButton(
                     title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
                     icon: "arrow.down.right",
                     color: sellPlum,
-                    textColor: .white,
+                    textColor: .primary,
                     action: onSell
                 )
             }

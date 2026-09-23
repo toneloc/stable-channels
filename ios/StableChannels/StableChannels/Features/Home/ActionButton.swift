@@ -4,7 +4,7 @@ struct ActionButton: View {
     let title: String
     let icon: String
     var color: Color = .white
-    var textColor: Color = .white
+    var textColor: Color = .primary
     var pulse: Bool = false
     let action: () -> Void
 
