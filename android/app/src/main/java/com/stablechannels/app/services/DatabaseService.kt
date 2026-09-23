@@ -1343,7 +1343,7 @@ class DatabaseService(context: Context) :
                 else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)
                 } else {
-                    TradeProtocol.tradeBackingAfterDelta(
+                    TradeProtocol.syncBackingAfterDelta(
                         receiverSats,
                         currentBacking,
                         currentExpected,
