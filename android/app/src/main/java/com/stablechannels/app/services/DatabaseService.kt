@@ -384,11 +384,13 @@ class DatabaseService(context: Context) :
                 return null
             }
             val overflowSats = currentBacking - receiverSats
-            val usdDeducted = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
-            val newExpected = maxOf(currentExpected - usdDeducted, 0.0)
-            // A repair that exhausts the target closes the position: nothing backs it.
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            val usdOverflow = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
+            val newExpected = maxOf(currentExpected - usdOverflow, 0.0)
+            // Report only the target drop; past the zero boundary the overflow is surplus.
+            val usdDeducted = currentExpected - newExpected
+            // Even when the repair exhausts the target, the remaining sats stay backing: a $0
+            // target with residue is an unsettled LSP surplus (#322), not native BTC.
+            val newBacking = receiverSats
             val cv =
                 ContentValues().apply {
                     put("expected_usd", newExpected)
@@ -471,7 +473,7 @@ class DatabaseService(context: Context) :
                     if (!it.moveToFirst()) throw MissingChannelRowException(userChannelId)
                     it.getDouble(0) to it.getLong(1)
                 }
-            if (currentExpected < 0.01 || currentBacking == 0L || currentBacking <= receiverSats) {
+            if (currentBacking == 0L || currentBacking <= receiverSats) {
                 db.execSQL("ROLLBACK")
                 return null
             }
@@ -484,10 +486,10 @@ class DatabaseService(context: Context) :
             // SECOND time ($100 -> $92 -> $82) and hid a genuine below-par claim from the
             // stability check. Pinning backing to the live balance matches the LSP's own
             // convention and makes this idempotent: a re-run sees backing <= receiver and stops.
-            // At the zero boundary the position is closed, so nothing backs it — see
-            // StabilityService.reconcileOutgoing().
-            val newBacking =
-                if (newExpected < StabilityService.MINIMUM_STABLE_USD) 0L else receiverSats
+            // At the zero boundary the residue stays backing: a $0 target with sats still backing
+            // it is an unsettled LSP surplus (#322), which the stability machinery settles as a
+            // normal above-par payment — see StabilityService.reconcileOutgoing().
+            val newBacking = receiverSats
             val cv =
                 ContentValues().apply {
                     put("channel_id", channelId)
@@ -505,7 +507,13 @@ class DatabaseService(context: Context) :
                 )
             }
             db.execSQL("COMMIT")
-            return OutgoingReconcileResult(usdToDeduct, currentExpected, newExpected, newBacking)
+            // Report only the target drop; past the zero boundary the overflow is surplus.
+            return OutgoingReconcileResult(
+                currentExpected - newExpected,
+                currentExpected,
+                newExpected,
+                newBacking,
+            )
         } catch (e: Exception) {
             try {
                 db.execSQL("ROLLBACK")
@@ -1338,9 +1346,17 @@ class DatabaseService(context: Context) :
             val currentExpected = row[1] as Double
             val currentBacking = row[2] as Long
             val receiverSats = row[3] as Long
+            // The LSP serialises its raw target, and its reconcile can leave a sub-cent remainder;
+            // that is a zero target, as the desktop's normalize_trade_expected_usd treats it.
+            val syncExpected = TradeProtocol.normalizeExpectedUsd(sync.expectedUsd)
             val localBacking =
-                if (sync.expectedUsd == 0.0) 0L
-                else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
+                // A zero-target sync keeps leftover backing only up to what the LSP still
+                // books: its signed residue settles via the stability machinery (#322), while
+                // a backing of 0 means the LSP already booked the close and the wallet's stale
+                // pre-exit allocation must be released, not paid away as phantom surplus.
+                if (syncExpected == 0.0) {
+                    currentBacking.coerceAtMost(sync.backingSats).coerceAtMost(receiverSats)
+                } else if (currentBacking > 0L && sync.expectedUsd == currentExpected) {
                     currentBacking.coerceAtMost(receiverSats)
                 } else {
                     TradeProtocol.tradeBackingAfterDelta(

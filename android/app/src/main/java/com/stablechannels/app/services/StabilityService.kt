@@ -11,7 +11,7 @@ import org.lightningdevkit.ldknode.ChannelDetails
 
 object StabilityService {
 
-    /** Below this the position is treated as closed — matches the `expectedUSD < 0.01` guards. */
+    /** Below this the position counts as zero-target; a zero target with no backing is closed. */
     const val MINIMUM_STABLE_USD = 0.01
 
     enum class StabilityAction(val value: String) {
@@ -31,7 +31,7 @@ object StabilityService {
 
     fun reconcileOutgoing(sc: StableChannel, price: Double): Pair<StableChannel, Double?> {
         val updated = sc.copy()
-        if (updated.expectedUSD.amount < 0.01 || updated.backingSats == 0L || price == 0.0) {
+        if (updated.backingSats == 0L || price == 0.0) {
             return Pair(updated, null)
         }
         if (updated.backingSats <= updated.stableReceiverBTC.sats) {
@@ -39,7 +39,8 @@ object StabilityService {
         }
         val overflowSats = updated.backingSats - updated.stableReceiverBTC.sats
         val usdToDeduct = (overflowSats.toDouble() / Constants.SATS_IN_BTC) * price
-        val newExpected = max(updated.expectedUSD.amount - usdToDeduct, 0.0)
+        val oldExpected = updated.expectedUSD.amount
+        val newExpected = max(oldExpected - usdToDeduct, 0.0)
         updated.expectedUSD = USD(newExpected)
         // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
         // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
@@ -47,14 +48,13 @@ object StabilityService {
         // ($100 -> $92 -> $82), and the leftover phantom backing masked a real below-par claim
         // from the stability check. This mirrors the LSP (backing_after_user_to_lsp_stability)
         // and makes the function idempotent: re-running sees backing <= receiver and returns.
-        // Exception at the zero boundary: a spend that exhausts the target closes the position,
-        // so nothing backs it. Leaving the remaining sats as backing for a $0 target would book
-        // them as neither stable nor native (recomputeNative gives receiver - backing = 0) and
-        // strand them: every repair path treats a sub-cent target as "no position" and bails.
-        updated.backingSats =
-            if (newExpected < MINIMUM_STABLE_USD) 0L else updated.stableReceiverBTC.sats
+        // At the zero boundary the residue stays backing: a $0 target with sats still backing it
+        // is an unsettled LSP surplus (#322), which checkStabilityAction now settles as a normal
+        // above-par PAY. Zeroing it here would release the LSP's sats to the user as native BTC.
+        updated.backingSats = updated.stableReceiverBTC.sats
         recomputeNative(updated)
-        return Pair(updated, usdToDeduct)
+        // Report the target drop only: past the zero boundary the rest of the overflow is surplus.
+        return Pair(updated, oldExpected - newExpected)
     }
 
     fun reconcileIncoming(sc: StableChannel): StableChannel {
@@ -73,17 +73,19 @@ object StabilityService {
         return updated
     }
 
-    fun deductOutgoing(sc: StableChannel, amountSats: Long, price: Double): Double? {
-        if (sc.expectedUSD.amount < 0.01 || price <= 0.0) return null
-        val nativeSats = sc.nativeChannelBTC.sats
-        if (amountSats <= nativeSats) return null // Fully covered by native balance
-        val overflowSats = amountSats - nativeSats
-        val usdToDeduct = overflowSats.toDouble() / Constants.SATS_IN_BTC * price
-        val newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
-        sc.expectedUSD = USD(newExpected)
-        sc.backingSats = (newExpected / price * Constants.SATS_IN_BTC).toLong()
-        recomputeNative(sc)
-        return usdToDeduct
+    /**
+     * Whether a spend of [amountMsat] would consume backing already owed to the LSP (#322). Only
+     * the excess over the native (non-backing) balance AND the stable target itself touches the
+     * surplus: spending into backing first shrinks the target, which leaves the surplus owed to the
+     * LSP unchanged. A spend that exhausts the target eats the surplus directly.
+     */
+    fun spendConsumesLspSurplus(sc: StableChannel, price: Double, amountMsat: Long): Boolean {
+        if (checkStabilityAction(sc, price).action != StabilityAction.PAY) return false
+        val nativeSats = max(sc.stableReceiverBTC.sats - sc.backingSats, 0L)
+        val overflowSats = amountMsat / 1000 - nativeSats
+        if (overflowSats <= 0) return false
+        val overflowUsd = overflowSats.toDouble() / Constants.SATS_IN_BTC * price
+        return overflowUsd > sc.expectedUSD.amount
     }
 
     fun recomputeNative(sc: StableChannel) {
@@ -93,7 +95,10 @@ object StabilityService {
 
     fun checkStabilityAction(sc: StableChannel, price: Double): StabilityCheckResult {
         val targetUSD = sc.expectedUSD.amount
-        if (targetUSD < 0.01 || price == 0.0) {
+        // A sub-cent target with no backing is a closed position. A sub-cent target WITH backing
+        // is not: those sats are an unsettled LSP surplus (#322) and must settle like any other
+        // above-par balance instead of being stranded by this bail.
+        if ((targetUSD < MINIMUM_STABLE_USD && sc.backingSats == 0L) || price == 0.0) {
             return StabilityCheckResult(StabilityAction.STABLE, 0.0, 0.0, targetUSD, 0.0)
         }
 
@@ -105,7 +110,9 @@ object StabilityService {
         val stableUSDValue = (sc.backingSats.toDouble() / Constants.SATS_IN_BTC) * price
 
         val dollarsFromPar = stableUSDValue - targetUSD
-        val percentFromPar = if (targetUSD > 0) abs(dollarsFromPar / targetUSD) * 100.0 else 0.0
+        // Clamp the denominator: at a zero/tiny target an unclamped ratio is 0 (or explodes),
+        // which would pin percentFromPar inside the deadband and block settlement of the residue.
+        val percentFromPar = abs(dollarsFromPar / max(targetUSD, MINIMUM_STABLE_USD)) * 100.0
 
         val action =
             when {

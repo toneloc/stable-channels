@@ -1790,7 +1790,7 @@ impl StableChannelManager {
         // Attribute by balance drop: (index, live channel, live user-side sats).
         let mut matches: Vec<(usize, &Channel, u64)> = Vec::new();
         for (i, sc) in self.stable_channels.iter().enumerate() {
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = channels.iter().find(|c| {
@@ -1933,7 +1933,7 @@ impl StableChannelManager {
                 // A failed splice save must finish before a tick can change these books.
                 continue;
             }
-            if sc.expected_usd.0 < 0.01 {
+            if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
             let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
@@ -2018,7 +2018,8 @@ impl StableChannelManager {
                 sc.stable_receiver_usd.0
             };
             let target = sc.expected_usd.0;
-            let percent_from_par = (((stable_usd_value - target) / target) * 100.0).abs();
+            let percent_from_par =
+                (((stable_usd_value - target) / target.max(0.01)) * 100.0).abs();
             let dollars_from_par = (stable_usd_value - target).abs();
 
             if percent_from_par < percent_threshold
@@ -2511,7 +2512,7 @@ impl StableChannelManager {
             else {
                 return;
             };
-            if sc.expected_usd.0 <= 0.0 || btc_price <= 0.0 {
+            if (sc.expected_usd.0 <= 0.0 && sc.backing_sats == 0) || btc_price <= 0.0 {
                 return;
             }
 

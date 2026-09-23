@@ -7,6 +7,7 @@ import com.stablechannels.app.services.PriceService
 import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.StabilityService.StabilityAction
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -185,11 +186,10 @@ class StabilityServiceTest {
     }
 
     @Test
-    fun `reconcileOutgoing closes the position when the spend exhausts the target`() {
-        // Preserve-sats must not apply at the zero boundary: with the target exhausted nothing
-        // backs it, so the remaining sats are native. Leaving them as backing for a $0 target
-        // books them as neither stable nor native, and every repair path treats a sub-cent
-        // target as "no position" and bails — the sats would be stranded for good.
+    fun `reconcileOutgoing preserves the residue when the spend exhausts the target`() {
+        // Zero boundary (#322): the sats left after an exhausting spend are an unsettled LSP
+        // surplus. They stay backing (never released to native BTC) so the stability machinery
+        // settles them as a normal above-par payment.
         val price = 100_000.0
         val sc =
             StableChannel(
@@ -199,10 +199,85 @@ class StabilityServiceTest {
             )
 
         val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
-        assertEquals(15.0, deducted!!, 0.0001)
+        assertEquals(10.0, deducted!!, 0.0001) // the target drop, not the $15 overflow
         assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
-        assertEquals(0L, updated.backingSats)
-        assertEquals(5_000L, updated.nativeChannelBTC.sats) // the sats the user still holds
+        assertEquals(5_000L, updated.backingSats) // residue kept as backing, not zeroed
+        assertEquals(0L, updated.nativeChannelBTC.sats) // none of it books as native
+    }
+
+    @Test
+    fun `reconcileOutgoing at a zero target clamps backing to the receiver balance`() {
+        // A spend landing on a position whose target already cleared still deducts the overflow
+        // and preserves the residue as backing instead of zeroing it.
+        val price = 100_000.0
+        val sc =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 20_000L,
+                stableReceiverBTC = Bitcoin(5_000L),
+            )
+
+        val (updated, deducted) = StabilityService.reconcileOutgoing(sc, price)
+        assertEquals(0.0, deducted!!, 0.0001) // nothing left to deduct from the target
+        assertEquals(0.0, updated.expectedUSD.amount, 0.0001)
+        assertEquals(5_000L, updated.backingSats)
+        assertEquals(0L, updated.nativeChannelBTC.sats)
+    }
+
+    @Test
+    fun `checkStabilityAction returns PAY at a zero target with residue backing`() {
+        // $0 target, $20 of residue backing: the whole residue is owed to the LSP, so the
+        // position is above par and must settle — the sub-cent bail must not apply (#322).
+        val sc =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 20_000L,
+                isStableReceiver = true,
+            )
+        val result = StabilityService.checkStabilityAction(sc, price = 100_000.0)
+        assertEquals(StabilityAction.PAY, result.action)
+        assertEquals(20.0, result.dollarsFromPar, 0.0001)
+    }
+
+    // ---------------------------------------------------------------------------
+    // spendConsumesLspSurplus — the #322 spend guard predicate
+    // ---------------------------------------------------------------------------
+
+    // $100 target, 100_000 sats backing, 100_000 native; at $110k the $10 drift is owed.
+    private fun guardChannel() =
+        StableChannel(
+            expectedUSD = USD(100.0),
+            backingSats = 100_000L,
+            stableReceiverBTC = Bitcoin(200_000L),
+            isStableReceiver = true,
+        )
+
+    @Test
+    fun `spendConsumesLspSurplus ignores spends within native or target`() {
+        val sc = guardChannel()
+        // Fully native-covered: never touches backing.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 50_000_000))
+        // 50_000 sats into backing ≈ $55 < $100 target: the target shrinks, surplus unchanged.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 150_000_000))
+        // Nothing owed below par: even a channel-emptying spend is fine.
+        assertFalse(StabilityService.spendConsumesLspSurplus(sc, 90_000.0, 200_000_000))
+    }
+
+    @Test
+    fun `spendConsumesLspSurplus blocks spends that exhaust the target`() {
+        val sc = guardChannel()
+        // 150_000 sats into backing ≈ $165 > $100 target: the excess eats the LSP's surplus.
+        assertTrue(StabilityService.spendConsumesLspSurplus(sc, 110_000.0, 250_000_000))
+        // At a zero target every sat of residue is surplus, so any spend past native is blocked.
+        val closed =
+            StableChannel(
+                expectedUSD = USD(0.0),
+                backingSats = 1_000L,
+                stableReceiverBTC = Bitcoin(200_000L),
+                isStableReceiver = true,
+            )
+        assertTrue(StabilityService.spendConsumesLspSurplus(closed, 100_000.0, 200_000_000))
+        assertFalse(StabilityService.spendConsumesLspSurplus(closed, 100_000.0, 100_000_000))
     }
 
     // ---------------------------------------------------------------------------

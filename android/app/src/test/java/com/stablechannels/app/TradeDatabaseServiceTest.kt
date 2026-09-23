@@ -795,8 +795,9 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
-    fun outgoingReconcileClosesThePositionWhenTheSpendExhaustsTheTarget() {
-        // Zero boundary, persisted side: nothing backs an exhausted target.
+    fun outgoingReconcilePreservesTheResidueWhenTheSpendExhaustsTheTarget() {
+        // Zero boundary, persisted side (#322): the leftover sats are an unsettled LSP surplus —
+        // they stay backing so the stability machinery settles them, never released to native BTC.
         val identifier = "1a".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
@@ -821,16 +822,17 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(result)
         assertEquals(0.0, result!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, result.newBackingSats)
+        assertEquals(5_000L, result.newBackingSats)
+        assertEquals(10.0, result.usdDeducted, 0.0001) // the target drop, not the $15 overflow
         val row = service.loadChannel("21")
         assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
-        assertEquals(0L, row?.backingSats) // the 5,000 sats are native, not stranded
+        assertEquals(5_000L, row?.backingSats) // residue preserved, not stranded or released
         service.close()
     }
 
     @Test
-    fun backingClampClosesThePositionWhenTheRepairExhaustsTheTarget() {
-        // Same boundary on the startup repair path.
+    fun backingClampPreservesTheResidueWhenTheRepairExhaustsTheTarget() {
+        // Same boundary on the startup repair path (#322).
         val identifier = "2b".repeat(32)
         val service = DatabaseService(context)
         service.saveChannel(
@@ -848,8 +850,143 @@ class TradeDatabaseServiceTest {
 
         assertNotNull(repaired)
         assertEquals(0.0, repaired!!.newExpectedUSD, 0.0001)
-        assertEquals(0L, repaired.newBackingSats)
-        assertEquals(0L, service.loadChannel("22")?.backingSats)
+        assertEquals(5_000L, repaired.newBackingSats)
+        assertEquals(10.0, repaired.usdDeducted, 0.0001)
+        assertEquals(5_000L, service.loadChannel("22")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAtZeroTargetPreservesTheResidue() {
+        // A zero-target LSP SYNC keeps min(current backing, the LSP's signed backing, receiver)
+        // so residue the LSP still books settles via the stability machinery (#322).
+        val identifier = "6f".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "33",
+            expectedUSD = 10.0,
+            backingSats = 20_000,
+            note = null,
+            receiverSats = 15_000,
+            latestPrice = 100_000.0,
+        )
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "99", // the LSP's own id; the lookup keys on channel_id
+                expectedUsd = 0.0,
+                backingSats = 20_000, // the LSP still books the residue
+                syncVersion = 1,
+                correlation = null,
+            )
+        val applied = service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, applied.status)
+        assertEquals(
+            15_000L,
+            applied.localBackingSats,
+        ) // min(20_000 backing, 20_000 signed, 15_000 receiver)
+        val row = service.loadChannel("33")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(15_000L, row?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncAtZeroTargetReleasesWhatTheLspBookedAsClosed() {
+        // The divergence-repair case: the LSP applied a full exit (target 0, backing 0) and its
+        // restart SYNC reaches a wallet still holding the pre-exit allocation. The wallet must
+        // converge to 0, not keep the stale allocation and pay it away as phantom surplus.
+        val identifier = "7a".repeat(32)
+        val service = DatabaseService(context)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "34",
+            expectedUSD = 60.0,
+            backingSats = 60_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0,
+        )
+
+        val sync =
+            TradeControlMessage.Sync(
+                channelId = identifier,
+                userChannelId = "99",
+                expectedUsd = 0.0,
+                backingSats = 0, // the LSP already booked the close
+                syncVersion = 1,
+                correlation = null,
+            )
+        val applied = service.applyUncorrelatedSyncIfNewer(sync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, applied.status)
+        assertEquals(0L, applied.localBackingSats)
+        val row = service.loadChannel("34")
+        assertEquals(0.0, row?.expectedUSD ?: -1.0, 0.0001)
+        assertEquals(0L, row?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun uncorrelatedSyncWithASubCentTargetTakesTheZeroTargetResiduePath() {
+        // The LSP serialises its raw target and its reconcile can leave a sub-cent remainder
+        // after a spend clears the target (e.g. $0.0002). That is a zero target with residue,
+        // so it must take the residue clamp like the desktop, not the delta path, which answers
+        // RETRY whenever the residue drift is actionable and would loop on every redelivery.
+        val service = DatabaseService(context)
+        val residueChannel = "6e".repeat(32)
+        service.saveChannel(
+            channelId = residueChannel,
+            userChannelId = "35",
+            expectedUSD = 0.0002,
+            backingSats = 1_961,
+            note = null,
+            receiverSats = 1_961,
+            latestPrice = 102_000.0,
+        )
+        val residueSync =
+            TradeControlMessage.Sync(
+                channelId = residueChannel,
+                userChannelId = "99",
+                expectedUsd = 0.0004, // sub-cent, computed at the LSP's own price
+                backingSats = 1_961, // the LSP books the residue
+                syncVersion = 1,
+                correlation = null,
+            )
+        val residueApplied =
+            service.applyUncorrelatedSyncIfNewer(residueSync, trustedPrice = 102_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, residueApplied.status)
+        assertEquals(1_961L, residueApplied.localBackingSats)
+        val residueRow = service.loadChannel("35")
+        assertTrue((residueRow?.expectedUSD ?: 1.0) < 0.01)
+        assertEquals(1_961L, residueRow?.backingSats)
+
+        // And a sub-cent target the LSP books as closed still releases the stale allocation.
+        val closedChannel = "6d".repeat(32)
+        service.saveChannel(
+            channelId = closedChannel,
+            userChannelId = "36",
+            expectedUSD = 60.0,
+            backingSats = 60_000,
+            note = null,
+            receiverSats = 100_000,
+            latestPrice = 100_000.0,
+        )
+        val closedSync =
+            TradeControlMessage.Sync(
+                channelId = closedChannel,
+                userChannelId = "99",
+                expectedUsd = 0.004,
+                backingSats = 0,
+                syncVersion = 1,
+                correlation = null,
+            )
+        val closedApplied =
+            service.applyUncorrelatedSyncIfNewer(closedSync, trustedPrice = 100_000.0)
+        assertEquals(TradeControlApplyStatus.APPLIED, closedApplied.status)
+        assertEquals(0L, closedApplied.localBackingSats)
+        assertEquals(0L, service.loadChannel("36")?.backingSats)
         service.close()
     }
 

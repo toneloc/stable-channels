@@ -14,6 +14,7 @@ import com.stablechannels.app.services.CloseTxidResolver
 import com.stablechannels.app.services.websocket.MempoolWebSocketClient
 import com.stablechannels.app.services.websocket.MempoolWebSocketService
 import com.stablechannels.app.services.websocket.WebSocketEvent
+import com.stablechannels.app.util.AppFormatters
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.QRCodeUtils
@@ -2643,11 +2644,35 @@ class AppState(private val context: Context) : ViewModel() {
         resumePendingSpliceConfirmation()
     }
 
+    /**
+     * Blocks a spend that would consume sats owed to the LSP (#322). When the position is above par
+     * the backing sats beyond the target belong to the LSP until a stability payment settles them.
+     * Spends covered by the native balance or by the stable target itself always pass — only a
+     * spend that exhausts the target eats the surplus. Fails open when no trusted price is
+     * available — the same "never block money movement on a missing price" rule the stability timer
+     * follows.
+     */
+    fun ensureNoUnsettledSurplus(amountMsat: Long) {
+        val sc = _stableChannel.value
+        if (!sc.isStableReceiver || sc.userChannelId.isEmpty()) return
+        val price = priceService.currentAccountingPrice()
+        if (price <= 0.0) return
+        if (StabilityService.spendConsumesLspSurplus(sc, price, amountMsat)) {
+            val owedUsd =
+                sc.backingSats.toDouble() / Constants.SATS_IN_BTC * price - sc.expectedUSD.amount
+            throw IllegalStateException(
+                "A stability payment of ${AppFormatters.formatUsd(owedUsd)} to the LSP is still " +
+                    "settling — retry this payment shortly."
+            )
+        }
+    }
+
     fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
         releaseStaleSpliceLock()
         if (isSweeping) {
             throw IllegalStateException("A splice is already in progress — try again shortly")
         }
+        ensureNoUnsettledSurplus(amountSats * 1000)
         val db =
             databaseService
                 ?: throw IllegalStateException(
