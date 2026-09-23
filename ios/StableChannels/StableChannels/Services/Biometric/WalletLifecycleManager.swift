@@ -17,12 +17,14 @@ enum RestorePhase: String, Codable {
 enum WalletRestoreError: Error, LocalizedError, Equatable {
     case invalidMnemonic(String)
     case wipeFailed(String)
+    case persistenceFailed(String)
     case recoveryFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidMnemonic(let msg): return msg
         case .wipeFailed(let msg): return msg
+        case .persistenceFailed(let msg): return msg
         case .recoveryFailed(let msg): return msg
         }
     }
@@ -90,6 +92,7 @@ final class WalletLifecycleManager {
             restoreStateStore.clearRecoveredRestorePending()
             return .ready
         } else if !hasSeed && !hasDb {
+            restoreStateStore.clearRecoveredRestorePending()
             return .newWallet
         } else if hasSeed && !hasDb {
             if restoreStateStore.isRecoveredRestorePending() {
@@ -133,7 +136,10 @@ final class WalletLifecycleManager {
                     // classifies this as .ready rather than .seedOnlyMismatch.
                     restoreStateStore.setRecoveredRestorePending(true)
                     restoreStateStore.clearRestorePhase()
-                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION", data: [:])
+                    AuditService.log(
+                        "RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION",
+                        data: ["pendingState": "keyNotFound"]
+                    )
                     return true
                 }
                 restoreStateStore.clearRestorePhase()
@@ -158,7 +164,10 @@ final class WalletLifecycleManager {
                 if phase == .oldPersistenceWiped {
                     restoreStateStore.setRecoveredRestorePending(true)
                     restoreStateStore.clearRestorePhase()
-                    AuditService.log("RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION", data: [:])
+                    AuditService.log(
+                        "RESTORE_INTERRUPTED_RECOVERY_COMPLETED_PROMOTION",
+                        data: ["pendingState": "empty"]
+                    )
                     return true
                 }
                 restoreStateStore.clearRestorePhase()
@@ -316,8 +325,8 @@ final class WalletLifecycleManager {
         // restore.
         AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
         try keychain.storeMnemonic(pending)
-        try? keychain.deletePendingMnemonic()
         restoreStateStore.setRecoveredRestorePending(true)
+        try? keychain.deletePendingMnemonic()
         return true
     }
 

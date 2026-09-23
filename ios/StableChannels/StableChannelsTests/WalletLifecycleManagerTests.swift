@@ -411,6 +411,38 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertNil(mockStorage.mockMnemonic)
         XCTAssertEqual(mockStorage.mockPendingMnemonic, otherMnemonic)
     }
+
+    func testMarkerlessRecoverySetsRecoveredFlagBeforeDeletingPending() throws {
+        // P2 crash boundary: after a markerless promotion, a kill between
+        // deletePendingMnemonic and setRecoveredRestorePending left the user
+        // stranded at .seedOnlyMismatch. This test reproduces the post-promotion
+        // state (active seed present, no pending, no marker, no database, no flag)
+        // and verifies that the corrected ordering produces .ready.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        mockStorage.mockPendingMnemonic = otherMnemonic
+        mockStorage.mockMnemonic = nil
+
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertTrue(didRecover)
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic)
+        XCTAssertTrue(ud?.bool(forKey: "recovered_restore_pending") == true)
+        // Without a database, startup must classify as .ready (not .seedOnlyMismatch)
+        XCTAssertEqual(manager.detectStartupState(), .ready)
+    }
+
+    func testNewWalletClearsStaleRecoveredRestorePending() {
+        // If a prior recovery set recovered_restore_pending but then the wallet
+        // was fully deleted, the flag must not leak into the next fresh start.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        ud?.set(true, forKey: "recovered_restore_pending")
+
+        let state = manager.detectStartupState()
+
+        XCTAssertEqual(state, .newWallet)
+        XCTAssertFalse(ud?.bool(forKey: "recovered_restore_pending") ?? false)
+    }
 }
 
 // MARK: - BIP-39 Validation
