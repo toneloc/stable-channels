@@ -178,6 +178,33 @@ final class PaymentRepository {
         return !rows.isEmpty
     }
 
+    /// True if a channel_close payment row exists matching this deposit amount within mining fee tolerance,
+    /// preventing close sweeps from creating duplicate on-chain deposit rows.
+    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400) -> Bool {
+        let sql = """
+        SELECT amount_msat FROM payments
+        WHERE payment_type = 'channel_close'
+        AND direction = 'received'
+        AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT 5
+        """
+        let cutoff = Int64(Date().timeIntervalSince1970) - withinSecs
+        guard let rows = try? rawSQL.query(sql, params: [.integer(cutoff)]) else { return false }
+        for row in rows {
+            let msat = row.int64(0)
+            guard msat > 0 else { continue }
+            let closeSats = UInt64(msat / 1000)
+            if depositSats <= closeSats && (closeSats - depositSats) <= 15000 {
+                return true
+            }
+            if depositSats >= closeSats && (depositSats - closeSats) <= 15000 {
+                return true
+            }
+        }
+        return false
+    }
+
     func getPayment(byId id: Int64) throws -> PaymentRecord? {
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,

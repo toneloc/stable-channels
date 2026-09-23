@@ -336,12 +336,12 @@ class AppState {
     private(set) var chainURL: String = Constants.primaryChainURL
 
     // Auto-sweep state
-    private(set) var isSweeping = false
+    var isSweeping = false
     var spliceTxid: String?
     private var spliceConfirmationTask: Task<Void, Never>?
     private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
-    private var prevOnchainSats: UInt64 = {
+    var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
@@ -2547,12 +2547,23 @@ class AppState {
     /// always pass — only a spend that exhausts the target eats the surplus. Fails open when no trusted
     /// price is available — the same "never block money movement on a missing price" rule the stability
     /// timer follows.
-    func ensureNoUnsettledSurplus(amountSats: UInt64, price overridePrice: Double? = nil) throws {
+    func ensureNoUnsettledSurplus(
+        amountSats: UInt64,
+        price overridePrice: Double? = nil,
+        outboundCapacityMsat: UInt64? = nil
+    ) throws {
         let sc = stableChannel
         guard sc.isStableReceiver, !sc.userChannelId.isEmpty else { return }
         let price = overridePrice ?? priceService.accountingPrice
         guard price > 0.0 else { return }
         if StabilityService.spendConsumesLspSurplus(sc, price: price, amountSats: amountSats) {
+            // When remaining residue cannot be settled via keysend (e.g. only unspendable channel
+            // reserve remains and outbound capacity is 0), release the guard so user funds are not trapped.
+            let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: { $0.isChannelReady })?
+                .outboundCapacityMsat
+            if let capacity, capacity == 0 {
+                return
+            }
             let owedUsd = Double(sc.backingSats) / Double(Constants.satsInBTC) * price
                 - sc.expectedUSD.amount
             let formatted = owedUsd.formatted(.currency(code: "USD"))
@@ -2565,8 +2576,16 @@ class AppState {
         }
     }
 
-    func ensureNoUnsettledSurplus(amountMsat: UInt64, price overridePrice: Double? = nil) throws {
-        try ensureNoUnsettledSurplus(amountSats: amountMsat / 1000, price: overridePrice)
+    func ensureNoUnsettledSurplus(
+        amountMsat: UInt64,
+        price overridePrice: Double? = nil,
+        outboundCapacityMsat: UInt64? = nil
+    ) throws {
+        try ensureNoUnsettledSurplus(
+            amountSats: amountMsat / 1000,
+            price: overridePrice,
+            outboundCapacityMsat: outboundCapacityMsat
+        )
     }
 
     func beginSpliceOut(amountSats: UInt64, address: String) throws {
@@ -2873,6 +2892,27 @@ class AppState {
         return StabilityService.checkStabilityAction(stableChannel, price: price)
     }
 
+    /// Computes the stability settlement amount in whole sats, capped to spendable channel capacity
+    /// so payments do not attempt to spend the unspendable channel reserve.
+    func calculateSettlementAmountMsat(
+        dollarsFromPar: Double,
+        price: Double,
+        outboundCapacityMsat: UInt64? = nil
+    ) -> UInt64 {
+        guard price > 0 else { return 0 }
+        var amountMsat = USD(amount: abs(dollarsFromPar)).toMsats(price: price) / 1000 * 1000
+        guard amountMsat > 0 else { return 0 }
+        let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: { $0.isChannelReady })?
+            .outboundCapacityMsat
+        if let capacity {
+            let maxSpendableMsat = capacity / 1000 * 1000
+            if amountMsat > maxSpendableMsat {
+                amountMsat = maxSpendableMsat
+            }
+        }
+        return amountMsat
+    }
+
     func runStabilityCheck() {
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
@@ -2904,8 +2944,11 @@ class AppState {
         guard now - stableChannel.lastStabilityPayment >= Int64(Constants.stabilityPaymentCooldownSecs) else { return }
 
         // The signed settlement requires whole sats: floor to a sat boundary so the
-        // signed amount_msat equals the keysend amount exactly.
-        let amountMsat = USD(amount: abs(result.dollarsFromPar)).toMsats(price: price) / 1000 * 1000
+        // signed amount_msat equals the keysend amount exactly, capped to spendable capacity.
+        let amountMsat = calculateSettlementAmountMsat(
+            dollarsFromPar: result.dollarsFromPar,
+            price: price
+        )
         guard amountMsat > 0 else { return }
 
         guard let databaseService else { return }
@@ -3149,7 +3192,7 @@ class AppState {
 
     // MARK: - On-Chain Deposit Detection
 
-    private func detectOnchainDeposit() {
+    func detectOnchainDeposit() {
         // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
         let currentOnchain = onchainBalanceSats
 
@@ -3162,7 +3205,7 @@ class AppState {
         }
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
-            .contains(where: { $0.opType == "close" }) == true {
+            .contains(where: { $0.opType == "channel_close" }) == true {
             prevOnchainSats = currentOnchain
             return
         }
@@ -3172,6 +3215,16 @@ class AppState {
             // Ignore tiny fluctuations from fee estimation changes
             guard depositSats >= 1000 else {
                 prevOnchainSats = currentOnchain
+                return
+            }
+
+            // Deduplicate against channel close sweeps that confirmed after the close was resolved
+            if databaseService?.paymentRepo.hasMatchingChannelClosePayment(depositSats: depositSats) == true {
+                prevOnchainSats = currentOnchain
+                AuditService.log("ONCHAIN_CLOSE_SWEEP_ABSORBED", data: [
+                    "amount_sats": "\(depositSats)",
+                    "onchain_balance": "\(currentOnchain)"
+                ])
                 return
             }
 

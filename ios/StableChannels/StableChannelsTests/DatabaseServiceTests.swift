@@ -1337,6 +1337,85 @@ final class DatabaseServiceTests: XCTestCase {
         let legacyTradeCount = try upgraded.rawSQL.query("SELECT COUNT(*) FROM trades")
         XCTAssertEqual(legacyTradeCount.first?.first as? Int64, 1)
     }
+
+    func testHasMatchingChannelClosePaymentMatchesWithinTolerance() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Exact match
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+        // Sweep slightly lower due to mining fees (within 15,000 sats tolerance)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 95_000))
+        // Sweep slightly higher (within 15,000 sats tolerance)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 105_000))
+        // Exact lower boundary (15,000 sats difference)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 85_000))
+        // Exact upper boundary (15,000 sats difference)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 115_000))
+        // Just beyond lower boundary (15,001 sats difference)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 84_999))
+        // Just beyond upper boundary (15,001 sats difference)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 115_001))
+        // Way outside tolerance
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 50_000))
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 200_000))
+    }
+
+    func testHasMatchingChannelClosePaymentIgnoresOtherTypes() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "onchain-payment-1",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Does not match non-channel_close payment
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+    }
+
+    func testHasMatchingChannelClosePaymentIgnoresSentDirection() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-sent",
+            paymentType: "channel_close",
+            direction: "sent",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Close payments sent (not received sweeps) are not matches
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+    }
+
+    func testHasMatchingChannelClosePaymentHonorsTimeCutoff() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-expired",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Expired window (cutoff = 0 seconds)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, withinSecs: -10))
+    }
 }
 
 @MainActor

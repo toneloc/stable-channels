@@ -539,7 +539,6 @@ struct SendView: View {
                         throw error
                     }
                 } else {
-                    try appState.ensureNoUnsettledSurplus(amountSats: sats)
                     let txid = try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
                     _ = try? appState.databaseService?.paymentRepo.recordPayment(
                         paymentId: txid,

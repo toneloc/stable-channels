@@ -43,10 +43,14 @@ struct USD: Codable, Equatable {
     }
 
     func toMsats(price: Double) -> UInt64 {
+        guard price > 0 else { return 0 }
         let btcValue = amount / price
         let sats = btcValue * Double(Constants.satsInBTC)
         let millisats = sats * 1000.0
-        return UInt64(abs(millisats).rounded(.down))
+        guard !millisats.isNaN, !millisats.isInfinite, millisats >= 0 else { return 0 }
+        let rounded = abs(millisats).rounded(.down)
+        guard rounded <= Double(UInt64.max) else { return UInt64.max }
+        return UInt64(rounded)
     }
 
     var formatted: String {

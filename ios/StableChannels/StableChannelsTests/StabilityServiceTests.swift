@@ -609,4 +609,250 @@ final class StabilityServiceTests: XCTestCase {
         // Missing/zero price fails open without throwing
         XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 0.0))
     }
+
+    @MainActor
+    func testDetectOnchainDepositAbsorbsWhenChannelClosing() {
+        let appState = AppState()
+        appState.isChannelClosing = true
+        appState.prevOnchainSats = 5_000
+        appState.onchainBalanceSats = 105_000
+
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+    }
+
+    @MainActor
+    func testDetectOnchainDepositAbsorbsWhenPendingCloseOpExists() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+        let appState = AppState()
+        appState.databaseService = dbService
+        _ = dbService.pendingOpRepo.insertPendingOperation(
+            opId: "close-test-ch",
+            opType: "channel_close",
+            fundingOutpointTxid: "txid-123",
+            fundingOutpointVout: 0
+        )
+        appState.isChannelClosing = false
+        appState.prevOnchainSats = 5_000
+        appState.onchainBalanceSats = 105_000
+
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+    }
+
+    @MainActor
+    func testDetectOnchainDepositAbsorbsWhenMatchingClosePaymentExists() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+        let appState = AppState()
+        appState.databaseService = dbService
+        _ = try dbService.paymentRepo.recordPayment(
+            paymentId: "close-payment-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+        appState.isChannelClosing = false
+        appState.prevOnchainSats = 5_000
+        // Sweep of 99,000 sats confirms (1,000 sat mining fee difference)
+        appState.onchainBalanceSats = 104_000
+
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 104_000)
+
+        // Verify no duplicate onchain payment row was created
+        let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
+        let onchainRows = payments.filter { $0.paymentType == "onchain" }
+        XCTAssertTrue(onchainRows.isEmpty)
+    }
+
+    @MainActor
+    func testCalculateSettlementAmountMsatCapsToOutboundCapacity() {
+        let appState = AppState()
+
+        // 100 USD at $100k/BTC = 100,000 sats = 100,000,000 msat.
+        // With 75,000 sats outbound capacity (25,000 sat reserve), payment is capped to 75,000,000 msat.
+        let capped = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_000_000
+        )
+        XCTAssertEqual(capped, 75_000_000)
+
+        // Within capacity: 50 USD = 50,000 sats = 50,000,000 msat.
+        let withinCapacity = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 50.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_000_000
+        )
+        XCTAssertEqual(withinCapacity, 50_000_000)
+
+        // Zero outbound capacity returns 0.
+        let zeroCapacity = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 0
+        )
+        XCTAssertEqual(zeroCapacity, 0)
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusReleasesWhenOutboundCapacityIsZero() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 5_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 5_000)
+
+        // When outbound capacity is available, guard blocks spend
+        XCTAssertThrowsError(
+            try appState.ensureNoUnsettledSurplus(
+                amountSats: 1_000,
+                price: 100_000.0,
+                outboundCapacityMsat: 5_000_000
+            )
+        )
+
+        // When only unspendable reserve remains (outboundCapacity = 0), guard releases so funds are not trapped
+        XCTAssertNoThrow(
+            try appState.ensureNoUnsettledSurplus(
+                amountSats: 1_000,
+                price: 100_000.0,
+                outboundCapacityMsat: 0
+            )
+        )
+    }
+
+    @MainActor
+    func testCalculateSettlementAmountMsatSubSatAndRoundingEdgeCases() {
+        let appState = AppState()
+
+        // Sub-sat dollar amount ($0.0000001 at $100k/BTC = 0.0001 sat) floors to 0 msat
+        let subSat = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 0.0000001,
+            price: 100_000.0,
+            outboundCapacityMsat: 100_000_000
+        )
+        XCTAssertEqual(subSat, 0)
+
+        // Fractional msat capacity (75,999 msat = 75.999 sats) floors to whole sat boundary (75,000 msat)
+        let fractionalCapacity = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_999
+        )
+        XCTAssertEqual(fractionalCapacity, 75_000)
+
+        // Zero or negative price returns 0 msat
+        let zeroPrice = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 50.0,
+            price: 0.0,
+            outboundCapacityMsat: 100_000_000
+        )
+        XCTAssertEqual(zeroPrice, 0)
+
+        let negativePrice = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 50.0,
+            price: -100_000.0,
+            outboundCapacityMsat: 100_000_000
+        )
+        XCTAssertEqual(negativePrice, 0)
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusExactTargetBoundary() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+
+        // Native balance = 40,000 sats.
+        // Target balance = $50 @ $100k/BTC = 50,000 sats.
+        // Total allowed spend before touching surplus = 40,000 + 50,000 = 90,000 sats.
+
+        // Exactly 90,000 sats: overflow is 50,000 sats ($50.00), which equals target USD.
+        // The guard condition is strictly greater (overflowUsd > expectedUSD), so this spend passes.
+        XCTAssertNoThrow(
+            try appState.ensureNoUnsettledSurplus(amountSats: 90_000, price: 100_000.0)
+        )
+
+        // 90,001 sats: overflow is 50,001 sats ($50.001), which exceeds target USD into LSP surplus.
+        // The guard must block this spend.
+        XCTAssertThrowsError(
+            try appState.ensureNoUnsettledSurplus(amountSats: 90_001, price: 100_000.0)
+        )
+    }
+
+    @MainActor
+    func testEnsureNoUnsettledSurplusSkipsForProviderAndEmptyChannel() {
+        let appState = AppState()
+
+        // Provider position (not stable receiver): surplus guard never applies
+        appState.stableChannel.isStableReceiver = false
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+        XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountSats: 95_000, price: 100_000.0))
+
+        // Empty userChannelId: no active channel, guard returns without throwing
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = ""
+        XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountSats: 95_000, price: 100_000.0))
+    }
+
+    @MainActor
+    func testDetectOnchainDepositDefersWhenSweepingOrSplicePending() {
+        let appState = AppState()
+        appState.prevOnchainSats = 5_000
+        appState.onchainBalanceSats = 100_000
+
+        // When isSweeping is true, deposit detection defers and prevOnchainSats is NOT advanced
+        appState.isSweeping = true
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+
+        // When pendingSplice exists, deposit detection defers and prevOnchainSats is NOT advanced
+        appState.isSweeping = false
+        appState.pendingSplice = PendingSplice(
+            direction: "out",
+            amountSats: 20_000,
+            address: "tb1qtestaddress"
+        )
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+    }
+
+    @MainActor
+    func testDetectOnchainDepositDustFluctuationIgnored() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+        let appState = AppState()
+        appState.databaseService = dbService
+        appState.prevOnchainSats = 5_000
+        // Increase of only 500 sats (< 1000 sats threshold)
+        appState.onchainBalanceSats = 5_500
+
+        appState.detectOnchainDeposit()
+        // Baseline advances to avoid re-triggering
+        XCTAssertEqual(appState.prevOnchainSats, 5_500)
+
+        // No onchain payment row recorded
+        let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
+        XCTAssertTrue(payments.isEmpty)
+    }
 }
