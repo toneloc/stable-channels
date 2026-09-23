@@ -85,6 +85,26 @@ fn payment_failure_reason_name(reason: Option<i32>) -> Option<String> {
     })
 }
 
+/// LDK Server rev this daemon's ldk-server-client is pinned to; a test keeps it equal to Cargo.toml.
+const PINNED_LDK_SERVER_REV: &str = "bd95e187";
+
+/// Whether LDK Server's reported build (`<version> (<git commit>)`) is the pinned rev; None when it reports no build.
+fn ldk_server_matches_pin(ldk_server_version: Option<&str>) -> Option<bool> {
+    ldk_server_version
+        .filter(|version| !version.is_empty())
+        .map(|version| version.contains(PINNED_LDK_SERVER_REV))
+}
+
+/// Audit data for a (re)connected event stream, naming the LDK Server build and whether it matches the pin.
+fn connected_audit_data(correlation_id: Option<&str>, ldk_server_version: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "correlation_id": correlation_id,
+        "ldk_server_version": ldk_server_version.filter(|version| !version.is_empty()),
+        "expected_ldk_server_rev": PINNED_LDK_SERVER_REV,
+        "ldk_server_matches_pin": ldk_server_matches_pin(ldk_server_version),
+    })
+}
+
 pub fn spawn(state: AppState) {
     tokio::spawn(async move { run(state).await });
 }
@@ -92,6 +112,8 @@ pub fn spawn(state: AppState) {
 async fn run(state: AppState) {
     let mut backoff = Duration::from_secs(1);
     let mut gap_correlation_id: Option<String> = None;
+    // A cold start is a gap that began at the previous run's last ledger entry.
+    let mut gap_started_ms: Option<i64> = state.last_event_before_start_ms;
     loop {
         let stream = match state.ldk_server.subscribe_events().await {
             Ok(s) => {
@@ -106,6 +128,7 @@ async fn run(state: AppState) {
                         serde_json::json!({ "correlation_id": correlation_id }),
                     );
                     gap_correlation_id = Some(correlation_id);
+                    gap_started_ms.get_or_insert(now_millis() as i64);
                 }
                 let correlation_id = gap_correlation_id.as_deref();
                 stable_channels::audit::audit_event(
@@ -127,9 +150,29 @@ async fn run(state: AppState) {
         };
         let (_reader, mut events) = buffer_events(stream);
         info!("[event_loop] subscribed");
+        let ldk_server_version = match state
+            .ldk_server
+            .get_node_info(ldk_server_client::ldk_server_grpc::api::GetNodeInfoRequest {})
+            .await
+        {
+            Ok(info) if !info.version.is_empty() => {
+                if ldk_server_matches_pin(Some(&info.version)) == Some(false) {
+                    warn!("[event_loop] LDK Server reports {}, but this daemon is built for LDK Server {}; run them at the same rev", info.version, PINNED_LDK_SERVER_REV);
+                }
+                Some(info.version)
+            },
+            Ok(_) => {
+                warn!("[event_loop] LDK Server reported no build version, so it is likely older than {} and its payment events may not decode", PINNED_LDK_SERVER_REV);
+                None
+            },
+            Err(e) => {
+                warn!("[event_loop] get_node_info failed: {}", e);
+                None
+            },
+        };
         stable_channels::audit::audit_event(
             "EVENT_STREAM_CONNECTED",
-            serde_json::json!({ "correlation_id": gap_correlation_id.as_deref() }),
+            connected_audit_data(gap_correlation_id.as_deref(), ldk_server_version.as_deref()),
         );
         {
             stable_channels::audit::audit_event(
@@ -157,6 +200,7 @@ async fn run(state: AppState) {
             let counts = crate::backfill::reconcile_event_history(
                 state.ldk_server.as_ref(),
                 state.db.as_ref(),
+                gap_started_ms,
             ).await;
             let reconciliation_complete =
                 counts.failed_scopes == 0 && counts.incomplete_scopes == 0;
@@ -176,6 +220,7 @@ async fn run(state: AppState) {
                 continue;
             }
             if reconciliation_complete {
+                gap_started_ms = None;
                 if let Some(correlation_id) = gap_correlation_id.take() {
                     stable_channels::audit::audit_event(
                         "EVENT_STREAM_GAP_CLOSED",
@@ -203,6 +248,7 @@ async fn run(state: AppState) {
                 serde_json::json!({ "correlation_id": correlation_id }),
             );
             gap_correlation_id = Some(correlation_id);
+            gap_started_ms.get_or_insert(now_millis() as i64);
         }
     }
 }
@@ -289,36 +335,34 @@ pub(crate) async fn dispatch_event(
             }
         },
         Some(EventVariant::PaymentReceived(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price)
                 .await;
         },
         Some(EventVariant::PaymentForwarded(e)) => {
-            if let Some(fp) = e.forwarded_payment {
-                // ForwardedPayment now carries per-HTLC locators; take the first of each list as the representative channel/node.
-                let prev = fp.prev_htlcs.first();
-                let next = fp.next_htlcs.first();
-                let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
-                let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
-                mgr.handle_payment_forwarded(
-                    prev.and_then(|h| h.user_channel_id.clone()).unwrap_or_default(),
-                    next.and_then(|h| h.user_channel_id.clone()),
-                    prev_channel_id,
-                    next_channel_id,
-                    prev.and_then(|h| h.node_id.clone()).unwrap_or_default(),
-                    next.and_then(|h| h.node_id.clone()).unwrap_or_default(),
-                    fp.outbound_amount_forwarded_msat.unwrap_or(0),
-                    fp.total_fee_earned_msat.unwrap_or(0),
-                    fp.skimmed_fee_msat,
-                    ldk,
-                    btc_price,
-                )
-                .await;
-            }
+            // The event carries per-HTLC locators; take the first of each list as the representative channel/node.
+            let prev = e.prev_htlcs.first();
+            let next = e.next_htlcs.first();
+            let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
+            let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
+            mgr.handle_payment_forwarded(
+                prev.and_then(|h| h.user_channel_id.clone()).unwrap_or_default(),
+                next.and_then(|h| h.user_channel_id.clone()),
+                prev_channel_id,
+                next_channel_id,
+                prev.and_then(|h| h.node_id.clone()).unwrap_or_default(),
+                next.and_then(|h| h.node_id.clone()).unwrap_or_default(),
+                e.outbound_amount_forwarded_msat,
+                e.total_fee_earned_msat.unwrap_or(0),
+                e.skimmed_fee_msat,
+                ldk,
+                btc_price,
+            )
+            .await;
         },
         Some(EventVariant::PaymentSuccessful(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
@@ -381,7 +425,7 @@ pub(crate) async fn dispatch_event(
             }
         },
         Some(EventVariant::PaymentFailed(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
@@ -438,7 +482,7 @@ pub(crate) async fn dispatch_event(
             );
         },
         Some(EventVariant::PaymentClaimable(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let has_custom_records = !e.custom_records.is_empty();
             stable_channels::audit::audit_event(
@@ -498,6 +542,31 @@ mod tests {
         );
         assert_eq!(payment_failure_reason_name(Some(99)).as_deref(), Some("UNKNOWN(99)"));
         assert_eq!(payment_failure_reason_name(None), None);
+    }
+
+    #[test]
+    fn connected_row_names_the_ldk_server_build_and_whether_it_matches_the_pin() {
+        let d = connected_audit_data(Some("event-stream-gap-1"), Some("0.1.0 (bd95e187b0c08b3fb90fc42a96f0f8a2b6773495)"));
+        assert_eq!(d["correlation_id"], "event-stream-gap-1");
+        assert_eq!(d["ldk_server_version"], "0.1.0 (bd95e187b0c08b3fb90fc42a96f0f8a2b6773495)");
+        assert_eq!(d["expected_ldk_server_rev"], PINNED_LDK_SERVER_REV);
+        assert_eq!(d["ldk_server_matches_pin"], true);
+        assert_eq!(connected_audit_data(None, Some("0.1.0 (0e4434d7083ae9926c73f26e7cd52f00bde44d37)"))["ldk_server_matches_pin"], false);
+        let unreported = connected_audit_data(None, Some(""));
+        assert!(unreported["ldk_server_version"].is_null());
+        assert!(unreported["ldk_server_matches_pin"].is_null());
+    }
+
+    #[test]
+    fn pinned_ldk_server_rev_matches_the_cargo_dependency() {
+        let manifest = include_str!("../Cargo.toml");
+        let rev = manifest
+            .lines()
+            .find(|line| line.starts_with("ldk-server-client"))
+            .and_then(|line| line.split("rev = \"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .unwrap();
+        assert!(rev.starts_with(PINNED_LDK_SERVER_REV), "update PINNED_LDK_SERVER_REV with the ldk-server-client pin");
     }
 
     #[test]

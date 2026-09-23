@@ -603,6 +603,16 @@ fn human_summary(event: &ChannelLedgerEvent) -> String {
             Some(state) => format!("Channel shutdown: {}", humanize_enum(&state)),
             None => "Channel shutdown stage changed".to_owned(),
         },
+        "CHANNEL_ONCHAIN_TX" => {
+            let state = if event.status == "failed" {
+                "failed"
+            } else if detail_text(event, "confirmation").as_deref() == Some("confirmed") {
+                "confirmed"
+            } else {
+                "broadcast"
+            };
+            format!("{} {state}", onchain_tx_label(detail_text(event, "tx_type").as_deref()))
+        }
         unknown => title_case_event(unknown),
     }
 }
@@ -724,6 +734,7 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
             "The Lightning payment completed successfully."
         }
         "PAYMENT_FAILED" => return failed_payment_help(event),
+        "CHANNEL_ONCHAIN_TX" => return onchain_tx_help(event),
         _ => {
             return format!(
                 "This is {}. Hover the badges for classification details or open Raw JSON for the exact recorded fields.",
@@ -745,6 +756,39 @@ fn detail_text(event: &ChannelLedgerEvent, key: &str) -> Option<String> {
 // LDK enum names such as ROUTE_NOT_FOUND read as "route not found".
 fn humanize_enum(name: &str) -> String {
     name.to_ascii_lowercase().replace('_', " ").replace("htlcs", "HTLCs")
+}
+
+fn onchain_tx_label(tx_type: Option<&str>) -> &'static str {
+    match tx_type {
+        Some("FUNDING") => "Funding transaction",
+        Some("INTERACTIVE_FUNDING") => "Interactive funding transaction",
+        Some("COOPERATIVE_CLOSE") => "Cooperative close transaction",
+        Some("UNILATERAL_CLOSE") => "Force-close transaction",
+        Some("ANCHOR_BUMP") => "Close fee-bump transaction",
+        Some("CLAIM") => "Claim transaction",
+        Some("SWEEP") => "Sweep transaction",
+        _ => "On-chain channel transaction",
+    }
+}
+
+fn onchain_tx_help(event: &ChannelLedgerEvent) -> String {
+    let what = match detail_text(event, "tx_type").as_deref() {
+        Some("FUNDING") => "This transaction funds the channel.",
+        Some("INTERACTIVE_FUNDING") => "This transaction was negotiated together with the peer, such as a splice, and becomes the channel's new funding.",
+        Some("COOPERATIVE_CLOSE") => "Both sides agreed to close the channel, and this transaction pays out their balances.",
+        Some("UNILATERAL_CLOSE") => "One side force-closed the channel by broadcasting its latest commitment transaction.",
+        Some("ANCHOR_BUMP") => "LDK added fees to a closing transaction through its anchor output so it confirms in time.",
+        Some("CLAIM") => "LDK claimed funds from the channel's closing transaction.",
+        Some("SWEEP") => "LDK swept the channel's claimable outputs back to its on-chain wallet.",
+        _ => "LDK classified this on-chain transaction as belonging to the channel.",
+    };
+    let height = detail_value(event, "confirmation_height").and_then(|height| height.as_u64());
+    let when = match height {
+        _ if event.status == "failed" => "It did not confirm and was dropped or replaced.".to_owned(),
+        Some(height) => format!("It confirmed in block {height}."),
+        None => "It is waiting for confirmation.".to_owned(),
+    };
+    format!("{what} {when}")
 }
 
 fn failed_payment_help(event: &ChannelLedgerEvent) -> String {
@@ -1479,5 +1523,32 @@ mod tests {
         );
         assert!(event_help(&backfill).contains("not observed on the live event stream"));
         assert!(event_help(&backfill).contains("1,500 msat"));
+    }
+
+    #[test]
+    fn onchain_channel_transactions_read_as_their_type_and_state() {
+        let mut funding = with_detail(
+            event(1, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"FUNDING","confirmation":"confirmed","confirmation_height":861204}"#,
+        );
+        assert_eq!(human_summary(&funding), "Funding transaction confirmed");
+        assert!(event_help(&funding).contains("funds the channel"));
+        assert!(event_help(&funding).contains("block 861204"));
+
+        let mut close = with_detail(
+            event(2, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"COOPERATIVE_CLOSE","confirmation":"unconfirmed"}"#,
+        );
+        close.status = "pending".to_owned();
+        assert_eq!(human_summary(&close), "Cooperative close transaction broadcast");
+        assert!(event_help(&close).contains("waiting for confirmation"));
+
+        funding.status = "failed".to_owned();
+        funding.detail_json = r#"{"tx_type":"FUNDING","confirmation":"unconfirmed"}"#.to_owned();
+        assert_eq!(human_summary(&funding), "Funding transaction failed");
+        assert!(event_help(&funding).contains("dropped or replaced"));
+
+        close.detail_json = r#"{"tx_type":"SOMETHING_NEW","confirmation":"unconfirmed"}"#.to_owned();
+        assert_eq!(human_summary(&close), "On-chain channel transaction broadcast");
     }
 }

@@ -9,7 +9,7 @@ ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends git protobuf-compiler && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 RUN git clone https://github.com/lightningdevkit/ldk-server.git . \
-    && git checkout a56d5a96397bb7c596f8833829508d8a66d66212
+    && git checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
 # experimental-lsps2-support: without it the [liquidity.lsps2_service] config
 # is dead code and JIT-channel requests are rejected ("without LSPS2 service
 # handler configured").

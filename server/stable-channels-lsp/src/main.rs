@@ -114,6 +114,11 @@ async fn main() -> Result<()> {
             error
         ),
     }
+    // Read before any task writes, so a restart's downtime is measured from the previous run's last entry.
+    let last_event_before_start_ms = db
+        .list_ledger_events(&stable_channels::ledger::LedgerQuery { limit: 1, ..Default::default() })
+        .ok()
+        .and_then(|page| page.overview.newest_occurred_at_ms);
     set_audit_ledger(db.clone());
     let channel_count = db
         .load_all_channels()
@@ -141,6 +146,7 @@ async fn main() -> Result<()> {
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         ldk_log_file,
+        last_event_before_start_ms,
     };
 
     let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);

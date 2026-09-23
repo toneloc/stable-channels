@@ -85,9 +85,10 @@ A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on t
 ```bash
 git clone https://github.com/toneloc/stable-channels.git
 git clone https://github.com/lightningdevkit/ldk-server.git
+git -C ldk-server checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
 ```
 
-They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement.
+They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
 
 ### 2. Configure LDK Server
 
@@ -96,6 +97,8 @@ In `ldk-server/contrib/ldk-server-config.toml`:
 ```toml
 [node]
 network = "signet"
+# The SC daemon backfills missed forwards from LDK Server's detailed history (about the last two hours); the default "stats" keeps only totals.
+forwarded_payment_tracking_mode = "detailed"
 
 [esplora]
 server_url = "https://mutinynet.com/api"
@@ -123,7 +126,7 @@ amount.
 
 For the LdkLog route to return content, set `[log] file = "/some/path/ldk-server.log"` in the same config so a file exists to tail.
 
-Comment out the `[bitcoind]`, `[electrum]`, and `[liquidity.lsps2_client]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.
+Comment out the `[bitcoind]`, `[electrum]`, and `[[liquidity.lsps_client]]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.
 
 ### 3. Configure the SC daemon
 

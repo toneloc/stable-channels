@@ -1,12 +1,16 @@
-//! Periodic observability poll: synthesizes SWEEP_PROGRESS, PEER_CONNECTED/PEER_DISCONNECTED and CHANNEL_SHUTDOWN_STATE_CHANGED audit events.
+//! Periodic observability poll: synthesizes SWEEP_PROGRESS, PEER_CONNECTED/PEER_DISCONNECTED, CHANNEL_SHUTDOWN_STATE_CHANGED and CHANNEL_ONCHAIN_TX audit events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use ldk_server_client::ldk_server_grpc::api::{GetBalancesRequest, ListChannelsRequest, ListPeersRequest};
+use ldk_server_client::ldk_server_grpc::api::{
+    GetBalancesRequest, GetPaymentDetailsRequest, ListChannelsRequest, ListPaymentsRequest,
+    ListPeersRequest,
+};
 use ldk_server_client::ldk_server_grpc::types::pending_sweep_balance::BalanceType;
-use ldk_server_client::ldk_server_grpc::types::Channel;
+use ldk_server_client::ldk_server_grpc::types::{Channel, Payment};
 use serde_json::Value;
+use stable_channels::db::Database;
 use tokio::time::interval;
 use tracing::warn;
 
@@ -25,6 +29,7 @@ async fn run(state: AppState) {
     let mut peer_prev: HashMap<String, bool> = HashMap::new();
     let mut peer_first_run = true;
     let mut shutdown_prev: HashMap<String, String> = HashMap::new();
+    let mut onchain_pending = pending_onchain_payment_ids(&state.db);
     loop {
         tick.tick().await;
         poll_sweeps(&state, &mut sweep_prev).await;
@@ -35,7 +40,88 @@ async fn run(state: AppState) {
         };
         poll_peers(&state, &channels, &mut peer_prev, &mut peer_first_run).await;
         shutdown_prev = record_shutdown_stages(&shutdown_prev, &channels);
+        record_onchain_channel_txs(ldk, &state.db, &channels, &mut onchain_pending).await;
     }
+}
+
+/// Resolve a channel_id to its user_channel_id from the live channel list, falling back to the daemon DB for closed channels.
+pub(crate) fn user_channel_id_for<'a>(
+    channels: &'a [Channel],
+    db: &'a Database,
+) -> impl Fn(&str) -> Option<String> + 'a {
+    move |channel_id: &str| {
+        channels
+            .iter()
+            .find(|c| c.channel_id == channel_id && !c.user_channel_id.is_empty())
+            .map(|c| c.user_channel_id.clone())
+            .or_else(|| db.get_user_channel_id_by_channel_id(channel_id).ok().flatten())
+    }
+}
+
+/// Payment ids of channel transactions the ledger last saw unconfirmed, so a restarted daemon keeps following them.
+pub(crate) fn pending_onchain_payment_ids(db: &Database) -> HashSet<String> {
+    let query = stable_channels::ledger::LedgerQuery {
+        category: Some("channel".to_owned()),
+        status: Some("pending".to_owned()),
+        limit: 200,
+        ..Default::default()
+    };
+    db.list_ledger_events(&query)
+        .map(|page| {
+            page.events
+                .into_iter()
+                .filter(|event| event.event_type == "CHANNEL_ONCHAIN_TX")
+                .filter_map(|event| event.detail.get("payment_id").and_then(Value::as_str).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Audit channel-related on-chain transactions from the newest payment page, following unconfirmed ones by id until they settle.
+pub(crate) async fn record_onchain_channel_txs(
+    ldk: &dyn LdkServerCalls,
+    db: &Database,
+    channels: &[Channel],
+    pending: &mut HashSet<String>,
+) {
+    let resolve = user_channel_id_for(channels, db);
+    let newest = match ldk.list_payments(ListPaymentsRequest { page_token: None }).await {
+        Ok(r) => r.payments,
+        Err(e) => { warn!("[observability] list_payments failed: {}", e); return; }
+    };
+    let mut seen = HashSet::new();
+    for payment in &newest {
+        seen.insert(payment.payment_id.clone());
+        record_onchain_payment(payment, &resolve, pending);
+    }
+    // LDK lists newest-created first, so an older transaction confirming does not return to the first page.
+    let off_page: Vec<String> = pending.iter().filter(|id| !seen.contains(*id)).cloned().collect();
+    for payment_id in off_page {
+        match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.clone() }).await {
+            Ok(r) => match r.payment {
+                Some(payment) => record_onchain_payment(&payment, &resolve, pending),
+                None => { pending.remove(&payment_id); }
+            },
+            Err(e) => warn!("[observability] get_payment_details({}) failed: {}", payment_id, e),
+        }
+    }
+}
+
+fn record_onchain_payment(
+    payment: &Payment,
+    resolve: &dyn Fn(&str) -> Option<String>,
+    pending: &mut HashSet<String>,
+) {
+    let Some(mut data) = crate::channel_audit::onchain_channel_tx_audit_data(payment, resolve) else {
+        return;
+    };
+    if data["status"] == "pending" {
+        pending.insert(payment.payment_id.clone());
+    } else {
+        pending.remove(&payment.payment_id);
+    }
+    data["source"] = serde_json::json!("onchain_poll");
+    stable_channels::audit::audit_event("CHANNEL_ONCHAIN_TX", data);
 }
 
 /// Audit every shutdown-stage change and return the next in-memory baseline; the per-stage dedup key keeps restarts from repeating a stage.

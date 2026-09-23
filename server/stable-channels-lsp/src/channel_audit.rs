@@ -1,7 +1,10 @@
 //! Maps ldk-server channel lifecycle data (pending open, splice rounds, channel snapshot fields) into audit-log JSON.
 
 use ldk_server_client::ldk_server_grpc::events::{SpliceNegotiated, SpliceNegotiationFailed};
-use ldk_server_client::ldk_server_grpc::types::{Channel, ChannelShutdownState, ReserveType};
+use ldk_server_client::ldk_server_grpc::types::{
+    confirmation_status, payment_kind, transaction_type, Channel, ChannelShutdownState, Payment,
+    PaymentDirection, PaymentStatus, ReserveType,
+};
 use serde_json::{json, Map, Value};
 
 use crate::channel_close::short;
@@ -90,6 +93,83 @@ pub fn channel_snapshot_fields(c: &Channel) -> Map<String, Value> {
         fields.insert("channel_shutdown_state".into(), json!(shutdown_state_name(state)));
     }
     fields
+}
+
+/// Ledger `data` for an on-chain transaction LDK classified against channels (funding, close, claim, sweep); None for anything else.
+pub fn onchain_channel_tx_audit_data(
+    payment: &Payment,
+    user_channel_id_for: &dyn Fn(&str) -> Option<String>,
+) -> Option<Value> {
+    let Some(payment_kind::Kind::Onchain(onchain)) = payment.kind.as_ref().and_then(|k| k.kind.as_ref())
+    else {
+        return None;
+    };
+    let pairs = |channels: &[ldk_server_client::ldk_server_grpc::types::TransactionChannel]| {
+        channels.iter().map(|c| (c.channel_id.clone(), c.counterparty_node_id.clone())).collect::<Vec<_>>()
+    };
+    let (tx_type, channels) = match onchain.tx_type.as_ref()?.kind.as_ref()? {
+        transaction_type::Kind::Funding(x) => ("FUNDING", pairs(&x.channels)),
+        transaction_type::Kind::InteractiveFunding(x) => ("INTERACTIVE_FUNDING", pairs(&x.channels)),
+        transaction_type::Kind::Sweep(x) => ("SWEEP", pairs(&x.channels)),
+        transaction_type::Kind::CooperativeClose(x) => ("COOPERATIVE_CLOSE", vec![(x.channel_id.clone(), x.counterparty_node_id.clone())]),
+        transaction_type::Kind::UnilateralClose(x) => ("UNILATERAL_CLOSE", vec![(x.channel_id.clone(), x.counterparty_node_id.clone())]),
+        transaction_type::Kind::AnchorBump(x) => ("ANCHOR_BUMP", vec![(x.channel_id.clone(), x.counterparty_node_id.clone())]),
+        transaction_type::Kind::Claim(x) => ("CLAIM", vec![(x.channel_id.clone(), x.counterparty_node_id.clone())]),
+    };
+    let mut channel_ids: Vec<String> = Vec::new();
+    let mut node_ids: Vec<String> = Vec::new();
+    for (channel_id, node_id) in channels {
+        if !channel_id.is_empty() && !channel_ids.contains(&channel_id) {
+            channel_ids.push(channel_id);
+        }
+        if !node_id.is_empty() && !node_ids.contains(&node_id) {
+            node_ids.push(node_id);
+        }
+    }
+    if channel_ids.is_empty() {
+        return None;
+    }
+    let mut user_channel_ids: Vec<String> = Vec::new();
+    for uid in channel_ids.iter().filter_map(|id| user_channel_id_for(id)) {
+        if !user_channel_ids.contains(&uid) {
+            user_channel_ids.push(uid);
+        }
+    }
+    let (confirmed_height, block_time) = match onchain.status.as_ref().and_then(|s| s.status.as_ref()) {
+        Some(confirmation_status::Status::Confirmed(c)) => (Some(c.height), c.timestamp),
+        _ => (None, 0),
+    };
+    let confirmation = if confirmed_height.is_some() { "confirmed" } else { "unconfirmed" };
+    let (state, status) = if payment.status == PaymentStatus::Failed as i32 {
+        ("failed", "failed")
+    } else if confirmed_height.is_some() {
+        ("confirmed", "completed")
+    } else {
+        ("unconfirmed", "pending")
+    };
+    let mut data = json!({
+        "payment_id": payment.payment_id,
+        "txid": onchain.txid,
+        "tx_type": tx_type,
+        "confirmation": confirmation,
+        "channel_ids": channel_ids,
+        "user_channel_ids": user_channel_ids,
+        "node_ids": node_ids,
+        "amount_msat": payment.amount_msat,
+        "fee_paid_msat": payment.fee_paid_msat,
+        "direction": if payment.direction == PaymentDirection::Outbound as i32 { "outbound" } else { "inbound" },
+        "status": status,
+        "dedup_key": format!("lsp:channel-onchain-tx:{}:{}", onchain.txid, state),
+    });
+    if let Some(height) = confirmed_height {
+        data["confirmation_height"] = json!(height);
+    }
+    // Date the row when it happened on-chain, not when the LSP noticed it (a first sync can surface months-old transactions).
+    let happened_secs = if confirmed_height.is_some() && block_time > 0 { block_time } else { payment.latest_update_timestamp };
+    if happened_secs > 0 {
+        data["occurred_at_ms"] = json!(happened_secs.saturating_mul(1000) as i64);
+    }
+    Some(data)
 }
 
 #[cfg(test)]
@@ -181,5 +261,111 @@ mod tests {
         assert_eq!(shutdown_state_name(42), "UNKNOWN(42)");
         assert_eq!(reserve_type_name(42), "UNKNOWN(42)");
         assert_eq!(shutdown_state_name(ChannelShutdownState::NotShuttingDown as i32), "NOT_SHUTTING_DOWN");
+    }
+
+    mod onchain {
+        use super::*;
+        use ldk_server_client::ldk_server_grpc::types::{
+            confirmation_status, payment_kind, transaction_type, ConfirmationStatus, Confirmed,
+            CooperativeClose, Funding, Onchain, Payment, PaymentDirection, PaymentKind,
+            PaymentStatus, Sweep, TransactionChannel, TransactionType, Unconfirmed,
+        };
+
+        const TXID: &str = "b6f6991d03df0e2e04dafffcd6bc418aac66049e2cd74b80f14ac86db1e3f0da";
+
+        fn onchain(tx_type: Option<transaction_type::Kind>, confirmed_at: Option<u32>, status: PaymentStatus) -> Payment {
+            let confirmation = match confirmed_at {
+                Some(height) => confirmation_status::Status::Confirmed(Confirmed { block_hash: "00ab".into(), height, timestamp: 1_758_000_000 }),
+                None => confirmation_status::Status::Unconfirmed(Unconfirmed {}),
+            };
+            Payment {
+                payment_id: "b6f6991d".into(),
+                kind: Some(PaymentKind {
+                    kind: Some(payment_kind::Kind::Onchain(Onchain {
+                        txid: TXID.into(),
+                        status: Some(ConfirmationStatus { status: Some(confirmation) }),
+                        tx_type: tx_type.map(|kind| TransactionType { kind: Some(kind) }),
+                    })),
+                }),
+                amount_msat: Some(250_000_000),
+                fee_paid_msat: Some(1_410_000),
+                direction: PaymentDirection::Outbound as i32,
+                status: status as i32,
+                ..Default::default()
+            }
+        }
+
+        fn known(channel_id: &str) -> Option<String> {
+            (channel_id == CHANNEL).then(|| UCID.to_owned())
+        }
+
+        fn funding() -> transaction_type::Kind {
+            transaction_type::Kind::Funding(Funding {
+                channels: vec![TransactionChannel { counterparty_node_id: PEER.into(), channel_id: CHANNEL.into() }],
+            })
+        }
+
+        #[test]
+        fn confirmed_funding_links_the_transaction_to_its_channel() {
+            let d = onchain_channel_tx_audit_data(&onchain(Some(funding()), Some(861_204), PaymentStatus::Succeeded), &known).unwrap();
+            assert_eq!(d["txid"], TXID);
+            assert_eq!(d["tx_type"], "FUNDING");
+            assert_eq!(d["confirmation"], "confirmed");
+            assert_eq!(d["confirmation_height"], 861_204);
+            assert_eq!(d["channel_ids"], serde_json::json!([CHANNEL]));
+            assert_eq!(d["user_channel_ids"], serde_json::json!([UCID]));
+            assert_eq!(d["node_ids"], serde_json::json!([PEER]));
+            assert_eq!(d["amount_msat"], 250_000_000u64);
+            assert_eq!(d["fee_paid_msat"], 1_410_000u64);
+            assert_eq!(d["direction"], "outbound");
+            assert_eq!(d["status"], "completed");
+            assert_eq!(d["dedup_key"], format!("lsp:channel-onchain-tx:{TXID}:confirmed"));
+            assert_eq!(d["occurred_at_ms"], 1_758_000_000_000i64, "a confirmed row is dated at its block time");
+        }
+
+        #[test]
+        fn an_unconfirmed_row_is_dated_at_ldks_last_update_or_left_to_now() {
+            let mut payment = onchain(Some(funding()), None, PaymentStatus::Pending);
+            payment.latest_update_timestamp = 1_757_990_000;
+            let d = onchain_channel_tx_audit_data(&payment, &known).unwrap();
+            assert_eq!(d["occurred_at_ms"], 1_757_990_000_000i64);
+            payment.latest_update_timestamp = 0;
+            assert!(onchain_channel_tx_audit_data(&payment, &known).unwrap().get("occurred_at_ms").is_none());
+        }
+
+        #[test]
+        fn an_unconfirmed_close_is_pending_and_keyed_separately_from_its_confirmation() {
+            let close = transaction_type::Kind::CooperativeClose(CooperativeClose { counterparty_node_id: PEER.into(), channel_id: CHANNEL.into() });
+            let d = onchain_channel_tx_audit_data(&onchain(Some(close), None, PaymentStatus::Pending), &known).unwrap();
+            assert_eq!(d["tx_type"], "COOPERATIVE_CLOSE");
+            assert_eq!(d["confirmation"], "unconfirmed");
+            assert!(d.get("confirmation_height").is_none());
+            assert_eq!(d["status"], "pending");
+            assert_eq!(d["dedup_key"], format!("lsp:channel-onchain-tx:{TXID}:unconfirmed"));
+        }
+
+        #[test]
+        fn a_failed_transaction_is_recorded_as_failed() {
+            let d = onchain_channel_tx_audit_data(&onchain(Some(funding()), None, PaymentStatus::Failed), &known).unwrap();
+            assert_eq!(d["status"], "failed");
+            assert_eq!(d["dedup_key"], format!("lsp:channel-onchain-tx:{TXID}:failed"));
+        }
+
+        #[test]
+        fn a_channel_the_lsp_cannot_resolve_keeps_its_channel_id_only() {
+            let d = onchain_channel_tx_audit_data(&onchain(Some(funding()), None, PaymentStatus::Pending), &|_| None).unwrap();
+            assert_eq!(d["channel_ids"], serde_json::json!([CHANNEL]));
+            assert_eq!(d["user_channel_ids"], serde_json::json!([]));
+        }
+
+        #[test]
+        fn transactions_without_a_channel_produce_no_row() {
+            let unclassified = onchain(None, Some(861_204), PaymentStatus::Succeeded);
+            assert!(onchain_channel_tx_audit_data(&unclassified, &known).is_none(), "plain on-chain sends are not channel activity");
+            let anonymous_sweep = onchain(Some(transaction_type::Kind::Sweep(Sweep { channels: vec![] })), None, PaymentStatus::Pending);
+            assert!(onchain_channel_tx_audit_data(&anonymous_sweep, &known).is_none());
+            let lightning = Payment { payment_id: "ln".into(), ..Default::default() };
+            assert!(onchain_channel_tx_audit_data(&lightning, &known).is_none());
+        }
     }
 }
