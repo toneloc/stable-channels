@@ -2566,6 +2566,10 @@ class AppState {
                     "total_channels": "\(nodeService.channels.count)"
                 ])
             }
+            // When remaining residue cannot be settled via keysend (e.g. only unspendable channel
+            // reserve remains or next outbound HTLC limit is 0), release the guard so user funds
+            // are not trapped. Note: This releases sends even if reserve sats are owed to the LSP
+            // — a bounded, deliberate trade-off so user funds never become permanently stuck.
             let capacity = outboundCapacityMsat ?? matchingChannel.map {
                 min($0.outboundCapacityMsat, $0.nextOutboundHtlcLimitMsat)
             }
@@ -2870,12 +2874,17 @@ class AppState {
     /// Heal books that claim more backing than the channel holds.
     /// backing > receiver cannot happen in normal operation: the backing is a slice of that
     /// balance. It means a withdrawal moved sats out without its stable-books deduction.
-    private func repairBooksAboveLiveBalance() {
+    func repairBooksAboveLiveBalance() {
         guard let db = databaseService else { return }
         guard !stableChannel.userChannelId.isEmpty, hasReadyChannel else { return }
         guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
         if (try? db.spliceRepo.hasPendingSplice()) ?? true { return }
-        if (try? db.stabilityRepo.loadPendingSend()) != nil { return }
+        if db.stabilityRepo.loadPendingSend() != nil { return }
+        if let payments = nodeService.node?.listPayments(), payments.contains(where: {
+            if case .pending = $0.status { return true }
+            return false
+        }) { return }
+        if (try? db.paymentRepo.hasPendingOutgoingPayment()) ?? true { return }
         let price = accountingBTCPrice
         guard price > 0.0 else { return }
 
@@ -3265,10 +3274,7 @@ class AppState {
                             let closeSats = op.balanceSats ?? 0
                             let diff = depositSats > closeSats ? depositSats - closeSats : closeSats - depositSats
                             if diff <= 15000 {
-                                _ = try? databaseService?.rawSQL.execute(
-                                    "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)",
-                                    params: [.text(op.opId)]
-                                )
+                                databaseService?.paymentRepo.markCloseSweepConsumed(paymentId: op.opId)
                                 break
                             }
                         }

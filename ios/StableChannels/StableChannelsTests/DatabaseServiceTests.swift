@@ -1467,6 +1467,54 @@ final class DatabaseServiceTests: XCTestCase {
         // Query now returns nil because it is consumed
         XCTAssertNil(service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000))
     }
+
+    func testHasPendingOutgoingPayment() throws {
+        // Initially no pending outgoing payments
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Received payment pending does not count as outgoing
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "incoming-pending-1",
+            paymentType: "lightning",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "pending"
+        )
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Completed sent payment does not count as pending
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "sent-completed-1",
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Pending sent payment returns true
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "sent-pending-1",
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 20_000_000,
+            amountUSD: 20.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "pending"
+        )
+        XCTAssertTrue(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Once updated to failed or completed, returns false
+        try service.paymentRepo.updatePaymentStatus(paymentId: "sent-pending-1", status: "failed")
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+    }
 }
 
 @MainActor

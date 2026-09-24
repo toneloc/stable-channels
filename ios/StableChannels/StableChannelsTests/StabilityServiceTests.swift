@@ -622,6 +622,73 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testEnsureNoUnsettledSurplusFailsOpenWhenNextOutboundHtlcLimitIsZero() {
+        let appState = AppState()
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 50.0)
+        appState.stableChannel.backingSats = 60_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+
+        let details = makeMockChannel(
+            userChannelId: "test-channel",
+            outboundCapacityMsat: 100_000_000,
+            nextOutboundHtlcLimitMsat: 0
+        )
+        appState.nodeService.channelsOverride = [details]
+        defer { appState.nodeService.channelsOverride = nil }
+
+        // When nextOutboundHtlcLimitMsat is 0, min(outbound, nextHtlc) == 0, failing open to prevent trapped funds
+        XCTAssertNoThrow(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 100_000.0))
+    }
+
+    @MainActor
+    func testRepairBooksAboveLiveBalanceSkippedWhenPendingOutgoingPaymentExists() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let appState = AppState()
+        let db = try DatabaseService(dataDir: tempDir)
+        appState.databaseService = db
+        appState.priceService.setPriceForTesting(100_000.0)
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.userChannelId = "test-channel"
+        appState.stableChannel.channelId = "test-channel"
+        appState.hasReadyChannel = true
+        appState.stableChannel.expectedUSD = USD(amount: 100.0)
+        appState.stableChannel.backingSats = 100_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 60_000)
+
+        // Record a pending outgoing payment (in-flight HTLC)
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "pending-htlc-1",
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 40_000_000,
+            amountUSD: 40.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "pending"
+        )
+
+        appState.repairBooksAboveLiveBalance()
+
+        // Books should NOT be modified because a payment is in-flight
+        XCTAssertEqual(appState.stableChannel.expectedUSD.amount, 100.0)
+        XCTAssertEqual(appState.stableChannel.backingSats, 100_000)
+
+        // Mark payment failed (HTLC canceled)
+        try db.paymentRepo.updatePaymentStatus(paymentId: "pending-htlc-1", status: "failed")
+        XCTAssertFalse(try db.paymentRepo.hasPendingOutgoingPayment())
+
+        // If the balance genuinely remained low without an in-flight payment, repair runs
+        appState.repairBooksAboveLiveBalance()
+        XCTAssertEqual(appState.stableChannel.expectedUSD.amount, 60.0)
+        XCTAssertEqual(appState.stableChannel.backingSats, 60_000)
+    }
+
+    @MainActor
     func testDetectOnchainDepositAbsorbsWhenChannelClosing() {
         let appState = AppState()
         appState.isChannelClosing = true

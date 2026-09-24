@@ -145,6 +145,17 @@ final class PaymentRepository {
         return paymentRecord(from: row)
     }
 
+    /// Returns true if an outgoing payment is currently in-flight ('pending').
+    func hasPendingOutgoingPayment() throws -> Bool {
+        let sql = """
+            SELECT 1 FROM payments
+            WHERE direction = 'sent' AND status = 'pending'
+            LIMIT 1
+        """
+        let rows = try rawSQL.query(sql, params: [])
+        return !rows.isEmpty
+    }
+
     /// Rows the confirmation poller advances. Splices are deliberately NOT here.
     /// A splice row's completion triggers stable-books reconcile in AppState.completeConfirmedSplice().
     /// Excluding splices ensures the poller does not race the monitor and complete rows without deducting books.

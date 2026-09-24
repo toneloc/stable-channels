@@ -566,7 +566,7 @@ struct SendView: View {
 
             success = true
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
         }
     }
 }
