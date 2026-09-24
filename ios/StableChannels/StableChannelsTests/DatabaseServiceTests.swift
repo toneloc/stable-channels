@@ -1440,6 +1440,33 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: true))
         XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
     }
+
+    func testFindMatchingChannelClosePaymentIdAndMarkCloseSweepConsumedCQS() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-cqs-test",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Query: findMatchingChannelClosePaymentId does not mutate database
+        let paymentId = service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000)
+        XCTAssertEqual(paymentId, "close-payment-cqs-test")
+        XCTAssertEqual(
+            service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000),
+            "close-payment-cqs-test"
+        )
+
+        // Command: markCloseSweepConsumed mutates database
+        XCTAssertTrue(service.paymentRepo.markCloseSweepConsumed(paymentId: "close-payment-cqs-test"))
+
+        // Query now returns nil because it is consumed
+        XCTAssertNil(service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000))
+    }
 }
 
 @MainActor

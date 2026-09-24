@@ -113,3 +113,34 @@ struct StableChannel: Codable {
         lastStabilityPayment: 0
     )
 }
+
+// MARK: - Domain Errors
+
+enum StabilitySpendError: LocalizedError, Equatable {
+    case surplusSettling(owedUSD: Double)
+
+    var errorDescription: String? {
+        switch self {
+        case .surplusSettling(let owedUSD):
+            let formatted = owedUSD.formatted(.currency(code: "USD"))
+            return "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."
+        }
+    }
+}
+
+enum SpliceOperationError: LocalizedError, Equatable {
+    case inProgress
+    case databaseUnavailable
+    case persistenceFailed(underlyingDescription: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case .inProgress:
+            return "A splice is already in progress — try again shortly"
+        case .databaseUnavailable:
+            return "Payment history is unavailable — splice not started"
+        case .persistenceFailed:
+            return "Could not save pending splice — splice not started"
+        }
+    }
+}

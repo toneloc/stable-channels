@@ -568,6 +568,11 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertThrowsError(try appState.ensureNoUnsettledSurplus(amountMsat: 95_000_000, price: 100_000.0)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("still settling"))
+            if case .surplusSettling(let owedUSD) = error as? StabilitySpendError {
+                XCTAssertEqual(owedUSD, 10.0, accuracy: 0.01)
+            } else {
+                XCTFail("Expected StabilitySpendError.surplusSettling, got: \(error)")
+            }
         }
     }
 
@@ -595,6 +600,11 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertThrowsError(try appState.ensureNoUnsettledSurplus(amountSats: 1_000, price: 100_000.0)) { error in
             let nsError = error as NSError
             XCTAssertTrue(nsError.localizedDescription.contains("still settling"))
+            if case .surplusSettling(let owedUSD) = error as? StabilitySpendError {
+                XCTAssertEqual(owedUSD, 5.0, accuracy: 0.01)
+            } else {
+                XCTFail("Expected StabilitySpendError.surplusSettling, got: \(error)")
+            }
         }
     }
 
@@ -707,6 +717,31 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testCalculateSettlementAmountMsatCapsToNextOutboundHtlcLimit() {
+        let appState = AppState()
+
+        // 100 USD at $100k/BTC = 100,000 sats = 100,000,000 msat.
+        // Outbound capacity is 75,000,000 msat, but nextOutboundHtlcLimitMsat is 50,000,000 msat.
+        // Must be capped to 50,000,000 msat.
+        let capped = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_000_000,
+            nextOutboundHtlcLimitMsat: 50_000_000
+        )
+        XCTAssertEqual(capped, 50_000_000)
+
+        // When nextOutboundHtlcLimitMsat is higher than outboundCapacityMsat, outboundCapacity binds.
+        let capacityBinds = appState.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 60_000_000,
+            nextOutboundHtlcLimitMsat: 80_000_000
+        )
+        XCTAssertEqual(capacityBinds, 60_000_000)
+    }
+
+    @MainActor
     func testEnsureNoUnsettledSurplusReleasesWhenOutboundCapacityIsZero() {
         let appState = AppState()
         appState.stableChannel.isStableReceiver = true
@@ -768,6 +803,30 @@ final class StabilityServiceTests: XCTestCase {
             outboundCapacityMsat: 100_000_000
         )
         XCTAssertEqual(negativePrice, 0)
+    }
+
+    func testStabilityServiceCalculateSettlementAmountMsatPureFunctionalCore() {
+        // Pure calculation with no AppState or nodeService dependency
+        let amount = StabilityService.calculateSettlementAmountMsat(
+            dollarsFromPar: 100.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_000_000,
+            nextOutboundHtlcLimitMsat: 50_000_000
+        )
+        XCTAssertEqual(amount, 50_000_000)
+
+        // When capacity is higher than needed, uncapped binds
+        let uncappedBinds = StabilityService.calculateSettlementAmountMsat(
+            dollarsFromPar: 20.0,
+            price: 100_000.0,
+            outboundCapacityMsat: 75_000_000,
+            nextOutboundHtlcLimitMsat: 50_000_000
+        )
+        XCTAssertEqual(uncappedBinds, 20_000_000)
+
+        // Non-positive price or 0 dollarsFromPar returns 0
+        XCTAssertEqual(StabilityService.calculateSettlementAmountMsat(dollarsFromPar: 0.0, price: 100_000.0), 0)
+        XCTAssertEqual(StabilityService.calculateSettlementAmountMsat(dollarsFromPar: 10.0, price: 0.0), 0)
     }
 
     @MainActor
@@ -879,6 +938,7 @@ final class StabilityServiceTests: XCTestCase {
         channelId: String = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
         userChannelId: String = "test-chan-1",
         outboundCapacityMsat: UInt64,
+        nextOutboundHtlcLimitMsat: UInt64? = nil,
         unspendablePunishmentReserve: UInt64 = 25_000,
         channelValueSats: UInt64 = 200_000,
         isChannelReady: Bool = true
@@ -910,7 +970,7 @@ final class StabilityServiceTests: XCTestCase {
             counterpartyForwardingInfoFeeBaseMsat: 1_000,
             counterpartyForwardingInfoFeeProportionalMillionths: 100,
             counterpartyForwardingInfoCltvExpiryDelta: 144,
-            nextOutboundHtlcLimitMsat: outboundCapacityMsat,
+            nextOutboundHtlcLimitMsat: nextOutboundHtlcLimitMsat ?? outboundCapacityMsat,
             nextOutboundHtlcMinimumMsat: 1_000,
             forceCloseSpendDelay: 144,
             inboundHtlcMinimumMsat: 1_000,
@@ -1084,5 +1144,132 @@ final class StabilityServiceTests: XCTestCase {
         // so it safely clears the send slot and does NOT send payment.
         XCTAssertFalse(paymentAttempted)
         XCTAssertNil(dbService.stabilityRepo.loadPendingSend())
+    }
+
+    @MainActor
+    func testRunStabilityCheckCapsSettlementToNextOutboundHtlcLimitWhenLowerThanCapacity() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+
+        let appState = AppState()
+        appState.databaseService = dbService
+        appState.priceService.setPriceForTesting(100_000.0)
+
+        let channelId = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        let userChannelId = "test-chan-1"
+        let counterparty = "020202020202020202020202020202020202020202020202020202020202020202"
+
+        appState.stableChannel.channelId = channelId
+        appState.stableChannel.userChannelId = userChannelId
+        appState.stableChannel.counterparty = counterparty
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 100_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+        appState.stableChannel.lastStabilityPayment = 0
+        appState.saveChannelToDB()
+
+        // Outbound capacity is 75,000 sats (75,000,000 msat), but nextOutboundHtlcLimitMsat is 50,000 sats (50,000,000
+        // msat)
+        let channel = makeMockChannel(
+            channelId: channelId,
+            userChannelId: userChannelId,
+            outboundCapacityMsat: 75_000_000,
+            nextOutboundHtlcLimitMsat: 50_000_000,
+            unspendablePunishmentReserve: 25_000,
+            channelValueSats: 200_000,
+            isChannelReady: true
+        )
+        appState.nodeService.channelsOverride = [channel]
+        appState.nodeService.lightningSyncAgeSecsOverride = 10
+        appState.nodeService.signMessageOverride = { _ in "mock-signature" }
+
+        var paymentSentMsat: UInt64?
+        appState.nodeService.sendStabilityPaymentOverride = { amountMsat, _, _ in
+            paymentSentMsat = amountMsat
+            return "mock-payment-id-htlc-limit"
+        }
+
+        appState.runStabilityCheck()
+
+        // Settlement was capped to nextOutboundHtlcLimitMsat (50,000,000 msat)
+        XCTAssertEqual(paymentSentMsat, 50_000_000)
+
+        let recorded = dbService.paymentRepo.payment(paymentId: "mock-payment-id-htlc-limit")
+        XCTAssertNotNil(recorded)
+        XCTAssertEqual(recorded?.amountMsat, 50_000_000)
+        XCTAssertEqual(recorded?.amountUSD, 50.0)
+
+        let updatedChannel = try dbService.channelRepo.loadChannel(userChannelId: userChannelId)
+        XCTAssertEqual(updatedChannel?.backingSats, 50_000)
+        XCTAssertNil(dbService.stabilityRepo.loadPendingSend())
+        XCTAssertTrue(appState.stableChannel.paymentMade)
+    }
+
+    @MainActor
+    func testDetectOnchainDepositConsumesMarkerDuringChannelClosing() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+
+        let appState = AppState()
+        appState.databaseService = dbService
+        appState.isChannelClosing = true
+
+        // Insert pending channel_close operation with expected 100,000 sats
+        _ = dbService.pendingOpRepo.insertPendingOperation(
+            opId: "close-op-1",
+            opType: "channel_close",
+            fundingOutpointTxid: "chan-txid",
+            fundingOutpointVout: 0,
+            balanceSats: 100_000,
+            balanceUsd: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: "node-1"
+        )
+
+        appState.prevOnchainSats = 0
+        appState.onchainBalanceSats = 99_000
+
+        // Sweep arrives while channel is closing
+        appState.detectOnchainDeposit()
+        XCTAssertEqual(appState.prevOnchainSats, 99_000)
+
+        // Marker must be consumed in database
+        let consumed = try dbService.rawSQL.query(
+            "SELECT 1 FROM consumed_close_sweeps WHERE payment_id = 'close-op-1'"
+        )
+        XCTAssertFalse(consumed.isEmpty)
+
+        // Now close finishes and later close txid resolves
+        appState.isChannelClosing = false
+        dbService.pendingOpRepo.updatePendingOperation(
+            opId: "close-op-1",
+            closingTxid: "close-txid",
+            status: "completed"
+        )
+        try dbService.paymentRepo.recordPayment(
+            paymentId: "close-op-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: "node-1",
+            status: "completed"
+        )
+
+        // An independent 100,000 sat deposit arrives later
+        appState.onchainBalanceSats = 199_000
+        appState.detectOnchainDeposit()
+
+        // Because the close sweep was already consumed, this deposit is NOT swallowed as a sweep
+        let depositPayments = (try? dbService.paymentRepo.getRecentPayments(limit: 10))?
+            .filter { $0.paymentType == "onchain" && $0.direction == "received" } ?? []
+        XCTAssertEqual(depositPayments.count, 1)
+        XCTAssertEqual(depositPayments.first?.amountMsat, 100_000_000)
     }
 }

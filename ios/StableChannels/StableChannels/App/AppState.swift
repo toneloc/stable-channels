@@ -2557,25 +2557,24 @@ class AppState {
         let price = overridePrice ?? priceService.accountingPrice
         guard price > 0.0 else { return }
         if StabilityService.spendConsumesLspSurplus(sc, price: price, amountSats: amountSats) {
-            // When remaining residue cannot be settled via keysend (e.g. only unspendable channel
-            // reserve remains and outbound capacity is 0), release the guard so user funds are not trapped.
-            // Note: This releases sends even if reserve sats are owed to the LSP — a bounded, deliberate
-            // trade-off so user funds never become permanently stuck.
-            let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: {
+            let matchingChannel = nodeService.channels.first(where: {
                 $0.isChannelReady && (!sc.userChannelId.isEmpty ? $0.userChannelId == sc.userChannelId : true)
-            })?.outboundCapacityMsat
+            })
+            if matchingChannel == nil, !sc.userChannelId.isEmpty {
+                AuditService.log("UNSETTLED_SURPLUS_NO_MATCHING_CHANNEL", data: [
+                    "user_channel_id": sc.userChannelId,
+                    "total_channels": "\(nodeService.channels.count)"
+                ])
+            }
+            let capacity = outboundCapacityMsat ?? matchingChannel.map {
+                min($0.outboundCapacityMsat, $0.nextOutboundHtlcLimitMsat)
+            }
             if let capacity, capacity == 0 {
                 return
             }
             let owedUsd = Double(sc.backingSats) / Double(Constants.satsInBTC) * price
                 - sc.expectedUSD.amount
-            let formatted = owedUsd.formatted(.currency(code: "USD"))
-            throw NSError(
-                domain: "",
-                code: 0,
-                userInfo: [NSLocalizedDescriptionKey:
-                    "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."]
-            )
+            throw StabilitySpendError.surplusSettling(owedUSD: owedUsd)
         }
     }
 
@@ -2593,19 +2592,11 @@ class AppState {
 
     func beginSpliceOut(amountSats: UInt64, address: String) throws {
         guard !isSweeping else {
-            throw NSError(
-                domain: "",
-                code: 0,
-                userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
-            )
+            throw SpliceOperationError.inProgress
         }
         try ensureNoUnsettledSurplus(amountSats: amountSats)
         guard let db = databaseService else {
-            throw NSError(
-                domain: "",
-                code: 0,
-                userInfo: [NSLocalizedDescriptionKey: "Payment history is unavailable — splice not started"]
-            )
+            throw SpliceOperationError.databaseUnavailable
         }
         // Persist before the native call so the operation survives a process
         // restart: on mainnet spliceNegotiated can arrive minutes after the
@@ -2616,23 +2607,33 @@ class AppState {
         let amountUSD: Double? = price > 0
             ? Double(amountSats) / Double(Constants.satsInBTC) * price
             : nil
-        let recorded = (try? db.paymentRepo.recordPayment(
-            paymentId: nil,
-            paymentType: "splice_out",
-            direction: "sent",
-            amountMsat: amountSats * 1000,
-            amountUSD: amountUSD,
-            btcPrice: price > 0 ? price : nil,
-            counterparty: nil,
-            status: "pending",
-            address: address
-        )) ?? false
-        guard recorded else {
-            throw NSError(
-                domain: "",
-                code: 0,
-                userInfo: [NSLocalizedDescriptionKey: "Could not save pending splice — splice not started"]
+        let recorded: Bool
+        do {
+            recorded = try db.paymentRepo.recordPayment(
+                paymentId: nil,
+                paymentType: "splice_out",
+                direction: "sent",
+                amountMsat: amountSats * 1000,
+                amountUSD: amountUSD,
+                btcPrice: price > 0 ? price : nil,
+                counterparty: nil,
+                status: "pending",
+                address: address
             )
+        } catch {
+            AuditService.log("SPLICE_OUT_PERSISTENCE_FAILED", data: [
+                "address": address,
+                "amount_sats": "\(amountSats)",
+                "error": error.localizedDescription
+            ])
+            throw SpliceOperationError.persistenceFailed(underlyingDescription: error.localizedDescription)
+        }
+        guard recorded else {
+            AuditService.log("SPLICE_OUT_PERSISTENCE_REJECTED", data: [
+                "address": address,
+                "amount_sats": "\(amountSats)"
+            ])
+            throw SpliceOperationError.persistenceFailed(underlyingDescription: "Payment record rejected")
         }
         spliceGeneration &+= 1
         isSweeping = true
@@ -2667,8 +2668,9 @@ class AppState {
             while !Task.isCancelled {
                 guard let self else { return }
                 if await self.isTxConfirmed(normalizedTxid) {
-                    self.completeConfirmedSplice(txid: normalizedTxid, expectedGeneration: monitorGeneration)
-                    return
+                    if self.completeConfirmedSplice(txid: normalizedTxid, expectedGeneration: monitorGeneration) {
+                        return
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
@@ -2734,12 +2736,13 @@ class AppState {
         return false
     }
 
-    private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) {
+    @discardableResult
+    private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) -> Bool {
         let price = accountingBTCPrice
         guard price > 0.0 else {
             // Defer: without a trusted price, don't finalize or clear state. Retry on next tick.
             AuditService.log("SPLICE_RECONCILE_DEFERRED", data: ["txid": txid, "reason": "no_trusted_price"])
-            return
+            return false
         }
 
         refreshBalances()
@@ -2762,7 +2765,7 @@ class AppState {
                 "txid": txid,
                 "reason": "db_not_completed"
             ])
-            return
+            return false
         }
         // History only reloads when this epoch moves; bump to ensure confirmation badge updates.
         confirmationUpdateEpoch += 1
@@ -2793,6 +2796,7 @@ class AppState {
             "txid": txid,
             "completed_row": "\(completed)"
         ])
+        return true
     }
 
     // MARK: - Stability Timer
@@ -2901,32 +2905,39 @@ class AppState {
     }
 
     /// Computes the stability settlement amount in whole sats, capped to spendable channel capacity
-    /// so payments do not attempt to spend the unspendable channel reserve.
+    /// and single-HTLC limits so payments do not attempt to spend the unspendable channel reserve
+    /// or exceed counterparty HTLC constraints.
     func calculateSettlementAmountMsat(
         dollarsFromPar: Double,
         price: Double,
-        outboundCapacityMsat: UInt64? = nil
+        outboundCapacityMsat: UInt64? = nil,
+        nextOutboundHtlcLimitMsat: UInt64? = nil
     ) -> UInt64 {
-        guard price > 0 else { return 0 }
-        var amountMsat = USD(amount: abs(dollarsFromPar)).toMsats(price: price) / 1000 * 1000
-        guard amountMsat > 0 else { return 0 }
-        let capacity: UInt64
+        let capacity: UInt64?
+        let htlcLimit: UInt64?
         if let outboundCapacityMsat {
             capacity = outboundCapacityMsat
+            htlcLimit = nextOutboundHtlcLimitMsat
         } else if let readyChannel = nodeService.channels.first(where: {
             $0
                 .isChannelReady &&
                 (!stableChannel.userChannelId.isEmpty ? $0.userChannelId == stableChannel.userChannelId : true)
         }) {
             capacity = readyChannel.outboundCapacityMsat
+            htlcLimit = readyChannel.nextOutboundHtlcLimitMsat
         } else {
+            AuditService.log("STABILITY_SETTLEMENT_NO_MATCHING_CHANNEL", data: [
+                "user_channel_id": stableChannel.userChannelId,
+                "total_channels": "\(nodeService.channels.count)"
+            ])
             return 0
         }
-        let maxSpendableMsat = capacity / 1000 * 1000
-        if amountMsat > maxSpendableMsat {
-            amountMsat = maxSpendableMsat
-        }
-        return amountMsat
+        return StabilityService.calculateSettlementAmountMsat(
+            dollarsFromPar: dollarsFromPar,
+            price: price,
+            outboundCapacityMsat: capacity,
+            nextOutboundHtlcLimitMsat: htlcLimit
+        )
     }
 
     func runStabilityCheck() {
@@ -2965,7 +2976,22 @@ class AppState {
             dollarsFromPar: result.dollarsFromPar,
             price: price
         )
-        guard amountMsat > 0 else { return }
+        guard amountMsat > 0 else {
+            AuditService.log("STABILITY_PAYMENT_SKIPPED", data: [
+                "reason": "zero_settlement_amount",
+                "dollars_from_par": "\(result.dollarsFromPar)"
+            ])
+            return
+        }
+
+        let uncappedMsat = USD(amount: abs(result.dollarsFromPar)).toMsats(price: price) / 1000 * 1000
+        if amountMsat < uncappedMsat {
+            AuditService.log("STABILITY_PAYMENT_CAPPED", data: [
+                "uncapped_msat": "\(uncappedMsat)",
+                "capped_msat": "\(amountMsat)",
+                "residue_msat": "\(uncappedMsat - amountMsat)"
+            ])
+        }
 
         guard let databaseService else { return }
 
@@ -3070,12 +3096,16 @@ class AppState {
         }
 
         do {
+            let paidUSD = min(
+                abs(result.dollarsFromPar),
+                Double(amountMsat) / 1000.0 / Double(Constants.satsInBTC) * price
+            )
             _ = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: paymentIdString,
                 paymentType: "stability",
                 direction: "sent",
                 amountMsat: amountMsat,
-                amountUSD: abs(result.dollarsFromPar),
+                amountUSD: paidUSD,
                 btcPrice: price,
                 status: "pending",
                 userChannelId: stableChannel.userChannelId,
@@ -3225,6 +3255,26 @@ class AppState {
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {
+            if currentOnchain > prevOnchainSats {
+                let depositSats = currentOnchain - prevOnchainSats
+                if databaseService?.paymentRepo
+                    .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) != true {
+                    if let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
+                        .filter({ $0.opType == "channel_close" }) {
+                        for op in pendingCloseOps {
+                            let closeSats = op.balanceSats ?? 0
+                            let diff = depositSats > closeSats ? depositSats - closeSats : closeSats - depositSats
+                            if diff <= 15000 {
+                                _ = try? databaseService?.rawSQL.execute(
+                                    "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)",
+                                    params: [.text(op.opId)]
+                                )
+                                break
+                            }
+                        }
+                    }
+                }
+            }
             prevOnchainSats = currentOnchain
             return
         }

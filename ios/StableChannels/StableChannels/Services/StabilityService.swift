@@ -272,4 +272,28 @@ enum StabilityService {
 
         return true
     }
+
+    // MARK: - Settlement Calculation
+
+    /// Calculate the stability settlement amount in millisatoshis, capped to spendable channel capacity
+    /// and single-HTLC limits. Pure functional core arithmetic.
+    static func calculateSettlementAmountMsat(
+        dollarsFromPar: Double,
+        price: Double,
+        outboundCapacityMsat: UInt64? = nil,
+        nextOutboundHtlcLimitMsat: UInt64? = nil
+    ) -> UInt64 {
+        guard price > 0, dollarsFromPar != 0 else { return 0 }
+        let uncappedMsat = USD(amount: abs(dollarsFromPar)).toMsats(price: price) / 1000 * 1000
+        guard let outboundCapacityMsat else { return uncappedMsat }
+
+        let effectiveCapacity: UInt64
+        if let nextOutboundHtlcLimitMsat {
+            effectiveCapacity = min(outboundCapacityMsat, nextOutboundHtlcLimitMsat)
+        } else {
+            effectiveCapacity = outboundCapacityMsat
+        }
+        let maxSpendableMsat = effectiveCapacity / 1000 * 1000
+        return min(uncappedMsat, maxSpendableMsat)
+    }
 }

@@ -6,6 +6,8 @@ struct ChannelSettingsView: View {
     @State private var showCloseChannelAlert = false
 
     var body: some View {
+        // Read observable property on AppState to ensure view invalidation when channel state changes,
+        // as NodeService is not directly observable.
         let _ = appState.hasReadyChannel
         List {
             if let channel = appState.nodeService.channels.first {

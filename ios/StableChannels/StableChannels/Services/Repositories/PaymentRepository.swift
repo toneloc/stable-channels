@@ -178,10 +178,8 @@ final class PaymentRepository {
         return !rows.isEmpty
     }
 
-    /// True if a channel_close payment row exists matching this deposit amount within mining fee tolerance,
-    /// preventing close sweeps from creating duplicate on-chain deposit rows.
-    /// When `consume` is true, marks the matching payment consumed so subsequent deposits are not swallowed.
-    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400, consume: Bool = false) -> Bool {
+    /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).
+    func findMatchingChannelClosePaymentId(depositSats: UInt64, withinSecs: Int64 = 86400) -> String? {
         let sql = """
         SELECT id, payment_id, amount_msat FROM payments
         WHERE payment_type = 'channel_close'
@@ -191,7 +189,7 @@ final class PaymentRepository {
         LIMIT 5
         """
         let cutoff = Int64(Date().timeIntervalSince1970) - withinSecs
-        guard let rows = try? rawSQL.query(sql, params: [.integer(cutoff)]) else { return false }
+        guard let rows = try? rawSQL.query(sql, params: [.integer(cutoff)]) else { return nil }
         for row in rows {
             let rowId = row.int64(0)
             let paymentId = row.string(1) ?? "\(rowId)"
@@ -214,16 +212,35 @@ final class PaymentRepository {
             }
 
             if matched {
-                if consume {
-                    _ = try? rawSQL.execute(
-                        "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)",
-                        params: [.text(paymentId)]
-                    )
-                }
-                return true
+                return paymentId
             }
         }
-        return false
+        return nil
+    }
+
+    /// Marks a close sweep payment as consumed so subsequent deposits are not swallowed (Command).
+    @discardableResult
+    func markCloseSweepConsumed(paymentId: String) -> Bool {
+        let sql = "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)"
+        do {
+            try rawSQL.execute(sql, params: [.text(paymentId)])
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// True if a channel_close payment row exists matching this deposit amount within mining fee tolerance,
+    /// preventing close sweeps from creating duplicate on-chain deposit rows.
+    /// When `consume` is true, also marks the matching payment consumed so subsequent deposits are not swallowed.
+    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400, consume: Bool = false) -> Bool {
+        guard let paymentId = findMatchingChannelClosePaymentId(depositSats: depositSats, withinSecs: withinSecs) else {
+            return false
+        }
+        if consume {
+            markCloseSweepConsumed(paymentId: paymentId)
+        }
+        return true
     }
 
     func getPayment(byId id: Int64) throws -> PaymentRecord? {

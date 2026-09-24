@@ -127,11 +127,18 @@ class NodeService: NodeServiceProtocol {
     /// (safe to release the wallet-dir lock) from "start owns the lock".
     private(set) var isStarting = false
     private(set) var nodeId: String = ""
-    var channelsOverride: [ChannelDetails]?
-    var channels: [ChannelDetails] {
-        get { channelsOverride ?? _channels }
-        set { _channels = newValue }
-    }
+    #if DEBUG
+        var channelsOverride: [ChannelDetails]?
+        var channels: [ChannelDetails] {
+            get { channelsOverride ?? _channels }
+            set { _channels = newValue }
+        }
+    #else
+        var channels: [ChannelDetails] {
+            get { _channels }
+            set { _channels = newValue }
+        }
+    #endif
 
     private var _channels: [ChannelDetails] = []
     private(set) var savedMnemonic: String?
@@ -506,15 +513,19 @@ class NodeService: NodeServiceProtocol {
         )
     }
 
-    // Test seams for driving stability checks without live LDK node
-    var lightningSyncAgeSecsOverride: UInt64?
-    var sendStabilityPaymentOverride: ((UInt64, PublicKey, [CustomTlvRecord]) throws -> PaymentId)?
-    var signMessageOverride: (([UInt8]) throws -> String)?
+    #if DEBUG
+        // Test seams for driving stability checks without live LDK node
+        var lightningSyncAgeSecsOverride: UInt64?
+        var sendStabilityPaymentOverride: ((UInt64, PublicKey, [CustomTlvRecord]) throws -> PaymentId)?
+        var signMessageOverride: (([UInt8]) throws -> String)?
+    #endif
 
     /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the
     /// node isn't running, the wallet has never synced, or the timestamp is in the future.
     func lightningSyncAgeSecs() -> UInt64? {
-        if let lightningSyncAgeSecsOverride { return lightningSyncAgeSecsOverride }
+        #if DEBUG
+            if let lightningSyncAgeSecsOverride { return lightningSyncAgeSecsOverride }
+        #endif
         guard let node else { return nil }
         return StabilityFreshness.syncAgeSecs(
             node.status().latestLightningWalletSyncTimestamp,
@@ -531,9 +542,11 @@ class NodeService: NodeServiceProtocol {
         to nodeId: PublicKey,
         tlvs: [CustomTlvRecord]
     ) throws -> PaymentId {
-        if let sendStabilityPaymentOverride {
-            return try sendStabilityPaymentOverride(amountMsat, nodeId, tlvs)
-        }
+        #if DEBUG
+            if let sendStabilityPaymentOverride {
+                return try sendStabilityPaymentOverride(amountMsat, nodeId, tlvs)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
         let now = UInt64(Date().timeIntervalSince1970)
         guard StabilityFreshness.isFresh(
@@ -612,9 +625,11 @@ class NodeService: NodeServiceProtocol {
     // MARK: - Wallet
 
     func signMessage(_ message: [UInt8]) throws -> String {
-        if let signMessageOverride {
-            return try signMessageOverride(message)
-        }
+        #if DEBUG
+            if let signMessageOverride {
+                return try signMessageOverride(message)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
         return try node.signMessage(msg: message)
     }
