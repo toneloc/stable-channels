@@ -58,6 +58,13 @@ class PriceService {
         isTrustedForAccounting = false
     }
 
+    func setPriceForTesting(_ price: Double) {
+        currentPrice = price
+        lastUpdate = Date()
+        isTrustedForAccounting = true
+        isQuarantined = false
+    }
+
     /// Fetch a direct-USD consensus, falling back to peg-normalized USDT only when USD quorum fails.
     func fetchPrice() async {
         guard !isUpdating else { return }

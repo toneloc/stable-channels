@@ -2559,8 +2559,11 @@ class AppState {
         if StabilityService.spendConsumesLspSurplus(sc, price: price, amountSats: amountSats) {
             // When remaining residue cannot be settled via keysend (e.g. only unspendable channel
             // reserve remains and outbound capacity is 0), release the guard so user funds are not trapped.
-            let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: { $0.isChannelReady })?
-                .outboundCapacityMsat
+            // Note: This releases sends even if reserve sats are owed to the LSP — a bounded, deliberate
+            // trade-off so user funds never become permanently stuck.
+            let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: {
+                $0.isChannelReady && (!sc.userChannelId.isEmpty ? $0.userChannelId == sc.userChannelId : true)
+            })?.outboundCapacityMsat
             if let capacity, capacity == 0 {
                 return
             }
@@ -2754,12 +2757,17 @@ class AppState {
         }
 
         let completed = databaseService?.spliceRepo.completeSplice(txid: txid) == true
-        if completed {
-            // History only reloads when this epoch moves; bump to ensure confirmation badge updates.
-            confirmationUpdateEpoch += 1
-            refreshBalances()
-            updateStableBalances()
+        guard completed else {
+            AuditService.log("SPLICE_COMPLETE_DEFERRED", data: [
+                "txid": txid,
+                "reason": "db_not_completed"
+            ])
+            return
         }
+        // History only reloads when this epoch moves; bump to ensure confirmation badge updates.
+        confirmationUpdateEpoch += 1
+        refreshBalances()
+        updateStableBalances()
 
         if spliceGeneration == expectedGeneration {
             isSweeping = false
@@ -2902,13 +2910,21 @@ class AppState {
         guard price > 0 else { return 0 }
         var amountMsat = USD(amount: abs(dollarsFromPar)).toMsats(price: price) / 1000 * 1000
         guard amountMsat > 0 else { return 0 }
-        let capacity = outboundCapacityMsat ?? nodeService.channels.first(where: { $0.isChannelReady })?
-            .outboundCapacityMsat
-        if let capacity {
-            let maxSpendableMsat = capacity / 1000 * 1000
-            if amountMsat > maxSpendableMsat {
-                amountMsat = maxSpendableMsat
-            }
+        let capacity: UInt64
+        if let outboundCapacityMsat {
+            capacity = outboundCapacityMsat
+        } else if let readyChannel = nodeService.channels.first(where: {
+            $0
+                .isChannelReady &&
+                (!stableChannel.userChannelId.isEmpty ? $0.userChannelId == stableChannel.userChannelId : true)
+        }) {
+            capacity = readyChannel.outboundCapacityMsat
+        } else {
+            return 0
+        }
+        let maxSpendableMsat = capacity / 1000 * 1000
+        if amountMsat > maxSpendableMsat {
+            amountMsat = maxSpendableMsat
         }
         return amountMsat
     }
@@ -2981,7 +2997,10 @@ class AppState {
         let recheck = StabilityService.checkStabilityAction(stableChannel, price: price)
         let recheckedAmountMsat: UInt64
         if recheck.action == .pay {
-            recheckedAmountMsat = (USD(amount: abs(recheck.dollarsFromPar)).toMsats(price: price) / 1000) * 1000
+            recheckedAmountMsat = calculateSettlementAmountMsat(
+                dollarsFromPar: recheck.dollarsFromPar,
+                price: price
+            )
         } else {
             recheckedAmountMsat = 0
         }
@@ -3219,7 +3238,8 @@ class AppState {
             }
 
             // Deduplicate against channel close sweeps that confirmed after the close was resolved
-            if databaseService?.paymentRepo.hasMatchingChannelClosePayment(depositSats: depositSats) == true {
+            if databaseService?.paymentRepo
+                .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) == true {
                 prevOnchainSats = currentOnchain
                 AuditService.log("ONCHAIN_CLOSE_SWEEP_ABSORBED", data: [
                     "amount_sats": "\(depositSats)",

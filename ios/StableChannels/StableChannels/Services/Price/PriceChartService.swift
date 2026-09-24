@@ -167,8 +167,37 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
 
     // MARK: - Backfill & Seeding
 
-    private var isBackfillingHourly: Bool = false
-    private var isBackfillingDaily: Bool = false
+    private let backfillLock = NSLock()
+    private var isBackfillingHourlyState: Bool = false
+    private var isBackfillingDailyState: Bool = false
+
+    private func tryAcquireHourlyBackfill() -> Bool {
+        backfillLock.lock()
+        defer { backfillLock.unlock() }
+        guard !isBackfillingHourlyState else { return false }
+        isBackfillingHourlyState = true
+        return true
+    }
+
+    private func releaseHourlyBackfill() {
+        backfillLock.lock()
+        isBackfillingHourlyState = false
+        backfillLock.unlock()
+    }
+
+    private func tryAcquireDailyBackfill() -> Bool {
+        backfillLock.lock()
+        defer { backfillLock.unlock() }
+        guard !isBackfillingDailyState else { return false }
+        isBackfillingDailyState = true
+        return true
+    }
+
+    private func releaseDailyBackfill() {
+        backfillLock.lock()
+        isBackfillingDailyState = false
+        backfillLock.unlock()
+    }
 
     private static let dailyDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -179,9 +208,8 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
 
     /// Fetch hourly candles from Kraken and backfill price_history for smooth 1W/1M charts.
     func backfillHourlyPrices(priceRepo: PriceRepository) async {
-        guard !isBackfillingHourly else { return }
-        isBackfillingHourly = true
-        defer { isBackfillingHourly = false }
+        guard tryAcquireHourlyBackfill() else { return }
+        defer { releaseHourlyBackfill() }
 
         // Determine how far back we need data — up to 30 days
         let thirtyDaysAgo = Int64(Date().timeIntervalSince1970) - 30 * 24 * 3600
@@ -219,9 +247,8 @@ final class PriceChartService: PriceChartFetching, @unchecked Sendable {
 
     /// Fetch daily candles from Kraken and backfill daily_prices for smooth 3M/6M/1Y/ALL charts.
     func backfillDailyPrices(priceRepo: PriceRepository) async {
-        guard !isBackfillingDaily else { return }
-        isBackfillingDaily = true
-        defer { isBackfillingDaily = false }
+        guard tryAcquireDailyBackfill() else { return }
+        defer { releaseDailyBackfill() }
 
         // Determine how far back we need data — up to 720 days
         let sevenTwentyDaysAgo = Int64(Date().timeIntervalSince1970) - 720 * 24 * 3600

@@ -180,9 +180,10 @@ final class PaymentRepository {
 
     /// True if a channel_close payment row exists matching this deposit amount within mining fee tolerance,
     /// preventing close sweeps from creating duplicate on-chain deposit rows.
-    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400) -> Bool {
+    /// When `consume` is true, marks the matching payment consumed so subsequent deposits are not swallowed.
+    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400, consume: Bool = false) -> Bool {
         let sql = """
-        SELECT amount_msat FROM payments
+        SELECT id, payment_id, amount_msat FROM payments
         WHERE payment_type = 'channel_close'
         AND direction = 'received'
         AND created_at >= ?
@@ -192,13 +193,33 @@ final class PaymentRepository {
         let cutoff = Int64(Date().timeIntervalSince1970) - withinSecs
         guard let rows = try? rawSQL.query(sql, params: [.integer(cutoff)]) else { return false }
         for row in rows {
-            let msat = row.int64(0)
+            let rowId = row.int64(0)
+            let paymentId = row.string(1) ?? "\(rowId)"
+            let msat = row.int64(2)
             guard msat > 0 else { continue }
-            let closeSats = UInt64(msat / 1000)
-            if depositSats <= closeSats && (closeSats - depositSats) <= 15000 {
-                return true
+
+            let checkSql = "SELECT 1 FROM consumed_close_sweeps WHERE payment_id = ? LIMIT 1"
+            if let consumedRows = try? rawSQL.query(checkSql, params: [.text(paymentId)]), !consumedRows.isEmpty {
+                continue
             }
-            if depositSats >= closeSats && (depositSats - closeSats) <= 15000 {
+
+            let closeSats = UInt64(msat / 1000)
+            let matched: Bool
+            if depositSats <= closeSats && (closeSats - depositSats) <= 15000 {
+                matched = true
+            } else if depositSats >= closeSats && (depositSats - closeSats) <= 15000 {
+                matched = true
+            } else {
+                matched = false
+            }
+
+            if matched {
+                if consume {
+                    _ = try? rawSQL.execute(
+                        "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)",
+                        params: [.text(paymentId)]
+                    )
+                }
                 return true
             }
         }

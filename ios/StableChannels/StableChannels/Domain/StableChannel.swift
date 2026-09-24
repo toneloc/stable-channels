@@ -49,7 +49,7 @@ struct USD: Codable, Equatable {
         let millisats = sats * 1000.0
         guard !millisats.isNaN, !millisats.isInfinite, millisats >= 0 else { return 0 }
         let rounded = abs(millisats).rounded(.down)
-        guard rounded <= Double(UInt64.max) else { return UInt64.max }
+        guard rounded < Double(UInt64.max) else { return UInt64.max }
         return UInt64(rounded)
     }
 

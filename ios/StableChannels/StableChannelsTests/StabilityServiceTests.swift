@@ -1,4 +1,5 @@
 import XCTest
+import LDKNode
 @testable import StableChannels
 
 final class StabilityServiceTests: XCTestCase {
@@ -854,5 +855,234 @@ final class StabilityServiceTests: XCTestCase {
         // No onchain payment row recorded
         let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
         XCTAssertTrue(payments.isEmpty)
+    }
+
+    // MARK: - USD.toMsats Overflow Boundary
+
+    func testUSDToMsatsOverflowBoundaryAtMaxDouble() {
+        // Double(UInt64.max) is 2^64 (18446744073709551616.0).
+        // A huge USD amount that evaluates to >= 2^64 millisats must clamp to UInt64.max rather than trapping.
+        let hugeUSD = USD(amount: 1.0e18)
+        let msats = hugeUSD.toMsats(price: 1.0)
+        XCTAssertEqual(msats, UInt64.max)
+
+        // Exact boundary check: amount / price * 1e11 = 2^64
+        let twoToThe64 = 18_446_744_073_709_551_616.0
+        let boundaryAmount = twoToThe64 / 100_000_000.0 / 1000.0 * 100_000.0
+        let boundaryUSD = USD(amount: boundaryAmount)
+        XCTAssertEqual(boundaryUSD.toMsats(price: 100_000.0), UInt64.max)
+    }
+
+    // MARK: - Mock ChannelDetails Helper
+
+    private func makeMockChannel(
+        channelId: String = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        userChannelId: String = "test-chan-1",
+        outboundCapacityMsat: UInt64,
+        unspendablePunishmentReserve: UInt64 = 25_000,
+        channelValueSats: UInt64 = 200_000,
+        isChannelReady: Bool = true
+    ) -> ChannelDetails {
+        ChannelDetails(
+            channelId: channelId,
+            counterpartyNodeId: "020202020202020202020202020202020202020202020202020202020202020202",
+            fundingTxo: nil,
+            fundingRedeemScript: nil,
+            shortChannelId: nil,
+            outboundScidAlias: nil,
+            inboundScidAlias: nil,
+            channelValueSats: channelValueSats,
+            unspendablePunishmentReserve: unspendablePunishmentReserve,
+            userChannelId: userChannelId,
+            feerateSatPer1000Weight: 253,
+            outboundCapacityMsat: outboundCapacityMsat,
+            inboundCapacityMsat: 100_000_000,
+            confirmationsRequired: 1,
+            confirmations: 6,
+            isOutbound: true,
+            isChannelReady: isChannelReady,
+            isUsable: isChannelReady,
+            isAnnounced: false,
+            cltvExpiryDelta: 144,
+            counterpartyUnspendablePunishmentReserve: 25_000,
+            counterpartyOutboundHtlcMinimumMsat: 1_000,
+            counterpartyOutboundHtlcMaximumMsat: 200_000_000,
+            counterpartyForwardingInfoFeeBaseMsat: 1_000,
+            counterpartyForwardingInfoFeeProportionalMillionths: 100,
+            counterpartyForwardingInfoCltvExpiryDelta: 144,
+            nextOutboundHtlcLimitMsat: outboundCapacityMsat,
+            nextOutboundHtlcMinimumMsat: 1_000,
+            forceCloseSpendDelay: 144,
+            inboundHtlcMinimumMsat: 1_000,
+            inboundHtlcMaximumMsat: 200_000_000,
+            config: ChannelConfig(
+                forwardingFeeProportionalMillionths: 100,
+                forwardingFeeBaseMsat: 1000,
+                cltvExpiryDelta: 144,
+                maxDustHtlcExposure: .fixedLimit(limitMsat: 5_000_000),
+                forceCloseAvoidanceMaxFeeSatoshis: 10_000,
+                acceptUnderpayingHtlcs: false
+            ),
+            channelShutdownState: nil
+        )
+    }
+
+    @MainActor
+    func testCalculateSettlementAmountMsatSelectsMatchingUserChannel() {
+        let appState = AppState()
+        appState.stableChannel.userChannelId = "target-chan"
+
+        let otherChan = makeMockChannel(
+            channelId: "other-chan-id",
+            userChannelId: "other-chan",
+            outboundCapacityMsat: 20_000_000
+        )
+        let targetChan = makeMockChannel(
+            channelId: "target-chan-id",
+            userChannelId: "target-chan",
+            outboundCapacityMsat: 50_000_000
+        )
+
+        appState.nodeService.channelsOverride = [otherChan, targetChan]
+
+        // Dollars from par: $100 at $100k/BTC = 100,000,000 msat.
+        // Should select targetChan (50_000_000 msat capacity), NOT otherChan (20_000_000 msat)
+        let amount = appState.calculateSettlementAmountMsat(dollarsFromPar: 100.0, price: 100_000.0)
+        XCTAssertEqual(amount, 50_000_000)
+    }
+
+    @MainActor
+    func testRunStabilityCheckZeroTargetCappedWithReserveSettlesSuccessfully() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+
+        let appState = AppState()
+        appState.databaseService = dbService
+        appState.priceService.setPriceForTesting(100_000.0)
+
+        // Zero-target position with 100,000 backing sats residue (above-par surplus)
+        let channelId = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        let userChannelId = "test-chan-1"
+        let counterparty = "020202020202020202020202020202020202020202020202020202020202020202"
+
+        appState.stableChannel.channelId = channelId
+        appState.stableChannel.userChannelId = userChannelId
+        appState.stableChannel.counterparty = counterparty
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 100_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+        appState.stableChannel.lastStabilityPayment = 0
+        appState.saveChannelToDB()
+
+        // Ready channel with 75,000 sats spendable capacity and 25,000 sat reserve.
+        // Total balance is 100,000 sats, but only 75,000 sats (75,000,000 msat) can be sent.
+        let channel = makeMockChannel(
+            channelId: channelId,
+            userChannelId: userChannelId,
+            outboundCapacityMsat: 75_000_000,
+            unspendablePunishmentReserve: 25_000,
+            channelValueSats: 200_000,
+            isChannelReady: true
+        )
+        appState.nodeService.channelsOverride = [channel]
+        appState.nodeService.lightningSyncAgeSecsOverride = 10
+        appState.nodeService.signMessageOverride = { _ in "mock-signature" }
+
+        var paymentSentMsat: UInt64?
+        var paymentSentTo: PublicKey?
+        appState.nodeService.sendStabilityPaymentOverride = { amountMsat, toNode, _ in
+            paymentSentMsat = amountMsat
+            paymentSentTo = toNode
+            return "mock-payment-id-123"
+        }
+
+        // Execute runStabilityCheck
+        appState.runStabilityCheck()
+
+        // Verify: settlement was capped to 75,000,000 msat, post-claim recheck matched,
+        // and payment was successfully sent!
+        XCTAssertEqual(paymentSentMsat, 75_000_000)
+        XCTAssertEqual(paymentSentTo, counterparty)
+
+        // Verify happy path post-conditions:
+        // 1. Payment recorded in paymentRepo
+        let recorded = dbService.paymentRepo.payment(paymentId: "mock-payment-id-123")
+        XCTAssertNotNil(recorded)
+        XCTAssertEqual(recorded?.amountMsat, 75_000_000)
+        XCTAssertEqual(recorded?.paymentType, "stability")
+        XCTAssertEqual(recorded?.direction, "sent")
+
+        // 2. Channel backing was decremented by 75,000 sats in DB (from 100,000 to 25,000 sats)
+        let updatedChannel = try dbService.channelRepo.loadChannel(userChannelId: userChannelId)
+        XCTAssertEqual(updatedChannel?.backingSats, 25_000)
+
+        // 3. Pending send marker was successfully cleared upon DB commit
+        XCTAssertNil(dbService.stabilityRepo.loadPendingSend())
+        XCTAssertTrue(appState.stableChannel.paymentMade)
+    }
+
+    @MainActor
+    func testRunStabilityCheckAbortsWhenBooksActuallyChangeAfterDecision() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbService = try DatabaseService(dataDir: tempDir)
+
+        let appState = AppState()
+        appState.databaseService = dbService
+        appState.priceService.setPriceForTesting(100_000.0)
+
+        let channelId = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+        let userChannelId = "test-chan-changed"
+        let counterparty = "020202020202020202020202020202020202020202020202020202020202020202"
+
+        appState.stableChannel.channelId = channelId
+        appState.stableChannel.userChannelId = userChannelId
+        appState.stableChannel.counterparty = counterparty
+        appState.stableChannel.isStableReceiver = true
+        appState.stableChannel.expectedUSD = USD(amount: 0.0)
+        appState.stableChannel.backingSats = 100_000
+        appState.stableChannel.stableReceiverBTC = Bitcoin(sats: 100_000)
+        appState.stableChannel.lastStabilityPayment = 0
+
+        // In DB, save with backingSats = 0 (simulating concurrent rebalance / books changed)
+        try dbService.channelRepo.saveChannel(
+            channelId: channelId,
+            userChannelId: userChannelId,
+            expectedUSD: 0.0,
+            backingSats: 0,
+            nativeSats: 100_000,
+            note: "",
+            receiverSats: 100_000,
+            latestPrice: 100_000.0
+        )
+
+        let channel = makeMockChannel(
+            channelId: channelId,
+            userChannelId: userChannelId,
+            outboundCapacityMsat: 75_000_000,
+            unspendablePunishmentReserve: 25_000,
+            channelValueSats: 200_000,
+            isChannelReady: true
+        )
+        appState.nodeService.channelsOverride = [channel]
+        appState.nodeService.lightningSyncAgeSecsOverride = 10
+
+        var paymentAttempted = false
+        appState.nodeService.sendStabilityPaymentOverride = { _, _, _ in
+            paymentAttempted = true
+            return "unexpected-payment-id"
+        }
+
+        // Execute runStabilityCheck
+        appState.runStabilityCheck()
+
+        // Since DB books had backingSats = 0, recheck evaluates to 0 msat != 75_000_000 msat,
+        // so it safely clears the send slot and does NOT send payment.
+        XCTAssertFalse(paymentAttempted)
+        XCTAssertNil(dbService.stabilityRepo.loadPendingSend())
     }
 }

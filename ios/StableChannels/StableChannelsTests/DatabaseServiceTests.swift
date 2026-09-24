@@ -1416,6 +1416,30 @@ final class DatabaseServiceTests: XCTestCase {
         // Expired window (cutoff = 0 seconds)
         XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, withinSecs: -10))
     }
+
+    func testHasMatchingChannelClosePaymentOneTimeConsumption() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-consume-test",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Without consume, match is repeatable
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+
+        // First deposit with consume: true absorbs the close sweep
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 99_000, consume: true))
+
+        // Subsequent deposit within tolerance is NOT swallowed because the close sweep is already consumed
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: true))
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+    }
 }
 
 @MainActor
