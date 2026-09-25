@@ -498,6 +498,18 @@
 			path = Confirmation;
 			sourceTree = "<group>";
 		};
+		497DA314306716B900B0D7C5 /* PriceChart */ = {
+			isa = PBXGroup;
+			children = (
+				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
+				497A424E3067156C003B908A /* PriceChartGraphView.swift */,
+				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
+				497A424F3067156C003B908A /* PriceChartPeriodSelectorView.swift */,
+				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
+			);
+			path = PriceChart;
+			sourceTree = "<group>";
+		};
 		498244AC3022718B0086BDB6 /* Biometric */ = {
 			isa = PBXGroup;
 			children = (
@@ -801,12 +813,8 @@
 				49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */,
 				49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
-				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
-				497A424E3067156C003B908A /* PriceChartGraphView.swift */,
-				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
-				497A424F3067156C003B908A /* PriceChartPeriodSelectorView.swift */,
-				786B669FA976C4646AF0D206 /* PriceChartView.swift */,
 				49DDD0073054000100B5A146 /* TactileCardButtonStyle.swift */,
+				497DA314306716B900B0D7C5 /* PriceChart */,
 			);
 			path = Home;
 			sourceTree = "<group>";

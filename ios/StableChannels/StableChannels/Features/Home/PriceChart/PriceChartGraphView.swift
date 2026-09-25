@@ -13,9 +13,14 @@ struct PriceChartGraphView: View {
 
     var body: some View {
         if priceHistory.count >= 2 {
-            chartContent
+            ZStack {
+                chartContent
+                    .id(chartPeriod)
+                    .transition(.opacity)
+            }
         } else {
             placeholderState
+                .transition(.opacity)
         }
     }
 
@@ -39,7 +44,7 @@ struct PriceChartGraphView: View {
                 y: .value("Price", record.price)
             )
             .foregroundStyle(.blue)
-            .lineStyle(StrokeStyle(lineWidth: selectedPricePoint != nil ? 1.5 : 2))
+            .lineStyle(StrokeStyle(lineWidth: 2))
             .interpolationMethod(.catmullRom)
 
             if let selected = selectedPricePoint, selected.id == record.id {
@@ -69,9 +74,9 @@ struct PriceChartGraphView: View {
         }
         .chartYAxis {
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [4, 4]))
-                    .foregroundStyle(Color(.separator).opacity(0.5))
-                AxisValueLabel {
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3, dash: [4, 4]))
+                    .foregroundStyle(.secondary.opacity(0.3))
+                AxisValueLabel(horizontalSpacing: 4) {
                     if let price = value.as(Double.self) {
                         Text(formatYAxis(price))
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
@@ -95,18 +100,27 @@ struct PriceChartGraphView: View {
                                     targetDate: date
                                 )
                                 if selectedPricePoint?.id != record?.id {
-                                    selectedPricePoint = record
+                                    var transaction = Transaction()
+                                    transaction.disablesAnimations = true
+                                    withTransaction(transaction) {
+                                        selectedPricePoint = record
+                                    }
                                     selectionFeedback.selectionChanged()
                                 }
                             }
                             .onEnded { _ in
-                                selectedPricePoint = nil
+                                var transaction = Transaction()
+                                transaction.disablesAnimations = true
+                                withTransaction(transaction) {
+                                    selectedPricePoint = nil
+                                }
                             }
                     )
             }
         }
         .frame(height: compact ? 200 : 150)
-        .padding(.horizontal, 14)
+        .padding(.leading, 14)
+        .padding(.trailing, 6)
     }
 
     private var placeholderState: some View {

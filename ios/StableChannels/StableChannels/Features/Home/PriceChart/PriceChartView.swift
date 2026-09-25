@@ -16,7 +16,9 @@ struct PriceChartView: View {
     @State private var chartMin: Double = 0
     @State private var chartMax: Double = 100
     @State private var chartPeriod: ChartPeriod = .all
+    @State private var displayedPeriod: ChartPeriod = .all
     @State private var selectedPricePoint: PriceRecord?
+    @State private var loadTask: Task<Void, Never>?
 
     var compact: Bool = false
 
@@ -27,9 +29,6 @@ struct PriceChartView: View {
             headerButton
 
             if isExpanded {
-                Divider()
-                    .overlay(dividerColor)
-
                 expandedContent
             }
         }
@@ -39,20 +38,25 @@ struct PriceChartView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onAppear {
             if isExpanded {
-                Task { await loadHistory() }
+                loadHistory(for: chartPeriod)
             }
         }
         .onChange(of: isExpanded) { _, newValue in
             if newValue {
-                Task { await loadHistory() }
+                loadHistory(for: chartPeriod)
             }
         }
-        .onChange(of: chartPeriod) { _, _ in
-            Task { await loadHistory() }
+        .onChange(of: chartPeriod) { _, newPeriod in
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                selectedPricePoint = nil
+            }
+            loadHistory(for: newPeriod)
         }
         .onReceive(NotificationCenter.default.publisher(for: .priceHistoryUpdated)) { _ in
             if isExpanded {
-                Task { await loadHistory(force: true) }
+                loadHistory(for: chartPeriod, force: true)
             }
         }
     }
@@ -114,7 +118,7 @@ struct PriceChartView: View {
                 priceHistory: priceHistory,
                 chartMin: chartMin,
                 chartMax: chartMax,
-                chartPeriod: chartPeriod,
+                chartPeriod: displayedPeriod,
                 selectedPricePoint: $selectedPricePoint,
                 compact: compact
             )
@@ -127,13 +131,13 @@ struct PriceChartView: View {
 
     private var cardBackground: some View {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .fill(colorScheme == .dark ? Color(white: 0.11) : Color(.secondarySystemGroupedBackground))
+            .fill(colorScheme == .dark ? Color(white: 0.11) : Color(white: 0.96))
     }
 
     private var cardBorder: some View {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
             .strokeBorder(
-                colorScheme == .dark ? Color.white.opacity(0.08) : Color(.separator).opacity(0.40),
+                colorScheme == .dark ? Color.white.opacity(0.08) : Color(.separator).opacity(0.30),
                 lineWidth: 1
             )
     }
@@ -142,19 +146,23 @@ struct PriceChartView: View {
         colorScheme == .dark ? Color.clear : Color.black.opacity(0.04)
     }
 
-    private var dividerColor: Color {
-        colorScheme == .dark ? Color.white.opacity(0.08) : Color(.separator).opacity(0.35)
-    }
-
     // MARK: - Data Loading
 
-    private func loadHistory(force: Bool = false) async {
-        let records = await appState.priceHistoryProvider.fetchPriceHistory(for: chartPeriod, force: force)
-        let bounds = PriceChartAlgorithms.chartBounds(in: records)
-        await MainActor.run {
-            self.priceHistory = records
-            self.chartMin = bounds.min
-            self.chartMax = bounds.max
+    private func loadHistory(for period: ChartPeriod, force: Bool = false) {
+        loadTask?.cancel()
+        loadTask = Task {
+            let records = await appState.priceHistoryProvider.fetchPriceHistory(for: period, force: force)
+            guard !Task.isCancelled else { return }
+            let bounds = PriceChartAlgorithms.chartBounds(in: records)
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.24)) {
+                    self.priceHistory = records
+                    self.chartMin = bounds.min
+                    self.chartMax = bounds.max
+                    self.displayedPeriod = period
+                }
+            }
         }
     }
 }

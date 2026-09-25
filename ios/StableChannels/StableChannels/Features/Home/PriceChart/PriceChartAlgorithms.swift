@@ -61,26 +61,12 @@ enum PriceChartAlgorithms {
         var aIndex = start
 
         for i in 0..<(targetCount - 2) {
-            // Calculate point average for next bucket (bucket C)
-            var avgX = 0.0
-            var avgY = 0.0
-            let nextBucketStart = start + Int(floor(Double(i + 1) * bucketSize)) + 1
-            let nextBucketEnd = min(start + Int(floor(Double(i + 2) * bucketSize)) + 1, records.endIndex)
-            let nextBucketCount = Double(nextBucketEnd - nextBucketStart)
-
-            if nextBucketCount > 0 {
-                for j in nextBucketStart..<nextBucketEnd {
-                    let r = records[j]
-                    avgX += Double(r.timestamp)
-                    avgY += r.price
-                }
-                avgX /= nextBucketCount
-                avgY /= nextBucketCount
-            } else if nextBucketStart < records.endIndex {
-                let r = records[nextBucketStart]
-                avgX = Double(r.timestamp)
-                avgY = r.price
-            }
+            let (avgX, avgY) = nextBucketAverage(
+                records: records,
+                start: start,
+                bucketIndex: i,
+                bucketSize: bucketSize
+            )
 
             // Current bucket range (bucket B)
             let currentBucketStart = start + Int(floor(Double(i) * bucketSize)) + 1
@@ -119,5 +105,31 @@ enum PriceChartAlgorithms {
         // Always include the last point
         sampled.append(records[records.endIndex - 1])
         return sampled
+    }
+
+    private static func nextBucketAverage<C: RandomAccessCollection>(
+        records: C,
+        start: Int,
+        bucketIndex: Int,
+        bucketSize: Double
+    ) -> (x: Double, y: Double) where C.Element == PriceRecord, C.Index == Int {
+        let nextBucketStart = start + Int(floor(Double(bucketIndex + 1) * bucketSize)) + 1
+        let nextBucketEnd = min(start + Int(floor(Double(bucketIndex + 2) * bucketSize)) + 1, records.endIndex)
+        let nextBucketCount = Double(nextBucketEnd - nextBucketStart)
+
+        if nextBucketCount > 0 {
+            var sumX = 0.0
+            var sumY = 0.0
+            for j in nextBucketStart..<nextBucketEnd {
+                let r = records[j]
+                sumX += Double(r.timestamp)
+                sumY += r.price
+            }
+            return (sumX / nextBucketCount, sumY / nextBucketCount)
+        } else if nextBucketStart < records.endIndex {
+            let r = records[nextBucketStart]
+            return (Double(r.timestamp), r.price)
+        }
+        return (0.0, 0.0)
     }
 }
