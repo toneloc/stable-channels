@@ -741,12 +741,12 @@ async fn test_outgoing_payment_deducts_from_stable() {
         expected_deduction_usd
     );
 
-    // After reconciliation, backing_sats should match the new expected_usd
-    let expected_backing = (expected_usd_after / price * 100_000_000.0) as u64;
+    // Native was already exhausted, so every remaining sat stays stable backing
     assert_eq!(
-        user_sc.backing_sats, expected_backing,
-        "Backing sats should match new expected_usd / price"
+        user_sc.backing_sats, user_sc.stable_receiver_btc.sats,
+        "Backing sats should equal remaining channel balance"
     );
+    assert_eq!(user_sc.native_sats, 0, "Native sats should be exhausted");
 
     // Verify the stable position is still approximately right
     println!(
@@ -1316,10 +1316,8 @@ async fn test_sell_btc_increases_stable_position() {
     // its own backing carried before this trade.
     let user_backing_before_trade = user_sc.backing_sats;
     let lsp_backing_before_trade = lsp_sc.backing_sats;
-    let old_target_sats =
-        (pre_sell2_expected / rise_price * 100_000_000.0).floor() as u64;
-    let new_target_sats =
-        (new_expected_usd2 / rise_price * 100_000_000.0).floor() as u64;
+    let old_target_sats = (pre_sell2_expected / rise_price * 100_000_000.0).floor() as u64;
+    let new_target_sats = (new_expected_usd2 / rise_price * 100_000_000.0).floor() as u64;
     let expected_delta_sats = new_target_sats - old_target_sats;
     assert!(apply_trade(&mut user_sc, new_expected_usd2, rise_price));
     assert!(apply_trade(&mut lsp_sc, new_expected_usd2, rise_price));
