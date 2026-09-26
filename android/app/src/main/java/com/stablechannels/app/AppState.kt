@@ -1964,16 +1964,18 @@ class AppState(private val context: Context) : ViewModel() {
             )
         }
         val backingDelta: Long? = if (isStabilityPayment) amountMsat / 1000 else null
-        // Atomically insert payment row and increment backing sats in one SQLite transaction.
+        // Atomically record the full payment and credit only the local backing shortfall.
         // Throws on DB failure — propagates to the collector which gates ack on success.
         val record = {
+            val receiptPrice =
+                if (isStabilityPayment) priceService.currentAccountingPrice() else price
             databaseService?.recordPaymentAndMaybeUpdateBacking(
                 paymentId = effectiveId,
                 paymentType = paymentType,
                 direction = "received",
                 amountMsat = amountMsat,
-                amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * price,
-                btcPrice = price,
+                amountUSD = (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC) * receiptPrice,
+                btcPrice = receiptPrice,
                 counterparty = sc0.counterparty,
                 userChannelId = userChannelId,
                 backingDeltaSats = backingDelta,
