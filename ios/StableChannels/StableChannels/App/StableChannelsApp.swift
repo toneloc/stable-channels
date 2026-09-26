@@ -12,6 +12,7 @@ struct StableChannelsApp: App {
             ContentView()
                 .environment(appState)
                 .task {
+                    guard NSClassFromString("XCTestCase") == nil else { return }
                     await appState.start()
                 }
                 .onReceive(NotificationCenter.default
@@ -36,6 +37,7 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         _ application: UIApplication,
         didFinishLaunchingWithOptions _: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        guard NSClassFromString("XCTestCase") == nil else { return true }
         UNUserNotificationCenter.current().delegate = self
 
         // Request notification permission — required for receiving stability payments while offline

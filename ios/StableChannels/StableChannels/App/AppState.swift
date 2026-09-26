@@ -83,7 +83,7 @@ class AppState {
 
     // MARK: - Services
 
-    let nodeService = NodeService.shared
+    let nodeService: NodeService
     let priceService = PriceService()
     let priceChartService: any PriceChartFetching = PriceChartService.shared
     var priceHistoryProvider: any PriceHistoryProviding
@@ -107,9 +107,11 @@ class AppState {
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
 
     init(
+        nodeService: NodeService? = nil,
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil
     ) {
+        self.nodeService = nodeService ?? (NSClassFromString("XCTestCase") != nil ? NodeService() : .shared)
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
