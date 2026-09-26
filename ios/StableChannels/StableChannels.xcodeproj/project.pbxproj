@@ -54,6 +54,7 @@
 		496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 496A44452FCD5845005AF12F /* InputSanitizer.swift */; };
 		497A42503067156C003B908A /* PriceChartGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 497A424E3067156C003B908A /* PriceChartGraphView.swift */; };
 		497A42513067156C003B908A /* PriceChartPeriodSelectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 497A424F3067156C003B908A /* PriceChartPeriodSelectorView.swift */; };
+		497A42533067156C003B908A /* LivePriceLabel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 497A42523067156C003B908A /* LivePriceLabel.swift */; };
 		4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */; };
 		498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A83022712F0086BDB6 /* BiometricProtocols.swift */; };
 		498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */; };
@@ -263,6 +264,7 @@
 		496A44452FCD5845005AF12F /* InputSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizer.swift; sourceTree = "<group>"; };
 		497A424E3067156C003B908A /* PriceChartGraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartGraphView.swift; sourceTree = "<group>"; };
 		497A424F3067156C003B908A /* PriceChartPeriodSelectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartPeriodSelectorView.swift; sourceTree = "<group>"; };
+		497A42523067156C003B908A /* LivePriceLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePriceLabel.swift; sourceTree = "<group>"; };
 		4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheetPresenter.swift; sourceTree = "<group>"; };
 		498244A83022712F0086BDB6 /* BiometricProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricProtocols.swift; sourceTree = "<group>"; };
 		498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricToggleCoordinator.swift; sourceTree = "<group>"; };
@@ -501,6 +503,7 @@
 		497DA314306716B900B0D7C5 /* PriceChart */ = {
 			isa = PBXGroup;
 			children = (
+				497A42523067156C003B908A /* LivePriceLabel.swift */,
 				4944457A3053DB3700B5A146 /* PriceChartAlgorithms.swift */,
 				497A424E3067156C003B908A /* PriceChartGraphView.swift */,
 				4944457B3053DB3700B5A146 /* PriceChartPeriod.swift */,
@@ -1099,6 +1102,7 @@
 				49F0B0E02FC0EF3A003A3B89 /* NodeSettingsView.swift in Sources */,
 				497A42503067156C003B908A /* PriceChartGraphView.swift in Sources */,
 				497A42513067156C003B908A /* PriceChartPeriodSelectorView.swift in Sources */,
+				497A42533067156C003B908A /* LivePriceLabel.swift in Sources */,
 				49F0B0E12FC0EF3A003A3B89 /* NotificationsSettingsView.swift in Sources */,
 				4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */,
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,

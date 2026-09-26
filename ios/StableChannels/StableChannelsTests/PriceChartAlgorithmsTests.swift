@@ -15,51 +15,27 @@ final class PriceChartAlgorithmsTests: XCTestCase {
             makeRecord(500, 54000)
         ]
 
-        let d50 = Date(timeIntervalSince1970: 50)
-        let d100 = Date(timeIntervalSince1970: 100)
-        let d150 = Date(timeIntervalSince1970: 150)
-        let d300 = Date(timeIntervalSince1970: 300)
-        let d450 = Date(timeIntervalSince1970: 450)
-        let d500 = Date(timeIntervalSince1970: 500)
-        let d550 = Date(timeIntervalSince1970: 550)
-
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d50), 0)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d100), 0)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d150), 1)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d300), 2)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d450), 4)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d500), 4)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d550), 5)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: [], cutoff: d100), 0)
+        func d(_ ts: TimeInterval) -> Date { Date(timeIntervalSince1970: ts) }
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(50)), 0)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(100)), 0)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(150)), 1)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(300)), 2)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(450)), 4)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(500)), 4)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(550)), 5)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: [], cutoff: d(100)), 0)
     }
 
     func testNearestRecord() {
-        let records = [
-            makeRecord(100, 50000),
-            makeRecord(200, 51000),
-            makeRecord(300, 52000)
-        ]
-
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 50))?.timestamp,
-            100
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 140))?.timestamp,
-            100
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 160))?.timestamp,
-            200
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 250))?.timestamp,
-            200
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 350))?.timestamp,
-            300
-        )
+        let records = [makeRecord(100, 50000), makeRecord(200, 51000), makeRecord(300, 52000)]
+        func near(_ ts: TimeInterval) -> Int64? {
+            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: ts))?.timestamp
+        }
+        XCTAssertEqual(near(50), 100)
+        XCTAssertEqual(near(140), 100)
+        XCTAssertEqual(near(160), 200)
+        XCTAssertEqual(near(250), 200)
+        XCTAssertEqual(near(350), 300)
         XCTAssertNil(PriceChartAlgorithms.nearestRecord(in: [], targetDate: Date(timeIntervalSince1970: 100)))
     }
 
@@ -170,44 +146,33 @@ final class PriceChartAlgorithmsTests: XCTestCase {
     func testDailyDateParsing() {
         // Epoch 0: 1970-01-01
         XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("1970-01-01"), 0)
-
         // Valid leap day: 2024-02-29
         XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2024-02-29"), 1709164800)
-
         // Valid century leap day (divisible by 400): 2000-02-29
         XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2000-02-29"), 951782400)
-
         // Target reference date: 2026-09-21
         XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2026-09-21"), 1789948800)
-
         // Valid 30-day month end: 2026-04-30
         XCTAssertNotNil(PriceHistoryService.parseDailyDateToTimestamp("2026-04-30"))
 
-        // Invalid February dates
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-02-29"), "2026 is not a leap year")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-02-30"))
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-02-31"))
-        XCTAssertNil(
-            PriceHistoryService.parseDailyDateToTimestamp("1900-02-29"),
-            "1900 is not a leap year (century rule)"
-        )
+        let invalidDates = [
+            "2026-02-29", "2026-02-30", "2026-02-31", "1900-02-29",
+            "2026-04-31", "2026-06-31", "2026-09-31", "2026-11-31",
+            "2026-00-15", "2026-13-15", "2026-05-00", "2026-05-32",
+            "2026-99-99", "invalid-date", "2026-4-5", "2026-04-05T00:00:00Z"
+        ]
+        for invalid in invalidDates {
+            XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp(invalid), "Expected nil for \(invalid)")
+        }
+    }
 
-        // Invalid days for 30-day months
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-04-31"), "April has 30 days")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-06-31"), "June has 30 days")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-09-31"), "September has 30 days")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-11-31"), "November has 30 days")
+    func testPriceHistoryServiceInvalidateCacheAndEmptyState() async {
+        let service = PriceHistoryService(databaseService: nil)
+        let empty = await service.fetchPriceHistory(for: .day)
+        XCTAssertTrue(empty.isEmpty)
 
-        // Invalid month/day ranges
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-00-15"), "Month 0 is invalid")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-13-15"), "Month 13 is invalid")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-05-00"), "Day 0 is invalid")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-05-32"), "Day 32 is invalid")
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-99-99"))
-
-        // Malformed format (strictly 10 characters yyyy-MM-dd)
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("invalid-date"))
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-4-5"))
-        XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp("2026-04-05T00:00:00Z"))
+        await service.invalidateCache()
+        let reloaded = await service.fetchPriceHistory(for: .day, force: true)
+        XCTAssertTrue(reloaded.isEmpty)
     }
 }

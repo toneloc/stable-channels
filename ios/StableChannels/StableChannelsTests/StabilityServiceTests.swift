@@ -313,6 +313,21 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(btc.toBTC(), 1.0)
     }
 
+    func testBitcoinFromUSDZeroOrInvalidPrice() {
+        let usd = USD(amount: 100.0)
+        XCTAssertEqual(Bitcoin.fromUSD(usd, price: 0.0).sats, 0)
+        XCTAssertEqual(Bitcoin.fromUSD(usd, price: -50_000.0).sats, 0)
+        XCTAssertEqual(Bitcoin.fromUSD(usd, price: Double.nan).sats, 0)
+        XCTAssertEqual(Bitcoin.fromUSD(usd, price: Double.infinity).sats, 0)
+    }
+
+    func testBitcoinFromBTCInvalidValues() {
+        XCTAssertEqual(Bitcoin.fromBTC(0.0).sats, 0)
+        XCTAssertEqual(Bitcoin.fromBTC(-1.5).sats, 0)
+        XCTAssertEqual(Bitcoin.fromBTC(Double.nan).sats, 0)
+        XCTAssertEqual(Bitcoin.fromBTC(Double.infinity).sats, 0)
+    }
+
     func testUSDFromBitcoin() {
         let btc = Bitcoin.fromBTC(1.0)
         let usd = USD.fromBitcoin(btc, price: 50_000.0)

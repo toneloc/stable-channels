@@ -9,10 +9,11 @@ struct ActionButton: View {
     let action: () -> Void
 
     @State private var isBreathing = false
+    private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
 
     var body: some View {
         Button(action: {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            impactFeedback.impactOccurred()
             action()
         }) {
             HStack(spacing: 10) {

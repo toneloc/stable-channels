@@ -1,17 +1,9 @@
 import SwiftUI
 
-private struct LivePriceLabel: View {
-    @Environment(AppState.self) private var appState
-    var body: some View {
-        Text(appState.btcPrice.usdFormatted)
-            .font(.headline.bold())
-    }
-}
-
 struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = false
+    @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = true
     @State private var priceHistory: [PriceRecord] = []
     @State private var chartMin: Double = 0
     @State private var chartMax: Double = 100
@@ -19,6 +11,7 @@ struct PriceChartView: View {
     @State private var displayedPeriod: ChartPeriod = .all
     @State private var selectedPricePoint: PriceRecord?
     @State private var loadTask: Task<Void, Never>?
+    @State private var isHistoryDirty = false
 
     var compact: Bool = false
 
@@ -38,12 +31,15 @@ struct PriceChartView: View {
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onAppear {
             if isExpanded {
-                loadHistory(for: chartPeriod)
+                loadHistory(for: chartPeriod, force: isHistoryDirty)
+                isHistoryDirty = false
             }
         }
         .onChange(of: isExpanded) { _, newValue in
             if newValue {
-                loadHistory(for: chartPeriod)
+                let force = isHistoryDirty
+                isHistoryDirty = false
+                loadHistory(for: chartPeriod, force: force)
             }
         }
         .onChange(of: chartPeriod) { _, newPeriod in
@@ -52,11 +48,15 @@ struct PriceChartView: View {
             withTransaction(transaction) {
                 selectedPricePoint = nil
             }
-            loadHistory(for: newPeriod)
+            let force = isHistoryDirty
+            isHistoryDirty = false
+            loadHistory(for: newPeriod, force: force)
         }
         .onReceive(NotificationCenter.default.publisher(for: .priceHistoryUpdated)) { _ in
             if isExpanded {
                 loadHistory(for: chartPeriod, force: true)
+            } else {
+                isHistoryDirty = true
             }
         }
     }
@@ -90,7 +90,7 @@ struct PriceChartView: View {
 
                 if let selected = selectedPricePoint {
                     Text(selected.price.usdFormatted)
-                        .font(.headline.bold())
+                        .font(.headline.bold().monospacedDigit())
                         .foregroundStyle(.primary)
                 } else {
                     LivePriceLabel()

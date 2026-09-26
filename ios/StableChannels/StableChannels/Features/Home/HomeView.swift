@@ -111,9 +111,7 @@ struct HomeView: View {
     private var balanceBarSection: some View {
         VStack(spacing: 6) {
             BalanceBarView(
-                stableUSD: appState.stableUSD,
-                totalSats: appState.lightningBalanceSats,
-                btcPrice: appState.btcPrice,
+                allocation: allocation,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
                     sc: appState.stableChannel,
                     price: appState.accountingBTCPrice

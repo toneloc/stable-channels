@@ -22,13 +22,13 @@ struct ChannelAllocation: Equatable, Sendable {
 
     /// Satoshis backing the stable USD position.
     var stableSats: UInt64 {
-        guard stableUSD > 0 else { return 0 }
-        if let backingSatsOverride, backingSatsOverride > 0 {
-            return backingSatsOverride
+        if let backingSatsOverride {
+            return min(backingSatsOverride, lightningBalanceSats)
         }
-        guard btcPrice > 0 else { return 0 }
+        guard stableUSD > 0, btcPrice > 0 else { return 0 }
         let calculated = (stableUSD / btcPrice) * Double(Constants.satsInBTC)
-        return UInt64(calculated)
+        if calculated.isNaN || calculated.isInfinite || calculated <= 0 { return 0 }
+        return UInt64(exactly: calculated) ?? (calculated > Double(UInt64.max) ? UInt64.max : UInt64(calculated))
     }
 
     /// Remaining satoshis in the channel belonging to the native Bitcoin position.

@@ -50,6 +50,10 @@ actor PriceHistoryService: PriceHistoryProviding {
         }
     }
 
+    func invalidateCache() {
+        isLoaded = false
+    }
+
     private func ensureLoaded(force: Bool) {
         if isLoaded && !force { return }
         guard let databaseService = databaseProvider() else { return }
@@ -68,9 +72,7 @@ actor PriceHistoryService: PriceHistoryProviding {
             )
         }
 
-        if !hourlyPrices.isEmpty || !allDailyPrices.isEmpty {
-            isLoaded = true
-        }
+        isLoaded = true
     }
 
     /// Lockless, zero-allocation ASCII parsing for "yyyy-MM-dd" UTC dates.

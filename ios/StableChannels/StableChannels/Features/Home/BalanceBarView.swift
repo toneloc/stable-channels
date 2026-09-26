@@ -12,9 +12,7 @@ struct TradeRequest: Identifiable {
 }
 
 struct BalanceBarView: View {
-    let stableUSD: Double
-    let totalSats: UInt64
-    let btcPrice: Double
+    let allocation: ChannelAllocation
     var maxSellUSD: Double = 0
     var onDragStarted: (() -> Void)?
     var onTradeRequest: ((TradeDirection, Double) -> Void)?
@@ -27,13 +25,6 @@ struct BalanceBarView: View {
     private let thumbDiameter: CGFloat = 28
     private let barHeight: CGFloat = 20
     private let minTradeUSD: Double = 1.0
-    private var allocation: ChannelAllocation {
-        ChannelAllocation(
-            stableUSD: stableUSD,
-            lightningBalanceSats: totalSats,
-            btcPrice: btcPrice
-        )
-    }
 
     private var interactive: Bool { onTradeRequest != nil }
 
@@ -153,7 +144,7 @@ struct BalanceBarView: View {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         let direction: TradeDirection = dragOffset > 0 ? .sell : .buy
                         let clamped = direction == .buy
-                            ? min(tradeUSD, stableUSD)
+                            ? min(tradeUSD, allocation.stableUSD)
                             : min(tradeUSD, maxSellUSD)
                         onTradeRequest?(direction, clamped)
                         // Hold thumb at dragged position, then snap back after sheet appears

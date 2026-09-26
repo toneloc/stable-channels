@@ -77,7 +77,7 @@ final class ChannelAllocationTests: XCTestCase {
         XCTAssertEqual(allocation.nativeSats, 98_000)
     }
 
-    func testBackingSatsOverrideZeroWhenNoStableUSD() {
+    func testBackingSatsOverridePreservedWhenNoStableUSD() {
         let allocation = ChannelAllocation(
             stableUSD: 0.0,
             lightningBalanceSats: 150_000,
@@ -85,8 +85,95 @@ final class ChannelAllocationTests: XCTestCase {
             backingSatsOverride: 52_000
         )
 
-        // With zero stable position, stable sats must be zero regardless of override
-        XCTAssertEqual(allocation.stableSats, 0)
-        XCTAssertEqual(allocation.nativeSats, 150_000)
+        // When backingSatsOverride is provided in a $0 target state (e.g. unsettled LSP surplus),
+        // the override is authoritative so native sats is receiverSats - backingSats.
+        XCTAssertEqual(allocation.stableSats, 52_000)
+        XCTAssertEqual(allocation.nativeSats, 98_000)
+    }
+
+    func testBackingSatsOverrideClampedToLightningBalance() {
+        let allocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 40_000,
+            btcPrice: 100_000.0,
+            backingSatsOverride: 50_000
+        )
+
+        XCTAssertEqual(allocation.stableSats, 40_000)
+        XCTAssertEqual(allocation.nativeSats, 0)
+    }
+
+    func testSplitBrainPreventionWithBackingSatsOverride() {
+        // $100 target, 100,000 channel sats, 100,000 backing sats, $110,000/BTC.
+        let withOverride = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: 110_000.0,
+            backingSatsOverride: 100_000
+        )
+        // Backing override locks in 100,000 sats -> 0 native sats
+        XCTAssertEqual(withOverride.stableSats, 100_000)
+        XCTAssertEqual(withOverride.nativeSats, 0)
+        XCTAssertEqual(withOverride.nativeUSD, 0.0)
+
+        // Without override, mark-to-market derives ~90,909 stable and 9,091 native sats
+        let withoutOverride = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: 110_000.0
+        )
+        XCTAssertEqual(withoutOverride.stableSats, 90_909)
+        XCTAssertEqual(withoutOverride.nativeSats, 9_091)
+    }
+
+    func testPathologicalPricesDoNotTrap() {
+        // Extreme positive price close to zero
+        let tinyPrice = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: 1e-9
+        )
+        // Must clamp or overflow safely without trapping/crashing
+        XCTAssertGreaterThanOrEqual(tinyPrice.stableSats, 0)
+
+        // Negative price
+        let negativePrice = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: -50_000.0
+        )
+        XCTAssertEqual(negativePrice.stableSats, 0)
+
+        // NaN and Infinity
+        let nanPrice = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: Double.nan
+        )
+        XCTAssertEqual(nanPrice.stableSats, 0)
+
+        let infPrice = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: Double.infinity
+        )
+        XCTAssertEqual(infPrice.stableSats, 0)
+    }
+
+    func testStableFractionBounds() {
+        let overfunded = ChannelAllocation(
+            stableUSD: 500.0,
+            lightningBalanceSats: 10_000,
+            btcPrice: 100_000.0
+        )
+        XCTAssertLessThanOrEqual(overfunded.stableFraction, 1.0)
+        XCTAssertGreaterThanOrEqual(overfunded.stableFraction, 0.0)
+
+        let zeroBalance = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 100_000.0
+        )
+        XCTAssertEqual(zeroBalance.stableFraction, 0.0)
     }
 }
