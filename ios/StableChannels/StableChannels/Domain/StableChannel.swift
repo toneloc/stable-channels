@@ -12,8 +12,11 @@ struct Bitcoin: Codable, Equatable {
     }
 
     static func fromBTC(_ btc: Double) -> Bitcoin {
-        let sats = UInt64((btc * Double(Constants.satsInBTC)).rounded())
-        return Bitcoin(sats: sats)
+        guard btc > 0, btc.isFinite else { return Bitcoin(sats: 0) }
+        let sats = btc * Double(Constants.satsInBTC)
+        guard !sats.isNaN, !sats.isInfinite, sats >= 0 else { return Bitcoin(sats: 0) }
+        let clamped = min(sats.rounded(), Double(UInt64.max))
+        return Bitcoin(sats: UInt64(clamped))
     }
 
     func toBTC() -> Double {
@@ -21,6 +24,9 @@ struct Bitcoin: Codable, Equatable {
     }
 
     static func fromUSD(_ usd: USD, price: Double) -> Bitcoin {
+        guard price > 0, price.isFinite, usd.amount > 0, usd.amount.isFinite else {
+            return Bitcoin(sats: 0)
+        }
         let btc = usd.amount / price
         return Bitcoin.fromBTC(btc)
     }
