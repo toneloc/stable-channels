@@ -1,11 +1,12 @@
 //! Reconcile-from-truth: on (re)connect, backfill audit records for forwards missed during the gap.
 
 use ldk_server_client::ldk_server_grpc::api::{
-    GetBalancesRequest, GetPaymentDetailsRequest, ListChannelsRequest,
-    ListForwardedPaymentsRequest, ListPaymentsRequest, ListPeersRequest,
+    GetBalancesRequest, GetForwardedPaymentTrackingModeRequest, GetPaymentDetailsRequest,
+    ListChannelsRequest, ListForwardedPaymentsRequest, ListPaymentsRequest, ListPeersRequest,
 };
 use ldk_server_client::ldk_server_grpc::types::{
-    pending_sweep_balance, PageToken, PaymentStatus, PendingSweepBalance,
+    pending_sweep_balance, Channel, ForwardedPaymentTrackingMode, PaymentStatus,
+    PendingSweepBalance,
 };
 use stable_channels::db::{forward_fingerprint, Database};
 use stable_channels::ledger::LedgerEventDraft;
@@ -14,13 +15,14 @@ use crate::stable_manager::LdkServerCalls;
 
 /// LDK Server pages payments newest-created first, but currently exposes no modified-since query.
 /// Keep reconnect work bounded; reaching this limit is recorded as a ledger gap, never as complete.
-const MAX_RECONSTRUCTION_PAGES: usize = 10;
+const MAX_RECONSTRUCTION_PAGES: usize = 20; // LDK Node serves 50 payments a page and on-chain ones share the budget: about 1,000 rows.
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ForwardBackfillResult {
     pub emitted: usize,
     pub failure: Option<String>,
     pub incomplete: Option<String>,
+    pub lost: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
@@ -32,6 +34,7 @@ pub struct ReconstructedCounts {
     pub sweeps: usize,
     pub failed_scopes: usize,
     pub incomplete_scopes: usize,
+    pub lost_scopes: usize,
     pub settlement_outcomes_safe: bool,
 }
 
@@ -41,6 +44,7 @@ pub struct ReconstructedCounts {
 pub async fn reconcile_event_history(
     ldk: &dyn LdkServerCalls,
     db: &Database,
+    gap_started_ms: Option<i64>,
 ) -> ReconstructedCounts {
     let mut counts = ReconstructedCounts::default();
 
@@ -52,15 +56,17 @@ pub async fn reconcile_event_history(
         },
     };
 
+    let mut live_channels: Vec<Channel> = Vec::new();
     match ldk.list_channels(ListChannelsRequest {}).await {
         Ok(response) => {
+            live_channels = response.channels.clone();
             for channel in response.channels {
                 let identity = if channel.user_channel_id.is_empty() {
                     channel.channel_id.clone()
                 } else {
                     channel.user_channel_id.clone()
                 };
-                let detail = serde_json::json!({
+                let mut detail = serde_json::json!({
                     "source": "reconnect_reconciliation",
                     "channel_id": channel.channel_id,
                     "user_channel_id": channel.user_channel_id,
@@ -72,6 +78,9 @@ pub async fn reconcile_event_history(
                     "is_channel_ready": channel.is_channel_ready,
                     "is_usable": channel.is_usable,
                 });
+                if let Some(fields) = detail.as_object_mut() {
+                    fields.extend(crate::channel_audit::channel_snapshot_fields(&channel));
+                }
                 match append_reconstructed_if_changed(
                     db,
                     "channel",
@@ -91,6 +100,7 @@ pub async fn reconcile_event_history(
         Err(error) => scope_failed("channels", &error.to_string(), &mut counts),
     }
 
+    let resolve_user_channel_id = crate::observability::user_channel_id_for(&live_channels, db);
     let mut page_token = None;
     let mut payment_pages = 0usize;
     let mut seen_payment_cursors = std::collections::HashSet::new();
@@ -104,8 +114,8 @@ pub async fn reconcile_event_history(
                         "PAYMENT_RECONSTRUCTED",
                         serde_json::json!({
                             "source": "reconnect_reconciliation",
-                            "dedup_key": format!("lsp:reconstructed-payment:{}:{}:{}", payment.id, payment.status, payment.latest_update_timestamp),
-                            "payment_id": payment.id,
+                            "dedup_key": format!("lsp:reconstructed-payment:{}:{}:{}", payment.payment_id, payment.status, payment.latest_update_timestamp),
+                            "payment_id": payment.payment_id,
                             "amount_msat": payment.amount_msat,
                             "fee_paid_msat": payment.fee_paid_msat,
                             "direction": payment.direction,
@@ -115,6 +125,10 @@ pub async fn reconcile_event_history(
                             "channel_association": "unavailable_from_ldk",
                         }),
                     );
+                    if let Some(mut data) = crate::channel_audit::onchain_channel_tx_audit_data(&payment, &resolve_user_channel_id) {
+                        data["source"] = serde_json::json!("reconnect_reconciliation");
+                        stable_channels::audit::audit_event("CHANNEL_ONCHAIN_TX", data);
+                    }
                     counts.payments += 1;
                 }
                 match response.next_page_token {
@@ -150,13 +164,29 @@ pub async fn reconcile_event_history(
         }
     }
 
-    let forwards = backfill_forwards(ldk, db).await;
+    let forwards = backfill_forwards(ldk, db, gap_started_ms).await;
     counts.forwards = forwards.emitted;
     if let Some(error) = forwards.failure {
         scope_failed("forwards", &error, &mut counts);
     }
     if let Some(reason) = forwards.incomplete {
         scope_incomplete("forwards", &reason, &mut counts);
+    }
+    if let Some(reason) = forwards.lost {
+        // Unrecoverable, so it is recorded but does not keep the event-stream gap open.
+        counts.lost_scopes += 1;
+        stable_channels::audit::audit_event(
+            "RECONCILIATION_GAP_DETECTED",
+            serde_json::json!({
+                "source": "reconnect_reconciliation",
+                "scope": "forwards",
+                "reason": reason,
+                "status": "partial",
+                "recoverable": false,
+                "gap_started_ms": gap_started_ms,
+                "dedup_key": gap_started_ms.map(|start| format!("lsp:forward-retention-loss:{start}")),
+            }),
+        );
     }
 
     match ldk.list_peers(ListPeersRequest {}).await {
@@ -288,8 +318,26 @@ fn append_reconstructed_if_changed(
     db.append_reconstructed_event_if_changed(scope, identity, &fingerprint, &draft)
 }
 
-fn page_cursor_key(token: &PageToken) -> String {
-    format!("{}:{}", token.token, token.index)
+/// Start of the oldest one-hour bucket LDK Node still keeps as individual forwards (it keeps the current and previous bucket).
+fn detailed_forward_retention_start_ms(now_ms: i64) -> i64 {
+    const HOUR_MS: i64 = 3_600_000;
+    (now_ms / HOUR_MS - 1) * HOUR_MS
+}
+
+/// Why forwards may be missing when the event-stream gap began before LDK Node's detailed retention, plus where retention starts.
+fn forward_retention_loss(gap_started_ms: Option<i64>, now_ms: i64) -> Option<(String, i64)> {
+    let retained_since = detailed_forward_retention_start_ms(now_ms);
+    let started = gap_started_ms?;
+    (started < retained_since).then(|| {
+        (
+            format!("the gap began at {started} ms but LDK Server keeps individual forwards only since {retained_since} ms; older forwards survive only as hourly totals"),
+            retained_since,
+        )
+    })
+}
+
+fn page_cursor_key(token: &str) -> String {
+    token.to_owned()
 }
 
 /// LDK Server does not expose the swept output's outpoint in every state. Once a spending
@@ -369,8 +417,33 @@ fn scope_incomplete(scope: &str, reason: &str, counts: &mut ReconstructedCounts)
 pub async fn backfill_forwards(
     ldk: &dyn LdkServerCalls,
     db: &Database,
+    gap_started_ms: Option<i64>,
 ) -> ForwardBackfillResult {
     let mut result = ForwardBackfillResult::default();
+    // Stats mode keeps only aggregates, so there is no per-payment history to reconcile against.
+    match ldk
+        .get_forwarded_payment_tracking_mode(GetForwardedPaymentTrackingModeRequest {})
+        .await
+    {
+        Ok(response) if response.mode == ForwardedPaymentTrackingMode::Stats as i32 => {
+            result.incomplete = Some(
+                "LDK Server keeps only forwarding stats; set [node] forwarded_payment_tracking_mode = \"detailed\" to reconcile missed forwards"
+                    .to_owned(),
+            );
+            return result;
+        },
+        Ok(_) => {},
+        Err(error) => {
+            result.incomplete = Some(format!(
+                "could not read LDK Server's forwarded payment tracking mode: {error}"
+            ));
+        },
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default();
+    result.lost = forward_retention_loss(gap_started_ms, now_ms).map(|(reason, _)| reason);
     let mut page_token = None;
     let mut pages = 0usize;
     let mut seen_cursors = std::collections::HashSet::new();
@@ -387,27 +460,27 @@ pub async fn backfill_forwards(
         };
         pages += 1;
         for fp in &resp.forwarded_payments {
-            // ForwardedPayment now carries per-HTLC locators; take the first of each list as the representative channel/node.
-            let prev = fp.prev_htlcs.first();
-            let next = fp.next_htlcs.first();
-            let prev_channel_id = prev.map(|h| h.channel_id.clone()).unwrap_or_default();
-            let next_channel_id = next.map(|h| h.channel_id.clone()).unwrap_or_default();
             let key = forward_fingerprint(
-                &prev_channel_id,
-                &next_channel_id,
+                &fp.prev_channel_id,
+                &fp.next_channel_id,
                 fp.outbound_amount_forwarded_msat,
                 fp.total_fee_earned_msat,
             );
-            let detail = serde_json::json!({
-                "prev_channel_id": prev_channel_id,
-                "next_channel_id": next_channel_id,
-                "prev_user_channel_id": prev.and_then(|h| h.user_channel_id.clone()),
-                "next_user_channel_id": next.and_then(|h| h.user_channel_id.clone()),
-                "prev_node_id": prev.and_then(|h| h.node_id.clone()),
-                "next_node_id": next.and_then(|h| h.node_id.clone()),
+            let mut detail = serde_json::json!({
+                "forwarded_payment_id": (!fp.id.is_empty()).then(|| fp.id.clone()),
+                "prev_channel_id": fp.prev_channel_id,
+                "next_channel_id": fp.next_channel_id,
+                "prev_user_channel_id": fp.prev_user_channel_id,
+                "next_user_channel_id": fp.next_user_channel_id,
+                "prev_node_id": fp.prev_node_id,
+                "next_node_id": fp.next_node_id,
                 "outbound_amount_msat": fp.outbound_amount_forwarded_msat,
                 "total_fee_msat": fp.total_fee_earned_msat,
+                "skimmed_fee_msat": fp.skimmed_fee_msat,
             });
+            if fp.forwarded_at_timestamp > 0 {
+                detail["occurred_at_ms"] = serde_json::json!(fp.forwarded_at_timestamp.saturating_mul(1000));
+            }
             let draft = LedgerEventDraft::from_audit_event("PAYMENT_FORWARDED_BACKFILL", detail);
             match db.append_forwarded_event_if_unseen(&key, &draft) {
                 Ok(true) => result.emitted += 1,
@@ -440,4 +513,26 @@ pub async fn backfill_forwards(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 2026-09-24T10:30:00Z
+    const HALF_PAST_TEN: i64 = 1_790_245_800_000;
+
+    #[test]
+    fn detailed_retention_starts_at_the_previous_hour_boundary() {
+        assert_eq!(detailed_forward_retention_start_ms(HALF_PAST_TEN), HALF_PAST_TEN - 5_400_000);
+    }
+
+    #[test]
+    fn only_gaps_older_than_retention_lose_forwards() {
+        assert!(forward_retention_loss(None, HALF_PAST_TEN).is_none());
+        assert!(forward_retention_loss(Some(HALF_PAST_TEN - 4_500_000), HALF_PAST_TEN).is_none(), "09:15 is still held");
+        let (reason, retained_since) = forward_retention_loss(Some(HALF_PAST_TEN - 5_460_000), HALF_PAST_TEN).unwrap();
+        assert_eq!(retained_since, HALF_PAST_TEN - 5_400_000);
+        assert!(reason.contains("hourly"));
+    }
 }

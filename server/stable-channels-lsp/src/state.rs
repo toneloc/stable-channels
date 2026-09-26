@@ -28,4 +28,6 @@ pub struct AppState {
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
     /// LDK Server's log file path, resolved at daemon startup. None if not configured.
     pub ldk_log_file: Option<PathBuf>,
+    /// Newest ledger entry written before this process started; the event loop treats it as the start of the downtime gap.
+    pub last_event_before_start_ms: Option<i64>,
 }

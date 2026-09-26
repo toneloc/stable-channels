@@ -14,7 +14,7 @@ const HELP_ADDRESS: &str =
 const HELP_AMOUNT: &str =
     "The on-chain amount to send. Miner fees are separate unless Send All is selected.";
 const HELP_SEND_ALL: &str =
-    "Spend the wallet's available on-chain balance, subtracting the miner fee from the output.";
+    "Spend the wallet's available on-chain balance, subtracting the miner fee from the output. LDK keeps the reserve it needs to fee-bump anchor channels, so a small amount can stay in the wallet.";
 const HELP_FEE_RATE: &str =
     "Optional miner fee rate in sat/vB. Higher rates can confirm faster but cost more.";
 const HELP_LAST_TXID: &str =
@@ -147,7 +147,7 @@ fn render_send(ui: &mut Ui, app: &mut LspServerApp) {
                             ui.memory_mut(|m| m.data.get_temp::<bool>(id).unwrap_or(false));
                         ui.checkbox(
                             &mut ok,
-                            "I understand this sends my entire on-chain balance",
+                            "I understand this sends my entire spendable on-chain balance",
                         );
 						ui.memory_mut(|m| m.data.insert_temp(id, ok));
 						let btn = egui::Button::new(
@@ -426,9 +426,9 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 								// Payment ID
 								r.col(|ui| {
 									ui.horizontal(|ui| {
-										ui.monospace(truncate_id(&payment.id, 5, 4));
+										ui.monospace(truncate_id(&payment.payment_id, 5, 4));
 										if ui.small_button("Copy").clicked() {
-											ui.output_mut(|o| o.copied_text = payment.id.clone());
+											ui.output_mut(|o| o.copied_text = payment.payment_id.clone());
 										}
 									});
 								});

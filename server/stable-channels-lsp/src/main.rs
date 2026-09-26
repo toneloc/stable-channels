@@ -1,5 +1,6 @@
 mod auth;
 mod backfill;
+mod channel_audit;
 mod channel_close;
 mod config;
 mod event_loop;
@@ -113,6 +114,11 @@ async fn main() -> Result<()> {
             error
         ),
     }
+    // Read before any task writes, so a restart's downtime is measured from the previous run's last entry.
+    let last_event_before_start_ms = db
+        .list_ledger_events(&stable_channels::ledger::LedgerQuery { limit: 1, ..Default::default() })
+        .ok()
+        .and_then(|page| page.overview.newest_occurred_at_ms);
     set_audit_ledger(db.clone());
     let channel_count = db
         .load_all_channels()
@@ -140,6 +146,7 @@ async fn main() -> Result<()> {
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         ldk_log_file,
+        last_event_before_start_ms,
     };
 
     let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
@@ -359,6 +366,7 @@ fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
         bytes_to_lower_hex(&bytes)
     } else {
         ldk_config::resolve_api_key(None, ldk_cfg_ref)
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("Could not resolve LDK Server api_key"))?
     };
 
