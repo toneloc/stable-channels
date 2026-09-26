@@ -16,4 +16,13 @@ protocol PriceChartFetching: Sendable {
         close: Double,
         volume: Double?
     )]?
+
+    /// Backfill hourly candles into the price repository.
+    func backfillHourlyPrices(priceRepo: PriceRepository) async
+
+    /// Backfill daily candles into the price repository.
+    func backfillDailyPrices(priceRepo: PriceRepository) async
+
+    /// Seed bundled historical daily prices into the price repository if needed.
+    func seedHistoricalPrices(priceRepo: PriceRepository)
 }

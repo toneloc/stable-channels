@@ -43,10 +43,14 @@ struct USD: Codable, Equatable {
     }
 
     func toMsats(price: Double) -> UInt64 {
+        guard price > 0 else { return 0 }
         let btcValue = amount / price
         let sats = btcValue * Double(Constants.satsInBTC)
         let millisats = sats * 1000.0
-        return UInt64(abs(millisats).rounded(.down))
+        guard !millisats.isNaN, !millisats.isInfinite, millisats >= 0 else { return 0 }
+        let rounded = abs(millisats).rounded(.down)
+        guard rounded < Double(UInt64.max) else { return UInt64.max }
+        return UInt64(rounded)
     }
 
     var formatted: String {
@@ -108,4 +112,35 @@ struct StableChannel: Codable {
         nativeSats: 0,
         lastStabilityPayment: 0
     )
+}
+
+// MARK: - Domain Errors
+
+enum StabilitySpendError: LocalizedError, Equatable {
+    case surplusSettling(owedUSD: Double)
+
+    var errorDescription: String? {
+        switch self {
+        case .surplusSettling(let owedUSD):
+            let formatted = owedUSD.formatted(.currency(code: "USD"))
+            return "A stability payment of \(formatted) to the LSP is still settling -- retry this payment shortly."
+        }
+    }
+}
+
+enum SpliceOperationError: LocalizedError, Equatable {
+    case inProgress
+    case databaseUnavailable
+    case persistenceFailed(underlyingDescription: String?)
+
+    var errorDescription: String? {
+        switch self {
+        case .inProgress:
+            return "A splice is already in progress — try again shortly"
+        case .databaseUnavailable:
+            return "Payment history is unavailable — splice not started"
+        case .persistenceFailed:
+            return "Could not save pending splice — splice not started"
+        }
+    }
 }

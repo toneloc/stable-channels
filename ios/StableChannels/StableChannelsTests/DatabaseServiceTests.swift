@@ -754,10 +754,21 @@ final class DatabaseServiceTests: XCTestCase {
     }
 
     func testBackfillDailyPricesNewDateAccounting() throws {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .gmt
+        let now = Date()
+        let day1 = formatter.string(from: try XCTUnwrap(calendar.date(byAdding: .day, value: -3, to: now)))
+        let day2 = formatter.string(from: try XCTUnwrap(calendar.date(byAdding: .day, value: -2, to: now)))
+        let day3 = formatter.string(from: try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: now)))
+        let day4 = formatter.string(from: now)
+
         let candles: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] = [
-            ("2026-09-08", 55000.0, 56000.0, 54000.0, 55500.0, 100.0),
-            ("2026-09-09", 55500.0, 57000.0, 55000.0, 56500.0, 150.0),
-            ("2026-09-10", 56500.0, 58000.0, 56000.0, 57500.0, 200.0)
+            (day1, 55000.0, 56000.0, 54000.0, 55500.0, 100.0),
+            (day2, 55500.0, 57000.0, 55000.0, 56500.0, 150.0),
+            (day3, 56500.0, 58000.0, 56000.0, 57500.0, 200.0)
         ]
 
         let inserted = try service.priceRepo.backfillDailyPrices(candles)
@@ -766,20 +777,20 @@ final class DatabaseServiceTests: XCTestCase {
         // Re-inserting existing dates with updated close price returns 0 newly inserted dates
         let updatedCandles: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] =
             [
-                ("2026-09-10", 56500.0, 58500.0, 56000.0, 58200.0, 250.0)
+                (day3, 56500.0, 58500.0, 56000.0, 58200.0, 250.0)
             ]
         let updatedCount = try service.priceRepo.backfillDailyPrices(updatedCandles)
         XCTAssertEqual(updatedCount, 0)
 
         // Verify the existing row's close price was refreshed
         let daily = try service.priceRepo.getDailyPrices(days: 10)
-        let sep10 = daily.first { $0.date == "2026-09-10" }
-        XCTAssertNotNil(sep10)
-        XCTAssertEqual(sep10?.close, 58200.0)
+        let updatedRecord = daily.first { $0.date == day3 }
+        XCTAssertNotNil(updatedRecord)
+        XCTAssertEqual(updatedRecord?.close, 58200.0)
 
         // Inserting a new date returns 1
         let newDay: [(date: String, open: Double, high: Double, low: Double, close: Double, volume: Double?)] = [
-            ("2026-09-11", 58200.0, 59000.0, 58000.0, 58800.0, 180.0)
+            (day4, 58200.0, 59000.0, 58000.0, 58800.0, 180.0)
         ]
         let newDayCount = try service.priceRepo.backfillDailyPrices(newDay)
         XCTAssertEqual(newDayCount, 1)
@@ -1325,6 +1336,184 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(legacyChannel.backingSats, 25_000)
         let legacyTradeCount = try upgraded.rawSQL.query("SELECT COUNT(*) FROM trades")
         XCTAssertEqual(legacyTradeCount.first?.first as? Int64, 1)
+    }
+
+    func testHasMatchingChannelClosePaymentMatchesWithinTolerance() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Exact match
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+        // Sweep slightly lower due to mining fees (within 15,000 sats tolerance)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 95_000))
+        // Sweep slightly higher (within 15,000 sats tolerance)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 105_000))
+        // Exact lower boundary (15,000 sats difference)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 85_000))
+        // Exact upper boundary (15,000 sats difference)
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 115_000))
+        // Just beyond lower boundary (15,001 sats difference)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 84_999))
+        // Just beyond upper boundary (15,001 sats difference)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 115_001))
+        // Way outside tolerance
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 50_000))
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 200_000))
+    }
+
+    func testHasMatchingChannelClosePaymentIgnoresOtherTypes() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "onchain-payment-1",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Does not match non-channel_close payment
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+    }
+
+    func testHasMatchingChannelClosePaymentIgnoresSentDirection() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-sent",
+            paymentType: "channel_close",
+            direction: "sent",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Close payments sent (not received sweeps) are not matches
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000))
+    }
+
+    func testHasMatchingChannelClosePaymentHonorsTimeCutoff() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-expired",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Expired window (cutoff = 0 seconds)
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, withinSecs: -10))
+    }
+
+    func testHasMatchingChannelClosePaymentOneTimeConsumption() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-consume-test",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Without consume, match is repeatable
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+
+        // First deposit with consume: true absorbs the close sweep
+        XCTAssertTrue(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 99_000, consume: true))
+
+        // Subsequent deposit within tolerance is NOT swallowed because the close sweep is already consumed
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: true))
+        XCTAssertFalse(service.paymentRepo.hasMatchingChannelClosePayment(depositSats: 100_000, consume: false))
+    }
+
+    func testFindMatchingChannelClosePaymentIdAndMarkCloseSweepConsumedCQS() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-payment-cqs-test",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 100.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Query: findMatchingChannelClosePaymentId does not mutate database
+        let paymentId = service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000)
+        XCTAssertEqual(paymentId, "close-payment-cqs-test")
+        XCTAssertEqual(
+            service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000),
+            "close-payment-cqs-test"
+        )
+
+        // Command: markCloseSweepConsumed mutates database
+        XCTAssertTrue(service.paymentRepo.markCloseSweepConsumed(paymentId: "close-payment-cqs-test"))
+
+        // Query now returns nil because it is consumed
+        XCTAssertNil(service.paymentRepo.findMatchingChannelClosePaymentId(depositSats: 100_000))
+    }
+
+    func testHasPendingOutgoingPayment() throws {
+        // Initially no pending outgoing payments
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Received payment pending does not count as outgoing
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "incoming-pending-1",
+            paymentType: "lightning",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "pending"
+        )
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Completed sent payment does not count as pending
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "sent-completed-1",
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "completed"
+        )
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Pending sent payment returns true
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "sent-pending-1",
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 20_000_000,
+            amountUSD: 20.0,
+            btcPrice: 100_000.0,
+            counterparty: nil,
+            status: "pending"
+        )
+        XCTAssertTrue(try service.paymentRepo.hasPendingOutgoingPayment())
+
+        // Once updated to failed or completed, returns false
+        try service.paymentRepo.updatePaymentStatus(paymentId: "sent-pending-1", status: "failed")
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
     }
 }
 

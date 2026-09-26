@@ -33,6 +33,15 @@ enum AppFormatters {
         return formatter
     }()
 
+    private static let percent: NumberFormatter = {
+        let formatter = NumberFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        return formatter
+    }()
+
     static func formatRelativeDate(_ date: Date, relativeTo: Date = Date()) -> String {
         relativeDate.localizedString(for: date, relativeTo: relativeTo)
     }
@@ -61,6 +70,23 @@ enum AppFormatters {
         custom.currencyCode = "USD"
         custom.maximumFractionDigits = 2
         return custom.string(from: NSNumber(value: amount)) ?? "$0.00"
+    }
+
+    static func formatPercent(_ value: Double, locale: Locale? = nil) -> String {
+        let sign = value >= 0 ? "+" : "-"
+        let absVal = abs(value)
+        let formatted: String
+        if let locale {
+            let custom = NumberFormatter()
+            custom.locale = locale
+            custom.numberStyle = .decimal
+            custom.minimumFractionDigits = 2
+            custom.maximumFractionDigits = 2
+            formatted = custom.string(from: NSNumber(value: absVal)) ?? String(format: "%.2f", absVal)
+        } else {
+            formatted = percent.string(from: NSNumber(value: absVal)) ?? String(format: "%.2f", absVal)
+        }
+        return "\(sign)\(formatted)%"
     }
 }
 
@@ -129,6 +155,15 @@ extension Double {
 
     var usdFormatted: String {
         usdFormatted(locale: nil)
+    }
+
+    /// Format a signed percentage with thousands separators, e.g. "+1,234.56%" or "-2.34%".
+    func percentFormatted(locale: Locale? = nil) -> String {
+        AppFormatters.formatPercent(self, locale: locale)
+    }
+
+    var percentFormatted: String {
+        percentFormatted(locale: nil)
     }
 }
 

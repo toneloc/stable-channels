@@ -40,6 +40,7 @@
 		4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */; };
 		4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944457F30540C1B00B5A146 /* BinarySearch.swift */; };
 		4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458130540C3500B5A146 /* BinarySearchTests.swift */; };
+		49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */; };
 		4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */; };
 		4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458330540C3500B5A146 /* InputSanitizerTests.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
@@ -89,6 +90,7 @@
 		499F1E573009F03E00936944 /* PaymentProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499F1E563009F03E00936944 /* PaymentProgress.swift */; };
 		49A0F0023029000000000001 /* PriceOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A0F0013029000000000001 /* PriceOracle.swift */; };
 		49A0F0033029000000000001 /* PriceOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A0F0013029000000000001 /* PriceOracle.swift */; };
+		49A3297B300CC81D003EC383 /* WalletErrorMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A3297A300CC81D003EC383 /* WalletErrorMessages.swift */; };
 		49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */; };
 		49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */; };
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
@@ -234,6 +236,7 @@
 		4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceChartAlgorithmsTests.swift; sourceTree = "<group>"; };
 		4944457F30540C1B00B5A146 /* BinarySearch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearch.swift; sourceTree = "<group>"; };
 		4944458130540C3500B5A146 /* BinarySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearchTests.swift; sourceTree = "<group>"; };
+		49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletErrorMessagesTests.swift; sourceTree = "<group>"; };
 		4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsFormattingTests.swift; sourceTree = "<group>"; };
 		4944458330540C3500B5A146 /* InputSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizerTests.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
@@ -282,6 +285,7 @@
 		499F1E4F3009F02300936944 /* TxConfirmationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxConfirmationProvider.swift; sourceTree = "<group>"; };
 		499F1E563009F03E00936944 /* PaymentProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentProgress.swift; sourceTree = "<group>"; };
 		49A0F0013029000000000001 /* PriceOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceOracle.swift; sourceTree = "<group>"; };
+		49A3297A300CC81D003EC383 /* WalletErrorMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletErrorMessages.swift; sourceTree = "<group>"; };
 		49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSheetHelpers.swift; sourceTree = "<group>"; };
 		49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSheet.swift; sourceTree = "<group>"; };
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
@@ -668,6 +672,7 @@
 				49E3080E30080B78009B0014 /* TransactionLinkService.swift */,
 				499DBE7A2FD2F06F003E89F9 /* TxidLinkStore.swift */,
 				49E3081030080F3C009B0014 /* TxidResolutionService.swift */,
+				49A3297A300CC81D003EC383 /* WalletErrorMessages.swift */,
 				498244AC3022718B0086BDB6 /* Biometric */,
 				495CB4023017AD1800560837 /* Confirmation */,
 				4944457E3053E42800B5A146 /* Price */,
@@ -772,6 +777,7 @@
 			isa = PBXGroup;
 			children = (
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
+				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -940,6 +946,7 @@
 				5C279A042FEA00040074ACD2 /* StabilitySettlementTests.swift in Sources */,
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */,
+				49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */,
 				4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */,
 				4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */,
 				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
@@ -965,6 +972,7 @@
 				492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */,
 				492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */,
 				492B54AF300CC81D003EC383 /* EsploraError.swift in Sources */,
+				49A3297B300CC81D003EC383 /* WalletErrorMessages.swift in Sources */,
 				499F1E513009F02300936944 /* BlockHeightService.swift in Sources */,
 				499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */,
 				499F1E553009F02300936944 /* ConfirmationService.swift in Sources */,

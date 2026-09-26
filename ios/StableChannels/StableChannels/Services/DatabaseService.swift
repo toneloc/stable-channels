@@ -221,6 +221,12 @@ final class DatabaseService {
                 timestamp INTEGER NOT NULL
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS consumed_close_sweeps (
+                payment_id TEXT PRIMARY KEY,
+                consumed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
