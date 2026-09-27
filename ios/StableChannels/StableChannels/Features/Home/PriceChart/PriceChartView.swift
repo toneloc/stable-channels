@@ -63,6 +63,13 @@ struct PriceChartView: View {
 
     // MARK: - Header
 
+    private var percentageChange: Double? {
+        guard priceHistory.count >= 2, let first = priceHistory.first?.price else { return nil }
+        let current = selectedPricePoint?
+            .price ?? (appState.btcPrice > 0 ? appState.btcPrice : priceHistory.last?.price ?? first)
+        return PriceChartAlgorithms.percentageChange(first: first, current: current)
+    }
+
     private var headerButton: some View {
         Button {
             impactFeedback.impactOccurred()
@@ -83,17 +90,39 @@ struct PriceChartView: View {
                         Text(selected.date, format: chartPeriod.dateFormat)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    } else {
+                        Text(displayedPeriod.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
                 Spacer()
 
-                if let selected = selectedPricePoint {
-                    Text(selected.price.usdFormatted)
-                        .font(.headline.bold().monospacedDigit())
-                        .foregroundStyle(.primary)
-                } else {
-                    LivePriceLabel()
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let selected = selectedPricePoint {
+                        Text(selected.price.usdFormatted)
+                            .font(.headline.bold().monospacedDigit())
+                            .foregroundStyle(.primary)
+                    } else {
+                        LivePriceLabel()
+                    }
+
+                    if let pct = percentageChange {
+                        let isUp = pct >= 0
+                        let sign = isUp ? "+" : ""
+                        Text("\(sign)\(String(format: "%.2f", pct))%")
+                            .font(.caption2.bold().monospacedDigit())
+                            .foregroundStyle(
+                                isUp
+                                    ? Color(red: 0.06, green: 0.73, blue: 0.51)
+                                    : Color(red: 0.94, green: 0.27, blue: 0.27)
+                            )
+                    } else {
+                        Text(" ")
+                            .font(.caption2.bold())
+                            .opacity(0)
+                    }
                 }
 
                 Image(systemName: "chevron.right")

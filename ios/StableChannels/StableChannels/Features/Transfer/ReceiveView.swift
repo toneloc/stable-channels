@@ -70,6 +70,11 @@ struct ReceiveView: View {
             }
         }
         .onDisappear { copyResetTask?.cancel() }
+        .onChange(of: appState.paymentFlash) { _, isFlashing in
+            if isFlashing {
+                dismiss()
+            }
+        }
     }
 
     // MARK: - Amount Input

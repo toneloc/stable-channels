@@ -63,6 +63,7 @@ struct HomeView: View {
             .navigationBarHidden(true)
             .refreshable {
                 appState.refreshBalances()
+                await appState.priceService.fetchPrice()
                 appState.recordCurrentPrice()
             }
         }
@@ -89,6 +90,9 @@ struct HomeView: View {
         }
         .onChange(of: appState.paymentFlash) {
             if appState.paymentFlash {
+                if showReceiveSheet {
+                    showReceiveSheet = false
+                }
                 withAnimation(.easeOut(duration: 0.3)) { flashScale = 1.08 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     withAnimation(.easeInOut(duration: 0.4)) { flashScale = 1.0 }

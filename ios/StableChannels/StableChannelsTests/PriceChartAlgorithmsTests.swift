@@ -175,4 +175,27 @@ final class PriceChartAlgorithmsTests: XCTestCase {
         let reloaded = await service.fetchPriceHistory(for: .day, force: true)
         XCTAssertTrue(reloaded.isEmpty)
     }
+
+    func testPercentageChange() throws {
+        // Gain: 50,000 to 55,000 (+10%)
+        let gain = PriceChartAlgorithms.percentageChange(first: 50_000, current: 55_000)
+        XCTAssertNotNil(gain)
+        XCTAssertEqual(try XCTUnwrap(gain), 10.0, accuracy: 0.0001)
+
+        // Loss: 50,000 to 45,000 (-10%)
+        let loss = PriceChartAlgorithms.percentageChange(first: 50_000, current: 45_000)
+        XCTAssertNotNil(loss)
+        XCTAssertEqual(try XCTUnwrap(loss), -10.0, accuracy: 0.0001)
+
+        // Flat: 50,000 to 50,000 (0%)
+        let flat = PriceChartAlgorithms.percentageChange(first: 50_000, current: 50_000)
+        XCTAssertNotNil(flat)
+        XCTAssertEqual(try XCTUnwrap(flat), 0.0, accuracy: 0.0001)
+
+        // Edge case: first price <= 0 or non-finite
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: 0, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: -100, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: .nan, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: 50_000, current: .infinity))
+    }
 }
