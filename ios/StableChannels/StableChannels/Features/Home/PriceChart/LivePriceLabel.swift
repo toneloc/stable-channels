@@ -1,43 +1,71 @@
 import SwiftUI
 
+/// Reusable view rendering numeric text with vertical mechanical odometer
+/// rolling transitions and optional directional tick highlight.
+struct RollingDigitLabel: View {
+    let text: String
+    let value: Double
+    var font: Font = .headline.bold()
+    var baseColor: Color = .primary
+    var enableTickHighlight: Bool = false
+    var tickUpColor: Color = .green
+    var tickDownColor: Color = .red
+    var tickDuration: TimeInterval = 0.45
+
+    @State private var currentColor: Color = .primary
+    @State private var colorResetTask: Task<Void, Never>?
+
+    var body: some View {
+        Text(text)
+            .font(font.monospacedDigit())
+            .foregroundStyle(currentColor)
+            .contentTransition(.numericText())
+            .animation(.snappy(duration: 0.28, extraBounce: 0.05), value: value)
+            .onChange(of: value) { old, new in
+                guard enableTickHighlight, old > 0, new > 0, old != new else { return }
+                colorResetTask?.cancel()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    currentColor = new > old ? tickUpColor : tickDownColor
+                }
+                colorResetTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(tickDuration * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.35)) {
+                        currentColor = baseColor
+                    }
+                }
+            }
+            .onAppear {
+                currentColor = baseColor
+            }
+            .onChange(of: baseColor) { _, newBase in
+                if colorResetTask == nil {
+                    currentColor = newBase
+                }
+            }
+    }
+}
+
 struct LivePriceLabel: View {
     @Environment(AppState.self) private var appState: AppState?
     var priceOverride: Double?
-
-    @State private var tickColor: Color = .primary
-    @State private var colorResetTask: Task<Void, Never>?
 
     private var currentPrice: Double {
         priceOverride ?? appState?.btcPrice ?? 0
     }
 
     var body: some View {
-        Group {
-            if currentPrice > 0 {
-                Text(currentPrice.usdFormatted)
-                    .font(.headline.bold().monospacedDigit())
-                    .foregroundStyle(tickColor)
-                    .contentTransition(.numericText())
-            } else {
-                Text("---")
-                    .font(.headline.bold().monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .animation(.snappy(duration: 0.28, extraBounce: 0.05), value: currentPrice)
-        .onChange(of: currentPrice) { old, new in
-            guard old > 0, new > 0, old != new else { return }
-            colorResetTask?.cancel()
-            withAnimation(.easeOut(duration: 0.15)) {
-                tickColor = new > old ? .green : .red
-            }
-            colorResetTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 450_000_000)
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.35)) {
-                    tickColor = .primary
-                }
-            }
+        if currentPrice > 0 {
+            RollingDigitLabel(
+                text: currentPrice.usdFormatted,
+                value: currentPrice,
+                font: .headline.bold(),
+                enableTickHighlight: true
+            )
+        } else {
+            Text("---")
+                .font(.headline.bold().monospacedDigit())
+                .foregroundStyle(.secondary)
         }
     }
 }

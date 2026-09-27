@@ -176,4 +176,74 @@ final class ChannelAllocationTests: XCTestCase {
         )
         XCTAssertEqual(zeroBalance.stableFraction, 0.0)
     }
+
+    // MARK: - BalanceScaleKinematics Tests
+
+    func testInitialStageIsResting() {
+        let kinematics = BalanceScaleKinematics()
+        let stage = kinematics.evaluate(
+            elapsedSinceStart: 0.10,
+            isSyncComplete: false,
+            settleElapsed: nil
+        )
+        XCTAssertEqual(stage, .resting)
+    }
+
+    func testShimmerStageProgression() {
+        let kinematics = BalanceScaleKinematics()
+
+        // Shimmer begins at 0.25s
+        let startStage = kinematics.evaluate(elapsedSinceStart: 0.25, isSyncComplete: false, settleElapsed: nil)
+        XCTAssertEqual(startStage, .shimmer(progress: 0.0))
+
+        // Mid-shimmer at 0.70s (0.45s elapsed in 0.90s duration)
+        let midStage = kinematics.evaluate(elapsedSinceStart: 0.70, isSyncComplete: false, settleElapsed: nil)
+        if case .shimmer(let progress) = midStage {
+            XCTAssertEqual(progress, 0.5, accuracy: 0.01)
+        } else {
+            XCTFail("Expected shimmer stage, got \(midStage)")
+        }
+    }
+
+    func testOscillationStage() {
+        let kinematics = BalanceScaleKinematics()
+
+        // Oscillation begins immediately after total shimmer duration (1.15s)
+        let stage = kinematics.evaluate(elapsedSinceStart: 1.150001, isSyncComplete: false, settleElapsed: nil)
+        if case .oscillating(let angle) = stage {
+            XCTAssertEqual(angle, 0.0, accuracy: 0.01)
+        } else {
+            XCTFail("Expected oscillating stage, got \(stage)")
+        }
+
+        // Peak quarter cycle (1.15s + 0.50s = 1.65s)
+        let peakStage = kinematics.evaluate(elapsedSinceStart: 1.65, isSyncComplete: false, settleElapsed: nil)
+        if case .oscillating(let angle) = peakStage {
+            XCTAssertEqual(angle, 4.8, accuracy: 0.1)
+        } else {
+            XCTFail("Expected oscillating stage, got \(peakStage)")
+        }
+    }
+
+    func testSettlingStageAndBalanced() {
+        let kinematics = BalanceScaleKinematics()
+
+        let settlingStage = kinematics.evaluate(elapsedSinceStart: 2.0, isSyncComplete: true, settleElapsed: 0.6)
+        if case .settling(let angle) = settlingStage {
+            XCTAssertLessThan(abs(angle), 4.8)
+        } else {
+            XCTFail("Expected settling stage, got \(settlingStage)")
+        }
+
+        let balancedStage = kinematics.evaluate(elapsedSinceStart: 2.0, isSyncComplete: true, settleElapsed: 1.2)
+        XCTAssertEqual(balancedStage, .balanced)
+    }
+
+    func testShimmerSweepRange() {
+        let (startNorm, endNorm) = BalanceScaleKinematics.shimmerSweepRange(progress: 0.5)
+        let expectedStart = 0.5 * 1.8 - 0.4 - 0.28
+        let expectedEnd = 0.5 * 1.8 - 0.4 + 0.28
+        XCTAssertEqual(startNorm, expectedStart, accuracy: 0.001)
+        XCTAssertEqual(endNorm, expectedEnd, accuracy: 0.001)
+    }
 }

@@ -31,35 +31,47 @@ struct HomeBalanceSectionView: View {
                     .foregroundStyle(.tertiary)
             } else if showBTC {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(displaySats.btcSpacedFormatted)
-                        .font(.system(size: 32, weight: .bold, design: .monospaced))
-                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                        .contentTransition(.numericText())
-                        .animation(.default, value: displaySats)
+                    RollingDigitLabel(
+                        text: displaySats.btcSpacedFormatted,
+                        value: Double(displaySats),
+                        font: .system(size: 32, weight: .bold, design: .monospaced),
+                        baseColor: appState.paymentFlash ? .green : .primary
+                    )
                     Text(String(localized: "label_btc", defaultValue: "BTC"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
 
-                Text(appState.totalBalanceUSD.usdFormatted)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                RollingDigitLabel(
+                    text: appState.totalBalanceUSD.usdFormatted,
+                    value: appState.totalBalanceUSD,
+                    font: .caption,
+                    baseColor: .secondary
+                )
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(appState.totalBalanceUSD.usdFormatted)
-                        .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .foregroundStyle(appState.paymentFlash ? .green : .primary)
-                        .contentTransition(.numericText())
-                        .animation(.default, value: appState.totalBalanceUSD)
-                        .animation(.easeInOut(duration: 0.3), value: appState.paymentFlash)
+                    RollingDigitLabel(
+                        text: appState.totalBalanceUSD.usdFormatted,
+                        value: appState.totalBalanceUSD,
+                        font: .system(size: 42, weight: .bold, design: .rounded),
+                        baseColor: appState.paymentFlash ? .green : .primary
+                    )
                     Text(String(localized: "label_usd", defaultValue: "USD"))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
 
-                Text("\(displaySats.btcSpacedFormatted) BTC")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 3) {
+                    RollingDigitLabel(
+                        text: displaySats.btcSpacedFormatted,
+                        value: Double(displaySats),
+                        font: .caption,
+                        baseColor: .secondary
+                    )
+                    Text(String(localized: "label_btc", defaultValue: "BTC"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .scaleEffect(flashScale)
