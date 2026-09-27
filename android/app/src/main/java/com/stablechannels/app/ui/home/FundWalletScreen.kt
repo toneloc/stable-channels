@@ -3,7 +3,6 @@ package com.stablechannels.app.ui.home
 import android.graphics.Bitmap
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -26,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.QRCodeUtils
 
 @Composable
@@ -66,7 +66,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                 colors =
                     ButtonDefaults.textButtonColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (LocalDarkTheme.current) {
                                 MaterialTheme.colorScheme.surfaceVariant
                             } else {
                                 Color(0xFFE5E5EA)

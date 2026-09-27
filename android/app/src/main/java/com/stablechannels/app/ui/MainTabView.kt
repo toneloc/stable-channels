@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +24,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.history.HistoryScreen
 import com.stablechannels.app.ui.home.HomeScreen
 import com.stablechannels.app.ui.settings.SettingsNavHost
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 
 enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
@@ -66,7 +66,7 @@ fun ModernBottomNavBar(
     onTabSelected: (Tab) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val isDark = isSystemInDarkTheme()
+    val isDark = LocalDarkTheme.current
     Box(
         modifier = modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp),
         contentAlignment = Alignment.BottomCenter,

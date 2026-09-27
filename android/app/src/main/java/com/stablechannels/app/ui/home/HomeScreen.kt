@@ -6,7 +6,6 @@ import android.os.Build
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -125,6 +124,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     }
 
     val totalUSD = (totalSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+    val isDark = LocalDarkTheme.current
     val scope = rememberCoroutineScope()
 
     var isRefreshing by remember { mutableStateOf(false) }
@@ -427,12 +427,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                     ButtonDefaults.filledTonalButtonColors(
                                                         containerColor =
                                                             MaterialTheme.colorScheme.secondary
-                                                                .copy(
-                                                                    alpha =
-                                                                        if (isSystemInDarkTheme())
-                                                                            0.15f
-                                                                        else 0.15f
-                                                                ),
+                                                                .copy(alpha = 0.15f),
                                                         contentColor =
                                                             MaterialTheme.colorScheme.secondary,
                                                     ),
@@ -493,9 +488,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                 // as distinct.
                                                 containerColor =
                                                     MaterialTheme.colorScheme.secondary.copy(
-                                                        alpha =
-                                                            if (isSystemInDarkTheme()) 0.15f
-                                                            else 0.15f
+                                                        alpha = 0.15f
                                                     ),
                                                 contentColor = MaterialTheme.colorScheme.secondary,
                                             ),
@@ -644,7 +637,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
@@ -657,7 +650,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showReceive = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
@@ -670,7 +663,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showBuy = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()
@@ -686,7 +679,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showSell = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            containerColor = if (isDark) Color.Black else Color.White,
             contentWindowInsets = @Composable { WindowInsets(0, 0, 0, 0) },
         ) {
             SheetEdgeToEdgeEffect()

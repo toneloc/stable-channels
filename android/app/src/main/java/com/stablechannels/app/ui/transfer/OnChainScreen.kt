@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.transfer
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -25,6 +24,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -82,7 +82,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     colors =
                         ButtonDefaults.textButtonColors(
                             containerColor =
-                                if (isSystemInDarkTheme()) {
+                                if (LocalDarkTheme.current) {
                                     MaterialTheme.colorScheme.surfaceVariant
                                 } else {
                                     Color(0xFFE5E5EA)
@@ -123,7 +123,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 colors =
                     CardDefaults.cardColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (LocalDarkTheme.current) {
                                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                             } else {
                                 Color(0xFFF2F2F7)
