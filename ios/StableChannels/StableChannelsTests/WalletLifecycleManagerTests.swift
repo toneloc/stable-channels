@@ -413,23 +413,89 @@ final class WalletLifecycleManagerTests: XCTestCase {
     }
 
     func testMarkerlessRecoverySetsRecoveredFlagBeforeDeletingPending() throws {
-        // P2 crash boundary: after a markerless promotion, a kill between
-        // deletePendingMnemonic and setRecoveredRestorePending left the user
-        // stranded at .seedOnlyMismatch. This test reproduces the post-promotion
-        // state (active seed present, no pending, no marker, no database, no flag)
-        // and verifies that the corrected ordering produces .ready.
+        // P2 crash boundary: verify that the recovery flag is persisted BEFORE
+        // active store and BEFORE pending deletion.
         let ud = UserDefaults(suiteName: testAppGroup)
         mockStorage.mockPendingMnemonic = otherMnemonic
         mockStorage.mockMnemonic = nil
 
+        var flagObservedBeforeStore = false
+        mockStorage.onStoreMnemonic = { _ in
+            flagObservedBeforeStore = ud?.bool(forKey: "recovered_restore_pending") == true
+        }
+
+        var flagObservedBeforeDelete = false
+        mockStorage.onDeletePendingMnemonic = {
+            flagObservedBeforeDelete = ud?.bool(forKey: "recovered_restore_pending") == true
+        }
+
         let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
 
         XCTAssertTrue(didRecover)
+        XCTAssertTrue(
+            flagObservedBeforeStore,
+            "recovered_restore_pending must be recorded before storeMnemonic executes"
+        )
+        XCTAssertTrue(
+            flagObservedBeforeDelete,
+            "recovered_restore_pending must be recorded before deletePendingMnemonic executes"
+        )
         XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
         XCTAssertNil(mockStorage.mockPendingMnemonic)
         XCTAssertTrue(ud?.bool(forKey: "recovered_restore_pending") == true)
         // Without a database, startup must classify as .ready (not .seedOnlyMismatch)
         XCTAssertEqual(manager.detectStartupState(), .ready)
+    }
+
+    func testMarkerlessRecoveryActiveMatchesPendingRecoversPostCrashPromotion() throws {
+        // Reproduces the exact crash boundary where the process was killed after
+        // storeMnemonic committed active == pending, before deletePending completed.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        mockStorage.mockMnemonic = otherMnemonic
+        mockStorage.mockPendingMnemonic = otherMnemonic
+
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertTrue(didRecover)
+        XCTAssertEqual(mockStorage.mockMnemonic, otherMnemonic)
+        XCTAssertNil(mockStorage.mockPendingMnemonic, "Pending copy must be cleaned up on recovery")
+        XCTAssertTrue(ud?.bool(forKey: "recovered_restore_pending") == true)
+        XCTAssertEqual(manager.detectStartupState(), .ready)
+    }
+
+    func testMarkerlessRecoveryActiveMatchesPendingBlockedIfLegacyArtifactsRemain() throws {
+        // If active matches pending but legacy artifacts exist, must fail closed.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        mockStorage.mockMnemonic = otherMnemonic
+        mockStorage.mockPendingMnemonic = otherMnemonic
+
+        let sqlitePath = tempDirURL.appendingPathComponent("ldk_node_data.sqlite")
+        try "legacy sqlite data".write(to: sqlitePath, atomically: true, encoding: .utf8)
+
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertFalse(didRecover)
+        XCTAssertEqual(
+            mockStorage.mockPendingMnemonic,
+            otherMnemonic,
+            "Pending slot must not be deleted when blocked by legacy artifacts"
+        )
+        XCTAssertFalse(ud?.bool(forKey: "recovered_restore_pending") ?? false)
+    }
+
+    func testMarkerlessRecoveryActiveDiffersFromPendingClearsPendingAsAbandoned() throws {
+        // If active seed exists and differs from pending, staged restore never wiped.
+        // Pending copy must be cleared without setting recovery flag or touching active seed.
+        let ud = UserDefaults(suiteName: testAppGroup)
+        mockStorage.mockMnemonic = testMnemonic
+        mockStorage.mockPendingMnemonic = otherMnemonic
+
+        let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
+
+        XCTAssertFalse(didRecover)
+        XCTAssertEqual(mockStorage.mockMnemonic, testMnemonic, "Active seed must remain untouched")
+        XCTAssertNil(mockStorage.mockPendingMnemonic, "Abandoned pending seed must be cleared")
+        XCTAssertFalse(ud?.bool(forKey: "recovered_restore_pending") ?? false)
     }
 
     func testNewWalletClearsStaleRecoveredRestorePending() {
@@ -688,7 +754,11 @@ private final class MockLifecycleMnemonicStorage: MnemonicStorageProtocol {
     var mockMnemonic: String?
     var mockPendingMnemonic: String?
 
+    var onStoreMnemonic: ((String) -> Void)?
+    var onDeletePendingMnemonic: (() -> Void)?
+
     func storeMnemonic(_ mnemonic: String) throws {
+        onStoreMnemonic?(mnemonic)
         mockMnemonic = mnemonic
     }
 
@@ -728,6 +798,7 @@ private final class MockLifecycleMnemonicStorage: MnemonicStorageProtocol {
     }
 
     func deletePendingMnemonic() throws {
+        onDeletePendingMnemonic?()
         mockPendingMnemonic = nil
     }
 

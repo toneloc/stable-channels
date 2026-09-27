@@ -136,4 +136,62 @@ final class WalletKeychainServiceTests: XCTestCase {
         XCTAssertFalse(WalletKeychainError.keyNotFound.localizedDescription.isEmpty)
         XCTAssertFalse(WalletKeychainError.dataConversionFailed.localizedDescription.isEmpty)
     }
+
+    // MARK: - Pending Mnemonic Tests & Slot Isolation
+
+    func testStoreAndLoadPendingMnemonicRoundTrip() throws {
+        let service = makeService()
+        try service.storePendingMnemonic(testMnemonic)
+        let loaded = try service.loadPendingMnemonic()
+        XCTAssertEqual(loaded, testMnemonic)
+        XCTAssertTrue(try service.hasPendingMnemonic())
+
+        try service.deletePendingMnemonic()
+        XCTAssertFalse(try service.hasPendingMnemonic())
+        XCTAssertThrowsError(try service.loadPendingMnemonic())
+    }
+
+    func testActiveAndPendingSlotIsolation() throws {
+        let service = makeService()
+        try service.storeMnemonic(testMnemonic)
+        try service.storePendingMnemonic(otherMnemonic)
+
+        XCTAssertEqual(try service.loadMnemonic(), testMnemonic)
+        XCTAssertEqual(try service.loadPendingMnemonic(), otherMnemonic)
+
+        // Deleting pending slot must not affect active slot
+        try service.deletePendingMnemonic()
+        XCTAssertFalse(try service.hasPendingMnemonic())
+        XCTAssertTrue(try service.hasMnemonic())
+        XCTAssertEqual(try service.loadMnemonic(), testMnemonic)
+
+        // Storing pending slot again and deleting active must not affect pending
+        try service.storePendingMnemonic(otherMnemonic)
+        try service.deleteMnemonic()
+        XCTAssertFalse(try service.hasMnemonic())
+        XCTAssertTrue(try service.hasPendingMnemonic())
+        XCTAssertEqual(try service.loadPendingMnemonic(), otherMnemonic)
+
+        try service.deletePendingMnemonic()
+    }
+
+    func testStorePendingMnemonicTrimsWhitespace() throws {
+        let service = makeService()
+        try service.storePendingMnemonic(testMnemonic + "\n  \t")
+        let loaded = try service.loadPendingMnemonic()
+        XCTAssertEqual(loaded, testMnemonic)
+        try service.deletePendingMnemonic()
+    }
+
+    func testStorePendingEmptyStringThrows() {
+        let service = makeService()
+        XCTAssertThrowsError(try service.storePendingMnemonic("")) { error in
+            XCTAssertTrue(error is WalletKeychainError)
+        }
+    }
+
+    func testDeletePendingMnemonicIsIdempotent() {
+        let service = makeService()
+        XCTAssertNoThrow(try service.deletePendingMnemonic())
+    }
 }
