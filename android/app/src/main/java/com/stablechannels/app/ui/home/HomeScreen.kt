@@ -3,10 +3,8 @@ package com.stablechannels.app.ui.home
 import android.Manifest
 import android.content.Intent
 import android.os.Build
-import android.provider.Settings
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
@@ -15,10 +13,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.ArrowCircleDown
-import androidx.compose.material.icons.filled.ArrowCircleUp
 import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
@@ -26,10 +21,8 @@ import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
@@ -53,7 +46,6 @@ import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
-import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -174,109 +166,21 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         ) {
             // Notification warning
             if (!notificationsEnabled) {
-                Card(
-                    onClick = {
-                        val intent =
-                            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                            }
-                        context.startActivity(intent)
-                    },
-                    colors =
-                        CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.error),
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(
-                            Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onError,
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                "Notifications Disabled",
-                                color = MaterialTheme.colorScheme.onError,
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 14.sp,
-                            )
-                            Text(
-                                "Enable notifications for stability payments",
-                                color = MaterialTheme.colorScheme.onError.copy(alpha = 0.9f),
-                                fontSize = 12.sp,
-                            )
-                        }
-                        Icon(
-                            imageVector = Icons.Default.ChevronRight,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onError.copy(alpha = 0.7f),
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
-                }
+                HomeNotificationBanner()
                 Spacer(Modifier.height(8.dp))
             }
 
             Spacer(Modifier.height(24.dp))
 
             // Balance (tap to toggle USD/BTC)
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.clickable { showBTC = !showBTC }.paymentFlash(isFlashing),
-            ) {
-                Text(
-                    text = "Total Balance",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(4.dp))
-                if (showBTC) {
-                    RollingDigitText(
-                        text = totalSats.btcSpacedFormatted() + " BTC",
-                        style =
-                            MaterialTheme.typography.headlineLarge.copy(
-                                fontSize = 32.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            ),
-                    )
-                } else {
-                    if (btcPrice > 0) {
-                        RollingDigitText(
-                            text = totalUSD.usdFormatted(),
-                            style =
-                                MaterialTheme.typography.headlineLarge.copy(
-                                    fontSize = 36.sp,
-                                    fontWeight = FontWeight.Bold,
-                                ),
-                        )
-                    } else if (totalSats > 0) {
-                        Text(
-                            text = "Fetching price...",
-                            fontSize = 24.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    } else {
-                        Text(
-                            text = "$0.00",
-                            fontSize = 36.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                }
-                Text(
-                    text =
-                        if (showBTC) {
-                            if (btcPrice > 0) totalUSD.usdFormatted() else "—"
-                        } else totalSats.btcSpacedFormatted() + " BTC",
-                    fontSize = 14.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            HomeBalanceSection(
+                totalSats = totalSats,
+                totalUSD = totalUSD,
+                btcPrice = btcPrice,
+                showBTC = showBTC,
+                isFlashing = isFlashing,
+                onToggleShowBTC = { showBTC = !showBTC },
+            )
 
             Spacer(Modifier.height(8.dp))
 
@@ -685,55 +589,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
 
             // Action buttons
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                val sendColor = if (isSystemInDarkTheme()) Color(0xFF0A84FF) else Color(0xFF007AFF)
-                val receiveColor =
-                    if (isSystemInDarkTheme()) Color(0xFF30D158) else Color(0xFF34C759)
-                ActionButton("Send", Icons.Default.ArrowCircleUp, sendColor, Modifier.weight(1f)) {
-                    showSend = true
-                }
-                ActionButton(
-                    "Receive",
-                    Icons.Default.ArrowCircleDown,
-                    receiveColor,
-                    Modifier.weight(1f),
-                    pulse = !hasReadyChannel,
-                ) {
-                    showReceive = true
-                }
-            }
-
-            Spacer(Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                val buyColor = if (isSystemInDarkTheme()) Color(0xFFFF9F0A) else Color(0xFFFF9500)
-                val sellColor = if (isSystemInDarkTheme()) Color(0xFFBF5AF2) else Color(0xFFAF52DE)
-                ActionButton(
-                    "USD → BTC",
-                    Icons.Default.ArrowCircleUp,
-                    buyColor,
-                    Modifier.weight(1f),
-                    rotation = 45f,
-                    enabled = hasReadyChannel,
-                ) {
-                    showBuy = true
-                }
-                ActionButton(
-                    "BTC → USD",
-                    Icons.Default.ArrowCircleDown,
-                    sellColor,
-                    Modifier.weight(1f),
-                    rotation = -45f,
-                    enabled = hasReadyChannel,
-                ) {
-                    showSell = true
-                }
-            }
+            HomeActionButtons(
+                hasReadyChannel = hasReadyChannel,
+                onSend = { showSend = true },
+                onReceive = { showReceive = true },
+                onBuy = { showBuy = true },
+                onSell = { showSell = true },
+            )
 
             // Status capsule
             if (statusMessage.isNotEmpty()) {
@@ -846,83 +708,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             currentPrice = btcPrice,
             onDismiss = { selectedPayment = null },
         )
-    }
-}
-
-@Composable
-fun ActionButton(
-    title: String,
-    icon: ImageVector,
-    color: Color,
-    modifier: Modifier = Modifier,
-    rotation: Float = 0f,
-    pulse: Boolean = false,
-    enabled: Boolean = true,
-    onClick: () -> Unit,
-) {
-    Box(modifier = modifier.defaultMinSize(minHeight = 52.dp).clip(RoundedCornerShape(12.dp))) {
-        FilledTonalButton(
-            onClick = onClick,
-            modifier = Modifier.fillMaxWidth().defaultMinSize(minHeight = 52.dp),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-            shape = RoundedCornerShape(12.dp),
-            enabled = enabled,
-            colors =
-                ButtonDefaults.filledTonalButtonColors(
-                    containerColor = color.copy(alpha = if (isSystemInDarkTheme()) 0.1f else 0.15f),
-                    contentColor = color,
-                    disabledContainerColor = color.copy(alpha = 0.05f),
-                    disabledContentColor = color.copy(alpha = 0.3f),
-                ),
-        ) {
-            Icon(icon, contentDescription = title, modifier = Modifier.size(20.dp).rotate(rotation))
-            Spacer(Modifier.width(6.dp))
-            Text(title)
-        }
-        if (pulse) {
-            key(pulse) {
-                val transition = rememberInfiniteTransition(label = "btnPulse")
-                val alpha by
-                    transition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 0.2f,
-                        animationSpec =
-                            infiniteRepeatable(
-                                animation = tween(800, easing = EaseInOut),
-                                repeatMode = RepeatMode.Reverse,
-                            ),
-                        label = "btnAlpha",
-                    )
-                Box(
-                    Modifier.matchParentSize()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(color.copy(alpha = alpha))
-                )
-            }
-        }
-    }
-}
-
-/**
- * Pure formatting for pending on-chain amounts, extracted so it's directly unit-testable (Compose
- * UI has no unit-test harness here). Falls back to a BTC figure instead of dropping the amount when
- * the price feed is momentarily unavailable.
- */
-object PendingAmountFormatter {
-    fun amountText(amountSats: Long?, btcPrice: Double): String? {
-        if (amountSats == null) return null
-        val amountUSD =
-            if (btcPrice > 0) (amountSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
-        return amountUSD?.usdFormatted() ?: "${amountSats.btcSpacedFormatted()} BTC"
-    }
-
-    fun moveToLightningLabel(spendableSats: Long, btcPrice: Double): String {
-        return if (btcPrice > 0) {
-            val spendableUSD = (spendableSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-            "Move ${spendableUSD.usdFormatted()} to Lightning"
-        } else {
-            "Move ${spendableSats.btcSpacedFormatted()} BTC to Lightning"
-        }
     }
 }
 
