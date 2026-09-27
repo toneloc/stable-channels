@@ -20,7 +20,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +36,9 @@ import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.usdFormatted
 
+private const val PREFS_NAME = "app_prefs"
+private const val PREF_KEY_CHART_EXPANDED = "is_price_chart_expanded"
+
 @Composable
 fun PriceChart(
     appState: AppState,
@@ -46,10 +48,9 @@ fun PriceChart(
 ) {
     val context = LocalContext.current
     val haptic = LocalHapticFeedback.current
-    val prefs =
-        remember(context) { context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE) }
+    val prefs = remember(context) { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     var isExpanded by remember {
-        mutableStateOf(prefs.getBoolean("is_price_chart_expanded", true))
+        mutableStateOf(prefs.getBoolean(PREF_KEY_CHART_EXPANDED, true))
     }
     val chevronRotation by
         animateFloatAsState(
@@ -96,12 +97,7 @@ fun PriceChart(
         priceHistory = PriceChartAlgorithms.lttbDownsample(raw, 200)
     }
 
-    val livePriceText by
-        remember(currentPrice) {
-            derivedStateOf {
-                if (currentPrice > 0.0) currentPrice.usdFormatted() else "---"
-            }
-        }
+    val livePriceText = if (currentPrice > 0.0) currentPrice.usdFormatted() else "---"
 
     val isDark = LocalDarkTheme.current
     val surfaceFill = if (isDark) Color(0xFF1E1E1E) else Color(0xFFF5F5F7)
@@ -122,11 +118,13 @@ fun PriceChart(
                 selectedPoint = selectedPoint,
                 chartPeriod = chartPeriod,
                 livePriceText = livePriceText,
+                currentPrice = currentPrice,
+                priceHistory = priceHistory,
                 onToggleExpanded = {
-                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     val newExpanded = !isExpanded
                     isExpanded = newExpanded
-                    prefs.edit().putBoolean("is_price_chart_expanded", newExpanded).apply()
+                    prefs.edit().putBoolean(PREF_KEY_CHART_EXPANDED, newExpanded).apply()
                 },
             )
 

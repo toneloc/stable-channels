@@ -30,12 +30,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -69,7 +73,7 @@ fun ActionButton(
             label = "btnScale",
         )
 
-    val breathingProgress by
+    val breathingProgress =
         if (pulse) {
             val infiniteTransition = rememberInfiniteTransition(label = "pulseTransition")
             infiniteTransition.animateFloat(
@@ -83,7 +87,7 @@ fun ActionButton(
                 label = "pulseProgress",
             )
         } else {
-            remember { mutableFloatStateOf(0f) }
+            null
         }
 
     val surfaceFill =
@@ -93,37 +97,58 @@ fun ActionButton(
             if (isPressed) Color(0xFFE0E0E6) else Color(0xFFF5F5F7)
         }
 
-    val borderStroke =
-        if (pulse) {
-            val pulseAlpha =
-                if (isDark) 0.20f + (0.50f * breathingProgress)
-                else 0.30f + (0.55f * breathingProgress)
-            color.copy(alpha = pulseAlpha)
-        } else {
-            if (isDark) Color.White.copy(alpha = if (isPressed) 0.04f else 0.08f)
-            else Color.Black.copy(alpha = if (isPressed) 0.15f else 0.08f)
-        }
-
-    val borderWidth = if (pulse) 1.5.dp else 1.dp
-    val elevation = if (pulse && breathingProgress > 0.4f) 3.dp else if (isDark) 0.dp else 1.dp
+    val staticBorderColor =
+        if (isDark) Color.White.copy(alpha = if (isPressed) 0.04f else 0.08f)
+        else Color.Black.copy(alpha = if (isPressed) 0.15f else 0.08f)
 
     Surface(
         onClick = {
-            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             onClick()
         },
         enabled = enabled,
         shape = RoundedCornerShape(14.dp),
         color = surfaceFill,
-        border = BorderStroke(borderWidth, borderStroke),
-        shadowElevation = elevation,
+        border = if (!pulse) BorderStroke(1.dp, staticBorderColor) else null,
+        shadowElevation = if (isDark) 0.dp else 1.dp,
         interactionSource = interactionSource,
         modifier =
-            modifier.height(48.dp).graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                if (!enabled) alpha = 0.45f
-            },
+            modifier
+                .height(48.dp)
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    if (!enabled) alpha = 0.45f
+                }
+                .then(
+                    if (pulse && breathingProgress != null) {
+                        Modifier.drawWithContent {
+                            drawContent()
+                            val progress = breathingProgress.value
+                            val pulseAlpha =
+                                if (isDark) 0.20f + (0.50f * progress)
+                                else 0.30f + (0.55f * progress)
+                            val strokeWidthPx = 1.5.dp.toPx()
+                            val halfStroke = strokeWidthPx / 2f
+                            val cornerRadiusPx = 14.dp.toPx()
+                            drawRoundRect(
+                                color = color.copy(alpha = pulseAlpha),
+                                topLeft = Offset(halfStroke, halfStroke),
+                                size =
+                                    Size(
+                                        size.width - strokeWidthPx,
+                                        size.height - strokeWidthPx,
+                                    ),
+                                cornerRadius =
+                                    CornerRadius(
+                                        cornerRadiusPx - halfStroke,
+                                        cornerRadiusPx - halfStroke,
+                                    ),
+                                style = Stroke(width = strokeWidthPx),
+                            )
+                        }
+                    } else Modifier
+                ),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth().height(48.dp).padding(horizontal = 14.dp),

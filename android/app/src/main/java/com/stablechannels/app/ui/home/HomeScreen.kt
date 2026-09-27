@@ -562,12 +562,16 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             }
 
+            Spacer(Modifier.height(16.dp))
+
             // Price chart
             PriceChart(
                 appState = appState,
                 databaseService = appState.databaseService,
                 currentPrice = btcPrice,
             )
+
+            Spacer(Modifier.height(16.dp))
 
             // Hint text when no channel
             if (!hasReadyChannel) {
@@ -576,7 +580,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(8.dp))
             }
 
             // Action buttons
@@ -771,8 +775,8 @@ private fun PendingRow(
             IconButton(
                 onClick = {
                     val intent =
-                        android.content.Intent(
-                            android.content.Intent.ACTION_VIEW,
+                        Intent(
+                            Intent.ACTION_VIEW,
                             android.net.Uri.parse(
                                 "https://mempool.space/tx/${txid.substringBefore(":")}"
                             ),

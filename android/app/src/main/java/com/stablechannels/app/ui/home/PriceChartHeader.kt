@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.models.PriceRecord
+import com.stablechannels.app.util.percentFormatted
 import com.stablechannels.app.util.usdFormatted
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -38,6 +40,8 @@ fun PriceChartHeader(
     selectedPoint: PriceRecord?,
     chartPeriod: ChartPeriod,
     livePriceText: String,
+    currentPrice: Double,
+    priceHistory: List<PriceRecord>,
     onToggleExpanded: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -64,7 +68,7 @@ fun PriceChartHeader(
 
         Spacer(modifier = Modifier.width(10.dp))
 
-        // Title and optional scrubber timestamp
+        // Title and period label / scrubber timestamp (reserved 2 lines)
         Column {
             Text(
                 text = "BTC Price",
@@ -72,31 +76,53 @@ fun PriceChartHeader(
                 fontWeight = FontWeight.Medium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (selectedPoint != null) {
-                val dateFmt =
-                    if (chartPeriod == ChartPeriod.DAY_1) {
-                        SimpleDateFormat("h:mm a", Locale.US)
-                    } else {
-                        SimpleDateFormat("MMM d, yyyy", Locale.US)
-                    }
-                Text(
-                    dateFmt.format(Date(selectedPoint.timestamp * 1000)),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            val subText =
+                if (selectedPoint != null) {
+                    val dateFmt =
+                        if (chartPeriod == ChartPeriod.DAY_1) {
+                            SimpleDateFormat("h:mm a", Locale.US)
+                        } else {
+                            SimpleDateFormat("MMM d, yyyy", Locale.US)
+                        }
+                    dateFmt.format(Date(selectedPoint.timestamp * 1000))
+                } else {
+                    chartPeriod.label
+                }
+            Text(
+                text = subText,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // Price display (pushed to the far right)
-        val displayPrice = selectedPoint?.price?.usdFormatted() ?: livePriceText
-        Text(
-            text = displayPrice,
-            fontSize = 17.sp,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface,
-        )
+        // Price display and percentage change (reserved 2 lines)
+        Column(horizontalAlignment = Alignment.End) {
+            val displayPrice = selectedPoint?.price?.usdFormatted() ?: livePriceText
+            Text(
+                text = displayPrice,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (priceHistory.size >= 2) {
+                val activePrice = selectedPoint?.price ?: currentPrice
+                val firstPrice = priceHistory.first().price
+                val isUp = activePrice >= firstPrice
+                val changeColor = if (isUp) Color(0xFF10B981) else Color(0xFFEF4444)
+                val changePercent =
+                    if (firstPrice > 0) ((activePrice - firstPrice) / firstPrice) * 100.0 else 0.0
+                Text(
+                    text = changePercent.percentFormatted(),
+                    color = changeColor,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 12.sp,
+                )
+            } else {
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+        }
 
         Spacer(modifier = Modifier.width(10.dp))
 

@@ -9,7 +9,6 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.SouthEast
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -48,8 +47,6 @@ fun HomeActionButtons(
                 title = "Receive",
                 icon = Icons.Default.ArrowDownward,
                 color = ReceiveGreen,
-                textColor =
-                    if (!hasReadyChannel) ReceiveGreen else MaterialTheme.colorScheme.onSurface,
                 pulse = !hasReadyChannel,
                 modifier = Modifier.weight(1f),
                 onClick = onReceive,

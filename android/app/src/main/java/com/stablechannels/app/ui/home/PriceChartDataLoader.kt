@@ -37,6 +37,12 @@ object PriceChartDataLoader {
                     }
                     .sortedBy { it.timestamp }
 
+            appState.cachedChartHourly = hourly
+            appState.cachedChartDaily = daily
+            if (hourly.isNotEmpty() || daily.isNotEmpty()) {
+                appState.chartDataLoaded = true
+            }
+
             hourly to daily
         }
 }

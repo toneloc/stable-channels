@@ -67,9 +67,26 @@ fun PriceChartGraph(
                 Modifier.weight(1f)
                     .height(160.dp)
                     .pointerInput(priceHistory) {
+                        var lastIndex: Int? = null
                         detectDragGestures(
-                            onDragEnd = { onPointSelected(null) },
-                            onDragCancel = { onPointSelected(null) },
+                            onDragStart = { offset ->
+                                val w = size.width.toFloat()
+                                val index =
+                                    ((offset.x / w) * (priceHistory.size - 1))
+                                        .toInt()
+                                        .coerceIn(0, priceHistory.size - 1)
+                                lastIndex = index
+                                onPointSelected(priceHistory[index])
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                            },
+                            onDragEnd = {
+                                lastIndex = null
+                                onPointSelected(null)
+                            },
+                            onDragCancel = {
+                                lastIndex = null
+                                onPointSelected(null)
+                            },
                             onDrag = { change, _ ->
                                 change.consume()
                                 val x = change.position.x
@@ -78,8 +95,9 @@ fun PriceChartGraph(
                                     ((x / w) * (priceHistory.size - 1))
                                         .toInt()
                                         .coerceIn(0, priceHistory.size - 1)
-                                val record = priceHistory[index]
-                                if (selectedPoint?.id != record.id) {
+                                if (lastIndex != index) {
+                                    lastIndex = index
+                                    val record = priceHistory[index]
                                     onPointSelected(record)
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
@@ -96,10 +114,8 @@ fun PriceChartGraph(
                                         .toInt()
                                         .coerceIn(0, priceHistory.size - 1)
                                 val record = priceHistory[index]
-                                if (selectedPoint?.id != record.id) {
-                                    onPointSelected(record)
-                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                }
+                                onPointSelected(record)
+                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 tryAwaitRelease()
                                 onPointSelected(null)
                             }
