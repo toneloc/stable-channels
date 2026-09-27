@@ -290,8 +290,33 @@ final class WalletLifecycleManager {
         // that merely could not be read would destroy the wrong identity.
         let hasActive = try keychain.hasMnemonic()
         if hasActive {
-            // The active seed survived, so the staged restore never reached the
-            // wipe — the pending copy is abandoned staging. Remove it.
+            // If the active seed already matches pending:
+            if let active = try? keychain.loadMnemonic(), active == pending {
+                let legacyArtifacts = ["keys_seed", "seed_phrase", "ldk_node_data.sqlite"]
+                    .filter { name in
+                        FileManager.default.fileExists(
+                            atPath: userDataDir.appendingPathComponent(name).path
+                        )
+                    }
+                if legacyArtifacts.isEmpty {
+                    // Promotion was committed to the active slot before process termination,
+                    // but pending deletion was interrupted. Confirm recovery and clean up pending.
+                    restoreStateStore.setRecoveredRestorePending(true)
+                    try? keychain.deletePendingMnemonic()
+                    AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
+                    return true
+                } else {
+                    // Legacy artifacts remain: fail closed, do not delete evidence.
+                    AuditService.log(
+                        "RESTORE_MARKERLESS_PENDING_BLOCKED_BY_LEGACY",
+                        data: ["artifacts": legacyArtifacts.joined(separator: ",")]
+                    )
+                    return false
+                }
+            }
+
+            // The active seed survived and differs from pending, so the staged restore never
+            // reached the wipe — the pending copy is abandoned staging. Remove it.
             AuditService.log("RESTORE_MARKERLESS_PENDING_CLEARED", data: [:])
             try? keychain.deletePendingMnemonic()
             return false
@@ -320,12 +345,12 @@ final class WalletLifecycleManager {
         }
 
         // No active seed, no legacy artifacts, but a verified pending seed exists:
-        // the wipe ran and the marker was lost. Promote the pending seed rather
-        // than letting startup read this as a brand-new wallet and orphan the
-        // restore.
+        // the wipe ran and the marker was lost. Record recovery intent BEFORE
+        // committing the active slot so a crash at the write boundary leaves
+        // the recovery flag set.
+        restoreStateStore.setRecoveredRestorePending(true)
         AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
         try keychain.storeMnemonic(pending)
-        restoreStateStore.setRecoveredRestorePending(true)
         try? keychain.deletePendingMnemonic()
         return true
     }
