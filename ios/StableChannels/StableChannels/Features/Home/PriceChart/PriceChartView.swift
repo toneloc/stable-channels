@@ -4,11 +4,11 @@ struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = true
+    @AppStorage("selected_price_chart_period") private var chartPeriod: ChartPeriod = .day
     @State private var priceHistory: [PriceRecord] = []
     @State private var chartMin: Double = 0
     @State private var chartMax: Double = 100
-    @State private var chartPeriod: ChartPeriod = .all
-    @State private var displayedPeriod: ChartPeriod = .all
+    @State private var displayedPeriod: ChartPeriod = .day
     @State private var selectedPricePoint: PriceRecord?
     @State private var loadTask: Task<Void, Never>?
     @State private var isHistoryDirty = false
@@ -110,8 +110,7 @@ struct PriceChartView: View {
 
                     if let pct = percentageChange {
                         let isUp = pct >= 0
-                        let sign = isUp ? "+" : ""
-                        Text("\(sign)\(String(format: "%.2f", pct))%")
+                        Text(pct.percentFormatted)
                             .font(.caption2.bold().monospacedDigit())
                             .foregroundStyle(
                                 isUp
