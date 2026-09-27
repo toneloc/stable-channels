@@ -563,13 +563,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
 
             // Price chart
-            if (btcPrice > 0) {
-                PriceChart(
-                    appState = appState,
-                    databaseService = appState.databaseService,
-                    currentPrice = btcPrice,
-                )
-            }
+            PriceChart(
+                appState = appState,
+                databaseService = appState.databaseService,
+                currentPrice = btcPrice,
+            )
 
             // Hint text when no channel
             if (!hasReadyChannel) {
