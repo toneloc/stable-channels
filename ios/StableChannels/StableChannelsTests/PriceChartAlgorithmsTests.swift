@@ -198,4 +198,35 @@ final class PriceChartAlgorithmsTests: XCTestCase {
         XCTAssertNil(PriceChartAlgorithms.percentageChange(first: .nan, current: 50_000))
         XCTAssertNil(PriceChartAlgorithms.percentageChange(first: 50_000, current: .infinity))
     }
+
+    func testChartPeriodPropertiesAndPersistence() {
+        // Verify all periods have non-empty raw values and valid day spans
+        for period in ChartPeriod.allCases {
+            XCTAssertFalse(period.rawValue.isEmpty)
+            XCTAssertGreaterThan(period.days, 0)
+            XCTAssertFalse(period.label.isEmpty)
+        }
+
+        // Test 5Y (5 years) specifically
+        let fiveYear = ChartPeriod.fiveYear
+        XCTAssertEqual(fiveYear.rawValue, "5Y")
+        XCTAssertEqual(fiveYear.days, 1825)
+        XCTAssertFalse(fiveYear.usesHourly)
+        XCTAssertEqual(fiveYear.label, "Past 5 Years")
+
+        // Test UserDefaults persistence round-trip (as used by @AppStorage)
+        let testKey = "test_selected_price_chart_period"
+        UserDefaults.standard.set(fiveYear.rawValue, forKey: testKey)
+        let storedRaw = UserDefaults.standard.string(forKey: testKey)
+        XCTAssertEqual(storedRaw, "5Y")
+        let restored = storedRaw.flatMap(ChartPeriod.init(rawValue:))
+        XCTAssertEqual(restored, .fiveYear)
+
+        // Verify fallback for unrecognized raw value
+        let invalid = "UNKNOWN"
+        let fallback = ChartPeriod(rawValue: invalid) ?? .day
+        XCTAssertEqual(fallback, .day)
+
+        UserDefaults.standard.removeObject(forKey: testKey)
+    }
 }
