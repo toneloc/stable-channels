@@ -1,8 +1,8 @@
 package com.stablechannels.app.ui.home
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.unit.dp
@@ -64,63 +65,41 @@ fun PriceChartGraph(
     Row(modifier = modifier.fillMaxWidth()) {
         Canvas(
             modifier =
-                Modifier.weight(1f)
-                    .height(160.dp)
-                    .pointerInput(priceHistory) {
-                        var lastIndex: Int? = null
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                val w = size.width.toFloat()
-                                val index =
-                                    ((offset.x / w) * (priceHistory.size - 1))
-                                        .toInt()
-                                        .coerceIn(0, priceHistory.size - 1)
-                                lastIndex = index
-                                onPointSelected(priceHistory[index])
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                            },
-                            onDragEnd = {
-                                lastIndex = null
-                                onPointSelected(null)
-                            },
-                            onDragCancel = {
-                                lastIndex = null
-                                onPointSelected(null)
-                            },
-                            onDrag = { change, _ ->
-                                change.consume()
+                Modifier.weight(1f).height(160.dp).pointerInput(priceHistory) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val w = size.width.toFloat()
+                        var lastIndex =
+                            ((down.position.x / w) * (priceHistory.size - 1))
+                                .toInt()
+                                .coerceIn(0, priceHistory.size - 1)
+                        onPointSelected(priceHistory[lastIndex])
+
+                        val pointerId = down.id
+                        try {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change =
+                                    event.changes.firstOrNull { it.id == pointerId } ?: break
+                                if (change.changedToUpIgnoreConsumed()) break
+
                                 val x = change.position.x
-                                val w = size.width.toFloat()
                                 val index =
                                     ((x / w) * (priceHistory.size - 1))
                                         .toInt()
                                         .coerceIn(0, priceHistory.size - 1)
                                 if (lastIndex != index) {
                                     lastIndex = index
-                                    val record = priceHistory[index]
-                                    onPointSelected(record)
+                                    onPointSelected(priceHistory[index])
                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                 }
-                            },
-                        )
-                    }
-                    .pointerInput(priceHistory) {
-                        detectTapGestures(
-                            onPress = {
-                                val x = it.x
-                                val w = size.width.toFloat()
-                                val index =
-                                    ((x / w) * (priceHistory.size - 1))
-                                        .toInt()
-                                        .coerceIn(0, priceHistory.size - 1)
-                                val record = priceHistory[index]
-                                onPointSelected(record)
-                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                                tryAwaitRelease()
-                                onPointSelected(null)
+                                change.consume()
                             }
-                        )
+                        } finally {
+                            onPointSelected(null)
+                        }
                     }
+                }
         ) {
             val w = size.width
             val h = size.height

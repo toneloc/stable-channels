@@ -56,7 +56,6 @@ fun ActionButton(
     icon: ImageVector,
     color: Color,
     modifier: Modifier = Modifier,
-    textColor: Color = MaterialTheme.colorScheme.onSurface,
     pulse: Boolean = false,
     enabled: Boolean = true,
     onClick: () -> Unit,
@@ -171,7 +170,7 @@ fun ActionButton(
                 text = title,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = textColor,
+                color = MaterialTheme.colorScheme.onSurface,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
