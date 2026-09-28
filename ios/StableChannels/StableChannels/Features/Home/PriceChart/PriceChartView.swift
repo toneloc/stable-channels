@@ -30,6 +30,7 @@ struct PriceChartView: View {
         .shadow(color: cardShadowColor, radius: 8, x: 0, y: 2)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onAppear {
+            displayedPeriod = chartPeriod
             if isExpanded {
                 loadHistory(for: chartPeriod, force: isHistoryDirty)
                 isHistoryDirty = false
@@ -65,8 +66,7 @@ struct PriceChartView: View {
 
     private var percentageChange: Double? {
         guard priceHistory.count >= 2, let first = priceHistory.first?.price else { return nil }
-        let current = selectedPricePoint?
-            .price ?? (appState.btcPrice > 0 ? appState.btcPrice : priceHistory.last?.price ?? first)
+        let current = selectedPricePoint?.price ?? priceHistory.last?.price ?? first
         return PriceChartAlgorithms.percentageChange(first: first, current: current)
     }
 
@@ -112,11 +112,7 @@ struct PriceChartView: View {
                         let isUp = pct >= 0
                         Text(pct.percentFormatted)
                             .font(.caption2.bold().monospacedDigit())
-                            .foregroundStyle(
-                                isUp
-                                    ? Color(red: 0.06, green: 0.73, blue: 0.51)
-                                    : Color(red: 0.94, green: 0.27, blue: 0.27)
-                            )
+                            .foregroundStyle(isUp ? Color.trendPositive : Color.trendNegative)
                     } else {
                         Text(" ")
                             .font(.caption2.bold())

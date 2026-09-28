@@ -90,9 +90,6 @@ struct HomeView: View {
         }
         .onChange(of: appState.paymentFlash) {
             if appState.paymentFlash {
-                if showReceiveSheet {
-                    showReceiveSheet = false
-                }
                 withAnimation(.easeOut(duration: 0.3)) { flashScale = 1.08 }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                     withAnimation(.easeInOut(duration: 0.4)) { flashScale = 1.0 }
@@ -135,6 +132,7 @@ struct HomeView: View {
                         Text(String(localized: "label_usd", defaultValue: "USD"))
                             .font(.caption.bold())
                     }
+                    .foregroundStyle(.green)
                     RollingDigitLabel(
                         text: showBTC ? "\(allocation.stableSats.btcSpacedFormatted) BTC" : appState.stableUSD
                             .usdFormatted,

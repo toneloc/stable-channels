@@ -31,9 +31,7 @@ struct PriceChartGraphView: View {
     }
 
     private var trendColor: Color {
-        isUp
-            ? Color(red: 0.06, green: 0.73, blue: 0.51)
-            : Color(red: 0.94, green: 0.27, blue: 0.27)
+        isUp ? .trendPositive : .trendNegative
     }
 
     private var chartContent: some View {

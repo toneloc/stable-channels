@@ -63,7 +63,7 @@ struct LivePriceLabel: View {
                 enableTickHighlight: true
             )
         } else {
-            Text("---")
+            Text(verbatim: "---")
                 .font(.headline.bold().monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -103,18 +103,18 @@ private struct LivePriceLabelPreviewContainer: View {
 
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
-                    Button("+$1") { previewPrice += 1 }
-                    Button("-$1") { previewPrice = max(0, previewPrice - 1) }
+                    Button { previewPrice += 1 } label: { Text(verbatim: "+$1") }
+                    Button { previewPrice = max(0, previewPrice - 1) } label: { Text(verbatim: "-$1") }
                 }
 
                 HStack(spacing: 10) {
-                    Button("+$250") { previewPrice += 250 }
-                    Button("-$500") { previewPrice = max(0, previewPrice - 500) }
+                    Button { previewPrice += 250 } label: { Text(verbatim: "+$250") }
+                    Button { previewPrice = max(0, previewPrice - 500) } label: { Text(verbatim: "-$500") }
                 }
 
                 HStack(spacing: 10) {
-                    Button("$100,000") { previewPrice = 100_000.50 }
-                    Button("$0") { previewPrice = 0 }
+                    Button { previewPrice = 100_000.50 } label: { Text(verbatim: "$100,000") }
+                    Button { previewPrice = 0 } label: { Text(verbatim: "$0") }
                 }
             }
             .buttonStyle(.bordered)
