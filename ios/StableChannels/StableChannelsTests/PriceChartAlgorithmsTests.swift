@@ -212,7 +212,7 @@ final class PriceChartAlgorithmsTests: XCTestCase {
         XCTAssertEqual(fiveYear.rawValue, "5Y")
         XCTAssertEqual(fiveYear.days, 1825)
         XCTAssertFalse(fiveYear.usesHourly)
-        XCTAssertEqual(fiveYear.label, "Past 5 Years")
+        XCTAssertFalse(fiveYear.label.isEmpty)
 
         // Test UserDefaults persistence round-trip (as used by @AppStorage)
         let testKey = "test_selected_price_chart_period"

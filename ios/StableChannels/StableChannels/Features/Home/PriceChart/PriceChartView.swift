@@ -64,12 +64,6 @@ struct PriceChartView: View {
 
     // MARK: - Header
 
-    private var percentageChange: Double? {
-        guard priceHistory.count >= 2, let first = priceHistory.first?.price else { return nil }
-        let current = selectedPricePoint?.price ?? priceHistory.last?.price ?? first
-        return PriceChartAlgorithms.percentageChange(first: first, current: current)
-    }
-
     private var headerButton: some View {
         Button {
             impactFeedback.impactOccurred()
@@ -108,16 +102,10 @@ struct PriceChartView: View {
                         LivePriceLabel()
                     }
 
-                    if let pct = percentageChange {
-                        let isUp = pct >= 0
-                        Text(pct.percentFormatted)
-                            .font(.caption2.bold().monospacedDigit())
-                            .foregroundStyle(isUp ? Color.trendPositive : Color.trendNegative)
-                    } else {
-                        Text(" ")
-                            .font(.caption2.bold())
-                            .opacity(0)
-                    }
+                    LivePricePercentageLabel(
+                        firstPrice: priceHistory.count >= 2 ? priceHistory.first?.price : nil,
+                        selectedPrice: selectedPricePoint?.price
+                    )
                 }
 
                 Image(systemName: "chevron.right")

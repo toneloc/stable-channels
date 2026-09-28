@@ -70,6 +70,32 @@ struct LivePriceLabel: View {
     }
 }
 
+struct LivePricePercentageLabel: View {
+    @Environment(AppState.self) private var appState: AppState?
+    let firstPrice: Double?
+    var selectedPrice: Double?
+
+    private var percentageChange: Double? {
+        guard let first = firstPrice, first > 0 else { return nil }
+        let current = selectedPrice ?? (appState?.btcPrice ?? 0)
+        guard current > 0 else { return nil }
+        return PriceChartAlgorithms.percentageChange(first: first, current: current)
+    }
+
+    var body: some View {
+        if let pct = percentageChange {
+            let isUp = pct >= 0
+            Text(pct.percentFormatted)
+                .font(.caption2.bold().monospacedDigit())
+                .foregroundStyle(isUp ? Color.trendPositive : Color.trendNegative)
+        } else {
+            Text(verbatim: " ")
+                .font(.caption2.bold())
+                .opacity(0)
+        }
+    }
+}
+
 // MARK: - Previews
 
 #Preview {

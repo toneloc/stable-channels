@@ -24,9 +24,12 @@ struct PriceChartGraphView: View {
         }
     }
 
+    @Environment(AppState.self) private var appState: AppState?
+
     private var isUp: Bool {
         guard let first = priceHistory.first?.price else { return true }
-        let current = selectedPricePoint?.price ?? priceHistory.last?.price ?? first
+        let livePrice = (appState?.btcPrice ?? 0) > 0 ? appState?.btcPrice : nil
+        let current = selectedPricePoint?.price ?? livePrice ?? priceHistory.last?.price ?? first
         return current >= first
     }
 

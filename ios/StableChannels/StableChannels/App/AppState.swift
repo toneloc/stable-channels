@@ -3923,6 +3923,11 @@ class AppState {
         guard price > 0 else { return }
         do {
             try databaseService?.priceRepo.recordPrice(price, source: "median")
+            Task { [weak self] in
+                guard let self else { return }
+                await priceHistoryProvider.invalidateCache()
+                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+            }
         } catch {
             // Price recording is best-effort, don't log every failure
         }
