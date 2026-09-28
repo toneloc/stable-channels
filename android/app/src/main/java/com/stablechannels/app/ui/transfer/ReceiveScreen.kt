@@ -1,7 +1,6 @@
 package com.stablechannels.app.ui.transfer
 
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,6 +27,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -79,7 +79,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 colors =
                     ButtonDefaults.textButtonColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (LocalDarkTheme.current) {
                                 MaterialTheme.colorScheme.surfaceVariant
                             } else {
                                 Color(0xFFE5E5EA)
@@ -103,7 +103,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 colors =
                     ButtonDefaults.textButtonColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (LocalDarkTheme.current) {
                                 MaterialTheme.colorScheme.surfaceVariant
                             } else {
                                 Color(0xFFE5E5EA)

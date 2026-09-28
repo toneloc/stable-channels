@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.settings
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -19,6 +18,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.StabilityService
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
@@ -590,7 +590,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         ModalBottomSheet(
             onDismissRequest = { showOnchainSend = false },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+            containerColor = if (LocalDarkTheme.current) Color.Black else Color.White,
         ) {
             OnChainSendScreen(appState) { showOnchainSend = false }
         }

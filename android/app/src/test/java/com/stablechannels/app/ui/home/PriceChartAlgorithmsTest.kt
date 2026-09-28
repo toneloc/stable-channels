@@ -104,4 +104,75 @@ class PriceChartAlgorithmsTest {
         assertEquals("$100K", PriceChartAlgorithms.formatYAxis(100000.0))
         assertEquals("$999", PriceChartAlgorithms.formatYAxis(999.0))
     }
+
+    @Test
+    fun testSliceHistoryHourlyUsesHourlyWhenSufficient() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+                makeRecord(300, 52000.0),
+            )
+        val daily =
+            listOf(
+                makeRecord(100, 49000.0),
+                makeRecord(200, 49500.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.DAY_1, hourly, daily, cutoffSec = 150)
+        assertEquals(2, result.size)
+        assertEquals(200L, result[0].timestamp)
+        assertEquals(300L, result[1].timestamp)
+        assertEquals(51000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryHourlyFallsBackToDailyWhenSparse() {
+        val hourly = listOf(makeRecord(300, 52000.0))
+        val daily =
+            listOf(
+                makeRecord(100, 49000.0),
+                makeRecord(200, 49500.0),
+                makeRecord(300, 50000.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.DAY_1, hourly, daily, cutoffSec = 50)
+        assertEquals(3, result.size)
+        assertEquals(49000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryDailyUsesDailyWhenSufficient() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+            )
+        val daily =
+            listOf(
+                makeRecord(100, 60000.0),
+                makeRecord(200, 61000.0),
+                makeRecord(300, 62000.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.MONTH_1, hourly, daily, cutoffSec = 150)
+        assertEquals(2, result.size)
+        assertEquals(200L, result[0].timestamp)
+        assertEquals(61000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryDailyFallsBackToHourlyWhenSparse() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+                makeRecord(300, 52000.0),
+            )
+        val daily = listOf(makeRecord(300, 62000.0))
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.MONTH_1, hourly, daily, cutoffSec = 50)
+        assertEquals(3, result.size)
+        assertEquals(50000.0, result[0].price, 0.001)
+    }
 }

@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.trade
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -26,6 +25,7 @@ import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
 import java.util.Locale
@@ -77,7 +77,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                     colors =
                         ButtonDefaults.textButtonColors(
                             containerColor =
-                                if (isSystemInDarkTheme()) {
+                                if (LocalDarkTheme.current) {
                                     MaterialTheme.colorScheme.surfaceVariant
                                 } else {
                                     Color(0xFFE5E5EA)
@@ -119,7 +119,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         colors =
                             ButtonDefaults.textButtonColors(
                                 containerColor =
-                                    if (isSystemInDarkTheme()) {
+                                    if (LocalDarkTheme.current) {
                                         MaterialTheme.colorScheme.surfaceVariant
                                     } else {
                                         androidx.compose.ui.graphics.Color(0xFFE5E5EA)
