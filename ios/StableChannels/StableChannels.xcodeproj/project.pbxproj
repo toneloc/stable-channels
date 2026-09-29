@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
 		02EB2F2AFFACF5F588CF7912 /* CodeScanner in Frameworks */ = {isa = PBXBuildFile; productRef = C5B41595048B8AA9D3617B42 /* CodeScanner */; };
 		05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446A88D1E083A380EDC5436 /* PriceService.swift */; };
 		06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B785A33E02FD999CB62019AD /* StableChannelsApp.swift */; };
@@ -193,6 +192,7 @@
 		D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */; };
 		D20000000000000000000011 /* Bech32.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000010 /* Bech32.swift */; };
 		D20000000000000000000019 /* LNURLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000018 /* LNURLService.swift */; };
+		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
 		D20000000000000000000037 /* Bech32Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000036 /* Bech32Tests.swift */; };
 		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
@@ -234,7 +234,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
 		0446A88D1E083A380EDC5436 /* PriceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceService.swift; sourceTree = "<group>"; };
 		07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		134775C01F3C51CA39B262FC /* LSPSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPSettingsView.swift; sourceTree = "<group>"; };
@@ -414,6 +413,7 @@
 		D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupFailoverTests.swift; sourceTree = "<group>"; };
 		D20000000000000000000010 /* Bech32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32.swift; sourceTree = "<group>"; };
 		D20000000000000000000018 /* LNURLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLService.swift; sourceTree = "<group>"; };
+		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
 		D20000000000000000000036 /* Bech32Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32Tests.swift; sourceTree = "<group>"; };
 		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };

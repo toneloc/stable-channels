@@ -232,8 +232,18 @@ enum Bech32 {
             throw Error.invalidUtf8String
         }
 
-        guard url.scheme?.lowercased() == "https" else {
-            throw Error.insecureClearnetScheme
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else {
+            throw Error.invalidUtf8String
+        }
+
+        if host.hasSuffix(".onion") {
+            guard scheme == "http" || scheme == "https" else {
+                throw Error.insecureClearnetScheme
+            }
+        } else {
+            guard scheme == "https" else {
+                throw Error.insecureClearnetScheme
+            }
         }
 
         return url

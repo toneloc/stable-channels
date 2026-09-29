@@ -58,15 +58,13 @@ final class LNURLService: LNURLServiceProtocol {
             guard domain.contains("."), !domain.hasPrefix("."), !domain.hasSuffix(".") else {
                 throw LNURLError.invalidTarget
             }
-            guard !domain.hasSuffix(".onion") else {
-                throw LNURLError.insecureEndpoint
-            }
             let allowedDomainChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
             guard domain.unicodeScalars.allSatisfy({ allowedDomainChars.contains($0) }) else {
                 throw LNURLError.invalidTarget
             }
 
-            guard let url = URL(string: "https://\(domain)/.well-known/lnurlp/\(username)") else {
+            let scheme = domain.hasSuffix(".onion") ? "http" : "https"
+            guard let url = URL(string: "\(scheme)://\(domain)/.well-known/lnurlp/\(username)") else {
                 throw LNURLError.invalidTarget
             }
             return url
@@ -77,16 +75,27 @@ final class LNURLService: LNURLServiceProtocol {
             return try Bech32.decodeLNURL(clean)
         }
 
-        // Direct HTTPS URL
-        if let url = URL(string: clean), url.scheme?.lowercased() == "https" {
+        // Direct URL (HTTPS for clearnet, HTTP/HTTPS for Tor .onion)
+        if let url = URL(string: clean), Self.isSecureEndpoint(url: url) {
             return url
         }
 
         throw LNURLError.invalidTarget
     }
 
+    /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
+    static func isSecureEndpoint(url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else {
+            return false
+        }
+        if host.hasSuffix(".onion") {
+            return scheme == "http" || scheme == "https"
+        }
+        return scheme == "https"
+    }
+
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams {
-        guard url.scheme?.lowercased() == "https" else {
+        guard Self.isSecureEndpoint(url: url) else {
             throw LNURLError.insecureEndpoint
         }
 
@@ -106,13 +115,13 @@ final class LNURLService: LNURLServiceProtocol {
 
         guard let httpResponse = response as? HTTPURLResponse,
               let finalURL = httpResponse.url,
-              finalURL.scheme?.lowercased() == "https",
+              Self.isSecureEndpoint(url: finalURL),
               (200...299).contains(httpResponse.statusCode) else {
             if let http = response as? HTTPURLResponse, http.statusCode == 404 {
                 throw LNURLError.errorResponse(reason: "Recipient address not found.")
             }
             if let http = response as? HTTPURLResponse, let finalURL = http.url,
-               finalURL.scheme?.lowercased() != "https" {
+               !Self.isSecureEndpoint(url: finalURL) {
                 throw LNURLError.insecureEndpoint
             }
             throw LNURLError.invalidResponse
@@ -146,8 +155,9 @@ final class LNURLService: LNURLServiceProtocol {
         expectedMetadataHashHex: String
     ) async throws -> LNURLPayInvoiceResponse {
         // Per LUD-06, callback URLs are supplied by the LNURL server and cross-origin endpoints
-        // are allowed by design. However, HTTPS transport is strictly mandated and redirect downgrades are blocked.
-        guard let initialUrl = URL(string: callback), initialUrl.scheme?.lowercased() == "https" else {
+        // are allowed by design. However, HTTPS transport is strictly mandated on clearnet (HTTP permitted only for
+        // .onion).
+        guard let initialUrl = URL(string: callback), Self.isSecureEndpoint(url: initialUrl) else {
             throw LNURLError.insecureEndpoint
         }
 
@@ -185,10 +195,10 @@ final class LNURLService: LNURLServiceProtocol {
 
         guard let httpResponse = response as? HTTPURLResponse,
               let finalURL = httpResponse.url,
-              finalURL.scheme?.lowercased() == "https",
+              Self.isSecureEndpoint(url: finalURL),
               (200...299).contains(httpResponse.statusCode) else {
             if let http = response as? HTTPURLResponse, let finalURL = http.url,
-               finalURL.scheme?.lowercased() != "https" {
+               !Self.isSecureEndpoint(url: finalURL) {
                 throw LNURLError.insecureEndpoint
             }
             throw LNURLError.invalidResponse

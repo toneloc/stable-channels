@@ -134,7 +134,12 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@@domain.com"))
         XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@nodomain"))
         XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "http://insecure-clearnet.com"))
-        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "anon@xyz.onion"))
+
+        let torAddress = try LNURLService.resolveEndpoint(from: "anon@xyz.onion")
+        XCTAssertEqual(torAddress.absoluteString, "http://xyz.onion/.well-known/lnurlp/anon")
+
+        let directTor = try LNURLService.resolveEndpoint(from: "http://xyz.onion/api/lnurlp")
+        XCTAssertEqual(directTor.absoluteString, "http://xyz.onion/api/lnurlp")
     }
 
     func testSuccessActionDomainMatching() throws {
@@ -495,5 +500,154 @@ final class LNURLServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testFetchPayParams_torHttpAccepted_andClearnetHttpRejected() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = LNURLService(urlSession: session)
+
+        let torURL = try XCTUnwrap(URL(string: "http://service.onion/lnurlp"))
+        let clearnetHttpURL = try XCTUnwrap(URL(string: "http://service.com/lnurlp"))
+        let validJson = """
+        {
+            "tag": "payRequest",
+            "callback": "http://service.onion/callback",
+            "minSendable": 1000,
+            "maxSendable": 10000000,
+            "metadata": "[[\\"text/plain\\",\\"Tor Service\\"]]",
+            "commentAllowed": 50
+        }
+        """
+
+        MockURLProtocol.requestHandler = { req in
+            let response = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(validJson.utf8))
+        }
+
+        // Tor hidden service over HTTP succeeds
+        let params = try await service.fetchPayParams(from: torURL)
+        XCTAssertEqual(params.callback, "http://service.onion/callback")
+
+        // Clearnet endpoint over HTTP is rejected
+        do {
+            _ = try await service.fetchPayParams(from: clearnetHttpURL)
+            XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchInvoice_torHttpAccepted_andClearnetHttpRejected() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = LNURLService(urlSession: session)
+
+        let torCallback = "http://service.onion/callback"
+        let clearnetHttpCallback = "http://service.com/callback"
+
+        MockURLProtocol.requestHandler = { req in
+            let response = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
+            return (response, Data(json.utf8))
+        }
+
+        // Tor callback over HTTP succeeds
+        let result = try await service.fetchInvoice(
+            callback: torCallback,
+            amountMsat: 50_000,
+            comment: nil,
+            expectedMetadataHashHex: Self.metadataHashA
+        )
+        XCTAssertEqual(result.pr, Self.valid50kInvoice)
+
+        // Clearnet callback over HTTP is rejected
+        do {
+            _ = try await service.fetchInvoice(
+                callback: clearnetHttpCallback,
+                amountMsat: 50_000,
+                comment: nil,
+                expectedMetadataHashHex: Self.metadataHashA
+            )
+            XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP callback")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchPayParams_uint64MaxMinSendable_doesNotTrapAndThrowsAmountOutOfBounds() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+        let service = LNURLService(urlSession: session)
+
+        let targetURL = try XCTUnwrap(URL(string: "https://service.example.com/.well-known/lnurlp/alice"))
+        let overflowingJson = """
+        {
+            "tag": "payRequest",
+            "callback": "https://service.example.com/callback",
+            "minSendable": \(UInt64.max),
+            "maxSendable": \(UInt64.max),
+            "metadata": "[[\\"text/plain\\",\\"alice\\"]]",
+            "commentAllowed": 140
+        }
+        """
+
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(overflowingJson.utf8))
+        }
+
+        do {
+            _ = try await service.fetchPayParams(from: targetURL)
+            XCTFail("Expected LNURLError.amountOutOfBounds without trapping")
+        } catch let LNURLError.amountOutOfBounds(minSats, maxSats) {
+            let expectedCeiling = (UInt64.max / 1000) + 1
+            XCTAssertEqual(minSats, expectedCeiling)
+            XCTAssertEqual(maxSats, UInt64.max / 1000)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testMinSatsCeiling_uint64MaxValues_doesNotOverflow() {
+        let maxParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/cb",
+            minSendable: UInt64.max,
+            maxSendable: UInt64.max,
+            metadata: "[[\"text/plain\",\"Overflow Test\"]]",
+            commentAllowed: nil
+        )
+        let expectedCeil = (UInt64.max / 1000) + 1
+        XCTAssertEqual(maxParams.minSats, expectedCeil)
+        XCTAssertFalse(maxParams.hasValidBounds)
+
+        let nearMaxParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/cb",
+            minSendable: UInt64.max - 998,
+            maxSendable: UInt64.max,
+            metadata: "[[\"text/plain\",\"Near Max Test\"]]",
+            commentAllowed: nil
+        )
+        let expectedNearCeil = ((UInt64.max - 998) / 1000) + 1
+        XCTAssertEqual(nearMaxParams.minSats, expectedNearCeil)
+
+        let exactMultipleParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/cb",
+            minSendable: 10_000,
+            maxSendable: 50_000,
+            metadata: "[[\"text/plain\",\"Exact Multiple Test\"]]",
+            commentAllowed: nil
+        )
+        XCTAssertEqual(exactMultipleParams.minSats, 10)
     }
 }

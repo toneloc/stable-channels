@@ -23,6 +23,19 @@ final class Bech32Tests: XCTestCase {
         XCTAssertEqual(decoded.absoluteString, "https://service.com/api/v1/lnurl/pay")
     }
 
+    func testLNURLDecoding_torHttpAllowed_andClearnetHttpRejected() throws {
+        // Tor hidden service over HTTP is permitted
+        let torLNURL = "lnurl1dp68gup69uhhxetjwe5kxefwdahxjmmw9acxz7gt0xmg5"
+        let decodedTor = try Bech32.decodeLNURL(torLNURL)
+        XCTAssertEqual(decodedTor.absoluteString, "http://service.onion/pay")
+
+        // Clearnet endpoint over HTTP is rejected
+        let clearnetHttpLNURL = "lnurl1dp68gup69uhhxetjwe5kxefwvdhk6tmsv9us85tvxr"
+        XCTAssertThrowsError(try Bech32.decodeLNURL(clearnetHttpLNURL)) { error in
+            XCTAssertEqual(error as? Bech32.Error, .insecureClearnetScheme)
+        }
+    }
+
     func testInvalidBech32Strings() {
         let invalidVectors = [
             " 1nwldj5",

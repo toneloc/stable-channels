@@ -15,7 +15,9 @@ struct LNURLPayParams: Codable, Equatable, Sendable {
     let commentAllowed: Int?
 
     var minSats: UInt64 {
-        (minSendable + 999) / 1000
+        let quotient = minSendable / 1000
+        let remainder = minSendable % 1000
+        return remainder > 0 ? (quotient + 1) : quotient
     }
 
     var maxSats: UInt64 {
