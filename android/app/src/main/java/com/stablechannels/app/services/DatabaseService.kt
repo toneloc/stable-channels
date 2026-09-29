@@ -1621,11 +1621,34 @@ class DatabaseService(context: Context) :
                 val ucid =
                     userChannelId
                         ?: throw IllegalStateException("userChannelId required for backing update")
-                val current = readBackingSats(db, ucid) ?: throw MissingChannelRowException(ucid)
-                // Clamp instead of refusing: this runs after the payment already settled, so the
-                // sats truly moved — a floor of 0 keeps the ledger recordable instead of wedging.
-                val newBacking = maxOf(0L, current + backingDeltaSats)
-                if (current + backingDeltaSats < 0) {
+                val (current, expectedUSD) =
+                    db.rawQuery(
+                            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
+                            arrayOf(ucid),
+                        )
+                        .use {
+                            if (!it.moveToFirst()) throw MissingChannelRowException(ucid)
+                            it.getLong(0) to it.getDouble(1)
+                        }
+                // Read both books under the same write lock as dedup. Credit the local
+                // shortfall without absorbing withdrawals whose accounting is still pending.
+                val incomingStability = paymentType == "stability" && direction == "received"
+                val newBacking =
+                    if (incomingStability) {
+                        StabilityService.backingAfterIncomingStability(
+                            current,
+                            expectedUSD,
+                            btcPrice ?: 0.0,
+                            backingDeltaSats,
+                        )
+                            ?: throw IllegalStateException(
+                                "Incoming stability allocation unavailable"
+                            )
+                    } else {
+                        // Outgoing sats already moved; retain the existing debit clamp.
+                        maxOf(0L, current + backingDeltaSats)
+                    }
+                if (!incomingStability && current + backingDeltaSats < 0) {
                     AuditService.log(
                         "BACKING_CLAMPED",
                         mapOf(
