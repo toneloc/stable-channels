@@ -170,6 +170,30 @@ final class FeeRateServiceTests: XCTestCase {
         let rate = await service.currentRate()
         XCTAssertEqual(rate, 25, "Façade should delegate to injected cache")
     }
+
+    // 10. WebSocket push during in-flight fetch is not overwritten by older fetch result
+
+    func testWebsocketFeeUpdate_notOverwrittenByOlderInflightFetch() async {
+        let slowSource = StubFeeRateSource(rate: 10, delay: .milliseconds(100))
+        let cache = FeeRateCache(sources: [slowSource], cacheTTL: .seconds(60), fallback: 2)
+
+        let fetchTask = Task {
+            await cache.recommendedFees()
+        }
+
+        try? await Task.sleep(for: .milliseconds(20))
+
+        let wsFees = RecommendedFees(fastestFee: 65, halfHourFee: 50, hourFee: 40, minimumFee: 25)
+        await cache.updateRecommendedFees(wsFees)
+
+        let fetchResult = await fetchTask.value
+
+        XCTAssertEqual(fetchResult.halfHourFee, 50)
+        let currentCached = await cache.recommendedFees()
+        XCTAssertEqual(currentCached.halfHourFee, 50)
+        let currentRate = await cache.currentRate()
+        XCTAssertEqual(currentRate, 50)
+    }
 }
 
 // MARK: - Counting helpers

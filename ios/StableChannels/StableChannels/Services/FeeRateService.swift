@@ -176,6 +176,7 @@ actor FeeRateCache {
     private var cachedRecommendedFees: RecommendedFees?
     private var cachedAt: ContinuousClock.Instant?
     private var inFlight: Task<(fees: RecommendedFees, isFallback: Bool), Never>?
+    private var updateGeneration: UInt64 = 0
 
     init(
         sources: [FeeRateSource],
@@ -188,6 +189,7 @@ actor FeeRateCache {
     }
 
     func updateRecommendedFees(_ fees: RecommendedFees) {
+        updateGeneration &+= 1
         cachedRecommendedFees = fees
         cachedRate = fees.halfHourFee
         cachedAt = ContinuousClock.now
@@ -203,6 +205,7 @@ actor FeeRateCache {
         if let task = inFlight {
             return await task.value.fees
         }
+        let generationBeforeFetch = updateGeneration
         let task = Task { [sources, fallback] () -> (fees: RecommendedFees, isFallback: Bool) in
             await withTaskGroup(of: RecommendedFees?.self,
                                 returning: (fees: RecommendedFees, isFallback: Bool).self) { group in
@@ -233,7 +236,17 @@ actor FeeRateCache {
         inFlight = task
         let result = await task.value
         inFlight = nil
+
+        // If the cache was updated or invalidated while suspended, do not overwrite with the older fetch result.
+        if updateGeneration != generationBeforeFetch {
+            if let fresh = cachedRecommendedFees {
+                return fresh
+            }
+            return result.fees
+        }
+
         if !result.isFallback {
+            updateGeneration &+= 1
             cachedRecommendedFees = result.fees
             cachedRate = result.fees.halfHourFee
             cachedAt = ContinuousClock.now
@@ -247,6 +260,7 @@ actor FeeRateCache {
     }
 
     func invalidate() {
+        updateGeneration &+= 1
         cachedRate = nil
         cachedRecommendedFees = nil
         cachedAt = nil
