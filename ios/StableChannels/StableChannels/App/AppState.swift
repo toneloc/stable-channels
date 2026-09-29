@@ -3677,11 +3677,18 @@ class AppState {
         }
 
         if nodeService.channels.isEmpty && !stableChannel.userChannelId.isEmpty {
-            stableChannel = .defaultWithLsp()
-            let prefs = UserDefaults.standard
-            prefs.removeObject(forKey: BalanceCacheKey.cachedChannelId)
-            prefs.removeObject(forKey: BalanceCacheKey.cachedUserChannelId)
-            prefs.removeObject(forKey: BalanceCacheKey.cachedExpectedUSD)
+            stableChannel = .init(
+                channelId: "",
+                userChannelId: "",
+                expectedUSD: USD(amount: 0),
+                backingSats: 0,
+                nativeSats: 0,
+                note: "",
+                stableReceiverBTC: Bitcoin(sats: 0),
+                stableReceiverUSD: USD(amount: 0),
+                latestPrice: 0,
+                counterparty: ""
+            )
         }
 
         // Resolve pending outbound deduction against raw wallet observation
