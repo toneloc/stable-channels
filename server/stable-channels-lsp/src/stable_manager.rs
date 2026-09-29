@@ -290,6 +290,15 @@ struct PendingBookUpdate {
     needs_sync: bool,
 }
 
+/// A successfully dispatched wake notification and the exact channel snapshot that triggered it.
+/// The channel ID makes the reconnect poll safe across splice transitions and duplicate UID rows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WakeSettlementRequest {
+    pub user_channel_id: u128,
+    pub channel_id: String,
+    pub counterparty: String,
+}
+
 /// In-memory list of stable channels plus a handle to the shared sqlite channels table.
 pub struct StableChannelManager {
     pub stable_channels: Vec<StableChannel>,
@@ -2019,36 +2028,71 @@ impl StableChannelManager {
     }
 
     /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one.
+    /// Returns channels for which an `lsp_to_user` wake push was accepted so the caller can poll
+    /// for the peer to become usable and settle without waiting for the next regular tick.
     pub async fn run_tick(
         &mut self,
         ldk: &dyn LdkServerCalls,
         push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>,
         btc_price: f64,
+    ) -> Vec<WakeSettlementRequest> {
+        self.run_tick_for_channel(ldk, push, btc_price, None, None)
+            .await
+    }
+
+    /// Re-run settlement for all eligible stable channels belonging to the peer that just woke.
+    /// The request's channel ID remains the exact liveness witness used by the poll; the peer
+    /// scope ensures sibling channels do not wait for another push cooldown window.
+    pub(crate) async fn run_wake_settlement(
+        &mut self,
+        ldk: &dyn LdkServerCalls,
+        push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>,
+        btc_price: f64,
+        request: WakeSettlementRequest,
     ) {
+        let _ = self
+            .run_tick_for_channel(
+                ldk,
+                push,
+                btc_price,
+                None,
+                Some(request.counterparty.as_str()),
+            )
+            .await;
+    }
+
+    async fn run_tick_for_channel(
+        &mut self,
+        ldk: &dyn LdkServerCalls,
+        push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>,
+        btc_price: f64,
+        only_user_channel_id: Option<u128>,
+        only_counterparty: Option<&str>,
+    ) -> Vec<WakeSettlementRequest> {
         let had_pending = !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty();
         if !self.retry_pending_reconciliations(ldk, btc_price).await || had_pending {
             // Give the event loop a chance to process the events held behind this correction
             // before considering another balance-based deduction or stability payment.
-            return;
+            return Vec::new();
         }
         // LDK Server's event stream is not replayable. Finish any receive that was durably
         // registered before a transient channel/signature/DB failure.
         self.retry_pending_signed_stability(ldk, btc_price).await;
         if btc_price <= 0.0 {
-            return;
+            return Vec::new();
         }
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
             Err(e) => {
                 tracing::warn!("[stable] run_tick: list_channels failed: {}", e);
-                return;
+                return Vec::new();
             }
         };
-        let mut by_user_channel_id: std::collections::HashMap<u128, Channel> =
+        let mut by_user_channel_id: std::collections::HashMap<u128, Vec<Channel>> =
             std::collections::HashMap::new();
         for c in &channels {
             if let Some(uid) = parse_user_channel_id(&c.user_channel_id) {
-                by_user_channel_id.insert(uid, c.clone());
+                by_user_channel_id.entry(uid).or_default().push(c.clone());
             }
         }
 
@@ -2063,9 +2107,22 @@ impl StableChannelManager {
 
         // Accepted USD and sat allocations for backstop SYNCs sent after the iter_mut borrow ends.
         let mut backstop_syncs: Vec<(u128, String, f64, u64, String)> = Vec::new();
+        // `lsp_to_user` wake pushes are followed by a short online poll in stability_tick so the
+        // top-up can be sent as soon as the mobile node reconnects.
+        let mut wake_settlement_requests: Vec<WakeSettlementRequest> = Vec::new();
         const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
 
         for sc in self.stable_channels.iter_mut() {
+            if let Some(target) = only_user_channel_id {
+                if sc.user_channel_id != target {
+                    continue;
+                }
+            }
+            if let Some(target) = only_counterparty {
+                if sc.counterparty.to_string() != target {
+                    continue;
+                }
+            }
             if self.pending_splices.contains_key(&sc.user_channel_id) {
                 // A failed splice save must finish before a tick can change these books.
                 continue;
@@ -2073,7 +2130,32 @@ impl StableChannelManager {
             if sc.expected_usd.0 < 0.01 && sc.backing_sats == 0 {
                 continue;
             }
-            let Some(c) = by_user_channel_id.get(&sc.user_channel_id) else { continue; };
+            let Some(candidates) = by_user_channel_id.get(&sc.user_channel_id) else {
+                continue;
+            };
+            let expected_channel_id = sc.channel_id.to_string();
+            let c = if candidates.len() == 1 {
+                &candidates[0]
+            } else if let Some(exact) = candidates
+                .iter()
+                .find(|candidate| candidate.channel_id == expected_channel_id)
+            {
+                exact
+            } else {
+                tracing::warn!(
+                    "[stable] run_tick: ambiguous channel snapshot for user_channel_id {}; skipping",
+                    sc.user_channel_id
+                );
+                stable_channels::audit::audit_event(
+                    "STABILITY_CHANNEL_SNAPSHOT_AMBIGUOUS",
+                    serde_json::json!({
+                        "user_channel_id": sc.user_channel_id.to_string(),
+                        "expected_channel_id": expected_channel_id,
+                        "candidate_count": candidates.len(),
+                    }),
+                );
+                continue;
+            };
 
             let (our_sats, their_sats) = channel_peer_balances(c);
             let mut proposed = sc.clone();
@@ -2411,9 +2493,22 @@ impl StableChannelManager {
                     }
                 }
             } else {
-                let mut p = push.lock().await;
-                p.notify(&sc.counterparty.to_string(), direction);
-                drop(p);
+                let counterparty = sc.counterparty.to_string();
+                let wake_available = {
+                    let mut p = push.lock().await;
+                    let notified = p.notify(&counterparty, direction).await;
+                    // A node-scoped push may have been sent for a sibling `user_to_lsp` channel
+                    // earlier in this tick (or a prior tick). Piggyback on that wake rather than
+                    // letting the node cooldown suppress the owed `lsp_to_user` settlement.
+                    notified || p.has_recent_notification(&counterparty)
+                };
+                if wake_available && direction == "lsp_to_user" {
+                    wake_settlement_requests.push(WakeSettlementRequest {
+                        user_channel_id: sc.user_channel_id,
+                        channel_id: c.channel_id.clone(),
+                        counterparty: counterparty.clone(),
+                    });
+                }
                 let key = format!("push_queued:{}", direction);
                 let (lo, lv) = self.stability_throttle.get(&sc.user_channel_id).cloned().unwrap_or_default();
                 if stability_should_log(&lo, &key, lv, stable_usd_value, target, dollar_threshold, percent_threshold, true) {
@@ -2448,6 +2543,7 @@ impl StableChannelManager {
                 self.startup_sync_pending.insert(uid);
             }
         }
+        wake_settlement_requests
     }
 
     /// Sign a SYNC_V1 payload and keysend it (1 msat) to the counterparty in custom TLV 13377331.
@@ -3539,7 +3635,7 @@ fn build_stable_channel(
 }
 
 /// Parse an LDK Server user_channel_id (decimal u128::to_string) to u128, with a hex fallback for legacy values.
-fn parse_user_channel_id(s: &str) -> Option<u128> {
+pub(crate) fn parse_user_channel_id(s: &str) -> Option<u128> {
     s.parse::<u128>()
         .ok()
         .or_else(|| u128::from_str_radix(s.trim_start_matches("0x"), 16).ok())
@@ -4493,6 +4589,244 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_tick_prefers_exact_channel_when_user_channel_id_is_duplicated() {
+        let mut mgr = make_manager();
+        let fake_initial = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_HEX,
+            COUNTERPARTY_HEX,
+            100_000,
+            50_000_000,
+            true,
+        )]);
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        // A splice transition can expose two snapshots with the same stable UID. The persisted
+        // channel ID must win over iteration order when selecting the live channel.
+        let other_channel_id =
+            "aa634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b";
+        let fake_drift = FakeLdkServer::new(vec![
+            make_channel(
+                other_channel_id,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                0,
+                true,
+            ),
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+        ]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+
+        mgr.run_tick(
+            &fake_drift as &dyn LdkServerCalls,
+            &push,
+            80_000.0,
+        )
+        .await;
+
+        let sends = fake_drift.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let raw = std::str::from_utf8(sends[0].custom_tlvs[1].value.as_ref()).unwrap();
+        let envelope = stable_channels::stable::parse_stability_signed_envelope(raw).unwrap();
+        let payload =
+            stable_channels::stable::parse_stability_payment_payload(&envelope.payload).unwrap();
+        assert_eq!(payload.channel_id, CHANNEL_ID_HEX);
+    }
+
+    #[tokio::test]
+    async fn wake_settlement_rechecks_all_channels_for_the_woken_peer() {
+        let mut mgr = make_manager();
+        const CHANNEL_TWO: &str =
+            "aa634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b";
+        const USER_CHANNEL_TWO: &str = "00000000000000000000000000000002";
+        let fake_initial = FakeLdkServer::new(vec![
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+            make_channel(
+                CHANNEL_TWO,
+                USER_CHANNEL_TWO,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+        ]);
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        mgr.edit_stable_channel(
+            CHANNEL_TWO,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+
+        let fake_online = FakeLdkServer::new(vec![
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+            make_channel(
+                CHANNEL_TWO,
+                USER_CHANNEL_TWO,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+        ]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_wake_settlement(
+            &fake_online as &dyn LdkServerCalls,
+            &push,
+            80_000.0,
+            WakeSettlementRequest {
+                user_channel_id: 1,
+                channel_id: CHANNEL_ID_HEX.to_string(),
+                counterparty: COUNTERPARTY_HEX.to_string(),
+            },
+        )
+        .await;
+
+        let sends = fake_online.sends.lock().unwrap();
+        assert_eq!(sends.len(), 2, "the peer wake should settle both sibling channels");
+        let channel_ids: Vec<_> = sends
+            .iter()
+            .map(|send| {
+                let raw = std::str::from_utf8(send.custom_tlvs[1].value.as_ref()).unwrap();
+                let envelope =
+                    stable_channels::stable::parse_stability_signed_envelope(raw).unwrap();
+                stable_channels::stable::parse_stability_payment_payload(&envelope.payload)
+                    .unwrap()
+                    .channel_id
+            })
+            .collect();
+        assert!(channel_ids.contains(&CHANNEL_ID_HEX.to_string()));
+        assert!(channel_ids.contains(&CHANNEL_TWO.to_string()));
+    }
+
+    #[tokio::test]
+    async fn lsp_to_user_wake_piggybacks_on_sibling_push_cooldown() {
+        let mut mgr = make_manager();
+        const CHANNEL_TWO: &str =
+            "aa634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b";
+        const USER_CHANNEL_TWO: &str = "00000000000000000000000000000002";
+        let fake_initial = FakeLdkServer::new(vec![
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+            make_channel(
+                CHANNEL_TWO,
+                USER_CHANNEL_TWO,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                true,
+            ),
+        ]);
+        mgr.edit_stable_channel(
+            CHANNEL_ID_HEX,
+            Some(10.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        mgr.edit_stable_channel(
+            CHANNEL_TWO,
+            Some(50.0),
+            None,
+            &fake_initial as &dyn LdkServerCalls,
+            100_000.0,
+        )
+        .await;
+        // Make the second channel owe the user at the rising price while the first channel is
+        // above par and therefore emits the sibling wake push first.
+        mgr.stable_channels[1].backing_sats = 20_000;
+
+        let fake_offline = FakeLdkServer::new(vec![
+            make_channel(
+                CHANNEL_ID_HEX,
+                USER_CHANNEL_ID_HEX,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                false,
+            ),
+            make_channel(
+                CHANNEL_TWO,
+                USER_CHANNEL_TWO,
+                COUNTERPARTY_HEX,
+                100_000,
+                50_000_000,
+                false,
+            ),
+        ]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new_for_test(mgr.data_dir()),
+        ));
+        crate::push::tokens::save_token(
+            &mgr.data_dir().to_string_lossy(),
+            "wake-test-token",
+            "ios",
+            COUNTERPARTY_HEX,
+            "sandbox",
+        );
+
+        let wake_requests = mgr
+            .run_tick(
+                &fake_offline as &dyn LdkServerCalls,
+                &push,
+                120_000.0,
+            )
+            .await;
+        assert_eq!(wake_requests.len(), 1);
+        assert_eq!(wake_requests[0].user_channel_id, 2);
+        assert_eq!(wake_requests[0].channel_id, CHANNEL_TWO);
+    }
+
+    #[tokio::test]
     async fn run_tick_send_failure_keeps_cooldown_unset() {
         let mut mgr = make_manager();
         let fake_initial = FakeLdkServer::new(vec![make_channel(
@@ -4541,14 +4875,29 @@ mod tests {
             100_000, 50_000_000, false,
         )]);
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(
-                &crate::config::PushConfig::default(),
-                mgr.data_dir(),
-            ),
+            crate::push::PushService::new_for_test(mgr.data_dir()),
         ));
+        crate::push::tokens::save_token(
+            &mgr.data_dir().to_string_lossy(),
+            "wake-test-token",
+            "ios",
+            COUNTERPARTY_HEX,
+            "sandbox",
+        );
 
-        mgr.run_tick(&fake_offline as &dyn LdkServerCalls, &push, 80_000.0).await;
+        let wake_requests = mgr
+            .run_tick(&fake_offline as &dyn LdkServerCalls, &push, 80_000.0)
+            .await;
 
+        assert_eq!(
+            wake_requests,
+            vec![crate::stable_manager::WakeSettlementRequest {
+                user_channel_id: 1,
+                channel_id: CHANNEL_ID_HEX.to_string(),
+                counterparty: COUNTERPARTY_HEX.to_string(),
+            }],
+            "an accepted lsp_to_user push should request an immediate wake poll"
+        );
         let sends = fake_offline.sends.lock().unwrap();
         assert!(sends.is_empty(), "must not send when peer offline");
         assert_eq!(
