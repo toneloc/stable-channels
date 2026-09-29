@@ -107,8 +107,14 @@ struct SendView: View {
         guard let feeRateSatVb else {
             return String(localized: "info_fee_estimating", defaultValue: "Estimating...")
         }
-        let feeSats = UInt64(ceil(feeRateSatVb * Double(Constants.estimatedOnchainSendVBytes)))
-        let displayRate = UInt64(max(1.0, feeRateSatVb.rounded()))
+        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: false)
+        let displayRate: UInt64
+        if feeRateSatVb.isFinite && feeRateSatVb > 0 {
+            let rounded = feeRateSatVb.rounded()
+            displayRate = rounded >= Double(UInt64.max) ? UInt64.max : UInt64(max(1.0, rounded))
+        } else {
+            displayRate = 1
+        }
         return String(
             format: String(localized: "info_onchain_fee_estimate_value", defaultValue: "~%@ BTC (%llu sat/vB)"),
             feeSats.btcSpacedFormatted,

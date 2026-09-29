@@ -82,6 +82,13 @@ final class PaymentFeeEstimatorTests: XCTestCase {
         XCTAssertEqual(fee, UInt64.max)
     }
 
+    func testEstimateOnchainFee_nonFiniteOrNegativeRateReturnsZero() {
+        XCTAssertEqual(PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: -5.0, isSendAll: false), 0)
+        XCTAssertEqual(PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 0.0, isSendAll: false), 0)
+        XCTAssertEqual(PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: Double.nan, isSendAll: false), 0)
+        XCTAssertEqual(PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: Double.infinity, isSendAll: false), 0)
+    }
+
     // MARK: - Network Fee Speed Tier Tests
 
     func testNetworkFeeSpeedTier_standardBaseline() {

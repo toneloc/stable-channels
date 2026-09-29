@@ -208,6 +208,69 @@ final class FeeRateServiceTests: XCTestCase {
         let currentRate = await cache.currentRate()
         XCTAssertEqual(currentRate, 50.0)
     }
+
+    func testRecommendedFees_ingressSanitizationAndCeiling() {
+        // Negative, zero, NaN, and infinite values should be sanitized to fallback
+        let hostile = RecommendedFees(
+            fastestFee: -10.0,
+            halfHourFee: Double.nan,
+            hourFee: Double.infinity,
+            economyFee: 0.0,
+            minimumFee: -1.0
+        )
+        XCTAssertEqual(hostile.minimumFee, 1.0)
+        XCTAssertEqual(hostile.fastestFee, 1.0)
+        XCTAssertEqual(hostile.halfHourFee, 1.0)
+        XCTAssertEqual(hostile.hourFee, 1.0)
+        XCTAssertEqual(hostile.economyFee, 1.0)
+
+        // Absurd rate exceeding maxAllowedFeeRate (10,000) should be clamped
+        let absurd = RecommendedFees(
+            fastestFee: 5_000_000.0,
+            halfHourFee: 100.0,
+            hourFee: 50.0,
+            minimumFee: 10.0
+        )
+        XCTAssertEqual(absurd.fastestFee, RecommendedFees.maxAllowedFeeRate)
+        XCTAssertEqual(absurd.rate(for: .priority), RecommendedFees.maxAllowedFeeRate)
+    }
+
+    func testCurrentRateSatVb_hugeRateDoesNotTrap() async {
+        let hugeSource = StubFeeRateSource(rate: 5_000_000.0)
+        let service = FeeRateService(sources: [hugeSource])
+        let satVb = await service.currentRateSatVb()
+        XCTAssertEqual(satVb, UInt64(RecommendedFees.maxAllowedFeeRate))
+    }
+
+    func testNetworkFailureAfterValidFetch_preservesLastKnownGoodRates() async {
+        final class FlakySource: FeeRateSource, @unchecked Sendable {
+            var shouldFail = false
+            func fetchRecommendedFees() async throws -> RecommendedFees {
+                if shouldFail {
+                    throw FeeRateError.timeout
+                }
+                return RecommendedFees(
+                    fastestFee: 60.0,
+                    halfHourFee: 45.0,
+                    hourFee: 30.0,
+                    minimumFee: 15.0
+                )
+            }
+        }
+
+        let source = FlakySource()
+        let cache = FeeRateCache(sources: [source], cacheTTL: .milliseconds(50), fallback: 2.0)
+
+        let initial = await cache.currentRate()
+        XCTAssertEqual(initial, 45.0)
+
+        // Wait past TTL and make network fail
+        source.shouldFail = true
+        try? await Task.sleep(for: .milliseconds(100))
+
+        let afterFailure = await cache.currentRate()
+        XCTAssertEqual(afterFailure, 45.0, "Should preserve last known good rate instead of dropping to 2.0 fallback")
+    }
 }
 
 // MARK: - Counting helpers

@@ -2,23 +2,31 @@ import Foundation
 
 /// Multi-tier recommended fee rates (sat/vB) matching target confirmation block conventions.
 struct RecommendedFees: Codable, Equatable, Sendable {
+    static let minAllowedFeeRate: Double = 0.1
+    static let maxAllowedFeeRate: Double = 10_000.0
+
     let fastestFee: Double
     let halfHourFee: Double
     let hourFee: Double
     let economyFee: Double?
     let minimumFee: Double
 
+    static func sanitizeRate(_ rate: Double, fallback: Double = 1.0) -> Double {
+        guard rate.isFinite && rate > 0 else { return fallback }
+        return max(minAllowedFeeRate, min(rate, maxAllowedFeeRate))
+    }
+
     func rate(for tier: NetworkFeeSpeedTier) -> Double {
-        let minRate = max(0.1, minimumFee)
+        let minRate = max(Self.minAllowedFeeRate, min(minimumFee, Self.maxAllowedFeeRate))
         let rawEconomy: Double
         if let economyFee, economyFee > 0 {
             rawEconomy = max(minRate, economyFee)
         } else {
             rawEconomy = max(minRate, hourFee)
         }
-        let economyRate = rawEconomy
-        let standardRate = max(economyRate, max(minRate, halfHourFee))
-        let priorityRate = max(standardRate, max(minRate, fastestFee))
+        let economyRate = min(Self.maxAllowedFeeRate, rawEconomy)
+        let standardRate = min(Self.maxAllowedFeeRate, max(economyRate, max(minRate, halfHourFee)))
+        let priorityRate = min(Self.maxAllowedFeeRate, max(standardRate, max(minRate, fastestFee)))
 
         switch tier {
         case .priority:
@@ -26,7 +34,7 @@ struct RecommendedFees: Codable, Equatable, Sendable {
         case .standard:
             return standardRate
         case .economy:
-            return min(standardRate, economyRate)
+            return economyRate
         }
     }
 
@@ -45,11 +53,16 @@ struct RecommendedFees: Codable, Equatable, Sendable {
         economyFee: Double? = nil,
         minimumFee: Double
     ) {
-        self.fastestFee = fastestFee
-        self.halfHourFee = halfHourFee
-        self.hourFee = hourFee
-        self.economyFee = economyFee
-        self.minimumFee = minimumFee
+        let cleanMin = Self.sanitizeRate(minimumFee, fallback: 1.0)
+        self.minimumFee = cleanMin
+        self.fastestFee = Self.sanitizeRate(fastestFee, fallback: cleanMin)
+        self.halfHourFee = Self.sanitizeRate(halfHourFee, fallback: cleanMin)
+        self.hourFee = Self.sanitizeRate(hourFee, fallback: cleanMin)
+        if let economyFee {
+            self.economyFee = Self.sanitizeRate(economyFee, fallback: cleanMin)
+        } else {
+            self.economyFee = nil
+        }
     }
 
     init(wsFees: MempoolWSFees) {
@@ -270,13 +283,17 @@ actor FeeRateCache {
             cachedRecommendedFees = result.fees
             cachedRate = result.fees.halfHourFee
             cachedAt = ContinuousClock.now
+            return result.fees
+        } else if let lastKnownGood = cachedRecommendedFees {
+            // Retain last-known-good cached rates during transient network outages
+            return lastKnownGood
         }
         return result.fees
     }
 
     func currentRate() async -> Double {
         let fees = await recommendedFees()
-        return fees.halfHourFee
+        return fees.rate(for: .standard)
     }
 
     func invalidate() {
@@ -313,7 +330,10 @@ final class FeeRateService: Sendable {
     }
 
     func currentRateSatVb() async -> UInt64 {
-        await UInt64(max(1.0, currentRate().rounded()))
+        let rate = await currentRate()
+        guard rate.isFinite && rate > 0 else { return 1 }
+        if rate >= Double(UInt64.max) { return UInt64.max }
+        return UInt64(max(1.0, rate.rounded()))
     }
 
     func recommendedFees() async -> RecommendedFees {

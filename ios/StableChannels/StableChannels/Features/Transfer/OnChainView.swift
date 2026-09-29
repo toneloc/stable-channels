@@ -31,11 +31,12 @@ struct OnChainSendView: View {
         guard let feeRateSatVb else {
             return String(localized: "info_fee_estimating", defaultValue: "Estimating network fee...")
         }
-        let vbytes = sendAll ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
-        let feeSats = UInt64(ceil(feeRateSatVb * Double(vbytes)))
-        let rateDisplay = feeRateSatVb.truncatingRemainder(dividingBy: 1) == 0
-            ? String(format: "%.0f", feeRateSatVb)
-            : String(format: "%.1f", feeRateSatVb)
+        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: sendAll)
+        let rateDisplay = feeRateSatVb.isFinite && feeRateSatVb > 0
+            ? (feeRateSatVb.truncatingRemainder(dividingBy: 1) == 0
+                ? String(format: "%.0f", feeRateSatVb)
+                : String(format: "%.1f", feeRateSatVb))
+            : "1"
         return String(
             format: String(
                 localized: "info_onchain_fee_estimate_sentence",
