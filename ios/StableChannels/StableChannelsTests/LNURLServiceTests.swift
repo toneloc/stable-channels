@@ -176,6 +176,58 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertFalse(phishingAction.isSameHostOrSubdomain(callbackURL: callbackURL))
     }
 
+    func testSuccessActionSchemeValidation() {
+        let httpsAction = LNURLSuccessAction(
+            tag: "url",
+            description: "Receipt",
+            url: "https://pay.shop.com/receipt/123",
+            message: nil,
+            ciphertext: nil,
+            iv: nil
+        )
+        if case .url(let desc, let url) = httpsAction.actionType {
+            XCTAssertEqual(desc, "Receipt")
+            XCTAssertEqual(url.absoluteString, "https://pay.shop.com/receipt/123")
+        } else {
+            XCTFail("Expected .url action")
+        }
+
+        let torAction = LNURLSuccessAction(
+            tag: "url",
+            description: "Tor Receipt",
+            url: "http://shop.onion/receipt/123",
+            message: nil,
+            ciphertext: nil,
+            iv: nil
+        )
+        if case .url(let desc, let url) = torAction.actionType {
+            XCTAssertEqual(desc, "Tor Receipt")
+            XCTAssertEqual(url.absoluteString, "http://shop.onion/receipt/123")
+        } else {
+            XCTFail("Expected .url action for Tor")
+        }
+
+        let insecureClearnetAction = LNURLSuccessAction(
+            tag: "url",
+            description: "Insecure",
+            url: "http://insecure-shop.com/receipt",
+            message: nil,
+            ciphertext: nil,
+            iv: nil
+        )
+        XCTAssertEqual(insecureClearnetAction.actionType, .unknown(tag: "url"))
+
+        let javascriptAction = LNURLSuccessAction(
+            tag: "url",
+            description: "Exploit",
+            url: "javascript:alert(1)",
+            message: nil,
+            ciphertext: nil,
+            iv: nil
+        )
+        XCTAssertEqual(javascriptAction.actionType, .unknown(tag: "url"))
+    }
+
     func testMockServiceSubstitution() async throws {
         let mock = MockLNURLService()
         await mock.setStubbedParams(LNURLPayParams(
@@ -294,6 +346,57 @@ final class LNURLServiceTests: XCTestCase {
 
         XCTAssertEqual(result.pr, Self.valid50kInvoice)
         XCTAssertFalse(result.isError)
+    }
+
+    func testFetchInvoice_withParams_validatesBoundsAndComment_andSucceeds() async throws {
+        let (service, callbackURL) = makeMockService()
+        let metadataJSON = ""
+        let params = LNURLPayParams(
+            tag: "payRequest",
+            callback: callbackURL.absoluteString,
+            minSendable: 10_000,
+            maxSendable: 100_000,
+            metadata: metadataJSON,
+            commentAllowed: 20
+        )
+
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
+            return (response, Data(json.utf8))
+        }
+
+        // Amount below minSendable throws amountOutOfBounds
+        do {
+            _ = try await service.fetchInvoice(params: params, amountMsat: 5_000, comment: nil)
+            XCTFail("Expected amountOutOfBounds")
+        } catch LNURLError.amountOutOfBounds {
+            // Success
+        }
+
+        // Amount above maxSendable throws amountOutOfBounds
+        do {
+            _ = try await service.fetchInvoice(params: params, amountMsat: 150_000, comment: nil)
+            XCTFail("Expected amountOutOfBounds")
+        } catch LNURLError.amountOutOfBounds {
+            // Success
+        }
+
+        // Comment too long throws invalidResponse
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: String(repeating: "c", count: 25)
+            )
+            XCTFail("Expected invalidResponse for comment exceeding limit")
+        } catch LNURLError.invalidResponse {
+            // Success
+        }
+
+        // Valid params and amount within bounds succeeds
+        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: "Hello")
+        XCTAssertEqual(result.pr, Self.valid50kInvoice)
     }
 
     func testFetchInvoice_mismatchedAmount_throwsInvoiceAmountMismatch() async throws {

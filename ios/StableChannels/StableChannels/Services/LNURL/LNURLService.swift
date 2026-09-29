@@ -6,11 +6,37 @@ import LDKNode
 protocol LNURLServiceProtocol: Sendable {
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams
     func fetchInvoice(
+        params: LNURLPayParams,
+        amountMsat: UInt64,
+        comment: String?
+    ) async throws -> LNURLPayInvoiceResponse
+    func fetchInvoice(
         callback: String,
         amountMsat: UInt64,
         comment: String?,
         expectedMetadataHashHex: String
     ) async throws -> LNURLPayInvoiceResponse
+}
+
+extension LNURLServiceProtocol {
+    func fetchInvoice(
+        params: LNURLPayParams,
+        amountMsat: UInt64,
+        comment: String? = nil
+    ) async throws -> LNURLPayInvoiceResponse {
+        guard params.isAmountValid(msat: amountMsat) else {
+            throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
+        }
+        guard params.isCommentValid(comment) else {
+            throw LNURLError.invalidResponse
+        }
+        return try await fetchInvoice(
+            callback: params.callback,
+            amountMsat: amountMsat,
+            comment: comment,
+            expectedMetadataHashHex: params.metadataHashHex
+        )
+    }
 }
 
 // MARK: - Service Implementation
@@ -111,18 +137,20 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.networkError(error.localizedDescription)
         }
 
+        guard let httpResponse = response as? HTTPURLResponse,
+              let finalURL = httpResponse.url else {
+            throw LNURLError.invalidResponse
+        }
+
+        guard Self.isSecureEndpoint(url: finalURL) else {
+            throw LNURLError.insecureEndpoint
+        }
+
         try parseErrorResponseIfPresent(data: data)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              let finalURL = httpResponse.url,
-              Self.isSecureEndpoint(url: finalURL),
-              (200...299).contains(httpResponse.statusCode) else {
-            if let http = response as? HTTPURLResponse, http.statusCode == 404 {
+        guard (200...299).contains(httpResponse.statusCode) else {
+            if httpResponse.statusCode == 404 {
                 throw LNURLError.errorResponse(reason: "Recipient address not found.")
-            }
-            if let http = response as? HTTPURLResponse, let finalURL = http.url,
-               !Self.isSecureEndpoint(url: finalURL) {
-                throw LNURLError.insecureEndpoint
             }
             throw LNURLError.invalidResponse
         }
@@ -191,16 +219,18 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.networkError(error.localizedDescription)
         }
 
+        guard let httpResponse = response as? HTTPURLResponse,
+              let finalURL = httpResponse.url else {
+            throw LNURLError.invalidResponse
+        }
+
+        guard Self.isSecureEndpoint(url: finalURL) else {
+            throw LNURLError.insecureEndpoint
+        }
+
         try parseErrorResponseIfPresent(data: data)
 
-        guard let httpResponse = response as? HTTPURLResponse,
-              let finalURL = httpResponse.url,
-              Self.isSecureEndpoint(url: finalURL),
-              (200...299).contains(httpResponse.statusCode) else {
-            if let http = response as? HTTPURLResponse, let finalURL = http.url,
-               !Self.isSecureEndpoint(url: finalURL) {
-                throw LNURLError.insecureEndpoint
-            }
+        guard (200...299).contains(httpResponse.statusCode) else {
             throw LNURLError.invalidResponse
         }
 

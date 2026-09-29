@@ -88,13 +88,12 @@ enum Bech32 {
         _ bechString: String,
         limitLength: Bool
     ) throws -> (hrp: String, payload5Bit: [UInt8], checksumType: ChecksumType) {
-        let trimmed = bechString.trimmingCharacters(in: .whitespacesAndNewlines)
-        if limitLength && trimmed.count > 90 { throw Error.invalidLength }
-        guard trimmed.count >= 8 else { throw Error.invalidLength }
+        if limitLength && bechString.count > 90 { throw Error.invalidLength }
+        guard bechString.count >= 8 else { throw Error.invalidLength }
 
         var hasLower = false
         var hasUpper = false
-        for byte in trimmed.utf8 {
+        for byte in bechString.utf8 {
             if byte >= 0x61 && byte <= 0x7A { hasLower = true }
             else if byte >= 0x41 && byte <= 0x5A { hasUpper = true }
             if hasLower && hasUpper {
@@ -102,10 +101,16 @@ enum Bech32 {
             }
         }
 
-        let lowercased = trimmed.lowercased()
+        let lowercased = bechString.lowercased()
         guard let pos = lowercased.lastIndex(of: "1") else { throw Error.missingHrp }
         let hrp = String(lowercased[..<pos])
         guard !hrp.isEmpty else { throw Error.missingHrp }
+
+        for byte in hrp.utf8 {
+            guard byte >= 33 && byte <= 126 else {
+                throw Error.invalidCharacter(Character(UnicodeScalar(byte)))
+            }
+        }
 
         let dataPart = lowercased[lowercased.index(after: pos)...]
         guard dataPart.count >= 6 else { throw Error.invalidLength }

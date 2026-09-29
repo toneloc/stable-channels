@@ -103,8 +103,15 @@ struct LNURLSuccessAction: Codable, Equatable, Sendable {
         case "message":
             return .message(message ?? "")
         case "url":
-            if let desc = description, let urlStr = url, let parsedURL = URL(string: urlStr) {
-                return .url(description: desc, url: parsedURL)
+            if let desc = description,
+               let urlStr = url,
+               let parsedURL = URL(string: urlStr),
+               let scheme = parsedURL.scheme?.lowercased() {
+                let isSecure = scheme == "https" ||
+                    (scheme == "http" && parsedURL.host?.lowercased().hasSuffix(".onion") == true)
+                if isSecure {
+                    return .url(description: desc, url: parsedURL)
+                }
             }
             return .unknown(tag: tag)
         case "aes":
