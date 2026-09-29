@@ -614,6 +614,7 @@ final class LNURLServiceTests: XCTestCase {
             XCTFail("Expected LNURLError.insecureEndpoint on HTTP downgrade")
         } catch LNURLError.insecureEndpoint {
             // Expected
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(insecureRedirectURL))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -713,6 +714,10 @@ final class LNURLServiceTests: XCTestCase {
             "192.168.0.1",
             "192.168.100.200",
             "169.254.169.254",
+            "100.64.0.1",
+            "100.127.255.254",
+            "198.18.0.1",
+            "198.19.255.254",
             "0.0.0.0",
             "::1",
             "[::1]",
@@ -738,6 +743,8 @@ final class LNURLServiceTests: XCTestCase {
             "8.8.8.8",
             "172.15.255.255",
             "172.32.0.1",
+            "100.128.0.1",
+            "198.20.0.1",
             "1.1.1.1"
         ]
         for host in allowed {
@@ -767,7 +774,11 @@ final class LNURLServiceTests: XCTestCase {
             "https://127.0.0.1/lnurlp",
             "https://localhost/lnurlp",
             "https://192.168.1.1/.well-known/lnurlp/alice",
-            "http://127.0.0.1/lnurlp"
+            "http://127.0.0.1/lnurlp",
+            // Bech32 encoded LNURL targeting 127.0.0.1
+            "lnurl1dp68gurn8ghj7vfjxuhrqt3s9ccj7mrww4excuqw06qrc",
+            // Bech32 encoded LNURL targeting 192.168.1.1
+            "lnurl1dp68gurn8ghj7vfexghrzd3c9ccjuvf0wpshjj3y5xy"
         ]
         for target in privateURLs {
             XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: target)) { error in
@@ -803,6 +814,7 @@ final class LNURLServiceTests: XCTestCase {
             XCTFail("Expected LNURLError.insecureEndpoint on loopback redirect")
         } catch LNURLError.insecureEndpoint {
             // Expected
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(loopbackRedirectURL))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -896,5 +908,135 @@ final class LNURLServiceTests: XCTestCase {
             commentAllowed: nil
         )
         XCTAssertEqual(exactMultipleParams.minSats, 10)
+    }
+
+    func testFetchInvoice_dnsResolvesToPrivateIP_isRejectedAsInsecureEndpoint() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let mockResolver = MockHostIPResolver(mapping: [
+            "rebinding.example.com": ["127.0.0.1"]
+        ])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
+
+        let targetURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/callback"))
+        let params = makeParams(callback: targetURL.absoluteString, metadata: "")
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: nil
+            )
+            XCTFail("Expected LNURLError.insecureEndpoint for DNS resolving to private IP")
+        } catch LNURLError.insecureEndpoint {
+            // Expected - request must be vetoed before opening socket / making network call
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(targetURL))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchPayParams_dnsResolvesToPrivateIP_isRejectedAsInsecureEndpoint() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let mockResolver = MockHostIPResolver(mapping: [
+            "rebinding.example.com": ["10.0.0.5"]
+        ])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
+
+        let targetURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/.well-known/lnurlp/alice"))
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        do {
+            _ = try await service.fetchPayParams(from: targetURL)
+            XCTFail("Expected LNURLError.insecureEndpoint for DNS resolving to private IP")
+        } catch LNURLError.insecureEndpoint {
+            // Expected - request must be vetoed before opening socket / making network call
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(targetURL))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchInvoice_redirectsToDnsResolvingToPrivateIP_isVetoedPreHop() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let callbackURL = try XCTUnwrap(URL(string: "https://service.example.com/callback"))
+        let redirectTargetURL = try XCTUnwrap(URL(string: "https://rebinding-redirect.example.com/internal-service"))
+
+        let mockResolver = MockHostIPResolver(mapping: [
+            "service.example.com": ["93.184.216.34"],
+            "rebinding-redirect.example.com": ["192.168.1.50"]
+        ])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(
+                url: callbackURL,
+                statusCode: 302,
+                httpVersion: nil,
+                headerFields: ["Location": redirectTargetURL.absoluteString]
+            )!
+            return (response, Data())
+        }
+
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: nil
+            )
+            XCTFail("Expected LNURLError.insecureEndpoint on redirect to host resolving to private IP")
+        } catch LNURLError.insecureEndpoint {
+            // Expected - redirect is vetoed pre-hop
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(redirectTargetURL))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testResolveEndpoint_withHostResolver_rejectsDNSResolvingToPrivateIP() {
+        let mockResolver = MockHostIPResolver(mapping: [
+            "evil.example.com": ["169.254.169.254"]
+        ])
+
+        XCTAssertThrowsError(
+            try LNURLService.resolveEndpoint(
+                from: "https://evil.example.com/pay",
+                hostResolver: mockResolver
+            )
+        ) { error in
+            guard case LNURLError.invalidTarget = error else {
+                XCTFail("Expected invalidTarget, got \(error)")
+                return
+            }
+        }
+    }
+}
+
+private struct MockHostIPResolver: HostIPResolving {
+    var mapping: [String: [String]] = [:]
+
+    func resolveHostIPs(_ host: String) -> [String] {
+        mapping[host] ?? []
     }
 }
