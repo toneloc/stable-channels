@@ -4245,6 +4245,22 @@ class AppState(private val context: Context) : ViewModel() {
         val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
 
+        // Reconcile database channels: LDK is the source of truth for channel existence.
+        // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
+        val liveUserChannelIds = nodeService.channels.map { it.userChannelId }
+        databaseService?.reconcileChannels(liveUserChannelIds)
+
+        if (nodeService.channels.isEmpty() && _stableChannel.value.userChannelId.isNotEmpty()) {
+            _stableChannel.value = StableChannel.defaultWithLsp(context)
+            context
+                .getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .remove(BalanceCacheKey.CACHED_CHANNEL_ID)
+                .remove(BalanceCacheKey.CACHED_USER_CHANNEL_ID)
+                .remove(BalanceCacheKey.CACHED_EXPECTED_USD)
+                .apply()
+        }
+
         // Resolve pending outbound deduction against raw wallet observation
         val effectivePending =
             synchronized(pendingLock) {
@@ -4473,13 +4489,26 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun updateStableBalances() {
         val price = priceService.currentPrice.value
+        val oldSc = _stableChannel.value
         val sc =
             StabilityService.updateBalances(
-                _stableChannel.value,
+                oldSc,
                 nodeService.channels,
                 _onchainBalanceSats.value,
                 price,
             )
+        
+        if (sc.userChannelId.isNotEmpty() && sc.userChannelId != oldSc.userChannelId) {
+            val dbRow = databaseService?.loadChannel(sc.userChannelId)
+            if (dbRow != null) {
+                _stableChannel.value = sc.copy(
+                    expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD), 
+                    backingSats = dbRow.backingSats,
+                    note = dbRow.note ?: ""
+                )
+                return
+            }
+        }
         _stableChannel.value = sc
     }
 

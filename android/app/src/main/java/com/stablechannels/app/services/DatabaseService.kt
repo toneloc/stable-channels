@@ -586,6 +586,15 @@ class DatabaseService(context: Context) :
         writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
     }
 
+    fun reconcileChannels(liveUserChannelIds: List<String>) {
+        if (liveUserChannelIds.isEmpty()) {
+            writableDatabase.delete("channels", null, null)
+        } else {
+            val placeholders = liveUserChannelIds.joinToString(",") { "?" }
+            writableDatabase.delete("channels", "user_channel_id NOT IN ($placeholders)", liveUserChannelIds.toTypedArray())
+        }
+    }
+
     /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
     fun hasAnyChannel(): Boolean {
         val cursor = readableDatabase.rawQuery("SELECT 1 FROM channels LIMIT 1", null)

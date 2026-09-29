@@ -214,6 +214,15 @@ final class ChannelRepository {
         try rawSQL.execute("DELETE FROM channels WHERE user_channel_id = ?", params: [.text(userChannelId)])
     }
 
+    func reconcileChannels(liveUserChannelIds: [String]) throws {
+        if liveUserChannelIds.isEmpty {
+            try rawSQL.execute("DELETE FROM channels", params: [])
+        } else {
+            let placeholders = liveUserChannelIds.map { _ in "?" }.joined(separator: ",")
+            try rawSQL.execute("DELETE FROM channels WHERE user_channel_id NOT IN (\(placeholders))", params: liveUserChannelIds.map { .text($0) })
+        }
+    }
+
     /// True if a channel_close payment record already exists for this channel_id/user_channel_id — i.e. the
     /// channel is gone for good and will never reappear in the channels table.
     func isChannelClosed(channelId: String, userChannelId: String? = nil) -> Bool {

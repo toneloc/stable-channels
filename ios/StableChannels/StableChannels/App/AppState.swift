@@ -3667,6 +3667,23 @@ class AppState {
         let rawSpendable = balances.spendableOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
 
+        // Reconcile database channels: LDK is the source of truth for channel existence.
+        // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
+        let liveUserChannelIds = nodeService.channels.map { $0.userChannelId }
+        do {
+            try databaseService?.channelRepo.reconcileChannels(liveUserChannelIds: liveUserChannelIds)
+        } catch {
+            print("Failed to reconcile channels: \(error)")
+        }
+
+        if nodeService.channels.isEmpty && !stableChannel.userChannelId.isEmpty {
+            stableChannel = .defaultWithLsp()
+            let prefs = UserDefaults.standard
+            prefs.removeObject(forKey: BalanceCacheKey.cachedChannelId)
+            prefs.removeObject(forKey: BalanceCacheKey.cachedUserChannelId)
+            prefs.removeObject(forKey: BalanceCacheKey.cachedExpectedUSD)
+        }
+
         // Resolve pending outbound deduction against raw wallet observation
         // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
         // the wallet's raw balance already reflects the spend. Any positive balance delta
@@ -3812,7 +3829,7 @@ class AppState {
 
     /// Update the StableChannel struct from current LDK channel data + price.
     private func updateStableBalances() {
-        let hadChannelId = !stableChannel.userChannelId.isEmpty
+        let oldUserChannelId = stableChannel.userChannelId
         let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
         StabilityService.updateBalances(
             &stableChannel,
@@ -3820,8 +3837,8 @@ class AppState {
             onchainBalanceSats: onchainBalanceSats,
             price: price
         )
-        // If userChannelId was just discovered, reload saved state (expectedUSD etc.) from DB
-        if !hadChannelId && !stableChannel.userChannelId.isEmpty {
+        // If userChannelId was just discovered or changed, reload saved state (expectedUSD etc.) from DB
+        if !stableChannel.userChannelId.isEmpty && stableChannel.userChannelId != oldUserChannelId {
             loadChannelFromDB()
         }
     }

@@ -233,13 +233,13 @@ enum StabilityService {
         if sc.userChannelId.isEmpty {
             matchingChannel = channels.first
         } else {
-            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId }
+            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId } ?? channels.first
         }
 
         guard let channel = matchingChannel else { return false }
 
-        // Auto-assign channel IDs if not set
-        if sc.userChannelId.isEmpty {
+        // Auto-assign channel IDs if not set or changed
+        if sc.userChannelId.isEmpty || sc.userChannelId != channel.userChannelId {
             sc.userChannelId = channel.userChannelId
             sc.channelId = channel.channelId
         }
