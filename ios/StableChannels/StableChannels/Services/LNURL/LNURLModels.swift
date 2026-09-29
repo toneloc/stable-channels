@@ -116,7 +116,7 @@ struct LNURLSuccessAction: Codable, Equatable, Sendable {
     }
 
     /// Checks if action URL shares the host or subdomain of the callback endpoint.
-    func isSameOriginOrSubdomain(callbackURL: URL) -> Bool {
+    func isSameHostOrSubdomain(callbackURL: URL) -> Bool {
         guard let urlStr = url, let actionURL = URL(string: urlStr),
               let actionHost = actionURL.host?.lowercased(),
               let callbackHost = callbackURL.host?.lowercased() else {

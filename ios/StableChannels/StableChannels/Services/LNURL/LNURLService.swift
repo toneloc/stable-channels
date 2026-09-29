@@ -9,23 +9,8 @@ protocol LNURLServiceProtocol: Sendable {
         callback: String,
         amountMsat: UInt64,
         comment: String?,
-        expectedMetadataHashHex: String?
+        expectedMetadataHashHex: String
     ) async throws -> LNURLPayInvoiceResponse
-}
-
-extension LNURLServiceProtocol {
-    func fetchInvoice(
-        callback: String,
-        amountMsat: UInt64,
-        comment: String?
-    ) async throws -> LNURLPayInvoiceResponse {
-        try await fetchInvoice(
-            callback: callback,
-            amountMsat: amountMsat,
-            comment: comment,
-            expectedMetadataHashHex: nil
-        )
-    }
 }
 
 // MARK: - Service Implementation
@@ -63,8 +48,10 @@ final class LNURLService: LNURLServiceProtocol {
             let domain = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !username.isEmpty, !domain.isEmpty else { throw LNURLError.invalidTarget }
 
-            let allowedUserChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_+"))
-            guard username.unicodeScalars.allSatisfy({ allowedUserChars.contains($0) }) else {
+            // Prevent path traversal, query injection, or delimiter manipulation in username
+            let forbiddenUserChars = CharacterSet(charactersIn: "/?#@: \\\"%<>{}|^`[]")
+            guard username.rangeOfCharacter(from: forbiddenUserChars) == nil,
+                  username.rangeOfCharacter(from: .controlCharacters) == nil else {
                 throw LNURLError.invalidTarget
             }
 
@@ -117,9 +104,16 @@ final class LNURLService: LNURLServiceProtocol {
 
         try parseErrorResponseIfPresent(data: data)
 
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse,
+              let finalURL = httpResponse.url,
+              finalURL.scheme?.lowercased() == "https",
+              (200...299).contains(httpResponse.statusCode) else {
             if let http = response as? HTTPURLResponse, http.statusCode == 404 {
                 throw LNURLError.errorResponse(reason: "Recipient address not found.")
+            }
+            if let http = response as? HTTPURLResponse, let finalURL = http.url,
+               finalURL.scheme?.lowercased() != "https" {
+                throw LNURLError.insecureEndpoint
             }
             throw LNURLError.invalidResponse
         }
@@ -133,6 +127,11 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.unsupportedTag(tag: params.tag)
         }
 
+        // Validate metadata has at least one valid text/plain entry per LUD-06
+        guard params.plainTextDescription != nil else {
+            throw LNURLError.invalidMetadata
+        }
+
         guard params.hasValidBounds else {
             throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
         }
@@ -144,8 +143,10 @@ final class LNURLService: LNURLServiceProtocol {
         callback: String,
         amountMsat: UInt64,
         comment: String?,
-        expectedMetadataHashHex: String? = nil
+        expectedMetadataHashHex: String
     ) async throws -> LNURLPayInvoiceResponse {
+        // Per LUD-06, callback URLs are supplied by the LNURL server and cross-origin endpoints
+        // are allowed by design. However, HTTPS transport is strictly mandated and redirect downgrades are blocked.
         guard let initialUrl = URL(string: callback), initialUrl.scheme?.lowercased() == "https" else {
             throw LNURLError.insecureEndpoint
         }
@@ -182,7 +183,14 @@ final class LNURLService: LNURLServiceProtocol {
 
         try parseErrorResponseIfPresent(data: data)
 
-        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse,
+              let finalURL = httpResponse.url,
+              finalURL.scheme?.lowercased() == "https",
+              (200...299).contains(httpResponse.statusCode) else {
+            if let http = response as? HTTPURLResponse, let finalURL = http.url,
+               finalURL.scheme?.lowercased() != "https" {
+                throw LNURLError.insecureEndpoint
+            }
             throw LNURLError.invalidResponse
         }
 
@@ -205,25 +213,26 @@ final class LNURLService: LNURLServiceProtocol {
         guard let invoiceMsat = bolt11.amountMilliSatoshis() else {
             throw LNURLError.errorResponse(reason: "Amountless invoices are not permitted for LNURL pay.")
         }
+
+        // LNURL-pay callback requests an exact amount in millisatoshis.
+        // Reject invoices whose encoded amount differs from the requested msat.
         guard invoiceMsat == amountMsat else {
             throw LNURLError.invoiceAmountMismatch(expectedMsat: amountMsat, actualMsat: invoiceMsat)
         }
+
         guard !bolt11.isExpired() else {
             throw LNURLError.errorResponse(reason: "The invoice returned by the LNURL service has expired.")
         }
 
-        if let expectedMetadataHashHex {
-            switch bolt11.invoiceDescription() {
-            case .hash(let hash):
-                guard hash.lowercased() == expectedMetadataHashHex.lowercased() else {
-                    throw LNURLError.errorResponse(reason: "Invoice description hash does not match payee metadata.")
-                }
-            case .direct:
-                throw LNURLError
-                    .errorResponse(
-                        reason: "Invoice uses direct description instead of required description hash (h tag)."
-                    )
+        switch bolt11.invoiceDescription() {
+        case .hash(let hash):
+            guard hash.lowercased() == expectedMetadataHashHex.lowercased() else {
+                throw LNURLError.errorResponse(reason: "Invoice description hash does not match payee metadata.")
             }
+        case .direct:
+            throw LNURLError.errorResponse(
+                reason: "Invoice uses direct description instead of required description hash (h tag)."
+            )
         }
 
         return invoiceResponse
