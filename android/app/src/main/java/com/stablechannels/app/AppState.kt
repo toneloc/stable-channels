@@ -4287,7 +4287,10 @@ class AppState(private val context: Context) : ViewModel() {
         try {
             databaseService?.reconcileChannels(liveUserChannelIds, liveChannelIds)
         } catch (e: Exception) {
-            AuditService.log("DB_RECONCILE_FAILED", mapOf("error" to (e.message ?: "Unknown error")))
+            AuditService.log(
+                "DB_RECONCILE_FAILED",
+                mapOf("error" to (e.message ?: "Unknown error")),
+            )
         }
 
         if (nodeService.channels.isEmpty() && _stableChannel.value.userChannelId.isNotEmpty()) {
@@ -4545,7 +4548,8 @@ class AppState(private val context: Context) : ViewModel() {
                         expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
                         backingSats = dbRow.backingSats,
                         note = dbRow.note ?: "",
-                        nativeChannelBTC = com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
+                        nativeChannelBTC =
+                            com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
                         counterparty = StableChannel.defaultWithLsp(context).counterparty,
                     )
                 } else {

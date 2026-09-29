@@ -3694,7 +3694,10 @@ class AppState {
         let liveUserChannelIds = nodeService.channels.map(\.userChannelId)
         let liveChannelIds = nodeService.channels.map(\.channelId)
         do {
-            try databaseService?.channelRepo.reconcileChannels(liveUserChannelIds: liveUserChannelIds, liveChannelIds: liveChannelIds)
+            try databaseService?.channelRepo.reconcileChannels(
+                liveUserChannelIds: liveUserChannelIds,
+                liveChannelIds: liveChannelIds
+            )
         } catch {
             AuditService.log("DB_RECONCILE_FAILED", data: ["error": error.localizedDescription])
         }
