@@ -15,7 +15,7 @@ struct StubFeeRateSource: FeeRateSource {
         self.throwsError = throwsError
     }
 
-    func fetchRate() async throws -> UInt64 {
+    func fetchRecommendedFees() async throws -> RecommendedFees {
         if delay > .zero {
             try? await Task.sleep(for: delay)
         }
@@ -23,7 +23,12 @@ struct StubFeeRateSource: FeeRateSource {
             throw err
         }
         guard let rate else { throw FeeRateError.parseFailed(source: "stub") }
-        return rate
+        return RecommendedFees(
+            fastestFee: max(1, (rate * 13) / 10),
+            halfHourFee: rate,
+            hourFee: max(1, (rate * 8) / 10),
+            minimumFee: max(1, rate / 2)
+        )
     }
 }
 
@@ -84,6 +89,21 @@ final class FeeRateServiceTests: XCTestCase {
 
         let rate = await cache.currentRate()
         XCTAssertEqual(rate, 2, "Both sources fail → fallback")
+    }
+
+    func testAllSourcesFail_fallbackNotCachedForTTL() async {
+        let counter = FetchCounter()
+        let failingSource = CountingSource(rate: 1, counter: counter, throwsError: FeeRateError.timeout)
+        let cache = FeeRateCache(sources: [failingSource], cacheTTL: .seconds(60), fallback: 2)
+
+        let first = await cache.currentRate()
+        XCTAssertEqual(first, 2)
+        XCTAssertEqual(counter.count, 1)
+
+        // Second call should attempt re-fetching because fallback was NOT cached
+        let second = await cache.currentRate()
+        XCTAssertEqual(second, 2)
+        XCTAssertEqual(counter.count, 2, "Fallback must not be cached; second call must re-attempt fetch")
     }
 
     // 5. One source fails, other succeeds → succeed
@@ -182,7 +202,7 @@ struct CountingSource: FeeRateSource {
         self.throwsError = throwsError
     }
 
-    func fetchRate() async throws -> UInt64 {
+    func fetchRecommendedFees() async throws -> RecommendedFees {
         counter.bump()
         if delay > .zero {
             try? await Task.sleep(for: delay)
@@ -190,6 +210,11 @@ struct CountingSource: FeeRateSource {
         if let err = throwsError {
             throw err
         }
-        return rate
+        return RecommendedFees(
+            fastestFee: max(1, (rate * 13) / 10),
+            halfHourFee: rate,
+            hourFee: max(1, (rate * 8) / 10),
+            minimumFee: max(1, rate / 2)
+        )
     }
 }
