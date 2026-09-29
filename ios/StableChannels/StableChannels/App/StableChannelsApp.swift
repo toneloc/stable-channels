@@ -5,7 +5,7 @@ import UserNotifications
 @main
 struct StableChannelsApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var appState = AppState()
+    @State private var appState = AppState(nodeService: .shared)
 
     var body: some Scene {
         WindowGroup {

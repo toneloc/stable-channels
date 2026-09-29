@@ -105,16 +105,19 @@ class AppState {
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
+    private let customRepairBooksUseCase: RepairBooksUseCase?
 
     init(
-        nodeService: NodeService? = nil,
+        nodeService: NodeService = NodeService(),
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
-        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil
+        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
+        repairBooksUseCase: RepairBooksUseCase? = nil
     ) {
-        self.nodeService = nodeService ?? (NSClassFromString("XCTestCase") != nil ? NodeService() : .shared)
+        self.nodeService = nodeService
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
+        self.customRepairBooksUseCase = repairBooksUseCase
     }
 
     // MARK: - State
@@ -2888,19 +2891,28 @@ class AppState {
     /// balance. It means a withdrawal moved sats out without its stable-books deduction.
     func repairBooksAboveLiveBalance() {
         guard let db = databaseService else { return }
-        guard !stableChannel.userChannelId.isEmpty, hasReadyChannel else { return }
-        guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
-        if (try? db.spliceRepo.hasPendingSplice()) ?? true { return }
-        if db.stabilityRepo.loadPendingSend() != nil { return }
-        if let payments = nodeService.node?.listPayments(), payments.contains(where: {
-            if case .pending = $0.status { return true }
-            return false
-        }) { return }
-        if (try? db.paymentRepo.hasPendingOutgoingPayment()) ?? true { return }
-        let price = accountingBTCPrice
-        guard price > 0.0 else { return }
 
-        guard let repair = StabilityService.repairBooksAboveLiveBalance(&stableChannel, price: price) else {
+        let paymentAdapter = LDKPaymentStatusAdapter(nodeService: nodeService, databaseService: db)
+        let spliceAdapter = DatabaseSpliceStatusAdapter(databaseService: db)
+        let stabilitySendAdapter = DatabaseStabilitySendStatusAdapter(databaseService: db)
+
+        let useCase = customRepairBooksUseCase ?? RepairBooksUseCase(
+            paymentStatusProvider: paymentAdapter,
+            spliceStatusProvider: spliceAdapter,
+            stabilitySendStatusProvider: stabilitySendAdapter
+        )
+
+        let price = accountingBTCPrice
+        let context = RepairBooksUseCase.Context(
+            hasUserChannelId: !stableChannel.userChannelId.isEmpty,
+            hasReadyChannel: hasReadyChannel,
+            isChannelClosing: isChannelClosing,
+            isSweeping: isSweeping,
+            hasPendingSpliceInMemory: pendingSplice != nil,
+            price: price
+        )
+
+        guard let repair = useCase.execute(channel: &stableChannel, context: context) else {
             return
         }
         saveChannelToDB()
