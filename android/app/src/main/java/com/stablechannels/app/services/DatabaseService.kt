@@ -593,8 +593,9 @@ class DatabaseService(context: Context) :
             val userPlaceholders = liveUserChannelIds.joinToString(",") { "?" }
             val channelPlaceholders = liveChannelIds.joinToString(",") { "?" }
             val args = (liveUserChannelIds + liveChannelIds).toTypedArray()
-            
-            // Delete any row that does not match any live user_channel_id AND does not match any live channel_id.
+
+            // Delete any row that does not match any live user_channel_id AND does not match any
+            // live channel_id.
             // If it matches either, it belongs to a live channel and should be spared.
             writableDatabase.delete(
                 "channels",

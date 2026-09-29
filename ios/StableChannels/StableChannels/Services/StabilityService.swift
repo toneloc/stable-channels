@@ -233,7 +233,7 @@ enum StabilityService {
         if sc.userChannelId.isEmpty {
             matchingChannel = channels.first(where: { $0.isChannelReady }) ?? channels.first
         } else {
-            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId } 
+            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId }
                 ?? channels.first(where: { $0.isChannelReady }) ?? channels.first
         }
 

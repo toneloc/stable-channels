@@ -220,7 +220,7 @@ final class ChannelRepository {
         } else {
             let userPlaceholders = liveUserChannelIds.map { _ in "?" }.joined(separator: ",")
             let channelPlaceholders = liveChannelIds.map { _ in "?" }.joined(separator: ",")
-            let params = (liveUserChannelIds + liveChannelIds).map { SQLiteParam.text($0) }
+            let params = (liveUserChannelIds + liveChannelIds).map { SQLValue.text($0) }
             try rawSQL.execute(
                 "DELETE FROM channels WHERE user_channel_id NOT IN (\(userPlaceholders)) AND channel_id NOT IN (\(channelPlaceholders))",
                 params: params
