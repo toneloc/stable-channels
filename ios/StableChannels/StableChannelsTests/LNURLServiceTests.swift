@@ -123,6 +123,9 @@ final class LNURLServiceTests: XCTestCase {
         let standard = try LNURLService.resolveEndpoint(from: "satoshi@bitcoin.org")
         XCTAssertEqual(standard.absoluteString, "https://bitcoin.org/.well-known/lnurlp/satoshi")
 
+        let personal = try LNURLService.resolveEndpoint(from: "prabal@0xprabal.com")
+        XCTAssertEqual(personal.absoluteString, "https://0xprabal.com/.well-known/lnurlp/prabal")
+
         let bech32Sample = "lnurl1dp68gurn8ghj7um9wfmxjcm99e3k7mf0v9cxjtmkxyhkcmn4wfkz7urp0yvwqajv"
         let resolvedBech32 = try LNURLService.resolveEndpoint(from: bech32Sample)
         XCTAssertEqual(resolvedBech32.absoluteString, "https://service.com/api/v1/lnurl/pay")
