@@ -1,41 +1,24 @@
 import Foundation
 import LDKNode
 
-// MARK: - Protocol
+// MARK: - Redirect Delegate
 
-protocol LNURLServiceProtocol: Sendable {
-    func fetchPayParams(from url: URL) async throws -> LNURLPayParams
-    func fetchInvoice(
-        params: LNURLPayParams,
-        amountMsat: UInt64,
-        comment: String?
-    ) async throws -> LNURLPayInvoiceResponse
-    func fetchInvoice(
-        callback: String,
-        amountMsat: UInt64,
-        comment: String?,
-        expectedMetadataHashHex: String
-    ) async throws -> LNURLPayInvoiceResponse
-}
+final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private(set) var encounteredInsecureRedirect = false
 
-extension LNURLServiceProtocol {
-    func fetchInvoice(
-        params: LNURLPayParams,
-        amountMsat: UInt64,
-        comment: String? = nil
-    ) async throws -> LNURLPayInvoiceResponse {
-        guard params.isAmountValid(msat: amountMsat) else {
-            throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
+    func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        willPerformHTTPRedirection _: HTTPURLResponse,
+        newRequest: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let targetURL = newRequest.url, LNURLService.isSecureEndpoint(url: targetURL) else {
+            encounteredInsecureRedirect = true
+            completionHandler(nil)
+            return
         }
-        guard params.isCommentValid(comment) else {
-            throw LNURLError.invalidResponse
-        }
-        return try await fetchInvoice(
-            callback: params.callback,
-            amountMsat: amountMsat,
-            comment: comment,
-            expectedMetadataHashHex: params.metadataHashHex
-        )
+        completionHandler(newRequest)
     }
 }
 
@@ -53,6 +36,43 @@ final class LNURLService: LNURLServiceProtocol {
             config.timeoutIntervalForResource = 30.0
             self.urlSession = URLSession(configuration: config)
         }
+    }
+
+    private static func isPrivateIPv4(_ ip: UInt32) -> Bool {
+        let top8 = ip >> 24
+        return top8 == 0 || top8 == 127 || top8 == 10 || ip == 0xFFFFFFFF ||
+            (ip >> 16) == 0xC0A8 || (ip >> 16) == 0xA9FE ||
+            (ip >= 0xAC100000 && ip <= 0xAC1FFFFF)
+    }
+
+    /// Checks if a given host is a private, loopback, or link-local address to prevent SSRF.
+    static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
+        var cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if cleanHost.hasPrefix("[") && cleanHost.hasSuffix("]") {
+            cleanHost = String(cleanHost.dropFirst().dropLast())
+        }
+        if cleanHost == "localhost" || cleanHost.hasSuffix(".localhost") || cleanHost.hasSuffix(".local") || cleanHost
+            .hasSuffix(".internal") {
+            return true
+        }
+        var addr4 = in_addr()
+        if inet_aton(cleanHost, &addr4) != 0 {
+            return isPrivateIPv4(UInt32(bigEndian: addr4.s_addr))
+        }
+        var addr6 = in6_addr()
+        if inet_pton(AF_INET6, cleanHost, &addr6) == 1 {
+            let b = withUnsafeBytes(of: &addr6) { Array($0) }
+            let isZero = b.allSatisfy { $0 == 0 }
+            let isV6Loopback = b[0..<15].allSatisfy { $0 == 0 } && b[15] == 1
+            if isZero || isV6Loopback { return true }
+            if b[0] == 0xFE && (b[1] & 0xC0) == 0x80 { return true }
+            if (b[0] & 0xFE) == 0xFC { return true }
+            if b[0..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xFF && b[11] == 0xFF {
+                let v4ip = (UInt32(b[12]) << 24) | (UInt32(b[13]) << 16) | (UInt32(b[14]) << 8) | UInt32(b[15])
+                return isPrivateIPv4(v4ip)
+            }
+        }
+        return false
     }
 
     /// Resolves an input destination into an actionable HTTPS LNURL endpoint URL.
@@ -89,6 +109,10 @@ final class LNURLService: LNURLServiceProtocol {
                 throw LNURLError.invalidTarget
             }
 
+            guard !isPrivateOrLoopbackHost(domain) else {
+                throw LNURLError.invalidTarget
+            }
+
             let scheme = domain.hasSuffix(".onion") ? "http" : "https"
             guard let url = URL(string: "\(scheme)://\(domain)/.well-known/lnurlp/\(username)") else {
                 throw LNURLError.invalidTarget
@@ -110,8 +134,12 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
+    /// Also rejects any loopback, private, or link-local hosts.
     static func isSecureEndpoint(url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
+            return false
+        }
+        guard !isPrivateOrLoopbackHost(host) else {
             return false
         }
         if host.hasSuffix(".onion") {
@@ -120,7 +148,7 @@ final class LNURLService: LNURLServiceProtocol {
         return scheme == "https"
     }
 
-    func fetchPayParams(from url: URL) async throws -> LNURLPayParams {
+    private func executeSecureGet(url: URL) async throws -> (Data, HTTPURLResponse) {
         guard Self.isSecureEndpoint(url: url) else {
             throw LNURLError.insecureEndpoint
         }
@@ -129,12 +157,17 @@ final class LNURLService: LNURLServiceProtocol {
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
 
+        let redirectDelegate = SecureRedirectDelegate()
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await urlSession.data(for: request)
+            (data, response) = try await urlSession.data(for: request, delegate: redirectDelegate)
         } catch {
             throw LNURLError.networkError(error.localizedDescription)
+        }
+
+        if redirectDelegate.encounteredInsecureRedirect {
+            throw LNURLError.insecureEndpoint
         }
 
         guard let httpResponse = response as? HTTPURLResponse,
@@ -146,6 +179,11 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.insecureEndpoint
         }
 
+        return (data, httpResponse)
+    }
+
+    func fetchPayParams(from url: URL) async throws -> LNURLPayParams {
+        let (data, httpResponse) = try await executeSecureGet(url: url)
         try parseErrorResponseIfPresent(data: data)
 
         guard (200...299).contains(httpResponse.statusCode) else {
@@ -177,15 +215,31 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     func fetchInvoice(
+        params: LNURLPayParams,
+        amountMsat: UInt64,
+        comment: String? = nil
+    ) async throws -> LNURLPayInvoiceResponse {
+        guard params.isAmountValid(msat: amountMsat) else {
+            throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
+        }
+        guard params.isCommentValid(comment) else {
+            throw LNURLError.invalidResponse
+        }
+        return try await fetchInvoiceRaw(
+            callback: params.callback,
+            amountMsat: amountMsat,
+            comment: comment,
+            expectedMetadataHashHex: params.metadataHashHex
+        )
+    }
+
+    private func fetchInvoiceRaw(
         callback: String,
         amountMsat: UInt64,
         comment: String?,
         expectedMetadataHashHex: String
     ) async throws -> LNURLPayInvoiceResponse {
-        // Per LUD-06, callback URLs are supplied by the LNURL server and cross-origin endpoints
-        // are allowed by design. However, HTTPS transport is strictly mandated on clearnet (HTTP permitted only for
-        // .onion).
-        guard let initialUrl = URL(string: callback), Self.isSecureEndpoint(url: initialUrl) else {
+        guard let initialUrl = URL(string: callback) else {
             throw LNURLError.insecureEndpoint
         }
 
@@ -207,27 +261,7 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.invalidResponse
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await urlSession.data(for: request)
-        } catch {
-            throw LNURLError.networkError(error.localizedDescription)
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              let finalURL = httpResponse.url else {
-            throw LNURLError.invalidResponse
-        }
-
-        guard Self.isSecureEndpoint(url: finalURL) else {
-            throw LNURLError.insecureEndpoint
-        }
-
+        let (data, httpResponse) = try await executeSecureGet(url: url)
         try parseErrorResponseIfPresent(data: data)
 
         guard (200...299).contains(httpResponse.statusCode) else {

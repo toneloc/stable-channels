@@ -31,10 +31,9 @@ actor MockLNURLService: LNURLServiceProtocol {
     }
 
     func fetchInvoice(
-        callback _: String,
+        params _: LNURLPayParams,
         amountMsat _: UInt64,
-        comment _: String?,
-        expectedMetadataHashHex _: String
+        comment _: String?
     ) async throws -> LNURLPayInvoiceResponse {
         if let error = shouldThrowError {
             throw error
@@ -320,6 +319,23 @@ final class LNURLServiceTests: XCTestCase {
     private static let amountlessInvoice =
         "lnbcrt1p4tkumuhp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qf7cucxts7m2m34lwa78u7mv7x5kdpclmamjugwgm3jpevvwtge0jpp53hupfs45s6g5d8344dz6d09f5t3vhj3rhdwxe23xdv6tqueyqleqsp5nxdytqnnlneq489wc8h04megxf7tcfq07tfpek03yl2d0p426y0q9qyysgqcqzp2xq97zvuqdkurx2kmkkqp3d7pvhw76vpr7e5zmlyljmmcl4mm2wjkf4a69w4nwt9spch3yrxny9auez5taj0d03mh38lqkn7j9v636kk5cl2jttgqd7gvvp"
 
+    private func makeParams(
+        callback: String,
+        metadata: String = "",
+        minSendable: UInt64 = 1_000,
+        maxSendable: UInt64 = 100_000_000,
+        commentAllowed: Int? = 100
+    ) -> LNURLPayParams {
+        LNURLPayParams(
+            tag: "payRequest",
+            callback: callback,
+            minSendable: minSendable,
+            maxSendable: maxSendable,
+            metadata: metadata,
+            commentAllowed: commentAllowed
+        )
+    }
+
     private func makeMockService() -> (LNURLService, URL) {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
@@ -337,11 +353,11 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         let result = try await service.fetchInvoice(
-            callback: callbackURL.absoluteString,
+            params: params,
             amountMsat: 50_000,
-            comment: "Tip",
-            expectedMetadataHashHex: Self.metadataHashA
+            comment: "Tip"
         )
 
         XCTAssertEqual(result.pr, Self.valid50kInvoice)
@@ -407,12 +423,12 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected invoiceAmountMismatch error")
         } catch let LNURLError.invoiceAmountMismatch(expectedMsat, actualMsat) {
@@ -431,13 +447,12 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
-        let differentHash = "0000000000000000000000000000000000000000000000000000000000000000"
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: differentHash
+                comment: nil
             )
             XCTFail("Expected errorResponse due to description hash mismatch")
         } catch let LNURLError.errorResponse(reason) {
@@ -455,12 +470,12 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected errorResponse due to direct description")
         } catch let LNURLError.errorResponse(reason) {
@@ -478,12 +493,12 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected errorResponse due to expired invoice")
         } catch let LNURLError.errorResponse(reason) {
@@ -501,12 +516,12 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected errorResponse due to amountless invoice")
         } catch let LNURLError.errorResponse(reason) {
@@ -527,11 +542,11 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         _ = try await service.fetchInvoice(
-            callback: callbackURL.absoluteString,
+            params: params,
             amountMsat: 50_000,
-            comment: "Thanks & hello? test=1",
-            expectedMetadataHashHex: Self.metadataHashA
+            comment: "Thanks & hello? test=1"
         )
 
         let resolvedURL = try XCTUnwrap(capturedURL)
@@ -581,21 +596,20 @@ final class LNURLServiceTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { _ in
             let response = HTTPURLResponse(
-                url: insecureRedirectURL,
-                statusCode: 200,
+                url: callbackURL,
+                statusCode: 302,
                 httpVersion: nil,
-                headerFields: nil
+                headerFields: ["Location": insecureRedirectURL.absoluteString]
             )!
-            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
-            return (response, Data(json.utf8))
+            return (response, Data())
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: callbackURL.absoluteString,
+                params: params,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected LNURLError.insecureEndpoint on HTTP downgrade")
         } catch LNURLError.insecureEndpoint {
@@ -660,27 +674,157 @@ final class LNURLServiceTests: XCTestCase {
         }
 
         // Tor callback over HTTP succeeds
+        let torParams = makeParams(callback: torCallback, metadata: "")
         let result = try await service.fetchInvoice(
-            callback: torCallback,
+            params: torParams,
             amountMsat: 50_000,
-            comment: nil,
-            expectedMetadataHashHex: Self.metadataHashA
+            comment: nil
         )
         XCTAssertEqual(result.pr, Self.valid50kInvoice)
 
         // Clearnet callback over HTTP is rejected
+        let clearnetParams = makeParams(callback: clearnetHttpCallback, metadata: "")
         do {
             _ = try await service.fetchInvoice(
-                callback: clearnetHttpCallback,
+                params: clearnetParams,
                 amountMsat: 50_000,
-                comment: nil,
-                expectedMetadataHashHex: Self.metadataHashA
+                comment: nil
             )
             XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP callback")
         } catch LNURLError.insecureEndpoint {
             // Expected
         } catch {
             XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testIsPrivateOrLoopbackHost_identifiesAllRestrictedRanges() {
+        let restricted = [
+            "localhost",
+            "sub.localhost",
+            "router.local",
+            "cluster.internal",
+            "127.0.0.1",
+            "127.255.255.254",
+            "10.0.0.1",
+            "10.254.1.9",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.0.1",
+            "192.168.100.200",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::1",
+            "[::1]",
+            "::",
+            "fe80::1",
+            "fc00::1",
+            "fd12:3456:789a::1",
+            "::ffff:127.0.0.1",
+            "::ffff:192.168.1.1"
+        ]
+        for host in restricted {
+            XCTAssertTrue(
+                LNURLService.isPrivateOrLoopbackHost(host),
+                "Expected \(host) to be detected as private/loopback"
+            )
+        }
+
+        let allowed = [
+            "bitcoin.org",
+            "ln.tips",
+            "example.com",
+            "service.onion",
+            "8.8.8.8",
+            "172.15.255.255",
+            "172.32.0.1",
+            "1.1.1.1"
+        ]
+        for host in allowed {
+            XCTAssertFalse(LNURLService.isPrivateOrLoopbackHost(host), "Expected \(host) to be public")
+        }
+    }
+
+    func testResolveEndpoint_rejectsPrivateAndLoopbackHosts() {
+        let privateAddresses = [
+            "alice@127.0.0.1",
+            "bob@localhost",
+            "carol@192.168.1.1",
+            "david@10.0.0.1",
+            "eve@169.254.169.254",
+            "frank@mydevice.local"
+        ]
+        for target in privateAddresses {
+            XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: target)) { error in
+                guard case LNURLError.invalidTarget = error else {
+                    XCTFail("Expected invalidTarget for \(target), got \(error)")
+                    return
+                }
+            }
+        }
+
+        let privateURLs = [
+            "https://127.0.0.1/lnurlp",
+            "https://localhost/lnurlp",
+            "https://192.168.1.1/.well-known/lnurlp/alice",
+            "http://127.0.0.1/lnurlp"
+        ]
+        for target in privateURLs {
+            XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: target)) { error in
+                guard case LNURLError.invalidTarget = error else {
+                    XCTFail("Expected invalidTarget for \(target), got \(error)")
+                    return
+                }
+            }
+        }
+    }
+
+    func testFetchInvoice_redirectsToLoopback_isVetoedPreHop() async throws {
+        let (service, callbackURL) = makeMockService()
+        let loopbackRedirectURL = try XCTUnwrap(URL(string: "https://127.0.0.1/callback"))
+
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(
+                url: callbackURL,
+                statusCode: 302,
+                httpVersion: nil,
+                headerFields: ["Location": loopbackRedirectURL.absoluteString]
+            )!
+            return (response, Data())
+        }
+
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: nil
+            )
+            XCTFail("Expected LNURLError.insecureEndpoint on loopback redirect")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testBech32_verifySegwitAddress_trimsSurroundingWhitespace() {
+        let validAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        let paddedAddress = "  \n\t bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 \r\n  "
+
+        let direct = Bech32.verifySegwitAddress(validAddress, expectedHrp: "bc")
+        let padded = Bech32.verifySegwitAddress(paddedAddress, expectedHrp: "bc")
+        XCTAssertTrue(direct)
+        XCTAssertTrue(padded)
+    }
+
+    func testBech32_decode_multibyteHRPCharacter_throwsInvalidCharacterWithoutGarbling() {
+        XCTAssertThrowsError(try Bech32.decode("🔥1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")) { error in
+            guard case let Bech32.Error.invalidCharacter(c) = error else {
+                XCTFail("Expected invalidCharacter, got \(error)")
+                return
+            }
+            XCTAssertEqual(c, "🔥")
         }
     }
 

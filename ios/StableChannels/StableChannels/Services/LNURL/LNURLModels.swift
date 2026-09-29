@@ -1,6 +1,26 @@
 import CryptoKit
 import Foundation
 
+// MARK: - Service Protocol
+
+protocol LNURLServiceProtocol: Sendable {
+    func fetchPayParams(from url: URL) async throws -> LNURLPayParams
+    func fetchInvoice(
+        params: LNURLPayParams,
+        amountMsat: UInt64,
+        comment: String?
+    ) async throws -> LNURLPayInvoiceResponse
+}
+
+extension LNURLServiceProtocol {
+    func fetchInvoice(
+        params: LNURLPayParams,
+        amountMsat: UInt64
+    ) async throws -> LNURLPayInvoiceResponse {
+        try await fetchInvoice(params: params, amountMsat: amountMsat, comment: nil)
+    }
+}
+
 // MARK: - Pay Parameters Model (LUD-06)
 
 /// LNURL-pay parameters returned from LUD-06 first-step GET request.

@@ -106,9 +106,10 @@ enum Bech32 {
         let hrp = String(lowercased[..<pos])
         guard !hrp.isEmpty else { throw Error.missingHrp }
 
-        for byte in hrp.utf8 {
-            guard byte >= 33 && byte <= 126 else {
-                throw Error.invalidCharacter(Character(UnicodeScalar(byte)))
+        for char in hrp {
+            guard let scalar = char.unicodeScalars.first, char.unicodeScalars.count == 1,
+                  scalar.value >= 33 && scalar.value <= 126 else {
+                throw Error.invalidCharacter(char)
             }
         }
 
@@ -147,7 +148,8 @@ enum Bech32 {
     /// Verifies that a native Segwit / Taproot address adheres to BIP-173 (v0 with Bech32)
     /// or BIP-350 (v1+ with Bech32m) specifications, including length limits and program sizes.
     static func verifySegwitAddress(_ address: String, expectedHrp: String) -> Bool {
-        guard let (hrp, payload, checksumType) = try? parse(address, limitLength: true) else {
+        let cleanAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let (hrp, payload, checksumType) = try? parse(cleanAddress, limitLength: true) else {
             return false
         }
         guard hrp == expectedHrp.lowercased(), !payload.isEmpty else { return false }
