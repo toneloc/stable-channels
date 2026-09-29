@@ -235,6 +235,41 @@ final class FeeRateServiceTests: XCTestCase {
         XCTAssertEqual(absurd.rate(for: .priority), RecommendedFees.maxAllowedFeeRate)
     }
 
+    func testRecommendedFees_codableIngressSanitization() throws {
+        // Direct JSON decoding must route through validating initializer and sanitize hostile rates
+        let json = """
+        {
+            "fastestFee": 1000000.0,
+            "halfHourFee": -20.0,
+            "hourFee": 0.0,
+            "economyFee": 1e30,
+            "minimumFee": 1.0
+        }
+        """.data(using: .utf8)!
+
+        let decoded = try JSONDecoder().decode(RecommendedFees.self, from: json)
+        XCTAssertEqual(decoded.fastestFee, RecommendedFees.maxAllowedFeeRate)
+        XCTAssertEqual(decoded.halfHourFee, 1.0) // negative falls back to cleanMin (1.0)
+        XCTAssertEqual(decoded.hourFee, 1.0) // 0 falls back to cleanMin (1.0)
+        XCTAssertEqual(decoded.economyFee, RecommendedFees.maxAllowedFeeRate)
+        XCTAssertEqual(decoded.minimumFee, 1.0)
+    }
+
+    func testRecommendedFees_minimumFeeAnomalyCappedAgainstHalfHourFee() {
+        // An anomalous minimumFee must not drag economy or standard tiers above halfHourFee
+        let anomaly = RecommendedFees(
+            fastestFee: 20.0,
+            halfHourFee: 10.0,
+            hourFee: 5.0,
+            economyFee: 3.0,
+            minimumFee: 500.0
+        )
+        // minimumFee is clamped by halfHourFee (10.0) in rate(for:)
+        XCTAssertEqual(anomaly.rate(for: .economy), 10.0)
+        XCTAssertEqual(anomaly.rate(for: .standard), 10.0)
+        XCTAssertEqual(anomaly.rate(for: .priority), 20.0)
+    }
+
     func testCurrentRateSatVb_hugeRateDoesNotTrap() async {
         let hugeSource = StubFeeRateSource(rate: 5_000_000.0)
         let service = FeeRateService(sources: [hugeSource])

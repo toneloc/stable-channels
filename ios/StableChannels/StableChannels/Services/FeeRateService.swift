@@ -17,7 +17,7 @@ struct RecommendedFees: Codable, Equatable, Sendable {
     }
 
     func rate(for tier: NetworkFeeSpeedTier) -> Double {
-        let minRate = max(Self.minAllowedFeeRate, min(minimumFee, Self.maxAllowedFeeRate))
+        let minRate = max(Self.minAllowedFeeRate, min(minimumFee, halfHourFee, Self.maxAllowedFeeRate))
         let rawEconomy: Double
         if let economyFee, economyFee > 0 {
             rawEconomy = max(minRate, economyFee)
@@ -38,14 +38,6 @@ struct RecommendedFees: Codable, Equatable, Sendable {
         }
     }
 
-    static let `default` = RecommendedFees(
-        fastestFee: 15.0,
-        halfHourFee: 10.0,
-        hourFee: 8.0,
-        economyFee: 5.0,
-        minimumFee: 1.0
-    )
-
     init(
         fastestFee: Double,
         halfHourFee: Double,
@@ -65,6 +57,22 @@ struct RecommendedFees: Codable, Equatable, Sendable {
         }
     }
 
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let fastestFee = try container.decode(Double.self, forKey: .fastestFee)
+        let halfHourFee = try container.decode(Double.self, forKey: .halfHourFee)
+        let hourFee = try container.decode(Double.self, forKey: .hourFee)
+        let economyFee = try container.decodeIfPresent(Double.self, forKey: .economyFee)
+        let minimumFee = try container.decode(Double.self, forKey: .minimumFee)
+        self.init(
+            fastestFee: fastestFee,
+            halfHourFee: halfHourFee,
+            hourFee: hourFee,
+            economyFee: economyFee,
+            minimumFee: minimumFee
+        )
+    }
+
     init(wsFees: MempoolWSFees) {
         self.init(
             fastestFee: wsFees.fastestFee,
@@ -80,15 +88,6 @@ struct RecommendedFees: Codable, Equatable, Sendable {
 protocol FeeRateSource: Sendable {
     /// Fetch full multi-tier recommended fee structure.
     func fetchRecommendedFees() async throws -> RecommendedFees
-    /// Fetch standard confirmation rate (sat/vB, ~30-min half-hour target).
-    func fetchRate() async throws -> Double
-}
-
-extension FeeRateSource {
-    func fetchRate() async throws -> Double {
-        let rec = try await fetchRecommendedFees()
-        return rec.halfHourFee
-    }
 }
 
 /// Blockstream esplora `{"1": ..., "3": ..., "6": ..., "144": ...}`
@@ -185,7 +184,6 @@ actor FeeRateCache {
     private let sources: [FeeRateSource]
     private let cacheTTL: Duration
     private let fallback: Double
-    private var cachedRate: Double?
     private var cachedRecommendedFees: RecommendedFees?
     private var cachedAt: ContinuousClock.Instant?
     private var inFlight: Task<(fees: RecommendedFees, isFallback: Bool), Never>?
@@ -204,7 +202,6 @@ actor FeeRateCache {
     func updateRecommendedFees(_ fees: RecommendedFees) {
         updateGeneration &+= 1
         cachedRecommendedFees = fees
-        cachedRate = fees.halfHourFee
         cachedAt = ContinuousClock.now
     }
 
@@ -281,7 +278,6 @@ actor FeeRateCache {
         if !result.isFallback {
             updateGeneration &+= 1
             cachedRecommendedFees = result.fees
-            cachedRate = result.fees.halfHourFee
             cachedAt = ContinuousClock.now
             return result.fees
         } else if let lastKnownGood = cachedRecommendedFees {
@@ -298,7 +294,6 @@ actor FeeRateCache {
 
     func invalidate() {
         updateGeneration &+= 1
-        cachedRate = nil
         cachedRecommendedFees = nil
         cachedAt = nil
     }
