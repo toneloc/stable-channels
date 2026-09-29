@@ -4,11 +4,11 @@ struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = true
+    @AppStorage("selected_price_chart_period") private var chartPeriod: ChartPeriod = .day
     @State private var priceHistory: [PriceRecord] = []
     @State private var chartMin: Double = 0
     @State private var chartMax: Double = 100
-    @State private var chartPeriod: ChartPeriod = .all
-    @State private var displayedPeriod: ChartPeriod = .all
+    @State private var displayedPeriod: ChartPeriod = .day
     @State private var selectedPricePoint: PriceRecord?
     @State private var loadTask: Task<Void, Never>?
     @State private var isHistoryDirty = false
@@ -30,6 +30,7 @@ struct PriceChartView: View {
         .shadow(color: cardShadowColor, radius: 8, x: 0, y: 2)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .onAppear {
+            displayedPeriod = chartPeriod
             if isExpanded {
                 loadHistory(for: chartPeriod, force: isHistoryDirty)
                 isHistoryDirty = false
@@ -83,17 +84,28 @@ struct PriceChartView: View {
                         Text(selected.date, format: chartPeriod.dateFormat)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
+                    } else {
+                        Text(displayedPeriod.label)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
                 Spacer()
 
-                if let selected = selectedPricePoint {
-                    Text(selected.price.usdFormatted)
-                        .font(.headline.bold().monospacedDigit())
-                        .foregroundStyle(.primary)
-                } else {
-                    LivePriceLabel()
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let selected = selectedPricePoint {
+                        Text(selected.price.usdFormatted)
+                            .font(.headline.bold().monospacedDigit())
+                            .foregroundStyle(.primary)
+                    } else {
+                        LivePriceLabel()
+                    }
+
+                    LivePricePercentageLabel(
+                        firstPrice: priceHistory.count >= 2 ? priceHistory.first?.price : nil,
+                        selectedPrice: selectedPricePoint?.price
+                    )
                 }
 
                 Image(systemName: "chevron.right")

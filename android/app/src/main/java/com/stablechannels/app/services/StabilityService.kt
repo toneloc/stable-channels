@@ -6,6 +6,7 @@ import com.stablechannels.app.models.USD
 import com.stablechannels.app.util.Constants
 import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToLong
 import org.lightningdevkit.ldknode.ChannelDetails
 
@@ -61,6 +62,36 @@ object StabilityService {
         val updated = sc.copy()
         recomputeNative(updated)
         return updated
+    }
+
+    /**
+     * Use Rust's local shortfall rule: excess receipts stay native and existing surplus stays
+     * backing. Apply the credit to the committed books, bounded by the actual received sats. Do not
+     * cap against a live balance snapshot: it can already include a later withdrawal whose event
+     * has not been accounted for. The temporary above-live backing is what outgoing reconciliation
+     * needs to deduct that withdrawal from the USD target.
+     */
+    fun backingAfterIncomingStability(
+        currentBackingSats: Long,
+        expectedUSD: Double,
+        price: Double,
+        amountSats: Long,
+    ): Long? {
+        if (
+            currentBackingSats < 0 ||
+                !expectedUSD.isFinite() ||
+                expectedUSD < 0.0 ||
+                !price.isFinite() ||
+                price <= 0.0 ||
+                amountSats <= 0
+        )
+            return null
+        val equilibrium = expectedUSD / price * Constants.SATS_IN_BTC
+        if (!equilibrium.isFinite() || equilibrium >= Long.MAX_VALUE.toDouble()) return null
+        val targetSats = equilibrium.toLong()
+        if (currentBackingSats >= targetSats) return currentBackingSats
+        // Cap the credit before adding so even an excessive amount cannot overflow Long.
+        return currentBackingSats + min(amountSats, targetSats - currentBackingSats)
     }
 
     fun applyTrade(sc: StableChannel, newExpectedUSD: Double, price: Double): StableChannel {

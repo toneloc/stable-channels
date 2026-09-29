@@ -1,43 +1,97 @@
 import SwiftUI
 
+/// Reusable view rendering numeric text with vertical mechanical odometer
+/// rolling transitions and optional directional tick highlight.
+struct RollingDigitLabel: View {
+    let text: String
+    let value: Double
+    var font: Font = .headline.bold()
+    var baseColor: Color = .primary
+    var enableTickHighlight: Bool = false
+    var tickUpColor: Color = .green
+    var tickDownColor: Color = .red
+    var tickDuration: TimeInterval = 0.45
+
+    @State private var currentColor: Color = .primary
+    @State private var colorResetTask: Task<Void, Never>?
+
+    var body: some View {
+        Text(text)
+            .font(font.monospacedDigit())
+            .foregroundStyle(currentColor)
+            .contentTransition(.numericText())
+            .animation(.snappy(duration: 0.28, extraBounce: 0.05), value: value)
+            .onChange(of: value) { old, new in
+                guard enableTickHighlight, old > 0, new > 0, old != new else { return }
+                colorResetTask?.cancel()
+                withAnimation(.easeOut(duration: 0.15)) {
+                    currentColor = new > old ? tickUpColor : tickDownColor
+                }
+                colorResetTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: UInt64(tickDuration * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.35)) {
+                        currentColor = baseColor
+                    }
+                }
+            }
+            .onAppear {
+                currentColor = baseColor
+            }
+            .onChange(of: baseColor) { _, newBase in
+                if colorResetTask == nil {
+                    currentColor = newBase
+                }
+            }
+    }
+}
+
 struct LivePriceLabel: View {
     @Environment(AppState.self) private var appState: AppState?
     var priceOverride: Double?
-
-    @State private var tickColor: Color = .primary
-    @State private var colorResetTask: Task<Void, Never>?
 
     private var currentPrice: Double {
         priceOverride ?? appState?.btcPrice ?? 0
     }
 
     var body: some View {
-        Group {
-            if currentPrice > 0 {
-                Text(currentPrice.usdFormatted)
-                    .font(.headline.bold().monospacedDigit())
-                    .foregroundStyle(tickColor)
-                    .contentTransition(.numericText())
-            } else {
-                Text("---")
-                    .font(.headline.bold().monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
+        if currentPrice > 0 {
+            RollingDigitLabel(
+                text: currentPrice.usdFormatted,
+                value: currentPrice,
+                font: .headline.bold(),
+                enableTickHighlight: true
+            )
+        } else {
+            Text(verbatim: "---")
+                .font(.headline.bold().monospacedDigit())
+                .foregroundStyle(.secondary)
         }
-        .animation(.snappy(duration: 0.28, extraBounce: 0.05), value: currentPrice)
-        .onChange(of: currentPrice) { old, new in
-            guard old > 0, new > 0, old != new else { return }
-            colorResetTask?.cancel()
-            withAnimation(.easeOut(duration: 0.15)) {
-                tickColor = new > old ? .green : .red
-            }
-            colorResetTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 450_000_000)
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.35)) {
-                    tickColor = .primary
-                }
-            }
+    }
+}
+
+struct LivePricePercentageLabel: View {
+    @Environment(AppState.self) private var appState: AppState?
+    let firstPrice: Double?
+    var selectedPrice: Double?
+
+    private var percentageChange: Double? {
+        guard let first = firstPrice, first > 0 else { return nil }
+        let current = selectedPrice ?? (appState?.btcPrice ?? 0)
+        guard current > 0 else { return nil }
+        return PriceChartAlgorithms.percentageChange(first: first, current: current)
+    }
+
+    var body: some View {
+        if let pct = percentageChange {
+            let isUp = pct >= 0
+            Text(pct.percentFormatted)
+                .font(.caption2.bold().monospacedDigit())
+                .foregroundStyle(isUp ? Color.trendPositive : Color.trendNegative)
+        } else {
+            Text(verbatim: " ")
+                .font(.caption2.bold())
+                .opacity(0)
         }
     }
 }
@@ -75,18 +129,18 @@ private struct LivePriceLabelPreviewContainer: View {
 
             VStack(spacing: 10) {
                 HStack(spacing: 10) {
-                    Button("+$1") { previewPrice += 1 }
-                    Button("-$1") { previewPrice = max(0, previewPrice - 1) }
+                    Button { previewPrice += 1 } label: { Text(verbatim: "+$1") }
+                    Button { previewPrice = max(0, previewPrice - 1) } label: { Text(verbatim: "-$1") }
                 }
 
                 HStack(spacing: 10) {
-                    Button("+$250") { previewPrice += 250 }
-                    Button("-$500") { previewPrice = max(0, previewPrice - 500) }
+                    Button { previewPrice += 250 } label: { Text(verbatim: "+$250") }
+                    Button { previewPrice = max(0, previewPrice - 500) } label: { Text(verbatim: "-$500") }
                 }
 
                 HStack(spacing: 10) {
-                    Button("$100,000") { previewPrice = 100_000.50 }
-                    Button("$0") { previewPrice = 0 }
+                    Button { previewPrice = 100_000.50 } label: { Text(verbatim: "$100,000") }
+                    Button { previewPrice = 0 } label: { Text(verbatim: "$0") }
                 }
             }
             .buttonStyle(.bordered)

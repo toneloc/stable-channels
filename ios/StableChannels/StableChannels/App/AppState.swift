@@ -105,16 +105,19 @@ class AppState {
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
+    private let customRepairBooksUseCase: RepairBooksUseCase?
 
     init(
-        nodeService: NodeService? = nil,
+        nodeService: NodeService = NodeService(),
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
-        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil
+        verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
+        repairBooksUseCase: RepairBooksUseCase? = nil
     ) {
-        self.nodeService = nodeService ?? (NSClassFromString("XCTestCase") != nil ? NodeService() : .shared)
+        self.nodeService = nodeService
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
+        self.customRepairBooksUseCase = repairBooksUseCase
     }
 
     // MARK: - State
@@ -136,6 +139,7 @@ class AppState {
     }
 
     var paymentFlash: Bool = false
+    var lastReceivedPaymentHash: String?
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
@@ -1753,6 +1757,10 @@ class AppState {
         // (recomputed at the current price), which is exactly the "reverted to $0.57" bug.
         guard persistence.isNewPayment else { return }
 
+        if !isStabilityPayment {
+            lastReceivedPaymentHash = paymentHashStr
+        }
+
         if let usd = amountUSD {
             statusMessage = "Payment received: \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: amountMsat / 1000, rowPrice: nil) {
@@ -1762,10 +1770,12 @@ class AppState {
             statusMessage = "Payment received: \(sats.btcSpacedFormatted) BTC"
         }
 
-        // Trigger payment received animation
-        paymentFlash = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.paymentFlash = false
+        // Trigger payment received animation for user payments only
+        if !isStabilityPayment {
+            paymentFlash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.paymentFlash = false
+            }
         }
     }
 
@@ -2882,19 +2892,28 @@ class AppState {
     /// balance. It means a withdrawal moved sats out without its stable-books deduction.
     func repairBooksAboveLiveBalance() {
         guard let db = databaseService else { return }
-        guard !stableChannel.userChannelId.isEmpty, hasReadyChannel else { return }
-        guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
-        if (try? db.spliceRepo.hasPendingSplice()) ?? true { return }
-        if db.stabilityRepo.loadPendingSend() != nil { return }
-        if let payments = nodeService.node?.listPayments(), payments.contains(where: {
-            if case .pending = $0.status { return true }
-            return false
-        }) { return }
-        if (try? db.paymentRepo.hasPendingOutgoingPayment()) ?? true { return }
-        let price = accountingBTCPrice
-        guard price > 0.0 else { return }
 
-        guard let repair = StabilityService.repairBooksAboveLiveBalance(&stableChannel, price: price) else {
+        let paymentAdapter = LDKPaymentStatusAdapter(nodeService: nodeService, databaseService: db)
+        let spliceAdapter = DatabaseSpliceStatusAdapter(databaseService: db)
+        let stabilitySendAdapter = DatabaseStabilitySendStatusAdapter(databaseService: db)
+
+        let useCase = customRepairBooksUseCase ?? RepairBooksUseCase(
+            paymentStatusProvider: paymentAdapter,
+            spliceStatusProvider: spliceAdapter,
+            stabilitySendStatusProvider: stabilitySendAdapter
+        )
+
+        let price = accountingBTCPrice
+        let context = RepairBooksUseCase.Context(
+            hasUserChannelId: !stableChannel.userChannelId.isEmpty,
+            hasReadyChannel: hasReadyChannel,
+            isChannelClosing: isChannelClosing,
+            isSweeping: isSweeping,
+            hasPendingSpliceInMemory: pendingSplice != nil,
+            price: price
+        )
+
+        guard let repair = useCase.execute(channel: &stableChannel, context: context) else {
             return
         }
         saveChannelToDB()
@@ -3418,7 +3437,10 @@ class AppState {
                             "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
                             data: ["txid": txid, "sats": "\(amountSats)"]
                         )
-                        paymentFlash.toggle()
+                        paymentFlash = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                            self?.paymentFlash = false
+                        }
                     }
                 } catch {
                     AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
@@ -3934,6 +3956,11 @@ class AppState {
         guard price > 0 else { return }
         do {
             try databaseService?.priceRepo.recordPrice(price, source: "median")
+            Task { [weak self] in
+                guard let self else { return }
+                await priceHistoryProvider.invalidateCache()
+                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+            }
         } catch {
             // Price recording is best-effort, don't log every failure
         }

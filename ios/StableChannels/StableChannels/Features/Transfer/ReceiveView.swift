@@ -7,6 +7,7 @@ struct ReceiveView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var amountUSD = ""
     @State private var invoice: String?
+    @State private var invoicePaymentHash: String?
     @State private var invoiceAmountSats: UInt64?
     @State private var errorMessage: String?
     @State private var isCopied = false
@@ -70,6 +71,11 @@ struct ReceiveView: View {
             }
         }
         .onDisappear { copyResetTask?.cancel() }
+        .onChange(of: appState.lastReceivedPaymentHash) { _, newHash in
+            if let newHash, let invoicePaymentHash, newHash == invoicePaymentHash {
+                dismiss()
+            }
+        }
     }
 
     // MARK: - Amount Input
@@ -329,6 +335,7 @@ struct ReceiveView: View {
             }
             invoiceAmountSats = sats
             invoice = inv.description
+            invoicePaymentHash = "\(inv.paymentHash())"
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -353,6 +360,7 @@ struct ReceiveView: View {
             )
             invoiceAmountSats = nil
             invoice = inv.description
+            invoicePaymentHash = "\(inv.paymentHash())"
         } catch {
             errorMessage = error.localizedDescription
         }
