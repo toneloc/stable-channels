@@ -49,66 +49,89 @@ final class PaymentFeeEstimatorTests: XCTestCase {
     // MARK: - Onchain Fee Estimation Tests
 
     func testEstimateOnchainFee_standardSendUsesEstimatedVBytes() {
-        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 10, isSendAll: false)
+        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 10.0, isSendAll: false)
         XCTAssertEqual(fee, 10 * Constants.estimatedOnchainSendVBytes)
     }
 
     func testEstimateOnchainFee_sendAllUsesConstantsVBytes() {
-        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 10, isSendAll: true)
+        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 10.0, isSendAll: true)
         XCTAssertEqual(fee, 10 * Constants.estimatedOnchainSendAllVBytes)
     }
 
     func testEstimateOnchainFee_customVBytes() {
         let fee = PaymentFeeEstimator.estimateOnchainFee(
-            feeRateSatVb: 12,
+            feeRateSatVb: 12.0,
             isSendAll: false,
             sendVBytes: 250
         )
         XCTAssertEqual(fee, 3_000)
     }
 
+    func testEstimateOnchainFee_fractionalRateRoundsUp() {
+        // 1.12 sat/vB * 250 vB = 280 sat
+        let fee = PaymentFeeEstimator.estimateOnchainFee(
+            feeRateSatVb: 1.12,
+            isSendAll: false,
+            sendVBytes: 250
+        )
+        XCTAssertEqual(fee, 280)
+    }
+
     func testEstimateOnchainFee_overflowSafety() {
-        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: UInt64.max, isSendAll: false)
+        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: Double.greatestFiniteMagnitude, isSendAll: false)
         XCTAssertEqual(fee, UInt64.max)
     }
 
     // MARK: - Network Fee Speed Tier Tests
 
     func testNetworkFeeSpeedTier_standardBaseline() {
-        let base: UInt64 = 10
-        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 8)
-        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 10)
-        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 13)
+        let base = 10.0
+        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 8.0, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 10.0, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 13.0, accuracy: 0.001)
     }
 
     func testNetworkFeeSpeedTier_lowFeeMempool() {
-        let base: UInt64 = 1
-        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 1)
-        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 1)
-        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 2)
+        let base = 1.0
+        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 0.8, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 1.0, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 1.3, accuracy: 0.001)
     }
 
     func testNetworkFeeSpeedTier_congestedMempool() {
-        let base: UInt64 = 50
-        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 40)
-        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 50)
-        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 65)
+        let base = 50.0
+        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 40.0, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 50.0, accuracy: 0.001)
+        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 65.0, accuracy: 0.001)
     }
 
     func testNetworkFeeSpeedTier_withRecommendedFees() {
-        let rec = RecommendedFees(fastestFee: 25, halfHourFee: 18, hourFee: 12, minimumFee: 2)
-        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: 10, recommendedFees: rec), 25)
-        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: 10, recommendedFees: rec), 18)
-        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: 10, recommendedFees: rec), 12)
+        let rec = RecommendedFees(fastestFee: 25.0, halfHourFee: 18.0, hourFee: 12.0, minimumFee: 2.0)
+        XCTAssertEqual(
+            NetworkFeeSpeedTier.priority.effectiveRate(baseRate: 10.0, recommendedFees: rec),
+            25.0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NetworkFeeSpeedTier.standard.effectiveRate(baseRate: 10.0, recommendedFees: rec),
+            18.0,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            NetworkFeeSpeedTier.economy.effectiveRate(baseRate: 10.0, recommendedFees: rec),
+            12.0,
+            accuracy: 0.001
+        )
     }
 
     func testNetworkFeeSpeedTier_monotonicityAcrossRange() {
-        for rate: UInt64 in 1...200 {
+        for rateInt in 1...200 {
+            let rate = Double(rateInt)
             let eco = NetworkFeeSpeedTier.economy.effectiveRate(baseRate: rate)
             let std = NetworkFeeSpeedTier.standard.effectiveRate(baseRate: rate)
             let pri = NetworkFeeSpeedTier.priority.effectiveRate(baseRate: rate)
 
-            XCTAssertGreaterThanOrEqual(eco, 1, "Economy must never drop below 1 sat/vB")
+            XCTAssertGreaterThanOrEqual(eco, 0.1, "Economy must never drop below 0.1 sat/vB")
             XCTAssertLessThanOrEqual(eco, std, "Economy must not exceed standard")
             XCTAssertGreaterThan(pri, std, "Priority must strictly exceed standard")
         }
@@ -116,21 +139,21 @@ final class PaymentFeeEstimatorTests: XCTestCase {
 
     func testRecommendedFees_monotonicityClampedOnInvertedRates() {
         // Inverted rates: hourFee (20) > halfHour (10) > fastest (5)
-        let inverted = RecommendedFees(fastestFee: 5, halfHourFee: 10, hourFee: 20, minimumFee: 2)
+        let inverted = RecommendedFees(fastestFee: 5.0, halfHourFee: 10.0, hourFee: 20.0, minimumFee: 2.0)
         let pri = inverted.rate(for: .priority)
         let std = inverted.rate(for: .standard)
         let eco = inverted.rate(for: .economy)
 
         XCTAssertGreaterThanOrEqual(pri, std, "Priority must clamp to at least standard")
         XCTAssertGreaterThanOrEqual(std, eco, "Standard must clamp to at least economy")
-        XCTAssertGreaterThanOrEqual(eco, 2, "Economy must respect minimum fee")
+        XCTAssertGreaterThanOrEqual(eco, 2.0, "Economy must respect minimum fee")
     }
 
     func testRecommendedFees_quietMempoolAllOne() {
-        let quiet = RecommendedFees(fastestFee: 1, halfHourFee: 1, hourFee: 1, economyFee: 1, minimumFee: 1)
-        XCTAssertEqual(quiet.rate(for: .priority), 1)
-        XCTAssertEqual(quiet.rate(for: .standard), 1)
-        XCTAssertEqual(quiet.rate(for: .economy), 1)
+        let quiet = RecommendedFees(fastestFee: 1.0, halfHourFee: 1.0, hourFee: 1.0, economyFee: 1.0, minimumFee: 1.0)
+        XCTAssertEqual(quiet.rate(for: .priority), 1.0, accuracy: 0.001)
+        XCTAssertEqual(quiet.rate(for: .standard), 1.0, accuracy: 0.001)
+        XCTAssertEqual(quiet.rate(for: .economy), 1.0, accuracy: 0.001)
     }
 
     func testNetworkFeeSpeedTier_metadataFields() {

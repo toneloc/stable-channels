@@ -7,18 +7,18 @@ enum WebSocketEvent {
 }
 
 struct MempoolWSFees: Codable, Equatable, Sendable {
-    let fastestFee: UInt64
-    let halfHourFee: UInt64
-    let hourFee: UInt64
-    let economyFee: UInt64?
-    let minimumFee: UInt64
+    let fastestFee: Double
+    let halfHourFee: Double
+    let hourFee: Double
+    let economyFee: Double?
+    let minimumFee: Double
 
     init(
-        fastestFee: UInt64,
-        halfHourFee: UInt64,
-        hourFee: UInt64,
-        economyFee: UInt64? = nil,
-        minimumFee: UInt64
+        fastestFee: Double,
+        halfHourFee: Double,
+        hourFee: Double,
+        economyFee: Double? = nil,
+        minimumFee: Double
     ) {
         self.fastestFee = fastestFee
         self.halfHourFee = halfHourFee

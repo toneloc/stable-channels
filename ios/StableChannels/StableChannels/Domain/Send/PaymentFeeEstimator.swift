@@ -17,13 +17,16 @@ enum PaymentFeeEstimator {
 
     /// Estimates the expected onchain transaction fee based on fee rate and send type.
     static func estimateOnchainFee(
-        feeRateSatVb: UInt64,
+        feeRateSatVb: Double,
         isSendAll: Bool,
         sendVBytes: UInt64 = Constants.estimatedOnchainSendVBytes,
         sendAllVBytes: UInt64 = Constants.estimatedOnchainSendAllVBytes
     ) -> UInt64 {
         let vbytes = isSendAll ? sendAllVBytes : sendVBytes
-        return saturatingMultiply(feeRateSatVb, vbytes)
+        guard feeRateSatVb.isFinite && feeRateSatVb > 0 else { return 0 }
+        let rawFee = Double(vbytes) * feeRateSatVb
+        if rawFee >= Double(UInt64.max) { return UInt64.max }
+        return UInt64(ceil(rawFee))
     }
 
     // MARK: - Overflow-Safe Arithmetic
@@ -75,20 +78,18 @@ enum NetworkFeeSpeedTier: String, CaseIterable, Identifiable, Sendable {
 
     /// Computes the effective fee rate in satoshis per virtual byte (sat/vB).
     /// Uses live `recommendedFees` directly when available, or a bounded estimate.
-    func effectiveRate(baseRate: UInt64, recommendedFees: RecommendedFees? = nil) -> UInt64 {
+    func effectiveRate(baseRate: Double, recommendedFees: RecommendedFees? = nil) -> Double {
         if let recommendedFees {
             return recommendedFees.rate(for: self)
         }
-        let normalized = max(1, baseRate)
+        let normalized = max(0.1, baseRate)
         switch self {
         case .economy:
-            let reduced = (normalized * 8) / 10
-            return max(1, reduced)
+            return max(0.1, normalized * 0.8)
         case .standard:
             return normalized
         case .priority:
-            let boosted = (normalized * 13) / 10
-            return max(normalized + 1, boosted)
+            return max(normalized + 0.1, normalized * 1.3)
         }
     }
 }

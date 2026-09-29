@@ -10,7 +10,7 @@ struct OnChainSendView: View {
     @State private var errorMessage: String?
     @State private var txid: String?
     @State private var spliceSuccess = false
-    @State private var feeRateSatVb: UInt64?
+    @State private var feeRateSatVb: Double?
 
     private var amountSats: UInt64? {
         convertedSats(price: appState.accountingBTCPrice)
@@ -32,14 +32,17 @@ struct OnChainSendView: View {
             return String(localized: "info_fee_estimating", defaultValue: "Estimating network fee...")
         }
         let vbytes = sendAll ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
-        let feeSats = feeRateSatVb * vbytes
+        let feeSats = UInt64(ceil(feeRateSatVb * Double(vbytes)))
+        let rateDisplay = feeRateSatVb.truncatingRemainder(dividingBy: 1) == 0
+            ? String(format: "%.0f", feeRateSatVb)
+            : String(format: "%.1f", feeRateSatVb)
         return String(
             format: String(
                 localized: "info_onchain_fee_estimate_sentence",
-                defaultValue: "Expected network fee: ~%@ BTC (%llu sat/vB)"
+                defaultValue: "Expected network fee: ~%@ BTC (%@ sat/vB)"
             ),
             feeSats.btcSpacedFormatted,
-            feeRateSatVb
+            rateDisplay
         )
     }
 

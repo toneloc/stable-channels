@@ -2,15 +2,15 @@ import Foundation
 
 /// Multi-tier recommended fee rates (sat/vB) matching target confirmation block conventions.
 struct RecommendedFees: Codable, Equatable, Sendable {
-    let fastestFee: UInt64
-    let halfHourFee: UInt64
-    let hourFee: UInt64
-    let economyFee: UInt64?
-    let minimumFee: UInt64
+    let fastestFee: Double
+    let halfHourFee: Double
+    let hourFee: Double
+    let economyFee: Double?
+    let minimumFee: Double
 
-    func rate(for tier: NetworkFeeSpeedTier) -> UInt64 {
-        let minRate = max(1, minimumFee)
-        let rawEconomy: UInt64
+    func rate(for tier: NetworkFeeSpeedTier) -> Double {
+        let minRate = max(0.1, minimumFee)
+        let rawEconomy: Double
         if let economyFee, economyFee > 0 {
             rawEconomy = max(minRate, economyFee)
         } else {
@@ -31,19 +31,19 @@ struct RecommendedFees: Codable, Equatable, Sendable {
     }
 
     static let `default` = RecommendedFees(
-        fastestFee: 15,
-        halfHourFee: 10,
-        hourFee: 8,
-        economyFee: 5,
-        minimumFee: 1
+        fastestFee: 15.0,
+        halfHourFee: 10.0,
+        hourFee: 8.0,
+        economyFee: 5.0,
+        minimumFee: 1.0
     )
 
     init(
-        fastestFee: UInt64,
-        halfHourFee: UInt64,
-        hourFee: UInt64,
-        economyFee: UInt64? = nil,
-        minimumFee: UInt64
+        fastestFee: Double,
+        halfHourFee: Double,
+        hourFee: Double,
+        economyFee: Double? = nil,
+        minimumFee: Double
     ) {
         self.fastestFee = fastestFee
         self.halfHourFee = halfHourFee
@@ -68,11 +68,11 @@ protocol FeeRateSource: Sendable {
     /// Fetch full multi-tier recommended fee structure.
     func fetchRecommendedFees() async throws -> RecommendedFees
     /// Fetch standard confirmation rate (sat/vB, ~30-min half-hour target).
-    func fetchRate() async throws -> UInt64
+    func fetchRate() async throws -> Double
 }
 
 extension FeeRateSource {
-    func fetchRate() async throws -> UInt64 {
+    func fetchRate() async throws -> Double {
         let rec = try await fetchRecommendedFees()
         return rec.halfHourFee
     }
@@ -96,10 +96,10 @@ struct BlockstreamFeeSource: FeeRateSource {
         let minFee = (json["144"] as? Double) ?? (json["25"] as? Double) ?? (json["1008"] as? Double) ?? 1.0
 
         return RecommendedFees(
-            fastestFee: UInt64(block1.rounded(.up)),
-            halfHourFee: UInt64(block3.rounded(.up)),
-            hourFee: UInt64(block6.rounded(.up)),
-            minimumFee: max(1, UInt64(minFee.rounded(.up)))
+            fastestFee: block1,
+            halfHourFee: block3,
+            hourFee: block6,
+            minimumFee: max(0.1, minFee)
         )
     }
 }
@@ -114,20 +114,20 @@ struct MempoolV1FeeSource: FeeRateSource {
         let data = try await Self.fetch(url: url, timeout: timeout)
         guard
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let fastest = json["fastestFee"] as? Double,
-            let halfHour = json["halfHourFee"] as? Double,
-            let hour = json["hourFee"] as? Double,
-            let minimumFee = json["minimumFee"] as? Double
+            let fastest = (json["fastestFee"] as? Double) ?? (json["fastestFee"] as? Int).map(Double.init),
+            let halfHour = (json["halfHourFee"] as? Double) ?? (json["halfHourFee"] as? Int).map(Double.init),
+            let hour = (json["hourFee"] as? Double) ?? (json["hourFee"] as? Int).map(Double.init),
+            let minimumFee = (json["minimumFee"] as? Double) ?? (json["minimumFee"] as? Int).map(Double.init)
         else { throw FeeRateError.parseFailed(source: "mempool-v1") }
 
-        let economy = json["economyFee"] as? Double
+        let economy = (json["economyFee"] as? Double) ?? (json["economyFee"] as? Int).map(Double.init)
 
         return RecommendedFees(
-            fastestFee: UInt64(fastest.rounded(.up)),
-            halfHourFee: UInt64(halfHour.rounded(.up)),
-            hourFee: UInt64(hour.rounded(.up)),
-            economyFee: economy.map { UInt64($0.rounded(.up)) },
-            minimumFee: max(1, UInt64(minimumFee.rounded(.up)))
+            fastestFee: fastest,
+            halfHourFee: halfHour,
+            hourFee: hour,
+            economyFee: economy,
+            minimumFee: max(0.1, minimumFee)
         )
     }
 }
@@ -171,8 +171,8 @@ extension FeeRateSource {
 actor FeeRateCache {
     private let sources: [FeeRateSource]
     private let cacheTTL: Duration
-    private let fallback: UInt64
-    private var cachedRate: UInt64?
+    private let fallback: Double
+    private var cachedRate: Double?
     private var cachedRecommendedFees: RecommendedFees?
     private var cachedAt: ContinuousClock.Instant?
     private var inFlight: Task<(fees: RecommendedFees, isFallback: Bool), Never>?
@@ -181,7 +181,7 @@ actor FeeRateCache {
     init(
         sources: [FeeRateSource],
         cacheTTL: Duration = .seconds(60),
-        fallback: UInt64 = 2
+        fallback: Double = 2.0
     ) {
         self.sources = sources
         self.cacheTTL = cacheTTL
@@ -202,47 +202,67 @@ actor FeeRateCache {
            ContinuousClock.now - at < cacheTTL {
             return rec
         }
-        if let task = inFlight {
-            return await task.value.fees
-        }
-        let generationBeforeFetch = updateGeneration
-        let task = Task { [sources, fallback] () -> (fees: RecommendedFees, isFallback: Bool) in
-            await withTaskGroup(of: RecommendedFees?.self,
-                                returning: (fees: RecommendedFees, isFallback: Bool).self) { group in
-                for source in sources {
-                    group.addTask {
-                        do {
-                            return try await source.fetchRecommendedFees()
-                        } catch {
-                            return nil
+
+        let generationBeforeWait = updateGeneration
+        let task: Task<(fees: RecommendedFees, isFallback: Bool), Never>
+        let isInitiator: Bool
+
+        if let existing = inFlight {
+            task = existing
+            isInitiator = false
+        } else {
+            let sources = self.sources
+            let fallback = self.fallback
+            let newTask = Task { [sources, fallback] () -> (fees: RecommendedFees, isFallback: Bool) in
+                await withTaskGroup(of: RecommendedFees?.self,
+                                    returning: (fees: RecommendedFees, isFallback: Bool).self) { group in
+                    for source in sources {
+                        group.addTask {
+                            do {
+                                return try await source.fetchRecommendedFees()
+                            } catch {
+                                return nil
+                            }
                         }
                     }
-                }
-                for await fees in group {
-                    if let fees {
-                        group.cancelAll()
-                        return (fees: fees, isFallback: false)
+                    for await fees in group {
+                        if let fees {
+                            group.cancelAll()
+                            return (fees: fees, isFallback: false)
+                        }
                     }
+                    let fallbackFees = RecommendedFees(
+                        fastestFee: max(0.1, fallback * 1.3),
+                        halfHourFee: fallback,
+                        hourFee: max(0.1, fallback * 0.8),
+                        minimumFee: max(0.1, fallback * 0.5)
+                    )
+                    return (fees: fallbackFees, isFallback: true)
                 }
-                let fallbackFees = RecommendedFees(
-                    fastestFee: max(1, (fallback * 13) / 10),
-                    halfHourFee: fallback,
-                    hourFee: max(1, (fallback * 8) / 10),
-                    minimumFee: max(1, fallback / 2)
-                )
-                return (fees: fallbackFees, isFallback: true)
             }
+            inFlight = newTask
+            task = newTask
+            isInitiator = true
         }
-        inFlight = task
+
         let result = await task.value
-        inFlight = nil
+        if isInitiator {
+            inFlight = nil
+        }
 
         // If the cache was updated or invalidated while suspended, do not overwrite with the older fetch result.
-        if updateGeneration != generationBeforeFetch {
+        if updateGeneration != generationBeforeWait {
             if let fresh = cachedRecommendedFees {
                 return fresh
             }
             return result.fees
+        }
+
+        // If another waiter already populated the cache with fresh data, return it.
+        if let fresh = cachedRecommendedFees,
+           let at = cachedAt,
+           ContinuousClock.now - at < cacheTTL {
+            return fresh
         }
 
         if !result.isFallback {
@@ -254,7 +274,7 @@ actor FeeRateCache {
         return result.fees
     }
 
-    func currentRate() async -> UInt64 {
+    func currentRate() async -> Double {
         let fees = await recommendedFees()
         return fees.halfHourFee
     }
@@ -283,13 +303,17 @@ final class FeeRateService: Sendable {
             )
         ],
         cacheTTL: Duration = .seconds(60),
-        fallback: UInt64 = 2
+        fallback: Double = 2.0
     ) {
         self.cache = FeeRateCache(sources: sources, cacheTTL: cacheTTL, fallback: fallback)
     }
 
-    func currentRate() async -> UInt64 {
+    func currentRate() async -> Double {
         await cache.currentRate()
+    }
+
+    func currentRateSatVb() async -> UInt64 {
+        await UInt64(max(1.0, currentRate().rounded()))
     }
 
     func recommendedFees() async -> RecommendedFees {
