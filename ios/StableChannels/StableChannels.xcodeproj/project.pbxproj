@@ -188,6 +188,8 @@
 		E8C9430FF8920728747EF550 /* SendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0FAABBD08BCBF20220C850 /* SendView.swift */; };
 		F54F1E51D4AF15D8700AB399 /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A2BA7D52F62DF17EFF532635 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */; };
+		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
+		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -392,6 +394,8 @@
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupFailoverTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
+		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
@@ -441,12 +445,13 @@
 			isa = PBXGroup;
 			children = (
 				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
+				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
 				379669F5815ECD9926C3A5D2 /* LSPConfig.swift */,
 				499F1E563009F03E00936944 /* PaymentProgress.swift */,
+				49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
-				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
-				49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */,
+				D20000000000000000000001 /* Send */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -783,6 +788,14 @@
 			path = Features;
 			sourceTree = "<group>";
 		};
+		D20000000000000000000001 /* Send */ = {
+			isa = PBXGroup;
+			children = (
+				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
+			);
+			path = Send;
+			sourceTree = "<group>";
+		};
 		DD0CC2D41227228C216D4BE8 /* Transfer */ = {
 			isa = PBXGroup;
 			children = (
@@ -839,6 +852,7 @@
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
+				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
@@ -983,6 +997,7 @@
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
+				D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
 				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
 				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
@@ -1011,6 +1026,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
+				D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,
