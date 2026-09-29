@@ -3162,7 +3162,7 @@ class AppState(private val context: Context) : ViewModel() {
                 )
             }
 
-            databaseService?.deleteChannel(sc.userChannelId)
+            databaseService?.deleteChannel(userChannelId)
             _stableChannel.value = StableChannel.defaultWithLsp(context)
             // Clear cached channel state
             context
@@ -4249,7 +4249,12 @@ class AppState(private val context: Context) : ViewModel() {
         // Stale database rows from closed channels can cause incorrect aggregate Stable USD
         // balances.
         val liveUserChannelIds = nodeService.channels.map { it.userChannelId }
-        databaseService?.reconcileChannels(liveUserChannelIds)
+        val liveChannelIds = nodeService.channels.map { it.channelId }
+        try {
+            databaseService?.reconcileChannels(liveUserChannelIds, liveChannelIds)
+        } catch (e: Exception) {
+            AuditService.log("DB_RECONCILE_FAILED", mapOf("error" to (e.message ?: "Unknown error")))
+        }
 
         if (nodeService.channels.isEmpty() && _stableChannel.value.userChannelId.isNotEmpty()) {
             _stableChannel.value = StableChannel.defaultWithLsp(context)
@@ -4507,6 +4512,17 @@ class AppState(private val context: Context) : ViewModel() {
                         expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
                         backingSats = dbRow.backingSats,
                         note = dbRow.note ?: "",
+                        nativeChannelBTC = com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
+                        counterparty = StableChannel.defaultWithLsp(context).counterparty,
+                    )
+                return
+            } else {
+                _stableChannel.value =
+                    sc.copy(
+                        expectedUSD = com.stablechannels.app.models.USD(0.0),
+                        backingSats = 0L,
+                        nativeChannelBTC = com.stablechannels.app.models.Bitcoin(0L),
+                        note = "",
                     )
                 return
             }

@@ -586,15 +586,20 @@ class DatabaseService(context: Context) :
         writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
     }
 
-    fun reconcileChannels(liveUserChannelIds: List<String>) {
-        if (liveUserChannelIds.isEmpty()) {
+    fun reconcileChannels(liveUserChannelIds: List<String>, liveChannelIds: List<String>) {
+        if (liveUserChannelIds.isEmpty() && liveChannelIds.isEmpty()) {
             writableDatabase.delete("channels", null, null)
         } else {
-            val placeholders = liveUserChannelIds.joinToString(",") { "?" }
+            val userPlaceholders = liveUserChannelIds.joinToString(",") { "?" }
+            val channelPlaceholders = liveChannelIds.joinToString(",") { "?" }
+            val args = (liveUserChannelIds + liveChannelIds).toTypedArray()
+            
+            // Delete any row that does not match any live user_channel_id AND does not match any live channel_id.
+            // If it matches either, it belongs to a live channel and should be spared.
             writableDatabase.delete(
                 "channels",
-                "user_channel_id NOT IN ($placeholders)",
-                liveUserChannelIds.toTypedArray(),
+                "user_channel_id NOT IN ($userPlaceholders) AND channel_id NOT IN ($channelPlaceholders)",
+                args,
             )
         }
     }

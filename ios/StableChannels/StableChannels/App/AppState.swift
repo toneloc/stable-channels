@@ -2304,8 +2304,8 @@ class AppState {
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
         // Clear stable state if this is our channel or no channels remain
-        if stableChannel.userChannelId == userChannelId || nodeService.channels.isEmpty {
-            try? databaseService?.channelRepo.deleteChannel(userChannelId: stableChannel.userChannelId)
+        if stableChannel.userChannelId == userChannelId.description || nodeService.channels.isEmpty {
+            try? databaseService?.channelRepo.deleteChannel(userChannelId: "\(userChannelId)")
             stableChannel.expectedUSD = .zero
             stableChannel.backingSats = 0
             stableChannel.nativeSats = 0
@@ -3670,10 +3670,11 @@ class AppState {
         // Reconcile database channels: LDK is the source of truth for channel existence.
         // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
         let liveUserChannelIds = nodeService.channels.map(\.userChannelId)
+        let liveChannelIds = nodeService.channels.map(\.channelId)
         do {
-            try databaseService?.channelRepo.reconcileChannels(liveUserChannelIds: liveUserChannelIds)
+            try databaseService?.channelRepo.reconcileChannels(liveUserChannelIds: liveUserChannelIds, liveChannelIds: liveChannelIds)
         } catch {
-            print("Failed to reconcile channels: \(error)")
+            AuditService.log("DB_RECONCILE_FAILED", data: ["error": error.localizedDescription])
         }
 
         if nodeService.channels.isEmpty && !stableChannel.userChannelId.isEmpty {
@@ -3914,6 +3915,12 @@ class AppState {
                 if record.latestPrice > 0 {
                     stableChannel.latestPrice = record.latestPrice
                 }
+            } else {
+                stableChannel.expectedUSD = .zero
+                stableChannel.backingSats = 0
+                stableChannel.nativeSats = 0
+                stableChannel.nativeChannelBTC = .zero
+                stableChannel.note = ""
             }
         } catch {
             AuditService.log("DB_LOAD_CHANNEL_FAILED", data: ["error": error.localizedDescription])

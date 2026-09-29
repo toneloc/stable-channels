@@ -148,9 +148,9 @@ object StabilityService {
         val channel =
             if (updated.userChannelId.isNotEmpty()) {
                 channels.find { it.userChannelId == updated.userChannelId }
-                    ?: channels.firstOrNull()
+                    ?: channels.find { it.isChannelReady } ?: channels.firstOrNull()
             } else {
-                channels.firstOrNull()
+                channels.find { it.isChannelReady } ?: channels.firstOrNull()
             }
 
         if (channel == null) return updated

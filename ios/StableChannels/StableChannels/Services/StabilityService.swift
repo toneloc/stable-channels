@@ -231,9 +231,10 @@ enum StabilityService {
         // Find matching channel
         let matchingChannel: ChannelDetails?
         if sc.userChannelId.isEmpty {
-            matchingChannel = channels.first
+            matchingChannel = channels.first(where: { $0.isChannelReady }) ?? channels.first
         } else {
-            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId } ?? channels.first
+            matchingChannel = channels.first { $0.userChannelId == sc.userChannelId } 
+                ?? channels.first(where: { $0.isChannelReady }) ?? channels.first
         }
 
         guard let channel = matchingChannel else { return false }

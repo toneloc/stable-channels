@@ -214,14 +214,16 @@ final class ChannelRepository {
         try rawSQL.execute("DELETE FROM channels WHERE user_channel_id = ?", params: [.text(userChannelId)])
     }
 
-    func reconcileChannels(liveUserChannelIds: [String]) throws {
-        if liveUserChannelIds.isEmpty {
+    func reconcileChannels(liveUserChannelIds: [String], liveChannelIds: [String]) throws {
+        if liveUserChannelIds.isEmpty && liveChannelIds.isEmpty {
             try rawSQL.execute("DELETE FROM channels", params: [])
         } else {
-            let placeholders = liveUserChannelIds.map { _ in "?" }.joined(separator: ",")
+            let userPlaceholders = liveUserChannelIds.map { _ in "?" }.joined(separator: ",")
+            let channelPlaceholders = liveChannelIds.map { _ in "?" }.joined(separator: ",")
+            let params = (liveUserChannelIds + liveChannelIds).map { SQLiteParam.text($0) }
             try rawSQL.execute(
-                "DELETE FROM channels WHERE user_channel_id NOT IN (\(placeholders))",
-                params: liveUserChannelIds.map { .text($0) }
+                "DELETE FROM channels WHERE user_channel_id NOT IN (\(userPlaceholders)) AND channel_id NOT IN (\(channelPlaceholders))",
+                params: params
             )
         }
     }
