@@ -27,7 +27,7 @@ struct HomeActionButtonsView: View {
                     title: String(localized: "button_receive", defaultValue: "Receive"),
                     icon: "arrow.down",
                     color: receiveGreen,
-                    textColor: !hasReadyChannel ? receiveGreen : .primary,
+                    textColor: .primary,
                     pulse: !hasReadyChannel,
                     action: onReceive
                 )

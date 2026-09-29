@@ -4,4 +4,5 @@ import Foundation
 /// Decouples Presentation components from concrete database and network infrastructure.
 protocol PriceHistoryProviding: Sendable {
     func fetchPriceHistory(for period: ChartPeriod, force: Bool) async -> [PriceRecord]
+    func invalidateCache() async
 }
