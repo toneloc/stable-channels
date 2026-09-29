@@ -219,7 +219,10 @@ final class ChannelRepository {
             try rawSQL.execute("DELETE FROM channels", params: [])
         } else {
             let placeholders = liveUserChannelIds.map { _ in "?" }.joined(separator: ",")
-            try rawSQL.execute("DELETE FROM channels WHERE user_channel_id NOT IN (\(placeholders))", params: liveUserChannelIds.map { .text($0) })
+            try rawSQL.execute(
+                "DELETE FROM channels WHERE user_channel_id NOT IN (\(placeholders))",
+                params: liveUserChannelIds.map { .text($0) }
+            )
         }
     }
 

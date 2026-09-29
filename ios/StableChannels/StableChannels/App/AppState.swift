@@ -3669,7 +3669,7 @@ class AppState {
 
         // Reconcile database channels: LDK is the source of truth for channel existence.
         // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
-        let liveUserChannelIds = nodeService.channels.map { $0.userChannelId }
+        let liveUserChannelIds = nodeService.channels.map(\.userChannelId)
         do {
             try databaseService?.channelRepo.reconcileChannels(liveUserChannelIds: liveUserChannelIds)
         } catch {

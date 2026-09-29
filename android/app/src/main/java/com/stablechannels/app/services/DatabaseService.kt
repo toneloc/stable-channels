@@ -591,7 +591,11 @@ class DatabaseService(context: Context) :
             writableDatabase.delete("channels", null, null)
         } else {
             val placeholders = liveUserChannelIds.joinToString(",") { "?" }
-            writableDatabase.delete("channels", "user_channel_id NOT IN ($placeholders)", liveUserChannelIds.toTypedArray())
+            writableDatabase.delete(
+                "channels",
+                "user_channel_id NOT IN ($placeholders)",
+                liveUserChannelIds.toTypedArray(),
+            )
         }
     }
 

@@ -4246,7 +4246,8 @@ class AppState(private val context: Context) : ViewModel() {
         val hasReady = nodeService.channels.any { it.isChannelReady }
 
         // Reconcile database channels: LDK is the source of truth for channel existence.
-        // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
+        // Stale database rows from closed channels can cause incorrect aggregate Stable USD
+        // balances.
         val liveUserChannelIds = nodeService.channels.map { it.userChannelId }
         databaseService?.reconcileChannels(liveUserChannelIds)
 
@@ -4497,15 +4498,16 @@ class AppState(private val context: Context) : ViewModel() {
                 _onchainBalanceSats.value,
                 price,
             )
-        
+
         if (sc.userChannelId.isNotEmpty() && sc.userChannelId != oldSc.userChannelId) {
             val dbRow = databaseService?.loadChannel(sc.userChannelId)
             if (dbRow != null) {
-                _stableChannel.value = sc.copy(
-                    expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD), 
-                    backingSats = dbRow.backingSats,
-                    note = dbRow.note ?: ""
-                )
+                _stableChannel.value =
+                    sc.copy(
+                        expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
+                        backingSats = dbRow.backingSats,
+                        note = dbRow.note ?: "",
+                    )
                 return
             }
         }
