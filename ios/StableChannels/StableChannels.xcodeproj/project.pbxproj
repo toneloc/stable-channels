@@ -201,6 +201,12 @@
 		D20000000000000000000023 /* URLSessionTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000022 /* URLSessionTransport.swift */; };
 		D20000000000000000000037 /* Bech32Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000036 /* Bech32Tests.swift */; };
 		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
+		D20000000000000000000013 /* SendDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000012 /* SendDestination.swift */; };
+		D20000000000000000000015 /* AddressVisualChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000014 /* AddressVisualChunker.swift */; };
+		D20000000000000000000051 /* Base58Check.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000050 /* Base58Check.swift */; };
+		D20000000000000000000039 /* AddressVisualChunkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000038 /* AddressVisualChunkerTests.swift */; };
+		D20000000000000000000041 /* PaymentDestinationClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */; };
+		D20000000000000000000053 /* Base58CheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000052 /* Base58CheckTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
 		E7E67B65EAD4FF5732460856 /* ChannelSweepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */; };
 		E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B46630309755AE15EF291D4 /* HistoricalPrices.swift */; };
@@ -429,6 +435,12 @@
 		D20000000000000000000022 /* URLSessionTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionTransport.swift; sourceTree = "<group>"; };
 		D20000000000000000000036 /* Bech32Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32Tests.swift; sourceTree = "<group>"; };
 		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000012 /* SendDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendDestination.swift; sourceTree = "<group>"; };
+		D20000000000000000000014 /* AddressVisualChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunker.swift; sourceTree = "<group>"; };
+		D20000000000000000000050 /* Base58Check.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58Check.swift; sourceTree = "<group>"; };
+		D20000000000000000000038 /* AddressVisualChunkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunkerTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDestinationClassifierTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000052 /* Base58CheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58CheckTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
@@ -831,6 +843,9 @@
 		D20000000000000000000001 /* Send */ = {
 			isa = PBXGroup;
 			children = (
+				D20000000000000000000014 /* AddressVisualChunker.swift */,
+				D20000000000000000000050 /* Base58Check.swift */,
+				D20000000000000000000012 /* SendDestination.swift */,
 				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
 			);
 			path = Send;
@@ -891,6 +906,9 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				D20000000000000000000038 /* AddressVisualChunkerTests.swift */,
+				D20000000000000000000052 /* Base58CheckTests.swift */,
+				D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */,
 				D20000000000000000000036 /* Bech32Tests.swift */,
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
 				49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */,
@@ -1052,6 +1070,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D20000000000000000000039 /* AddressVisualChunkerTests.swift in Sources */,
+				D20000000000000000000053 /* Base58CheckTests.swift in Sources */,
+				D20000000000000000000041 /* PaymentDestinationClassifierTests.swift in Sources */,
 				D20000000000000000000037 /* Bech32Tests.swift in Sources */,
 				D20000000000000000000043 /* LNURLServiceTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
@@ -1099,6 +1120,9 @@
 				D20000000000000000000019 /* LNURLService.swift in Sources */,
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
 				D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */,
+				D20000000000000000000015 /* AddressVisualChunker.swift in Sources */,
+				D20000000000000000000051 /* Base58Check.swift in Sources */,
+				D20000000000000000000013 /* SendDestination.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,
