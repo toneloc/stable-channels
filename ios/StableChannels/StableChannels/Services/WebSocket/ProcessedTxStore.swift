@@ -8,6 +8,7 @@ final class ProcessedTxStore {
     let ttl: TimeInterval
     let maxEntries: Int
 
+    private var insertionOrder: [String] = []
     private var lastPurgeTime: Date = .distantPast
     private let purgeInterval: TimeInterval = 300 // 5 minutes
     private let logger = Logger(subsystem: "com.stablechannels", category: "dedup")
@@ -27,6 +28,9 @@ final class ProcessedTxStore {
 
     /// Record a processed key and enforce the memory cap.
     func recordProcessedTx(_ key: String) {
+        if entries[key] == nil {
+            insertionOrder.append(key)
+        }
         entries[key] = Date()
         enforceCap()
         purgeExpiredIfDue()
@@ -37,12 +41,22 @@ final class ProcessedTxStore {
     /// Enforce a hard entry cap by evicting the oldest 20% of entries.
     func enforceCap() {
         guard entries.count > maxEntries else { return }
-        let evictCount = maxEntries / 5 // remove ~20%
-        let sorted = entries.sorted { $0.value < $1.value }
-        for (key, _) in sorted.prefix(evictCount) {
-            entries.removeValue(forKey: key)
+        let evictCount = max(maxEntries / 5, 1) // remove ~20%
+        var evicted = 0
+        var writeIdx = 0
+        for i in 0..<insertionOrder.count {
+            let key = insertionOrder[i]
+            if evicted < evictCount {
+                if entries.removeValue(forKey: key) != nil {
+                    evicted += 1
+                }
+            } else if entries[key] != nil {
+                insertionOrder[writeIdx] = key
+                writeIdx += 1
+            }
         }
-        logger.debug("Evicted \(evictCount) oldest entries (count was \(sorted.count))")
+        insertionOrder.removeSubrange(writeIdx..<insertionOrder.count)
+        logger.debug("Evicted \(evictCount) oldest entries (count was \(self.entries.count))")
     }
 
     /// Purge expired entries at most every 5 minutes.
@@ -58,6 +72,7 @@ final class ProcessedTxStore {
         }
         let removed = before - entries.count
         if removed > 0 {
+            insertionOrder.removeAll { self.entries[$0] == nil }
             logger.debug("Purged \(removed) expired entries")
         }
         lastPurgeTime = now

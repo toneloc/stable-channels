@@ -60,7 +60,7 @@ pub async fn reconcile_event_history(
                 } else {
                     channel.user_channel_id.clone()
                 };
-                let detail = serde_json::json!({
+                let mut detail = serde_json::json!({
                     "source": "reconnect_reconciliation",
                     "channel_id": channel.channel_id,
                     "user_channel_id": channel.user_channel_id,
@@ -72,6 +72,9 @@ pub async fn reconcile_event_history(
                     "is_channel_ready": channel.is_channel_ready,
                     "is_usable": channel.is_usable,
                 });
+                if let Some(fields) = detail.as_object_mut() {
+                    fields.extend(crate::channel_audit::channel_snapshot_fields(&channel));
+                }
                 match append_reconstructed_if_changed(
                     db,
                     "channel",
@@ -237,7 +240,7 @@ async fn reconcile_pending_settlement_outcomes(
     let pending = db
         .list_pending_settlements()
         .map_err(|error| format!("failed to list pending settlements: {error}"))?;
-    for (payment_id, _) in pending {
+    for (payment_id, kind) in pending {
         let response = ldk
             .get_payment_details(GetPaymentDetailsRequest {
                 payment_id: payment_id.clone(),
@@ -249,6 +252,11 @@ async fn reconcile_pending_settlement_outcomes(
         let Some(payment) = response.payment else {
             continue;
         };
+        if kind == "sync" && payment.status == PaymentStatus::Failed as i32 {
+            db.mark_sync_payment_failed(&payment_id)
+                .map_err(|error| format!("failed to persist failed SYNC {payment_id}: {error}"))?;
+            continue;
+        }
         if payment.status != PaymentStatus::Succeeded as i32 {
             continue;
         }
@@ -402,6 +410,7 @@ pub async fn backfill_forwards(
                 "next_node_id": next.and_then(|h| h.node_id.clone()),
                 "outbound_amount_msat": fp.outbound_amount_forwarded_msat,
                 "total_fee_msat": fp.total_fee_earned_msat,
+                "skimmed_fee_msat": fp.skimmed_fee_msat,
             });
             let draft = LedgerEventDraft::from_audit_event("PAYMENT_FORWARDED_BACKFILL", detail);
             match db.append_forwarded_event_if_unseen(&key, &draft) {

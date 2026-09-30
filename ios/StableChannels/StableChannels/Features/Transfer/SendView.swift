@@ -461,6 +461,7 @@ struct SendView: View {
                 let price: Double
                 if invoiceMsat > 0 {
                     price = appState.btcPrice
+                    try appState.ensureNoUnsettledSurplus(amountMsat: invoiceMsat)
                     paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
                     actualMsat = invoiceMsat
                 } else {
@@ -469,6 +470,7 @@ struct SendView: View {
                         throw untrustedPriceError()
                     }
                     actualMsat = converted
+                    try appState.ensureNoUnsettledSurplus(amountMsat: actualMsat)
                     paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
                 }
                 let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (
@@ -494,6 +496,7 @@ struct SendView: View {
                 }
                 let offer = try Offer.fromStr(offerStr: trimmed)
                 let msat = sats * 1000
+                try appState.ensureNoUnsettledSurplus(amountMsat: msat)
                 let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
                 _ = try? appState.databaseService?.paymentRepo.recordPayment(
@@ -563,7 +566,7 @@ struct SendView: View {
 
             success = true
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
         }
     }
 }

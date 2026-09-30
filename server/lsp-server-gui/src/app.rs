@@ -16,7 +16,7 @@ use sc_rest_client::ldk_server_grpc::api::{
 	ListChannelsRequest, ListForwardedPaymentsRequest, ListPaymentsRequest, ListPeersRequest,
 	OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest, SignMessageRequest,
 	SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest, UpdateChannelConfigRequest,
-	VerifySignatureRequest,
+	VerifySignatureRequest, AllFunds, onchain_send_request, open_channel_request, splice_in_request,
 };
 use sc_rest_client::sc_protos::stable::{
 	ChannelLedgerEvent, EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
@@ -568,8 +568,7 @@ impl LspServerApp {
 		if let Some(client) = &self.state.client {
 			let form = &self.state.forms.onchain_send;
 			let address = form.address.trim().to_string();
-			let amount_sats = self.parse_amount_sats(&form.amount_sats);
-			let send_all = if form.send_all { Some(true) } else { None };
+			let amount = onchain_send_amount(self.parse_amount_sats(&form.amount_sats), form.send_all);
 			let fee_rate = form.fee_rate_sat_per_vb.trim().parse::<u64>().ok();
 
 			if address.is_empty() {
@@ -582,8 +581,7 @@ impl LspServerApp {
 				client
 					.onchain_send(OnchainSendRequest {
 						address,
-						amount_sats,
-						send_all,
+						amount,
 						fee_rate_sat_per_vb: fee_rate,
 					})
 					.await
@@ -753,7 +751,7 @@ impl LspServerApp {
 					.open_channel(OpenChannelRequest {
 						node_pubkey,
 						address,
-						channel_amount_sats,
+						amount: Some(open_channel_request::Amount::ChannelAmountSats(channel_amount_sats)),
 						push_to_counterparty_msat,
 						channel_config,
 						announce_channel,
@@ -852,7 +850,7 @@ impl LspServerApp {
 					.splice_in(SpliceInRequest {
 						user_channel_id,
 						counterparty_node_id,
-						splice_amount_sats,
+						amount: Some(splice_in_request::Amount::SpliceAmountSats(splice_amount_sats)),
 					})
 					.await
 					.map_err(|e| e.to_string())
@@ -1084,6 +1082,7 @@ impl LspServerApp {
 						node_id,
 						route_parameters: None,
 						custom_tlvs: vec![],
+						preimage: None,
 					})
 					.await
 					.map_err(|e| e.to_string())
@@ -1545,6 +1544,15 @@ impl LspServerApp {
 	}
 }
 
+// "Send entire balance" wins over a typed amount; LDK Server rejects a request with neither.
+fn onchain_send_amount(amount_sats: Option<u64>, send_all: bool) -> Option<onchain_send_request::Amount> {
+	if send_all {
+		Some(onchain_send_request::Amount::AllFunds(AllFunds {}))
+	} else {
+		amount_sats.map(onchain_send_request::Amount::AmountSats)
+	}
+}
+
 fn build_channel_config(fee_prop: &str, fee_base: &str, cltv: &str) -> Option<ChannelConfig> {
 	let fee_prop = fee_prop.parse::<u32>().ok();
 	let fee_base = fee_base.parse::<u32>().ok();
@@ -1769,5 +1777,31 @@ mod ledger_tests {
         let mut changed = form.clone();
         changed.status = "completed".to_owned();
         assert_ne!(key, ChannelLedgerRequestKey::from(&changed));
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+
+    #[test]
+    fn onchain_send_all_takes_precedence_over_a_typed_amount() {
+        assert!(matches!(
+            onchain_send_amount(Some(50_000), true),
+            Some(onchain_send_request::Amount::AllFunds(_))
+        ));
+        assert!(matches!(
+            onchain_send_amount(None, true),
+            Some(onchain_send_request::Amount::AllFunds(_))
+        ));
+    }
+
+    #[test]
+    fn onchain_send_uses_the_typed_amount_or_nothing() {
+        assert!(matches!(
+            onchain_send_amount(Some(50_000), false),
+            Some(onchain_send_request::Amount::AmountSats(50_000))
+        ));
+        assert!(onchain_send_amount(None, false).is_none());
     }
 }

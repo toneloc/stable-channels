@@ -7,8 +7,44 @@ use tracing::{info, warn};
 use ldk_server_client::ldk_server_grpc::events::event_envelope::Event as EventVariant;
 use ldk_server_client::ldk_server_grpc::events::{ChannelState, EventEnvelope};
 
-use crate::stable_manager::LdkServerCalls;
+use crate::stable_manager::{LdkServerCalls, StableChannelManager};
 use crate::state::AppState;
+
+pub(crate) type EventItem = Result<EventEnvelope, ldk_server_client::error::LdkServerError>;
+
+#[async_trait::async_trait]
+pub(crate) trait EventSource: Send + 'static {
+    async fn next_event(&mut self) -> Option<EventItem>;
+}
+
+#[async_trait::async_trait]
+impl EventSource for ldk_server_client::client::EventStream {
+    async fn next_event(&mut self) -> Option<EventItem> {
+        self.next_message().await
+    }
+}
+
+/// Keep draining the subscription while accounting retries. A bounded queue here would push
+/// the wait back to LDK Server, whose broadcast stream silently drops events when it falls behind.
+/// The caller owns the JoinSet so reconnect/cancellation also stops the old reader.
+pub(crate) fn buffer_events(
+    mut source: impl EventSource,
+) -> (
+    tokio::task::JoinSet<()>,
+    tokio::sync::mpsc::UnboundedReceiver<EventItem>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut reader = tokio::task::JoinSet::new();
+    reader.spawn(async move {
+        while let Some(item) = source.next_event().await {
+            let failed = item.is_err();
+            if sender.send(item).is_err() || failed {
+                break;
+            }
+        }
+    });
+    (reader, receiver)
+}
 
 fn now_millis() -> u128 {
     std::time::SystemTime::now()
@@ -18,7 +54,7 @@ fn now_millis() -> u128 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DispatchOutcome {
+pub(crate) enum DispatchOutcome {
     Continue,
     Reconnect,
 }
@@ -39,6 +75,16 @@ fn claimable_audit_data(
     data
 }
 
+/// Decode LDK's PaymentFailureReason for the audit row; unknown values keep their raw number.
+fn payment_failure_reason_name(reason: Option<i32>) -> Option<String> {
+    use ldk_server_client::ldk_server_grpc::events::PaymentFailureReason;
+    reason.map(|value| {
+        PaymentFailureReason::from_i32(value)
+            .map(|r| crate::channel_close::short(r.as_str_name(), "PAYMENT_FAILURE_REASON_"))
+            .unwrap_or_else(|| format!("UNKNOWN({})", value))
+    })
+}
+
 pub fn spawn(state: AppState) {
     tokio::spawn(async move { run(state).await });
 }
@@ -47,7 +93,7 @@ async fn run(state: AppState) {
     let mut backoff = Duration::from_secs(1);
     let mut gap_correlation_id: Option<String> = None;
     loop {
-        let mut stream = match state.ldk_server.subscribe_events().await {
+        let stream = match state.ldk_server.subscribe_events().await {
             Ok(s) => {
                 backoff = Duration::from_secs(1);
                 s
@@ -79,6 +125,7 @@ async fn run(state: AppState) {
                 continue;
             },
         };
+        let (_reader, mut events) = buffer_events(stream);
         info!("[event_loop] subscribed");
         stable_channels::audit::audit_event(
             "EVENT_STREAM_CONNECTED",
@@ -92,17 +139,21 @@ async fn run(state: AppState) {
                     "scopes": ["channels", "payments", "forwards", "peers", "sweeps"],
                 }),
             );
+            // Finish failed accounting writes before reconnect hydration or backfill can
+            // change the same books. The existing stream remains open while we retry.
+            let mut mgr = StableChannelManager::lock_for_event(
+                &state.stable_manager,
+                state.ldk_server.as_ref(),
+            )
+            .await;
             let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
             if btc_price > 0.0 {
-                state
-                    .stable_manager
-                    .lock()
-                    .await
-                    .reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
+                mgr.reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
                     .await;
             } else {
                 warn!("[event_loop] reconnect reconcile skipped: price cache cold");
             }
+            drop(mgr);
             let counts = crate::backfill::reconcile_event_history(
                 state.ldk_server.as_ref(),
                 state.db.as_ref(),
@@ -133,7 +184,7 @@ async fn run(state: AppState) {
                 }
             }
         }
-        while let Some(item) = stream.next_message().await {
+        while let Some(item) = events.recv().await {
             if dispatch(item, &state).await == DispatchOutcome::Reconnect {
                 break;
             }
@@ -167,10 +218,22 @@ async fn dispatch(
             return DispatchOutcome::Reconnect;
         },
     };
-    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-    let mut mgr = state.stable_manager.lock().await;
     let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
-    match envelope.event {
+    // Keep this envelope on the stack while an earlier correction is unsaved. Returning or
+    // reconnecting here would lose the event because LDK Server does not replay its stream.
+    let mut mgr = StableChannelManager::lock_for_event(&state.stable_manager, ldk).await;
+    let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
+    dispatch_event(envelope.event, &mut mgr, &state.db, ldk, btc_price).await
+}
+
+pub(crate) async fn dispatch_event(
+    event: Option<EventVariant>,
+    mgr: &mut crate::stable_manager::StableChannelManager,
+    db: &stable_channels::db::Database,
+    ldk: &dyn LdkServerCalls,
+    btc_price: f64,
+) -> DispatchOutcome {
+    match event {
         Some(EventVariant::ChannelStateChanged(e)) => {
             if e.state == ChannelState::Ready as i32 {
                 mgr.handle_channel_ready(
@@ -193,11 +256,13 @@ async fn dispatch(
             } else if e.state == ChannelState::Pending as i32 {
                 stable_channels::audit::audit_event(
                     "CHANNEL_PENDING",
-                    serde_json::json!({
-                        "channel_id": e.channel_id,
-                        "user_channel_id": e.user_channel_id,
-                        "counterparty_node_id": e.counterparty_node_id,
-                    }),
+                    crate::channel_audit::pending_audit_data(
+                        &e.channel_id,
+                        &e.user_channel_id,
+                        e.counterparty_node_id.as_deref(),
+                        e.funding_txo.as_deref(),
+                        e.former_temporary_channel_id.as_deref(),
+                    ),
                 );
             } else if e.state == ChannelState::OpenFailed as i32 {
                 stable_channels::audit::audit_event(
@@ -245,6 +310,7 @@ async fn dispatch(
                     next.and_then(|h| h.node_id.clone()).unwrap_or_default(),
                     fp.outbound_amount_forwarded_msat.unwrap_or(0),
                     fp.total_fee_earned_msat.unwrap_or(0),
+                    fp.skimmed_fee_msat,
                     ldk,
                     btc_price,
                 )
@@ -258,7 +324,7 @@ async fn dispatch(
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
             let mut settlement_handled = false;
             if let Some(payment_id) = payment_id.as_deref() {
-                match state.db.mark_trade_response_delivered(
+                match db.mark_trade_response_delivered(
                     payment_id,
                     crate::stable_manager::StableChannelManager::unix_time_secs(),
                 ) {
@@ -276,12 +342,11 @@ async fn dispatch(
                         return DispatchOutcome::Reconnect;
                     }
                 }
-                let known_settlement = state
-                    .db
+                let known_settlement = db
                     .settlement_exists(payment_id)
                     .ok()
                     .unwrap_or(false);
-                match state.db.mark_settlement_succeeded(
+                match db.mark_settlement_succeeded(
                     payment_id,
                     amount_msat,
                     fee_paid_msat,
@@ -321,7 +386,20 @@ async fn dispatch(
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
             if let Some(payment_id) = payment_id.as_deref() {
-                if let Err(error) = state.db.mark_trade_response_failed(
+                // Persist the failure before continuing. The retry tick derives ordinary SYNC
+                // obligations from these outcomes, including after a restart or reconnect.
+                if let Err(error) = db.mark_sync_payment_failed(payment_id) {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({
+                            "op": "mark_sync_payment_failed",
+                            "payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return DispatchOutcome::Reconnect;
+                }
+                if let Err(error) = db.mark_trade_response_failed(
                     payment_id,
                     crate::stable_manager::StableChannelManager::unix_time_secs(),
                 ) {
@@ -344,7 +422,7 @@ async fn dispatch(
                 .map(|rollback| rollback.user_channel_id.clone())
                 .or_else(|| {
                     payment_id.as_deref()
-                        .and_then(|pid| state.db.get_settlement_channel(pid).ok().flatten())
+                        .and_then(|pid| db.get_settlement_channel(pid).ok().flatten())
                 });
             stable_channels::audit::audit_event(
                 "PAYMENT_FAILED",
@@ -355,6 +433,7 @@ async fn dispatch(
                     "direction": direction,
                     "user_channel_id": user_channel_id,
                     "stability_rollback_applied": rollback.map(|rollback| rollback.applied),
+                    "reason": payment_failure_reason_name(e.reason),
                 }),
             );
         },
@@ -367,7 +446,21 @@ async fn dispatch(
                 claimable_audit_data(payment_id.as_deref(), amount_msat, has_custom_records),
             );
         },
-        _ => {},
+        // Audit-only: balances are reconciled when the spliced channel re-fires Ready.
+        Some(EventVariant::SpliceNegotiated(e)) => {
+            stable_channels::audit::audit_event(
+                "SPLICE_NEGOTIATED",
+                crate::channel_audit::splice_negotiated_audit_data(&e),
+            );
+        },
+        Some(EventVariant::SpliceNegotiationFailed(e)) => {
+            stable_channels::audit::audit_event(
+                "SPLICE_NEGOTIATION_FAILED",
+                crate::channel_audit::splice_failed_audit_data(&e),
+            );
+        },
+        // prost decodes a oneof variant this pin does not know as None.
+        None => warn!("[event_loop] unrecognized event variant; LDK Server is likely newer than this daemon's ldk-server-client pin"),
     }
     DispatchOutcome::Continue
 }
@@ -390,6 +483,21 @@ mod tests {
         let d = claimable_audit_data(Some("abc123"), None, false);
         assert!(d.get("amount_msat").is_none());
         assert_eq!(d["payment_id"], "abc123");
+    }
+
+    #[test]
+    fn failure_reason_decodes_ldk_variants_and_keeps_unknown_numbers() {
+        use ldk_server_client::ldk_server_grpc::events::PaymentFailureReason;
+        assert_eq!(
+            payment_failure_reason_name(Some(PaymentFailureReason::RouteNotFound as i32)).as_deref(),
+            Some("ROUTE_NOT_FOUND")
+        );
+        assert_eq!(
+            payment_failure_reason_name(Some(PaymentFailureReason::RecipientRejected as i32)).as_deref(),
+            Some("RECIPIENT_REJECTED")
+        );
+        assert_eq!(payment_failure_reason_name(Some(99)).as_deref(), Some("UNKNOWN(99)"));
+        assert_eq!(payment_failure_reason_name(None), None);
     }
 
     #[test]

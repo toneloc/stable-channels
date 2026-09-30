@@ -1,6 +1,6 @@
 import Foundation
 
-struct MatchResult: Equatable {
+struct MatchResult: Equatable, Hashable {
     let target: String
     let isTxid: Bool
 }
@@ -16,18 +16,24 @@ struct TransactionMatcher {
         tx: MempoolWSTransaction
     ) -> [MatchResult] {
         var results = [MatchResult]()
+        var seen = Set<MatchResult>()
+
+        func appendIfNew(_ res: MatchResult) {
+            if seen.insert(res).inserted {
+                results.append(res)
+            }
+        }
 
         // Direct address in response JSON
         if let respAddr = msg.address, trackedAddresses.contains(respAddr) {
-            results.append(MatchResult(target: respAddr, isTxid: false))
+            appendIfNew(MatchResult(target: respAddr, isTxid: false))
         }
 
         // Match output scriptpubkey_address
         if let vouts = tx.vout {
             for vout in vouts {
                 if let addr = vout.scriptpubkeyAddress, trackedAddresses.contains(addr) {
-                    let res = MatchResult(target: addr, isTxid: false)
-                    if !results.contains(res) { results.append(res) }
+                    appendIfNew(MatchResult(target: addr, isTxid: false))
                 }
             }
         }
@@ -36,16 +42,14 @@ struct TransactionMatcher {
         if let vins = tx.vin {
             for vin in vins {
                 if let inputTxid = vin.txid, trackedTxids.contains(inputTxid) {
-                    let res = MatchResult(target: inputTxid, isTxid: true)
-                    if !results.contains(res) { results.append(res) }
+                    appendIfNew(MatchResult(target: inputTxid, isTxid: true))
                 }
             }
         }
 
         // Match tracked txids directly
         if let respTxid = msg.txid, trackedTxids.contains(respTxid) {
-            let res = MatchResult(target: respTxid, isTxid: true)
-            if !results.contains(res) { results.append(res) }
+            appendIfNew(MatchResult(target: respTxid, isTxid: true))
         }
 
         // Match bulk multi-address-transactions dictionary keys
@@ -55,8 +59,7 @@ struct TransactionMatcher {
                 if (txGroup.mempool?.contains(where: { $0.txid == tx.txid }) == true) ||
                     (txGroup.confirmed?.contains(where: { $0.txid == tx.txid }) == true) ||
                     (txGroup.removed?.contains(where: { $0.txid == tx.txid }) == true) {
-                    let res = MatchResult(target: addr, isTxid: false)
-                    if !results.contains(res) { results.append(res) }
+                    appendIfNew(MatchResult(target: addr, isTxid: false))
                 }
             }
         }

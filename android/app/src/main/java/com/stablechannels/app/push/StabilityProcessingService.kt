@@ -16,6 +16,7 @@ import com.stablechannels.app.services.PaymentFailureRecorder
 import com.stablechannels.app.services.SignedSettlementValidation
 import com.stablechannels.app.services.SpliceEventRecorder
 import com.stablechannels.app.services.StabilityPaymentProtocol
+import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeProtocol
@@ -504,7 +505,10 @@ class StabilityProcessingService : Service() {
                                 InsertResult.DUPLICATE -> {
                                     node.eventHandled()
                                     if (result == InsertResult.INSERTED) {
-                                        Log.d(TAG, "Updated backingSats += $amountSats (delta)")
+                                        Log.d(
+                                            TAG,
+                                            "Applied incoming stability payment at the local target",
+                                        )
                                     }
                                 }
                                 InsertResult.MISSING_CHANNEL ->
@@ -678,13 +682,13 @@ class StabilityProcessingService : Service() {
                     }
                     val backingCursor =
                         db.rawQuery(
-                            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
                             arrayOf(userChannelId),
                         )
-                    val currentBacking = backingCursor.use {
-                        if (it.moveToFirst()) it.getLong(0) else null
+                    val books = backingCursor.use {
+                        if (it.moveToFirst()) it.getLong(0) to it.getDouble(1) else null
                     }
-                    if (currentBacking == null) {
+                    if (books == null) {
                         Log.e(
                             TAG,
                             "recordPaymentAtomicInDB: no channel row for user_channel_id=$userChannelId — rolling back",
@@ -693,10 +697,24 @@ class StabilityProcessingService : Service() {
                         db.close()
                         return InsertResult.MISSING_CHANNEL
                     }
-                    // Clamp instead of refusing: this runs after the payment already settled, so
-                    // the sats truly moved — a floor of 0 keeps the ledger recordable.
-                    val newBacking = maxOf(0L, currentBacking + backingDeltaSats)
-                    if (currentBacking + backingDeltaSats < 0) {
+                    val (currentBacking, expectedUSD) = books
+                    val incomingStability = paymentType == "stability" && direction == "received"
+                    val newBacking =
+                        if (incomingStability) {
+                            StabilityService.backingAfterIncomingStability(
+                                currentBacking,
+                                expectedUSD,
+                                btcPrice,
+                                backingDeltaSats,
+                            )
+                                ?: throw IllegalStateException(
+                                    "Incoming stability allocation unavailable"
+                                )
+                        } else {
+                            // Outgoing sats already moved; retain the existing debit clamp.
+                            maxOf(0L, currentBacking + backingDeltaSats)
+                        }
+                    if (!incomingStability && currentBacking + backingDeltaSats < 0) {
                         Log.w(
                             TAG,
                             "BACKING_CLAMPED: current=$currentBacking delta=$backingDeltaSats clamped_to=$newBacking user_channel_id=$userChannelId",
@@ -919,13 +937,15 @@ class StabilityProcessingService : Service() {
 
         val expectedUsd = channelState.expectedUsd
 
-        if (expectedUsd < 0.01) {
+        // Use backingSats from DB directly — set at trade time, reset after payments
+        val backingSats = channelState.backingSats
+
+        // A sub-cent target with backing is an unsettled LSP surplus (#322), not "no position":
+        // fall through so the surplus settles as a normal above-par payment.
+        if (expectedUsd < 0.01 && backingSats == 0L) {
             Log.d(TAG, "No stable position, skipping")
             return
         }
-
-        // Use backingSats from DB directly — set at trade time, reset after payments
-        val backingSats = channelState.backingSats
 
         Log.d(TAG, "Channel state: expectedUSD=$expectedUsd, backingSats=$backingSats")
 
@@ -938,7 +958,10 @@ class StabilityProcessingService : Service() {
             }
 
         val dollarsFromPar = stableUsdValue - expectedUsd
-        val percentFromPar = if (expectedUsd > 0) abs(dollarsFromPar / expectedUsd) * 100.0 else 0.0
+        // Clamp the denominator: at a zero/tiny target an unclamped ratio would pin the residue
+        // inside the deadband (percentFromPar == 0) and block its settlement.
+        val percentFromPar =
+            abs(dollarsFromPar / maxOf(expectedUsd, StabilityService.MINIMUM_STABLE_USD)) * 100.0
 
         if (
             percentFromPar < Constants.STABILITY_THRESHOLD_PERCENT ||

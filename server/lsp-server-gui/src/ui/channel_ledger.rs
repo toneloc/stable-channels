@@ -593,6 +593,16 @@ fn human_summary(event: &ChannelLedgerEvent) -> String {
         "PAYMENT_SETTLED" if event_amount_msat(event) == Some(1) => {
             "Accounting sync settled".to_owned()
         }
+        "PAYMENT_FAILED" => match detail_text(event, "reason") {
+            Some(reason) => format!("Payment failed: {}", humanize_enum(&reason)),
+            None => "Payment failed".to_owned(),
+        },
+        "SPLICE_NEGOTIATED" => "Splice negotiated".to_owned(),
+        "SPLICE_NEGOTIATION_FAILED" => "Splice negotiation failed".to_owned(),
+        "CHANNEL_SHUTDOWN_STATE_CHANGED" => match detail_text(event, "shutdown_state") {
+            Some(state) => format!("Channel shutdown: {}", humanize_enum(&state)),
+            None => "Channel shutdown stage changed".to_owned(),
+        },
         unknown => title_case_event(unknown),
     }
 }
@@ -657,7 +667,25 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
             "After reconnecting, the LSP rebuilt this pending sweep snapshot from LDK's current balances."
         }
         "PAYMENT_FORWARDED_BACKFILL" => {
-            "The LSP found a forwarded payment in LDK history that was not observed on the live event stream and added it to the ledger."
+            return with_skimmed_fee(
+                event,
+                "The LSP found a forwarded payment in LDK history that was not observed on the live event stream and added it to the ledger.",
+            );
+        }
+        "PAYMENT_FORWARDED" => {
+            return with_skimmed_fee(
+                event,
+                "The LSP routed this payment between the incoming and outgoing channels shown below.",
+            );
+        }
+        "SPLICE_NEGOTIATED" => {
+            "The splice was agreed with the peer and its new funding transaction is waiting for confirmation. The channel's accounting is reconciled when LDK reports it ready again."
+        }
+        "SPLICE_NEGOTIATION_FAILED" => {
+            "A splice negotiation round with the peer failed. Nothing changed on-chain: the channel keeps its current funding and any splice already negotiated."
+        }
+        "CHANNEL_SHUTDOWN_STATE_CHANGED" => {
+            "The channel moved to a new cooperative close stage. Pending HTLCs are resolved first, then the closing fee is negotiated and the close transaction is broadcast. The LSP checks every 30 seconds, so a quick close can skip stages, and a stage the channel falls back to after a disconnect is not recorded again."
         }
         "RECONCILIATION_SCOPE_FAILED" => {
             "Part of the reconnect recovery could not be queried. The affected scope and error are available in Raw JSON."
@@ -695,7 +723,7 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         "PAYMENT_SETTLED" | "PAYMENT_SUCCESSFUL" => {
             "The Lightning payment completed successfully."
         }
-        "PAYMENT_FAILED" => "The Lightning payment did not complete successfully.",
+        "PAYMENT_FAILED" => return failed_payment_help(event),
         _ => {
             return format!(
                 "This is {}. Hover the badges for classification details or open Raw JSON for the exact recorded fields.",
@@ -704,6 +732,46 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         },
     };
     explanation.to_owned()
+}
+
+fn detail_value(event: &ChannelLedgerEvent, key: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(&event.detail_json).ok()?.get(key).cloned()
+}
+
+fn detail_text(event: &ChannelLedgerEvent, key: &str) -> Option<String> {
+    detail_value(event, key)?.as_str().map(str::to_owned)
+}
+
+// LDK enum names such as ROUTE_NOT_FOUND read as "route not found".
+fn humanize_enum(name: &str) -> String {
+    name.to_ascii_lowercase().replace('_', " ").replace("htlcs", "HTLCs")
+}
+
+fn failed_payment_help(event: &ChannelLedgerEvent) -> String {
+    let base = "The Lightning payment did not complete successfully.";
+    let Some(reason) = detail_text(event, "reason") else {
+        return base.to_owned();
+    };
+    let cause = match reason.as_str() {
+        "ROUTE_NOT_FOUND" => "LDK found no route to the recipient. For a stability payment or sync this usually means the wallet was offline or the channel lacked capacity.".to_owned(),
+        "RECIPIENT_REJECTED" => "The recipient's node rejected it.".to_owned(),
+        "RETRIES_EXHAUSTED" => "LDK used up its retry attempts or its retry timeout.".to_owned(),
+        "PAYMENT_EXPIRED" => "It expired while LDK was still retrying.".to_owned(),
+        "USER_ABANDONED" => "It was abandoned before it completed.".to_owned(),
+        "UNEXPECTED_ERROR" => "LDK hit an unexpected routing error.".to_owned(),
+        other => format!("LDK reported the reason as {}.", humanize_enum(other)),
+    };
+    format!("{base} {cause}")
+}
+
+fn with_skimmed_fee(event: &ChannelLedgerEvent, explanation: &str) -> String {
+    match detail_value(event, "skimmed_fee_msat").and_then(|fee| fee.as_u64()).filter(|fee| *fee > 0) {
+        Some(fee) => format!(
+            "{explanation} {} of the fee was withheld as the channel-open fee for a just-in-time channel.",
+            format_msat(fee)
+        ),
+        None => explanation.to_owned(),
+    }
 }
 
 fn splice_direction(event: &ChannelLedgerEvent) -> Option<String> {
@@ -1350,5 +1418,66 @@ mod tests {
             format_sats_with_usd(100_000, Some(80_000.0)),
             "100,000 sats · ≈ $80.00"
         );
+    }
+
+    fn with_detail(mut event: ChannelLedgerEvent, detail: &str) -> ChannelLedgerEvent {
+        event.detail_json = detail.to_owned();
+        event
+    }
+
+    #[test]
+    fn splice_negotiation_rows_read_as_splice_progress() {
+        let negotiated = event(1, "SPLICE_NEGOTIATED");
+        assert_eq!(human_summary(&negotiated), "Splice negotiated");
+        assert!(event_help(&negotiated).contains("waiting for confirmation"));
+        let failed = event(2, "SPLICE_NEGOTIATION_FAILED");
+        assert_eq!(human_summary(&failed), "Splice negotiation failed");
+        assert!(event_help(&failed).contains("Nothing changed on-chain"));
+    }
+
+    #[test]
+    fn shutdown_stage_rows_name_the_new_stage() {
+        let resolving = with_detail(
+            event(1, "CHANNEL_SHUTDOWN_STATE_CHANGED"),
+            r#"{"previous_shutdown_state":"SHUTDOWN_INITIATED","shutdown_state":"RESOLVING_HTLCS"}"#,
+        );
+        assert_eq!(human_summary(&resolving), "Channel shutdown: resolving HTLCs");
+        assert!(event_help(&resolving).contains("cooperative close"));
+        assert!(event_help(&resolving).contains("every 30 seconds"));
+        assert_eq!(
+            human_summary(&event(2, "CHANNEL_SHUTDOWN_STATE_CHANGED")),
+            "Channel shutdown stage changed"
+        );
+    }
+
+    #[test]
+    fn failed_payment_rows_explain_the_ldk_reason() {
+        let route = with_detail(event(1, "PAYMENT_FAILED"), r#"{"reason":"ROUTE_NOT_FOUND"}"#);
+        assert_eq!(human_summary(&route), "Payment failed: route not found");
+        assert!(event_help(&route).contains("wallet was offline"));
+        let exhausted = with_detail(event(5, "PAYMENT_FAILED"), r#"{"reason":"RETRIES_EXHAUSTED"}"#);
+        assert!(event_help(&exhausted).contains("used up its retry attempts"));
+        let rejected = with_detail(event(2, "PAYMENT_FAILED"), r#"{"reason":"RECIPIENT_REJECTED"}"#);
+        assert!(event_help(&rejected).contains("rejected"));
+        let novel = with_detail(event(3, "PAYMENT_FAILED"), r#"{"reason":"UNKNOWN(42)"}"#);
+        assert!(event_help(&novel).contains("unknown(42)"));
+        let legacy = with_detail(event(4, "PAYMENT_FAILED"), r#"{"reason":null}"#);
+        assert_eq!(human_summary(&legacy), "Payment failed");
+        assert_eq!(event_help(&legacy), "The Lightning payment did not complete successfully.");
+    }
+
+    #[test]
+    fn forwarded_rows_mention_a_skimmed_channel_open_fee() {
+        let jit = with_detail(event(1, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":2500000}"#);
+        assert!(event_help(&jit).contains("2,500 sats"));
+        assert!(event_help(&jit).contains("channel-open fee"));
+        let plain = with_detail(event(2, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":null}"#);
+        assert!(!event_help(&plain).contains("channel-open fee"));
+        let backfill = with_detail(
+            event(3, "PAYMENT_FORWARDED_BACKFILL"),
+            r#"{"skimmed_fee_msat":1500}"#,
+        );
+        assert!(event_help(&backfill).contains("not observed on the live event stream"));
+        assert!(event_help(&backfill).contains("1,500 msat"));
     }
 }

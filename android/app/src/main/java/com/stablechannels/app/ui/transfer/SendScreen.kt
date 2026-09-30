@@ -11,7 +11,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,6 +47,7 @@ import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.scanner.QRScannerScreen
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.InputSanitizer
 import com.stablechannels.app.util.QRCodeUtils
@@ -527,7 +527,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 colors =
                     CardDefaults.cardColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (LocalDarkTheme.current) {
                                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
                             } else {
                                 Color(0xFFF2F2F7)
@@ -774,6 +774,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         val actualMsat: Long
                                         val recordPrice: Double
                                         if (invoiceMsat > 0) {
+                                            appState.ensureNoUnsettledSurplus(invoiceMsat)
                                             paymentId = appState.nodeService.sendPayment(invoice)
                                             actualMsat = invoiceMsat
                                             recordPrice = price
@@ -789,6 +790,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 accountingMsatFromUSD(enteredUSD, accountingPrice)
                                                     ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                             recordPrice = accountingPrice
+                                            appState.ensureNoUnsettledSurplus(actualMsat)
                                             paymentId =
                                                 appState.nodeService.sendPaymentUsingAmount(
                                                     invoice,
@@ -812,6 +814,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             accountingSatsFromUSD(enteredUSD, accountingPrice)
                                                 ?: throw Exception(UNTRUSTED_PRICE_MESSAGE)
                                         val offer = Offer.fromStr(trimmed)
+                                        appState.ensureNoUnsettledSurplus(sats * 1000)
                                         val paymentId =
                                             appState.nodeService.sendBolt12UsingAmount(
                                                 offer,

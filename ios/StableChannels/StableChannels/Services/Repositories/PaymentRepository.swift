@@ -145,9 +145,22 @@ final class PaymentRepository {
         return paymentRecord(from: row)
     }
 
+    /// Returns true if an outgoing payment is currently in-flight ('pending').
+    func hasPendingOutgoingPayment() throws -> Bool {
+        let sql = """
+            SELECT 1 FROM payments
+            WHERE direction = 'sent' AND status = 'pending'
+            LIMIT 1
+        """
+        let rows = try rawSQL.query(sql, params: [])
+        return !rows.isEmpty
+    }
+
+    /// Rows the confirmation poller advances. Splices are deliberately NOT here.
+    /// A splice row's completion triggers stable-books reconcile in AppState.completeConfirmedSplice().
+    /// Excluding splices ensures the poller does not race the monitor and complete rows without deducting books.
     func paymentsNeedingConfirmation() throws -> [PaymentRecord] {
         let defaultRequired = ConfirmationPolicy.defaultRequiredConfirmations
-        let spliceRequired = ConfirmationPolicy.spliceRequiredConfirmations
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
@@ -155,21 +168,90 @@ final class PaymentRepository {
         WHERE txid IS NOT NULL
         AND txid != ''
         AND status != 'failed'
-        AND (
-            (payment_type IN ('splice_in', 'splice_out') AND (confirmations IS NULL OR confirmations < ?))
-            OR
-            (payment_type IN ('onchain', 'channel_close') AND (confirmations IS NULL OR confirmations < ?))
-        )
+        AND payment_type IN ('onchain', 'channel_close')
+        AND (confirmations IS NULL OR confirmations < ?)
         ORDER BY created_at DESC
         LIMIT 50
         """
         let rows = try rawSQL.query(
             sql,
-            params: [.integer(Int64(spliceRequired)), .integer(Int64(defaultRequired))]
+            params: [.integer(Int64(defaultRequired))]
         )
         return rows.map { row in
             paymentRecord(from: row)
         }
+    }
+
+    /// Check if any payment row exists carrying this transaction ID.
+    func paymentExists(forTxid txid: String) throws -> Bool {
+        let sql = "SELECT 1 FROM payments WHERE txid = ? LIMIT 1"
+        let rows = try rawSQL.query(sql, params: [.text(txid)])
+        return !rows.isEmpty
+    }
+
+    /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).
+    func findMatchingChannelClosePaymentId(depositSats: UInt64, withinSecs: Int64 = 86400) -> String? {
+        let sql = """
+        SELECT id, payment_id, amount_msat FROM payments
+        WHERE payment_type = 'channel_close'
+        AND direction = 'received'
+        AND created_at >= ?
+        ORDER BY created_at DESC
+        LIMIT 5
+        """
+        let cutoff = Int64(Date().timeIntervalSince1970) - withinSecs
+        guard let rows = try? rawSQL.query(sql, params: [.integer(cutoff)]) else { return nil }
+        for row in rows {
+            let rowId = row.int64(0)
+            let paymentId = row.string(1) ?? "\(rowId)"
+            let msat = row.int64(2)
+            guard msat > 0 else { continue }
+
+            let checkSql = "SELECT 1 FROM consumed_close_sweeps WHERE payment_id = ? LIMIT 1"
+            if let consumedRows = try? rawSQL.query(checkSql, params: [.text(paymentId)]), !consumedRows.isEmpty {
+                continue
+            }
+
+            let closeSats = UInt64(msat / 1000)
+            let matched: Bool
+            if depositSats <= closeSats && (closeSats - depositSats) <= 15000 {
+                matched = true
+            } else if depositSats >= closeSats && (depositSats - closeSats) <= 15000 {
+                matched = true
+            } else {
+                matched = false
+            }
+
+            if matched {
+                return paymentId
+            }
+        }
+        return nil
+    }
+
+    /// Marks a close sweep payment as consumed so subsequent deposits are not swallowed (Command).
+    @discardableResult
+    func markCloseSweepConsumed(paymentId: String) -> Bool {
+        let sql = "INSERT OR IGNORE INTO consumed_close_sweeps (payment_id) VALUES (?)"
+        do {
+            try rawSQL.execute(sql, params: [.text(paymentId)])
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// True if a channel_close payment row exists matching this deposit amount within mining fee tolerance,
+    /// preventing close sweeps from creating duplicate on-chain deposit rows.
+    /// When `consume` is true, also marks the matching payment consumed so subsequent deposits are not swallowed.
+    func hasMatchingChannelClosePayment(depositSats: UInt64, withinSecs: Int64 = 86400, consume: Bool = false) -> Bool {
+        guard let paymentId = findMatchingChannelClosePaymentId(depositSats: depositSats, withinSecs: withinSecs) else {
+            return false
+        }
+        if consume {
+            markCloseSweepConsumed(paymentId: paymentId)
+        }
+        return true
     }
 
     func getPayment(byId id: Int64) throws -> PaymentRecord? {

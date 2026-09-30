@@ -145,4 +145,34 @@ object PriceChartAlgorithms {
     fun formatYAxis(price: Double): String {
         return if (price >= 1000) "$${(price / 1000).toInt()}K" else "$${price.toInt()}"
     }
+
+    /** Slices price history based on timeframe and data availability. */
+    fun sliceHistory(
+        chartPeriod: ChartPeriod,
+        hourlyPrices: List<PriceRecord>,
+        allDailyPrices: List<PriceRecord>,
+        cutoffSec: Long,
+    ): List<PriceRecord> {
+        return if (chartPeriod.usesHourly) {
+            val startIdx = lowerBound(hourlyPrices, cutoffSec)
+            val hourlySlice = hourlyPrices.subList(startIdx, hourlyPrices.size)
+            if (hourlySlice.size >= 2) {
+                hourlySlice
+            } else {
+                val dailyStartIdx = lowerBound(allDailyPrices, cutoffSec)
+                val dailySlice = allDailyPrices.subList(dailyStartIdx, allDailyPrices.size)
+                if (dailySlice.size >= 2) dailySlice else hourlySlice
+            }
+        } else {
+            val startIdx = lowerBound(allDailyPrices, cutoffSec)
+            val dailySlice = allDailyPrices.subList(startIdx, allDailyPrices.size)
+            if (dailySlice.size >= 2) {
+                dailySlice
+            } else {
+                val hourlyStartIdx = lowerBound(hourlyPrices, cutoffSec)
+                val hourlySlice = hourlyPrices.subList(hourlyStartIdx, hourlyPrices.size)
+                if (hourlySlice.size >= 2) hourlySlice else dailySlice
+            }
+        }
+    }
 }

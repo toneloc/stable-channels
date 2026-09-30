@@ -114,12 +114,6 @@ fun SettingsHub(appState: AppState, navController: NavController) {
             label = "App Access",
             onClick = { navController.navigate(SettingsRoute.AppAccess.route) },
         )
-        SettingsNavLink(
-            icon = Icons.Default.PrivacyTip,
-            iconBackground = Color(0xFF6366F1),
-            label = "Privacy Policy",
-            onClick = { uriHandler.openUri(Constants.PRIVACY_POLICY_URL) },
-        )
 
         // Support section
         SettingsSectionHeader(title = "Support", color = Color(0xFF10B981))
@@ -142,7 +136,7 @@ fun SettingsHub(appState: AppState, navController: NavController) {
             icon = Icons.Default.PrivacyTip,
             iconBackground = Color(0xFF6B7280),
             label = "Privacy Policy",
-            onClick = { uriHandler.openUri("https://stablechannels.com/privacy.html") },
+            onClick = { uriHandler.openUri(Constants.PRIVACY_POLICY_URL) },
         )
 
         Spacer(Modifier.height(100.dp))

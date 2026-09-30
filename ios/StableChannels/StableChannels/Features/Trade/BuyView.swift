@@ -13,7 +13,7 @@ struct BuyView: View {
     init(prefillAmountUSD: Double = 0) {
         self.prefillAmountUSD = prefillAmountUSD
         _amountStr = State(initialValue: prefillAmountUSD > 0
-            ? String(format: "%.2f", prefillAmountUSD)
+            ? String(format: "%.2f", BuyAmountPolicy.maximumUsd(prefillAmountUSD))
             : "")
     }
 
@@ -24,7 +24,7 @@ struct BuyView: View {
     }
 
     private var maxBuyUSD: Double {
-        appState.stableChannel.expectedUSD.amount
+        BuyAmountPolicy.maximumUsd(appState.stableChannel.expectedUSD.amount)
     }
 
     private var tradePrice: Double { appState.accountingBTCPrice }
@@ -129,7 +129,7 @@ struct BuyView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(amountUSD <= 0 || amountUSD > maxBuyUSD || tradePrice <= 0)
+                .disabled(!BuyAmountPolicy.accepts(amountUsd: amountUSD, balanceUsd: maxBuyUSD) || tradePrice <= 0)
         }
     }
 

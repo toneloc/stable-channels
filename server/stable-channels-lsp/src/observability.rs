@@ -1,10 +1,12 @@
-//! Periodic observability poll: synthesizes SWEEP_PROGRESS and PEER_CONNECTED/PEER_DISCONNECTED audit events.
+//! Periodic observability poll: synthesizes SWEEP_PROGRESS, PEER_CONNECTED/PEER_DISCONNECTED and CHANNEL_SHUTDOWN_STATE_CHANGED audit events.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use ldk_server_client::ldk_server_grpc::api::GetBalancesRequest;
+use ldk_server_client::ldk_server_grpc::api::{GetBalancesRequest, ListChannelsRequest, ListPeersRequest};
 use ldk_server_client::ldk_server_grpc::types::pending_sweep_balance::BalanceType;
+use ldk_server_client::ldk_server_grpc::types::Channel;
+use serde_json::Value;
 use tokio::time::interval;
 use tracing::warn;
 
@@ -22,11 +24,62 @@ async fn run(state: AppState) {
     let mut sweep_prev: HashMap<String, String> = HashMap::new();
     let mut peer_prev: HashMap<String, bool> = HashMap::new();
     let mut peer_first_run = true;
+    let mut shutdown_prev: HashMap<String, String> = HashMap::new();
     loop {
         tick.tick().await;
         poll_sweeps(&state, &mut sweep_prev).await;
-        poll_peers(&state, &mut peer_prev, &mut peer_first_run).await;
+        let ldk: &dyn LdkServerCalls = state.ldk_server.as_ref();
+        let channels = match ldk.list_channels(ListChannelsRequest {}).await {
+            Ok(r) => r.channels,
+            Err(e) => { warn!("[observability] list_channels failed: {}", e); continue; }
+        };
+        poll_peers(&state, &channels, &mut peer_prev, &mut peer_first_run).await;
+        shutdown_prev = record_shutdown_stages(&shutdown_prev, &channels);
     }
+}
+
+/// Audit every shutdown-stage change and return the next in-memory baseline; the per-stage dedup key keeps restarts from repeating a stage.
+pub(crate) fn record_shutdown_stages(
+    prev: &HashMap<String, String>,
+    channels: &[Channel],
+) -> HashMap<String, String> {
+    let (events, next) = shutdown_audit_data(prev, channels);
+    for data in events {
+        stable_channels::audit::audit_event("CHANNEL_SHUTDOWN_STATE_CHANGED", data);
+    }
+    next
+}
+
+/// Pure: rows for channels whose shutdown stage changed since `prev` (an unseen channel emits only if already shutting down) plus the next baseline.
+pub fn shutdown_audit_data(
+    prev: &HashMap<String, String>,
+    channels: &[Channel],
+) -> (Vec<Value>, HashMap<String, String>) {
+    let mut events = Vec::new();
+    let mut current = HashMap::new();
+    for c in channels {
+        // An LDK Server older than a56d5a9 does not report the stage.
+        let Some(state) = c.channel_shutdown_state else { continue };
+        let name = crate::channel_audit::shutdown_state_name(state);
+        let previous = prev.get(&c.channel_id);
+        let changed = match previous {
+            Some(previous) => previous != &name,
+            None => name != "NOT_SHUTTING_DOWN",
+        };
+        if changed {
+            events.push(serde_json::json!({
+                "channel_id": c.channel_id,
+                "user_channel_id": c.user_channel_id,
+                "counterparty_node_id": c.counterparty_node_id,
+                "previous_shutdown_state": previous,
+                "shutdown_state": name,
+                // Each stage is recorded the first time it is reached; a fall-back (e.g. to RESOLVING_HTLCS after a disconnect) is not re-recorded.
+                "dedup_key": format!("lsp:channel-shutdown-stage:{}:{}", c.channel_id, name),
+            }));
+        }
+        current.insert(c.channel_id.clone(), name);
+    }
+    (events, current)
 }
 
 /// Pure: which channels changed sweep-state (or left the pending set → "Swept").
@@ -109,20 +162,20 @@ pub fn peer_transitions(
     out
 }
 
-async fn poll_peers(state: &AppState, prev: &mut HashMap<String, bool>, first_run: &mut bool) {
-    use ldk_server_client::ldk_server_grpc::api::{ListChannelsRequest, ListPeersRequest};
+async fn poll_peers(
+    state: &AppState,
+    channels: &[Channel],
+    prev: &mut HashMap<String, bool>,
+    first_run: &mut bool,
+) {
     let ldk: &dyn LdkServerCalls = state.ldk_server.as_ref();
     let peers = match ldk.list_peers(ListPeersRequest {}).await {
         Ok(r) => r.peers,
         Err(e) => { warn!("[observability] list_peers failed: {}", e); return; }
     };
-    let channels = match ldk.list_channels(ListChannelsRequest {}).await {
-        Ok(r) => r.channels,
-        Err(e) => { warn!("[observability] list_channels failed: {}", e); return; }
-    };
     // counterparty node_id -> its user_channel_ids
     let mut cp_uids: HashMap<String, Vec<String>> = HashMap::new();
-    for c in &channels {
+    for c in channels {
         cp_uids.entry(c.counterparty_node_id.clone()).or_default().push(c.user_channel_id.clone());
     }
     // current connection state, counterparties only
@@ -181,5 +234,51 @@ mod tests {
         assert_eq!(peer_transitions(&cur, &cur2, false), vec![("02aa".to_string(), false)]); // flipped to disconnected
 
         assert!(peer_transitions(&cur2, &cur2, false).is_empty()); // no change
+    }
+
+    fn channel(state: Option<ldk_server_client::ldk_server_grpc::types::ChannelShutdownState>) -> Channel {
+        Channel {
+            channel_id: "f9634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b".into(),
+            user_channel_id: "189476124653200987495269098788434301048".into(),
+            counterparty_node_id: "02465ed5be53d04fde66c9418ff14a5f2267723810176c9212b722e542dc1afb1b".into(),
+            channel_shutdown_state: state.map(|s| s as i32),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn shutdown_stage_changes_are_audited_with_a_per_stage_dedup_key() {
+        use ldk_server_client::ldk_server_grpc::types::ChannelShutdownState::*;
+        let (events, open) = shutdown_audit_data(&HashMap::new(), &[channel(Some(NotShuttingDown))]);
+        assert!(events.is_empty(), "a normal channel is not a shutdown event");
+        let (events, next) = shutdown_audit_data(&open, &[channel(Some(ShutdownInitiated))]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["user_channel_id"], "189476124653200987495269098788434301048");
+        assert_eq!(events[0]["channel_id"], "f9634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b");
+        assert_eq!(events[0]["counterparty_node_id"], "02465ed5be53d04fde66c9418ff14a5f2267723810176c9212b722e542dc1afb1b");
+        assert_eq!(events[0]["previous_shutdown_state"], "NOT_SHUTTING_DOWN");
+        assert_eq!(events[0]["shutdown_state"], "SHUTDOWN_INITIATED");
+        assert_eq!(
+            events[0]["dedup_key"],
+            "lsp:channel-shutdown-stage:f9634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b:SHUTDOWN_INITIATED"
+        );
+        let (events, _) = shutdown_audit_data(&next, &[channel(Some(ShutdownInitiated))]);
+        assert!(events.is_empty(), "an unchanged stage is not re-audited");
+    }
+
+    #[test]
+    fn a_close_already_underway_after_a_restart_is_audited() {
+        use ldk_server_client::ldk_server_grpc::types::ChannelShutdownState::*;
+        let (events, _) = shutdown_audit_data(&HashMap::new(), &[channel(Some(ResolvingHtlcs))]);
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["previous_shutdown_state"].is_null());
+        assert_eq!(events[0]["shutdown_state"], "RESOLVING_HTLCS");
+    }
+
+    #[test]
+    fn channels_from_an_older_ldk_server_never_emit_shutdown_rows() {
+        let (events, next) = shutdown_audit_data(&HashMap::new(), &[channel(None)]);
+        assert!(events.is_empty());
+        assert!(next.is_empty());
     }
 }

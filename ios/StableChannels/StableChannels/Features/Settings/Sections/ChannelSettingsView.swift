@@ -6,6 +6,9 @@ struct ChannelSettingsView: View {
     @State private var showCloseChannelAlert = false
 
     var body: some View {
+        // Read observable property on AppState to ensure view invalidation when channel state changes,
+        // as NodeService is not directly observable.
+        let _ = appState.hasReadyChannel
         List {
             if let channel = appState.nodeService.channels.first {
                 Section {
@@ -85,12 +88,32 @@ struct ChannelSettingsView: View {
                     }
                 }
 
+                if !appState.isChannelClosing {
+                    Section {
+                        Button(
+                            String(localized: "button_close_channel", defaultValue: "Close channel"),
+                            role: .destructive
+                        ) {
+                            showCloseChannelAlert = true
+                        }
+                    }
+                } else {
+                    Section {
+                        HStack {
+                            ProgressView()
+                                .padding(.trailing, 8)
+                            Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } else if appState.isChannelClosing {
                 Section {
-                    Button(
-                        String(localized: "button_close_channel", defaultValue: "Close channel"),
-                        role: .destructive
-                    ) {
-                        showCloseChannelAlert = true
+                    HStack {
+                        ProgressView()
+                            .padding(.trailing, 8)
+                        Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
+                            .foregroundStyle(.secondary)
                     }
                 }
             } else {

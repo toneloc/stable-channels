@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.history
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.TradeOutcome
+import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.shortString
@@ -27,11 +27,12 @@ import com.stablechannels.app.util.usdFormatted
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
+    val isDark = LocalDarkTheme.current
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-        containerColor = if (isSystemInDarkTheme()) Color.Black else Color.White,
+        containerColor = if (isDark) Color.Black else Color.White,
     ) {
         Column(
             modifier =
@@ -49,7 +50,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                     colors =
                         ButtonDefaults.textButtonColors(
                             containerColor =
-                                if (isSystemInDarkTheme()) {
+                                if (isDark) {
                                     MaterialTheme.colorScheme.surfaceVariant
                                 } else {
                                     Color(0xFFE5E5EA)
@@ -75,7 +76,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                 colors =
                     CardDefaults.cardColors(
                         containerColor =
-                            if (isSystemInDarkTheme()) {
+                            if (isDark) {
                                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
                             } else {
                                 Color(0xFFF2F2F7)
