@@ -3,19 +3,26 @@ import XCTest
 
 final class ChannelSweepTests: XCTestCase {
     var dbService: DatabaseService!
-    let tempDbUrl: URL = {
-        let tempDir = FileManager.default.temporaryDirectory
-        return tempDir.appendingPathComponent("test_sweep_\(UUID().uuidString).sqlite")
-    }()
+    var tempDataDir: URL!
 
     override func setUpWithError() throws {
-        dbService = try DatabaseService(dbURL: tempDbUrl)
-        try dbService.migrate()
+        tempDataDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_sweep_\(UUID().uuidString)", isDirectory: true)
+
+        try FileManager.default.createDirectory(
+            at: tempDataDir,
+            withIntermediateDirectories: true
+        )
+
+        // DatabaseService creates stablechannels.db and initializes its schema.
+        dbService = try DatabaseService(dataDir: tempDataDir)
     }
 
     override func tearDownWithError() throws {
         dbService = nil
-        try? FileManager.default.removeItem(at: tempDbUrl)
+        if let tempDataDir {
+            try? FileManager.default.removeItem(at: tempDataDir)
+        }
     }
 
     func testReconcileChannelsSurvivesOnMatchedChannelId() throws {
