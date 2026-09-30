@@ -384,11 +384,35 @@ impl StableChannelManager {
         }
     }
 
+    /// The identifier a client correlates a trade result by: the payment hash of its own keysend.
+    /// ldk-node >= 0.8 gives inbound payments an id distinct from the hash (older versions used
+    /// the hash itself), so the LDK id stays our internal key and the hash goes on the wire.
+    async fn correlation_payment_id(ldk: &dyn LdkServerCalls, inbound_payment_id: &str) -> String {
+        use ldk_server_client::ldk_server_grpc::types::payment_kind::Kind;
+        ldk.get_payment_details(GetPaymentDetailsRequest {
+            payment_id: inbound_payment_id.to_string(),
+        })
+        .await
+        .ok()
+        .and_then(|response| response.payment)
+        .and_then(|payment| payment.kind)
+        .and_then(|kind| kind.kind)
+        .and_then(|kind| match kind {
+            Kind::Bolt11(bolt11) => Some(bolt11.hash),
+            Kind::Spontaneous(spontaneous) => Some(spontaneous.hash),
+            Kind::Bolt12Offer(offer) => offer.hash,
+            _ => None,
+        })
+        .filter(|hash| stable_channels::trade::is_payment_id(hash))
+        .unwrap_or_else(|| inbound_payment_id.to_string())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn reject_correlated_trade(
         &self,
         ldk: &dyn LdkServerCalls,
         inbound_payment_id: &str,
+        correlation_payment_id: &str,
         trade_id: &str,
         request_hash: &str,
         channel_id: &str,
@@ -400,7 +424,7 @@ impl StableChannelManager {
         let payload = crate::messages::build_trade_rejected_payload(
             channel_id,
             trade_id,
-            inbound_payment_id,
+            correlation_payment_id,
             request_hash,
             reason,
             decided_at as u64,
@@ -2678,6 +2702,8 @@ impl StableChannelManager {
             };
             let request_hash = stable_channels::trade::request_hash(envelope.payload.as_bytes());
             let now = Self::unix_time_secs();
+            let correlation_payment_id =
+                Self::correlation_payment_id(ldk, inbound_payment_id).await;
 
             match self.db.trade_decision_by_payment(inbound_payment_id) {
                 Ok(Some(decision)) => {
@@ -2696,6 +2722,7 @@ impl StableChannelManager {
                     self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
+                        &correlation_payment_id,
                         trade_id,
                         &request_hash,
                         &chan.channel_id,
@@ -2720,6 +2747,7 @@ impl StableChannelManager {
                     self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
+                        &correlation_payment_id,
                         trade_id,
                         &request_hash,
                         &chan.channel_id,
@@ -2737,6 +2765,7 @@ impl StableChannelManager {
                     self.reject_correlated_trade(
                         ldk,
                         inbound_payment_id,
+                        &correlation_payment_id,
                         trade_id,
                         &request_hash,
                         &chan.channel_id,
@@ -2849,7 +2878,7 @@ impl StableChannelManager {
                 updated.backing_sats,
                 sync_version,
                 trade_id,
-                inbound_payment_id,
+                &correlation_payment_id,
                 &request_hash,
             );
             let signature = match ldk
@@ -2893,6 +2922,7 @@ impl StableChannelManager {
                         serde_json::json!({
                             "trade_id": trade_id,
                             "trade_payment_id": inbound_payment_id,
+                            "correlation_payment_id": correlation_payment_id,
                             "request_hash": request_hash,
                             "expected_usd": updated.expected_usd.0,
                             "backing_sats": updated.backing_sats,
