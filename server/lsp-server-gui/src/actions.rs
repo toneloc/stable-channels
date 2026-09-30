@@ -227,6 +227,36 @@ fn apply_page_to_data(ctx: AppCtx, page: ListPaymentsResponse, appending: bool) 
 /// Upper bound on pages fetched by "Load all", so a misbehaving cursor cannot loop forever.
 const MAX_PAYMENT_PAGES: usize = 5_000;
 
+/// Follow empty payment pages until a visible page or the end of the history.
+///
+/// The REST server filters some upstream payment rows, so a page can be empty while still
+/// carrying a cursor. A single Load More click should not make the user click through those
+/// pages one at a time. Keep this separate from `load_all_payments`: Load All has its own
+/// progress and pagination behavior.
+async fn fetch_page_until_visible<F, Fut>(
+	mut page_token: Option<String>,
+	mut fetch: F,
+) -> Result<ListPaymentsResponse, String>
+where
+	F: FnMut(Option<String>) -> Fut,
+	Fut: Future<Output = Result<ListPaymentsResponse, String>>,
+{
+	let mut seen = HashSet::new();
+	loop {
+		if let Some(token) = &page_token {
+			if !seen.insert(token.clone()) {
+				return Err("Stopped loading payments: the server repeated a page token".to_string());
+			}
+		}
+
+		let page = fetch(page_token.clone()).await?;
+		if !page.payments.is_empty() || page.next_page_token.is_none() {
+			return Ok(page);
+		}
+		page_token = page.next_page_token;
+	}
+}
+
 /// Fetch every remaining payments page so search and sorting cover the full history.
 pub fn load_all_payments(ctx: AppCtx) {
 	if busy(ctx, Op::Payments) || busy(ctx, Op::PaymentsAll) {
@@ -276,12 +306,32 @@ pub fn fetch_payments(ctx: AppCtx, appending: bool) {
 	if !busy(ctx, Op::Payments) && !busy(ctx, Op::PaymentsAll) {
 		if let Some(client) = client(ctx) {
 			let page_token = if appending { ctx.data.peek().payments_page_token.clone() } else { None };
-			run(
-				ctx,
-				Op::Payments,
-				async move { client.list_payments(ListPaymentsRequest { page_token }).await },
-				move |ctx, v| apply_page_to_data(ctx, v, appending),
-			);
+			if appending {
+				run(
+					ctx,
+					Op::Payments,
+					async move {
+						fetch_page_until_visible(page_token, |page_token| {
+							let client = Arc::clone(&client);
+							async move {
+								client
+									.list_payments(ListPaymentsRequest { page_token })
+									.await
+									.map_err(|e| e.to_string())
+							}
+						})
+						.await
+					},
+					move |ctx, v| apply_page_to_data(ctx, v, true),
+				);
+			} else {
+				run(
+					ctx,
+					Op::Payments,
+					async move { client.list_payments(ListPaymentsRequest { page_token }).await },
+					move |ctx, v| apply_page_to_data(ctx, v, false),
+				);
+			}
 		}
 	}
 	fetch_settlement_payments(ctx);
@@ -1637,6 +1687,61 @@ mod tests {
 		let mut token = None;
 		apply_payments_page(&mut payments, &mut token, page(&["a"], None), true);
 		assert_eq!(ids(&payments), vec!["a"]);
+	}
+
+	#[tokio::test]
+	async fn load_more_skips_empty_pages_and_advances_cursor() {
+		let mut pages = std::collections::HashMap::new();
+		pages.insert(Some("t1".to_string()), page(&[], Some(2)));
+		pages.insert(Some("t2".to_string()), page(&["visible"], Some(3)));
+		let mut requested = Vec::new();
+
+		let result = fetch_page_until_visible(Some("t1".to_string()), |token| {
+			requested.push(token.clone());
+			std::future::ready(Ok::<_, String>(pages.get(&token).cloned().unwrap()))
+		})
+		.await
+		.unwrap();
+
+		assert_eq!(ids(&Some(result)), vec!["visible"]);
+		assert_eq!(requested, vec![Some("t1".to_string()), Some("t2".to_string())]);
+	}
+
+	#[tokio::test]
+	async fn load_more_stops_after_empty_pages_reach_the_end() {
+		let mut pages = std::collections::HashMap::new();
+		pages.insert(Some("t1".to_string()), page(&[], Some(2)));
+		pages.insert(Some("t2".to_string()), page(&[], None));
+		let mut requested = Vec::new();
+
+		let result = fetch_page_until_visible(Some("t1".to_string()), |token| {
+			requested.push(token.clone());
+			std::future::ready(Ok::<_, String>(pages.get(&token).cloned().unwrap()))
+		})
+		.await
+		.unwrap();
+
+		assert!(result.payments.is_empty());
+		assert!(result.next_page_token.is_none());
+		assert_eq!(requested, vec![Some("t1".to_string()), Some("t2".to_string())]);
+	}
+
+	#[tokio::test]
+	async fn load_more_rejects_a_repeated_cursor_while_skipping_empty_pages() {
+		let mut pages = std::collections::HashMap::new();
+		pages.insert(Some("t1".to_string()), page(&[], Some(2)));
+		pages.insert(Some("t2".to_string()), page(&[], Some(1)));
+		let mut requested = Vec::new();
+
+		let error = fetch_page_until_visible(Some("t1".to_string()), |token| {
+			requested.push(token.clone());
+			std::future::ready(Ok::<_, String>(pages.get(&token).cloned().unwrap()))
+		})
+		.await
+		.unwrap_err();
+
+		assert_eq!(error, "Stopped loading payments: the server repeated a page token");
+		assert_eq!(requested, vec![Some("t1".to_string()), Some("t2".to_string())]);
 	}
 
 	#[test]
