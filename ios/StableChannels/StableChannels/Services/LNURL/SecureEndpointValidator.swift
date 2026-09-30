@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 // MARK: - Host IP Resolver Protocol
 
@@ -56,20 +55,14 @@ final class SystemHostIPResolver: HostIPResolving {
 final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _encounteredInsecureRedirect = false
-    private var _expectedHost: String?
     private let hostResolver: HostIPResolving
 
     var encounteredInsecureRedirect: Bool {
         lock.withLock { _encounteredInsecureRedirect }
     }
 
-    var expectedHost: String? {
-        lock.withLock { _expectedHost }
-    }
-
-    init(hostResolver: HostIPResolving = SystemHostIPResolver(), initialExpectedHost: String? = nil) {
+    init(hostResolver: HostIPResolving = SystemHostIPResolver()) {
         self.hostResolver = hostResolver
-        self._expectedHost = initialExpectedHost
     }
 
     func urlSession(
@@ -80,39 +73,13 @@ final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         guard let targetURL = newRequest.url,
-              let pinned = SecureEndpointValidator.preparePinnedRequest(from: targetURL, hostResolver: hostResolver)
+              SecureEndpointValidator.isSecureEndpoint(url: targetURL, hostResolver: hostResolver)
         else {
             lock.withLock { _encounteredInsecureRedirect = true }
             completionHandler(nil)
             return
         }
-        // Transitions to IP literals or .onion set expectedHost to nil, defaulting to system trust evaluation.
-        lock.withLock { _expectedHost = pinned.expectedHost }
-        completionHandler(pinned.request)
-    }
-
-    func urlSession(
-        _: URLSession,
-        task _: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let serverTrust = challenge.protectionSpace.serverTrust,
-              let host = lock.withLock({ _expectedHost }) else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-
-        let policy = SecPolicyCreateSSL(true, host as CFString)
-        SecTrustSetPolicies(serverTrust, policy)
-
-        var error: CFError?
-        if SecTrustEvaluateWithError(serverTrust, &error) {
-            completionHandler(.useCredential, URLCredential(trust: serverTrust))
-        } else {
-            completionHandler(.cancelAuthenticationChallenge, nil)
-        }
+        completionHandler(newRequest)
     }
 }
 
@@ -157,6 +124,13 @@ enum SecureEndpointValidator {
                     UInt32(bytes[15])
                 return isPrivateIPv4(v4ip) // 64:ff9b::/96 Well-Known Prefix (RFC 6052)
             }
+        }
+        // RFC 2765 SIIT IPv4-translated (::ffff:0:0/96)
+        if bytes[0..<8].allSatisfy({ $0 == 0 }) && bytes[8] == 0xFF && bytes[9] == 0xFF &&
+            bytes[10..<12].allSatisfy({ $0 == 0 }) {
+            let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
+                UInt32(bytes[15])
+            return isPrivateIPv4(v4ip)
         }
         if (bytes[0..<10].allSatisfy { $0 == 0 } && bytes[10] == 0xFF && bytes[11] == 0xFF) ||
             bytes[0..<12].allSatisfy({ $0 == 0 }) {
@@ -223,27 +197,15 @@ enum SecureEndpointValidator {
     /// Also rejects any loopback, private, or link-local hosts, as well as DNS names resolving to restricted IPs.
     /// Enforces fail-closed semantics: non-.onion hosts failing DNS resolution are strictly rejected.
     static func isSecureEndpoint(url: URL, hostResolver: HostIPResolving = SystemHostIPResolver()) -> Bool {
-        preparePinnedRequest(from: url, hostResolver: hostResolver) != nil
-    }
-
-    /// Prepares an SSRF-safe pinned request for an HTTPS endpoint.
-    /// Resolves clearnet hostnames to validated public IPs (preferring IPv4), strips any userinfo,
-    /// and rewrites the destination URL to the numeric IP literal. The IP-literal URL is what
-    /// prevents secondary DNS lookups and closes the DNS-rebinding (TOCTOU) window. The original
-    /// hostname is preserved as the HTTP Host header for virtual hosting.
-    ///
-    /// Known limitation: URLSession omits TLS SNI when the URL host is an IP literal (RFC 6066),
-    /// so servers behind CDN edges or shared hosting that select certificates via SNI will reject
-    /// the handshake. This fails closed (no security bypass), but prevents connecting to those
-    /// hosts until a connection-level SNI transport (e.g. NWConnection) is adopted.
-    static func preparePinnedRequest(
-        from url: URL,
-        hostResolver: HostIPResolving = SystemHostIPResolver()
-    ) -> (request: URLRequest, expectedHost: String?)? {
         guard let scheme = url.scheme?.lowercased(),
               let rawHost = url.host?.lowercased(),
               !rawHost.isEmpty else {
-            return nil
+            return false
+        }
+
+        // Reject embedded userinfo
+        guard url.user == nil, url.password == nil else {
+            return false
         }
 
         let cleanHost = cleanHostString(rawHost)
@@ -251,50 +213,32 @@ enum SecureEndpointValidator {
               !cleanHost.hasSuffix(".localhost"),
               !cleanHost.hasSuffix(".local"),
               !cleanHost.hasSuffix(".internal") else {
-            return nil
+            return false
         }
 
         if cleanHost.hasSuffix(".onion") {
-            guard scheme == "http" || scheme == "https" else { return nil }
-            var req = URLRequest(url: url)
-            req.httpMethod = "GET"
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            return (req, nil)
+            return scheme == "http" || scheme == "https"
         }
 
-        guard scheme == "https" else { return nil }
+        guard scheme == "https" else { return false }
 
         if let isPrivate = evaluateNumericIP(cleanHost) {
-            guard !isPrivate else { return nil }
-            var req = URLRequest(url: url)
-            req.httpMethod = "GET"
-            req.setValue("application/json", forHTTPHeaderField: "Accept")
-            return (req, nil)
+            return !isPrivate
         }
 
         let ips = hostResolver.resolveHostIPs(cleanHost)
         guard !ips.isEmpty, !ips.contains(where: { isPrivateOrLoopbackHost($0) }) else {
-            return nil
+            return false
         }
 
-        let pinnedIP = ips.first(where: { !$0.contains(":") }) ?? ips[0]
-        let hostString = pinnedIP.contains(":") ? "[\(pinnedIP)]" : pinnedIP
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.user = nil
-        components?.password = nil
-        components?.host = hostString
-        guard let pinnedURL = components?.url else { return nil }
+        return true
+    }
 
-        var pinnedRequest = URLRequest(url: pinnedURL)
-        pinnedRequest.httpMethod = "GET"
-        pinnedRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-        let hostHeader: String
-        if let port = url.port, port != 80, port != 443 {
-            hostHeader = "\(rawHost):\(port)"
-        } else {
-            hostHeader = rawHost
-        }
-        pinnedRequest.setValue(hostHeader, forHTTPHeaderField: "Host")
-        return (pinnedRequest, rawHost)
+    /// Creates an HTTPS GET request preserving the hostname in the URL for native TLS SNI.
+    static func createSecureRequest(from url: URL) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        return req
     }
 }
