@@ -125,7 +125,7 @@ enum SecureEndpointValidator {
                 return isPrivateIPv4(v4ip) // 64:ff9b::/96 Well-Known Prefix (RFC 6052)
             }
         }
-        // RFC 2765 SIIT IPv4-translated (::ffff:0:0/96)
+        // RFC 2765 SIIT IPv4-translated (::ffff:0:0:0/96)
         if bytes[0..<8].allSatisfy({ $0 == 0 }) && bytes[8] == 0xFF && bytes[9] == 0xFF &&
             bytes[10..<12].allSatisfy({ $0 == 0 }) {
             let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |

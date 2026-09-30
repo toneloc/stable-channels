@@ -4,18 +4,21 @@ import LDKNode
 // MARK: - LNURL Service Implementation
 
 final class LNURLService: LNURLServiceProtocol {
-    private let urlSession: URLSession
+    private let transport: SecureHTTPTransporting
     private let hostResolver: HostIPResolving
 
-    init(urlSession: URLSession? = nil, hostResolver: HostIPResolving = SystemHostIPResolver()) {
+    init(
+        urlSession: URLSession? = nil,
+        hostResolver: HostIPResolving = SystemHostIPResolver(),
+        transport: SecureHTTPTransporting? = nil
+    ) {
         self.hostResolver = hostResolver
-        if let session = urlSession {
-            self.urlSession = session
+        if let transport {
+            self.transport = transport
+        } else if let session = urlSession {
+            self.transport = URLSessionTransport(urlSession: session, hostResolver: hostResolver)
         } else {
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 15.0
-            config.timeoutIntervalForResource = 30.0
-            self.urlSession = URLSession(configuration: config)
+            self.transport = NWConnectionTransport(hostResolver: hostResolver)
         }
     }
 
@@ -98,34 +101,7 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     private func executeSecureGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        guard Self.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
-            throw LNURLError.insecureEndpoint
-        }
-
-        let request = SecureEndpointValidator.createSecureRequest(from: url)
-        let redirectDelegate = SecureRedirectDelegate(hostResolver: hostResolver)
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await urlSession.data(for: request, delegate: redirectDelegate)
-        } catch {
-            throw LNURLError.networkError(error.localizedDescription)
-        }
-
-        if redirectDelegate.encounteredInsecureRedirect {
-            throw LNURLError.insecureEndpoint
-        }
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              let finalURL = httpResponse.url else {
-            throw LNURLError.invalidResponse
-        }
-
-        guard Self.isSecureEndpoint(url: finalURL, hostResolver: hostResolver) else {
-            throw LNURLError.insecureEndpoint
-        }
-
-        return (data, httpResponse)
+        try await transport.executeGet(url: url)
     }
 
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams {

@@ -1249,7 +1249,9 @@ final class LNURLServiceTests: XCTestCase {
             "2001:10::1", // ORCHID (RFC 4843)
             "2001:20::1", // ORCHIDv2 (RFC 7343)
             "2002:c058:6301::", // 6to4 embedding 192.88.99.1
-            "192.88.99.1" // 6to4 anycast relay (RFC 3068/7526)
+            "192.88.99.1", // 6to4 anycast relay (RFC 3068/7526)
+            "::ffff:0:127.0.0.1", // SIIT IPv4-translated (RFC 2765)
+            "::ffff:0:10.0.0.1" // SIIT IPv4-translated (RFC 2765)
         ]
         for ip in blocked {
             XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost(ip), "Expected \(ip) to be blocked")
@@ -1258,7 +1260,8 @@ final class LNURLServiceTests: XCTestCase {
         let allowed = [
             "2606:4700::1111",
             "1.1.1.1",
-            "93.184.216.34"
+            "93.184.216.34",
+            "::ffff:0:8.8.8.8"
         ]
         for ip in allowed {
             XCTAssertFalse(SecureEndpointValidator.isPrivateOrLoopbackHost(ip), "Expected \(ip) to be allowed")
@@ -1277,6 +1280,11 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("127.0.0.1"), true)
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("10.0.0.1"), true)
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("8.8.8.8"), false)
+
+        // Non-canonical forms are not recognized as numeric literals by inet_pton
+        XCTAssertNil(SecureEndpointValidator.evaluateNumericIP("0x7f.0.0.1"))
+        XCTAssertNil(SecureEndpointValidator.evaluateNumericIP("2130706433"))
+        XCTAssertNil(SecureEndpointValidator.evaluateNumericIP("127.1"))
 
         XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("0127.0.0.1"))
         XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("010.0.0.1"))
@@ -1302,11 +1310,19 @@ final class LNURLServiceTests: XCTestCase {
         let publicURL = try XCTUnwrap(URL(string: "https://0177.0.0.1/api"))
         XCTAssertTrue(SecureEndpointValidator.isSecureEndpoint(url: publicURL))
 
-        // Legacy non-canonical forms fall through inet_pton and are rejected by DNS resolution
+        // Legacy non-canonical forms fall through to DNS resolution and are blocked if resolving to loopback
         let legacyForms = ["https://0x7f.0.0.1/api", "https://2130706433/api", "https://127.1/api"]
+        let legacyResolver = MockHostIPResolver(mapping: [
+            "0x7f.0.0.1": ["127.0.0.1"],
+            "2130706433": ["127.0.0.1"],
+            "127.1": ["127.0.0.1"]
+        ])
         for legacyStr in legacyForms {
             let legacyURL = try XCTUnwrap(URL(string: legacyStr))
-            XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: legacyURL))
+            XCTAssertFalse(
+                SecureEndpointValidator.isSecureEndpoint(url: legacyURL, hostResolver: legacyResolver),
+                "Expected \(legacyStr) to be blocked via resolver path"
+            )
         }
     }
 
@@ -1368,6 +1384,72 @@ final class LNURLServiceTests: XCTestCase {
         }
         XCTAssertNil(rejectedRequest)
         XCTAssertTrue(delegate.encounteredInsecureRedirect)
+
+        // Verify default platform certificate trust handling is preserved without custom challenge override
+        XCTAssertFalse(
+            delegate.responds(to: #selector(URLSessionTaskDelegate.urlSession(_:task:didReceive:completionHandler:))),
+            "SecureRedirectDelegate should not implement custom challenge handler, leaving trust to system PKI"
+        )
+    }
+
+    func testHTTPResponseParser_parsesContentLengthAndChunkedBodies() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
+
+        // Standard Content-Length response
+        let rawContentLength = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"status\":\"OK\"}"
+            .data(using: .utf8)!
+        let (body1, resp1) = try HTTPResponseParser.parse(data: rawContentLength, url: url)
+        XCTAssertEqual(resp1.statusCode, 200)
+        XCTAssertEqual(String(data: body1, encoding: .utf8), "{\"status\":\"OK\"}")
+
+        // Chunked Transfer-Encoding response
+        let rawChunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
+            .data(using: .utf8)!
+        let (body2, resp2) = try HTTPResponseParser.parse(data: rawChunked, url: url)
+        XCTAssertEqual(resp2.statusCode, 200)
+        XCTAssertEqual(String(data: body2, encoding: .utf8), "hello world")
+
+        // 404 response
+        let raw404 = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found".data(using: .utf8)!
+        let (body3, resp3) = try HTTPResponseParser.parse(data: raw404, url: url)
+        XCTAssertEqual(resp3.statusCode, 404)
+        XCTAssertEqual(String(data: body3, encoding: .utf8), "Not Found")
+    }
+
+    func testNWConnectionTransport_blocksInsecureEndpointsPreFlight() async throws {
+        let resolver = MockHostIPResolver(mapping: [
+            "private.example.com": ["10.0.0.1"],
+            "loopback.example.com": ["127.0.0.1"]
+        ])
+        let transport = NWConnectionTransport(hostResolver: resolver)
+
+        do {
+            _ = try await transport.executeGet(url: try XCTUnwrap(URL(string: "https://private.example.com/test")))
+            XCTFail("Expected insecureEndpoint error for private IP resolution")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        }
+
+        do {
+            _ = try await transport.executeGet(url: try XCTUnwrap(URL(string: "https://loopback.example.com/test")))
+            XCTFail("Expected insecureEndpoint error for loopback resolution")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        }
+
+        do {
+            _ = try await transport.executeGet(url: try XCTUnwrap(URL(string: "https://127.0.0.1/test")))
+            XCTFail("Expected insecureEndpoint error for literal loopback IP")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        }
+
+        do {
+            _ = try await transport.executeGet(url: try XCTUnwrap(URL(string: "https://user:pass@example.com/test")))
+            XCTFail("Expected insecureEndpoint error for userinfo URL")
+        } catch LNURLError.insecureEndpoint {
+            // Expected
+        }
     }
 }
 
