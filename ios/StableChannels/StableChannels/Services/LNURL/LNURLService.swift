@@ -98,19 +98,18 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     private func executeSecureGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        guard Self.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
+        guard let pinned = SecureEndpointValidator.preparePinnedRequest(from: url, hostResolver: hostResolver) else {
             throw LNURLError.insecureEndpoint
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-
-        let redirectDelegate = SecureRedirectDelegate(hostResolver: hostResolver)
+        let redirectDelegate = SecureRedirectDelegate(
+            hostResolver: hostResolver,
+            initialExpectedHost: pinned.expectedHost
+        )
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await urlSession.data(for: request, delegate: redirectDelegate)
+            (data, response) = try await urlSession.data(for: pinned.request, delegate: redirectDelegate)
         } catch {
             throw LNURLError.networkError(error.localizedDescription)
         }

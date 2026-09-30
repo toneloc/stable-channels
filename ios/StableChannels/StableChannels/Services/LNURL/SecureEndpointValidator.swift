@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 // MARK: - Host IP Resolver Protocol
 
@@ -55,14 +56,20 @@ final class SystemHostIPResolver: HostIPResolving {
 final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _encounteredInsecureRedirect = false
+    private var _expectedHost: String?
     private let hostResolver: HostIPResolving
 
     var encounteredInsecureRedirect: Bool {
         lock.withLock { _encounteredInsecureRedirect }
     }
 
-    init(hostResolver: HostIPResolving = SystemHostIPResolver()) {
+    var expectedHost: String? {
+        lock.withLock { _expectedHost }
+    }
+
+    init(hostResolver: HostIPResolving = SystemHostIPResolver(), initialExpectedHost: String? = nil) {
         self.hostResolver = hostResolver
+        self._expectedHost = initialExpectedHost
     }
 
     func urlSession(
@@ -73,12 +80,38 @@ final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
         guard let targetURL = newRequest.url,
-              SecureEndpointValidator.isSecureEndpoint(url: targetURL, hostResolver: hostResolver) else {
+              let pinned = SecureEndpointValidator.preparePinnedRequest(from: targetURL, hostResolver: hostResolver)
+        else {
             lock.withLock { _encounteredInsecureRedirect = true }
             completionHandler(nil)
             return
         }
-        completionHandler(newRequest)
+        lock.withLock { _expectedHost = pinned.expectedHost }
+        completionHandler(pinned.request)
+    }
+
+    func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let serverTrust = challenge.protectionSpace.serverTrust,
+              let host = lock.withLock({ _expectedHost }) else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+
+        let policy = SecPolicyCreateSSL(true, host as CFString)
+        SecTrustSetPolicies(serverTrust, policy)
+
+        var error: CFError?
+        if SecTrustEvaluateWithError(serverTrust, &error) {
+            completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        } else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+        }
     }
 }
 
@@ -88,66 +121,42 @@ enum SecureEndpointValidator {
     /// Validates whether an IPv4 address belongs to private, loopback, multicast, or reserved ranges.
     static func isPrivateIPv4(_ ip: UInt32) -> Bool {
         let top8 = ip >> 24
-        // 0.0.0.0/8 (Current network), 10.0.0.0/8 (RFC 1918), 127.0.0.0/8 (Loopback)
         if top8 == 0 || top8 == 10 || top8 == 127 { return true }
-        // 100.64.0.0/10 (Shared Address Space / CGNAT, RFC 6598)
-        if ip >= 0x6440_0000 && ip <= 0x647F_FFFF { return true }
-        // 169.254.0.0/16 (Link Local, RFC 3927)
-        if (ip >> 16) == 0xA9FE { return true }
-        // 172.16.0.0/12 (RFC 1918 Private)
-        if ip >= 0xAC10_0000 && ip <= 0xAC1F_FFFF { return true }
-        // 192.0.0.0/24 (IETF Protocol Assignments, RFC 6890), 192.0.2.0/24 (TEST-NET-1, RFC 5737)
-        if (ip >> 8) == 0xC00000 || (ip >> 8) == 0xC00002 { return true }
-        // 192.168.0.0/16 (RFC 1918 Private)
-        if (ip >> 16) == 0xC0A8 { return true }
-        // 198.18.0.0/15 (Benchmarking, RFC 2544)
-        if ip >= 0xC612_0000 && ip <= 0xC613_FFFF { return true }
-        // 198.51.100.0/24 (TEST-NET-2, RFC 5737)
-        if (ip >> 8) == 0xC63364 { return true }
-        // 203.0.113.0/24 (TEST-NET-3, RFC 5737)
-        if (ip >> 8) == 0xCB0071 { return true }
-        // 224.0.0.0/4 (Multicast, RFC 5771)
-        if (top8 & 0xF0) == 0xE0 { return true }
-        // 240.0.0.0/4 (Reserved / Class E / Broadcast, RFC 1112)
-        if (top8 & 0xF0) == 0xF0 { return true }
+        if ip >= 0x6440_0000 && ip <= 0x647F_FFFF { return true } // CGNAT 100.64.0.0/10
+        if (ip >> 16) == 0xA9FE { return true } // Link Local 169.254.0.0/16
+        if ip >= 0xAC10_0000 && ip <= 0xAC1F_FFFF { return true } // RFC 1918 172.16.0.0/12
+        if (ip >> 8) == 0xC00000 || (ip >> 8) == 0xC00002 { return true } // 192.0.0.0/24, 192.0.2.0/24
+        if (ip >> 16) == 0xC0A8 { return true } // RFC 1918 192.168.0.0/16
+        if ip >= 0xC612_0000 && ip <= 0xC613_FFFF { return true } // Benchmark 198.18.0.0/15
+        if (ip >> 8) == 0xC63364 || (ip >> 8) == 0xCB0071 { return true } // TEST-NET-2/3
+        if (top8 & 0xF0) == 0xE0 || (top8 & 0xF0) == 0xF0 { return true } // Multicast / Reserved
         return false
     }
 
     /// Validates whether an IPv6 address belongs to private, loopback, multicast, or reserved ranges.
     static func isPrivateIPv6(_ bytes: UnsafeRawBufferPointer) -> Bool {
         guard bytes.count == 16 else { return false }
-        // ::/128 (Unspecified)
-        if bytes.allSatisfy({ $0 == 0 }) { return true }
-        // ::1/128 (Loopback)
-        if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true }
-        // fe80::/10 (Link-Local unicast)
-        if bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80 { return true }
-        // fc00::/7 (Unique Local unicast ULA)
-        if (bytes[0] & 0xFE) == 0xFC { return true }
-        // ff00::/8 (Multicast)
-        if bytes[0] == 0xFF { return true }
-        // 100::/64 (Discard-only prefix, RFC 6666)
-        if bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2..<8].allSatisfy({ $0 == 0 }) { return true }
-        // 2001:db8::/32 (Documentation prefix, RFC 3849)
-        if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8 { return true }
-        // ::ffff:0:0/96 (IPv4-mapped IPv6)
+        if bytes.allSatisfy({ $0 == 0 }) { return true } // ::/128 Unspecified
+        if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true } // ::1/128 Loopback
+        if bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80 { return true } // fe80::/10 Link-Local
+        if (bytes[0] & 0xFE) == 0xFC { return true } // fc00::/7 ULA
+        if bytes[0] == 0xFF { return true } // ff00::/8 Multicast
+        if bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2..<8].allSatisfy({ $0 == 0 }) { return true } // 100::/64
+        if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8 { return true } // 2001:db8::/32
         if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xFF && bytes[11] == 0xFF {
             let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
                 UInt32(bytes[15])
             return isPrivateIPv4(v4ip)
         }
-        // ::0:0/96 (IPv4-compatible IPv6, deprecated RFC 4291)
         if bytes[0..<12].allSatisfy({ $0 == 0 }) {
             let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
                 UInt32(bytes[15])
             return isPrivateIPv4(v4ip)
         }
-        // 2002::/16 (6to4 prefix, RFC 3056): embedded IPv4 in bytes 2..5
         if bytes[0] == 0x20 && bytes[1] == 0x02 {
             let v4ip = (UInt32(bytes[2]) << 24) | (UInt32(bytes[3]) << 16) | (UInt32(bytes[4]) << 8) | UInt32(bytes[5])
             return isPrivateIPv4(v4ip)
         }
-        // 2001::/32 (Teredo prefix, RFC 4380): client IPv4 in bytes 12..15 XOR 0xFF
         if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00 && bytes[3] == 0x00 {
             let v4ip = (UInt32(bytes[12] ^ 0xFF) << 24) | (UInt32(bytes[13] ^ 0xFF) << 16) |
                 (UInt32(bytes[14] ^ 0xFF) << 8) | UInt32(bytes[15] ^ 0xFF)
@@ -161,16 +170,18 @@ enum SecureEndpointValidator {
         bytes.withUnsafeBytes { isPrivateIPv6($0) }
     }
 
-    /// Checks if a given host is a private, loopback, or link-local address to prevent SSRF.
-    static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
-        var cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanHost.hasPrefix("[") && cleanHost.hasSuffix("]") {
-            cleanHost = String(cleanHost.dropFirst().dropLast())
+    /// Trims surrounding whitespace and removes IPv6 square brackets.
+    static func cleanHostString(_ host: String) -> String {
+        var clean = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if clean.hasPrefix("[") && clean.hasSuffix("]") {
+            clean = String(clean.dropFirst().dropLast())
         }
-        if cleanHost == "localhost" || cleanHost.hasSuffix(".localhost") || cleanHost.hasSuffix(".local") || cleanHost
-            .hasSuffix(".internal") {
-            return true
-        }
+        return clean
+    }
+
+    /// Evaluates if a host is an IPv4 or IPv6 numeric literal and whether it belongs to a private/loopback range.
+    /// Returns true if private/loopback, false if public numeric IP, and nil if domain name.
+    static func evaluateNumericIP(_ cleanHost: String) -> Bool? {
         var addr4 = in_addr()
         if inet_aton(cleanHost, &addr4) != 0 {
             return isPrivateIPv4(UInt32(bigEndian: addr4.s_addr))
@@ -179,32 +190,91 @@ enum SecureEndpointValidator {
         if inet_pton(AF_INET6, cleanHost, &addr6) == 1 {
             return withUnsafeBytes(of: &addr6) { isPrivateIPv6($0) }
         }
-        return false
+        return nil
+    }
+
+    /// Checks if a string represents an IPv4 or IPv6 numeric literal.
+    static func isNumericIP(_ host: String) -> Bool {
+        evaluateNumericIP(cleanHostString(host)) != nil
+    }
+
+    /// Checks if a given host is a private, loopback, or link-local address to prevent SSRF.
+    static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
+        let clean = cleanHostString(host)
+        if clean == "localhost" || clean.hasSuffix(".localhost") || clean.hasSuffix(".local") || clean
+            .hasSuffix(".internal") {
+            return true
+        }
+        return evaluateNumericIP(clean) ?? false
     }
 
     /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
     /// Also rejects any loopback, private, or link-local hosts, as well as DNS names resolving to restricted IPs.
     /// Enforces fail-closed semantics: non-.onion hosts failing DNS resolution are strictly rejected.
     static func isSecureEndpoint(url: URL, hostResolver: HostIPResolving = SystemHostIPResolver()) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
-            return false
+        preparePinnedRequest(from: url, hostResolver: hostResolver) != nil
+    }
+
+    /// Prepares an SSRF-safe pinned request for an HTTPS endpoint.
+    /// Resolves clearnet hostnames to a validated public IP, rewrites the destination URL to the pinned IP,
+    /// and preserves the Host header so that URLSession avoids secondary DNS lookups (preventing DNS rebinding).
+    static func preparePinnedRequest(
+        from url: URL,
+        hostResolver: HostIPResolving = SystemHostIPResolver()
+    ) -> (request: URLRequest, expectedHost: String?)? {
+        guard let scheme = url.scheme?.lowercased(),
+              let rawHost = url.host?.lowercased(),
+              !rawHost.isEmpty else {
+            return nil
         }
-        guard !isPrivateOrLoopbackHost(host) else {
-            return false
+
+        let cleanHost = cleanHostString(rawHost)
+        guard cleanHost != "localhost",
+              !cleanHost.hasSuffix(".localhost"),
+              !cleanHost.hasSuffix(".local"),
+              !cleanHost.hasSuffix(".internal") else {
+            return nil
         }
-        if host.hasSuffix(".onion") {
-            return scheme == "http" || scheme == "https"
+
+        if cleanHost.hasSuffix(".onion") {
+            guard scheme == "http" || scheme == "https" else { return nil }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            return (req, nil)
         }
-        guard scheme == "https" else {
-            return false
+
+        guard scheme == "https" else { return nil }
+
+        if let isPrivate = evaluateNumericIP(cleanHost) {
+            guard !isPrivate else { return nil }
+            var req = URLRequest(url: url)
+            req.httpMethod = "GET"
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+            return (req, nil)
         }
-        let ips = hostResolver.resolveHostIPs(host)
-        guard !ips.isEmpty else {
-            return false
+
+        let ips = hostResolver.resolveHostIPs(cleanHost)
+        guard let pinnedIP = ips.first,
+              !ips.contains(where: { isPrivateOrLoopbackHost($0) }) else {
+            return nil
         }
-        if ips.contains(where: { isPrivateOrLoopbackHost($0) }) {
-            return false
+
+        let hostString = pinnedIP.contains(":") ? "[\(pinnedIP)]" : pinnedIP
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.host = hostString
+        guard let pinnedURL = components?.url else { return nil }
+
+        var pinnedRequest = URLRequest(url: pinnedURL)
+        pinnedRequest.httpMethod = "GET"
+        pinnedRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        let hostHeader: String
+        if let port = url.port, port != 80, port != 443 {
+            hostHeader = "\(rawHost):\(port)"
+        } else {
+            hostHeader = rawHost
         }
-        return true
+        pinnedRequest.setValue(hostHeader, forHTTPHeaderField: "Host")
+        return (pinnedRequest, rawHost)
     }
 }

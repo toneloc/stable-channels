@@ -1163,6 +1163,105 @@ final class LNURLServiceTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    func testPreparePinnedRequest_pinsHostToPublicIPAndPreservesHostHeader() throws {
+        let resolver = MockHostIPResolver(mapping: [
+            "service.example.com": ["93.184.216.34"],
+            "ipv6.example.com": ["2606:4700:4700::1111"],
+            "private.example.com": ["10.0.0.1"]
+        ])
+
+        // Standard HTTPS URL
+        let url = try XCTUnwrap(URL(string: "https://service.example.com/api?foo=bar"))
+        let pinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(from: url, hostResolver: resolver))
+        XCTAssertEqual(pinned.request.url?.absoluteString, "https://93.184.216.34/api?foo=bar")
+        XCTAssertEqual(pinned.request.value(forHTTPHeaderField: "Host"), "service.example.com")
+        XCTAssertEqual(pinned.expectedHost, "service.example.com")
+
+        // Non-default port
+        let portURL = try XCTUnwrap(URL(string: "https://service.example.com:8443/api"))
+        let portPinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(
+            from: portURL,
+            hostResolver: resolver
+        ))
+        XCTAssertEqual(portPinned.request.url?.absoluteString, "https://93.184.216.34:8443/api")
+        XCTAssertEqual(portPinned.request.value(forHTTPHeaderField: "Host"), "service.example.com:8443")
+        XCTAssertEqual(portPinned.expectedHost, "service.example.com")
+
+        // IPv6 resolution
+        let ipv6URL = try XCTUnwrap(URL(string: "https://ipv6.example.com/api"))
+        let ipv6Pinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(
+            from: ipv6URL,
+            hostResolver: resolver
+        ))
+        XCTAssertEqual(ipv6Pinned.request.url?.host, "2606:4700:4700::1111")
+        XCTAssertEqual(ipv6Pinned.request.value(forHTTPHeaderField: "Host"), "ipv6.example.com")
+        XCTAssertEqual(ipv6Pinned.expectedHost, "ipv6.example.com")
+
+        // Tor onion service is untouched
+        let torURL = try XCTUnwrap(URL(string: "http://service.onion/api"))
+        let torPinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(
+            from: torURL,
+            hostResolver: resolver
+        ))
+        XCTAssertEqual(torPinned.request.url?.absoluteString, "http://service.onion/api")
+        XCTAssertNil(torPinned.expectedHost)
+
+        // Public IP literal is untouched
+        let publicIPURL = try XCTUnwrap(URL(string: "https://8.8.8.8/api"))
+        let publicIPPinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(
+            from: publicIPURL,
+            hostResolver: resolver
+        ))
+        XCTAssertEqual(publicIPPinned.request.url?.absoluteString, "https://8.8.8.8/api")
+        XCTAssertNil(publicIPPinned.expectedHost)
+
+        // Private IP literal returns nil
+        let privateIPURL = try XCTUnwrap(URL(string: "https://127.0.0.1/api"))
+        XCTAssertNil(SecureEndpointValidator.preparePinnedRequest(from: privateIPURL, hostResolver: resolver))
+
+        // Host resolving to private IP returns nil
+        let privateHostURL = try XCTUnwrap(URL(string: "https://private.example.com/api"))
+        XCTAssertNil(SecureEndpointValidator.preparePinnedRequest(from: privateHostURL, hostResolver: resolver))
+    }
+
+    func testExecuteSecureGet_transportsToPinnedIPAndSetsHostHeader() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let resolver = MockHostIPResolver(mapping: [
+            "pay.example.com": ["93.184.216.34"]
+        ])
+        let service = LNURLService(urlSession: session, hostResolver: resolver)
+
+        var capturedRequest: URLRequest?
+        let targetURL = try XCTUnwrap(URL(string: "https://pay.example.com/.well-known/lnurlp/alice"))
+        let validJson = """
+        {
+            "tag": "payRequest",
+            "callback": "https://pay.example.com/callback",
+            "minSendable": 1000,
+            "maxSendable": 10000000,
+            "metadata": "[[\\"text/plain\\",\\"Alice\\"]]",
+            "commentAllowed": 50
+        }
+        """
+
+        MockURLProtocol.requestHandler = { req in
+            capturedRequest = req
+            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data(validJson.utf8))
+        }
+
+        let params = try await service.fetchPayParams(from: targetURL)
+        XCTAssertEqual(params.callback, "https://pay.example.com/callback")
+
+        let actualRequest = try XCTUnwrap(capturedRequest)
+        XCTAssertEqual(actualRequest.url?.host, "93.184.216.34")
+        XCTAssertEqual(actualRequest.value(forHTTPHeaderField: "Host"), "pay.example.com")
+        XCTAssertEqual(actualRequest.url?.path, "/.well-known/lnurlp/alice")
+    }
 }
 
 private struct MockHostIPResolver: HostIPResolving {
