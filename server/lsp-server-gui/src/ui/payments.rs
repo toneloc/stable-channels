@@ -87,14 +87,14 @@ pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
 			.payments
 			.iter()
 			.map(|p| PaymentRow {
-				id: p.id.clone(),
+				id: p.payment_id.clone(),
 				hash: p.kind.as_ref().map(payment_hash).unwrap_or_default(),
 				type_label: p
 					.kind
 					.as_ref()
 					.map(|k| format_payment_kind(k))
 					.unwrap_or_else(|| "Unknown".to_string()),
-				settlement_kind: settlement_kinds.and_then(|m| m.get(&p.id).copied()),
+				settlement_kind: settlement_kinds.and_then(|m| m.get(&p.payment_id).copied()),
 				amount_msat: p.amount_msat,
 				fee_paid_msat: p.fee_paid_msat,
 				direction: p.direction,
@@ -547,9 +547,9 @@ fn render_payment_details_dialog(ctx: &Context, app: &mut LspServerApp) {
                                         HELP_PAYMENT_ID,
                                     );
 								ui.horizontal(|ui| {
-									ui.monospace(&payment.id);
+									ui.monospace(&payment.payment_id);
 									if ui.small_button("Copy").clicked() {
-										ui.output_mut(|o| o.copied_text = payment.id.clone());
+										ui.output_mut(|o| o.copied_text = payment.payment_id.clone());
 									}
 								});
 								ui.end_row();

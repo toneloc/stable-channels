@@ -16,6 +16,10 @@ use crate::ledger::{
     LedgerQuery, LedgerRef, LegacyImportReport,
 };
 
+mod forward_history;
+mod onchain_audit;
+mod stream_checkpoint;
+
 /// Outcome of `record_payment_and_maybe_update_backing`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaymentPersistence {
@@ -200,20 +204,20 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-/// Stable dedup key for a forwarded payment (the proto gives forwards no unique id).
+/// Correlation attributes only, NEVER a forwarded-payment identity. Identical
+/// routes and amounts can represent arbitrarily many distinct payments.
 pub fn forward_fingerprint(
     prev_channel_id: &str,
     next_channel_id: &str,
     outbound_amount_msat: Option<u64>,
     total_fee_msat: Option<u64>,
 ) -> String {
-    format!(
-        "{}|{}|{}|{}",
+    serde_json::json!([
         prev_channel_id,
         next_channel_id,
-        outbound_amount_msat.unwrap_or(0),
-        total_fee_msat.unwrap_or(0)
-    )
+        outbound_amount_msat,
+        total_fee_msat,
+    ]).to_string()
 }
 
 /// An unresolved or historically resolved trade addressable by protocol correlation fields.
@@ -671,7 +675,7 @@ impl Database {
 
         init_trade_decisions_schema(&mut conn)?;
 
-        // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
+        // Retained for old installations; fingerprints are no longer read as identities.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS forwarded_seen (fingerprint TEXT PRIMARY KEY)",
             [],
@@ -4256,31 +4260,6 @@ impl Database {
         }))
     }
 
-    /// Record a forward and its ledger row in one transaction. The fingerprint marker cannot
-    /// survive without the event, so a transient ledger failure remains retryable on reconnect.
-    pub fn append_forwarded_event_if_unseen(
-        &self,
-        fingerprint: &str,
-        draft: &LedgerEventDraft,
-    ) -> SqliteResult<bool> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO forwarded_seen (fingerprint) VALUES (?1)",
-            params![fingerprint],
-        )?;
-        if inserted == 0 {
-            tx.commit()?;
-            return Ok(false);
-        }
-        let outcome = ledger::append_on_connection(&tx, draft)?;
-        tx.commit()?;
-        if outcome.inserted {
-            crate::audit::mirror_committed_ledger_event(draft, outcome.event_id);
-        }
-        Ok(outcome.inserted)
-    }
-
     pub fn settlement_exists(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -5058,23 +5037,27 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_seen_dedups_and_fingerprint_is_stable() {
+    fn forward_history_ids_dedup_without_collapsing_equal_payments() {
         let db = Database::open_in_memory().unwrap();
         let fp = forward_fingerprint("aa", "bb", Some(1000), Some(7));
         assert_eq!(fp, forward_fingerprint("aa", "bb", Some(1000), Some(7)));
         assert_ne!(fp, forward_fingerprint("aa", "bb", Some(1001), Some(7)));
+        assert_ne!(forward_fingerprint("aa", "bb", None, None), forward_fingerprint("aa", "bb", Some(0), Some(0)));
         let draft = LedgerEventDraft::from_audit_event(
-            "PAYMENT_FORWARDED",
-            serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb"}),
+            "PAYMENT_FORWARDED_BACKFILL",
+            serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "outbound_amount_msat": 1000, "total_fee_msat": 7}),
         );
-        assert!(db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
-        assert!(!db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("history-1", &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("history-2", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-1", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-2", &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("", &draft).is_err());
+        assert_eq!(db.list_ledger_events(&LedgerQuery::default()).unwrap().events.len(), 2);
     }
 
     #[test]
     fn forwarded_marker_rolls_back_when_ledger_append_fails() {
         let db = Database::open_in_memory().unwrap();
-        let fingerprint = forward_fingerprint("aa", "bb", Some(1_000), Some(7));
         let draft = LedgerEventDraft::from_audit_event(
             "PAYMENT_FORWARDED_BACKFILL",
             serde_json::json!({
@@ -5095,17 +5078,21 @@ mod tests {
             .unwrap();
 
         assert!(db
-            .append_forwarded_event_if_unseen(&fingerprint, &draft)
+            .append_forwarded_event_if_unseen("history-retry", &draft)
             .is_err());
+        {
+            let conn = db.conn.lock().unwrap();
+            let event_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(event_count, 0);
+            conn.execute_batch("DROP TRIGGER inject_forward_ledger_failure").unwrap();
+        }
+        assert!(db.append_forwarded_event_if_unseen("history-retry", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-retry", &draft).unwrap());
         let conn = db.conn.lock().unwrap();
-        let marker_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM forwarded_seen", [], |row| row.get(0))
-            .unwrap();
-        let event_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(marker_count, 0);
-        assert_eq!(event_count, 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM forward_audit_occurrences", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

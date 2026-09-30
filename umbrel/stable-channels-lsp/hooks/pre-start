@@ -30,9 +30,25 @@ esac
 # issue as the e2e stack's "[tls] hosts" gotcha).
 LDK_SERVER_HOST="stable-channels-lsp_ldk-server_1"
 
-mkdir -p "${CONF_DIR}" \
-         "${APP_DATA_DIR}/data/ldk-server" \
-         "${APP_DATA_DIR}/data/sc-lsp"
+# Own only paths created by this hook. Existing private files, ACLs and
+# operator-selected permissions must survive restarts unchanged.
+own_new_path() {
+    if [ "$(id -u)" = "0" ]; then
+        chown 1000:1000 "$1"
+    fi
+}
+for dir in "${APP_DATA_DIR}/data" "${CONF_DIR}" \
+           "${APP_DATA_DIR}/data/ldk-server" "${APP_DATA_DIR}/data/sc-lsp"; do
+    if [ ! -d "$dir" ]; then
+        mkdir -p "$dir"
+        own_new_path "$dir"
+    elif [ ! -L "$dir" ] && [ -f "$dir/.gitkeep" ] && [ ! -L "$dir/.gitkeep" ] && [ ! -s "$dir/.gitkeep" ] &&
+         [ -z "$(find "$dir" -mindepth 1 -maxdepth 1 ! -name .gitkeep -print -quit)" ]; then
+        # App-store installs can deliver the package's empty placeholder
+        # directories as root. Initialize only these unused scaffold paths.
+        own_new_path "$dir"
+    fi
+done
 
 LDK_CONFIG_TMP="${CONF_DIR}/.ldk-server.toml.$$"
 SC_CONFIG_TMP="${CONF_DIR}/.sc-lsp.toml.$$"
@@ -41,7 +57,9 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ ! -e "${CONF_DIR}/ldk-server.toml" ]; then
+if [ ! -e "${CONF_DIR}/ldk-server.toml" ] && [ ! -L "${CONF_DIR}/ldk-server.toml" ]; then
+    # Keep this bootstrap compatible with the older compose-pinned image.
+    # Only rebuilt LDK images add detailed history, in their own entrypoint.
     cat > "$LDK_CONFIG_TMP" <<EOF
 # Created by hooks/pre-start on first launch. Operator edits are preserved.
 [node]
@@ -80,10 +98,11 @@ log_to_file = true
 hosts = ["${LDK_SERVER_HOST}"]
 EOF
     chmod 600 "$LDK_CONFIG_TMP"
+    own_new_path "$LDK_CONFIG_TMP"
     mv -f -- "$LDK_CONFIG_TMP" "${CONF_DIR}/ldk-server.toml"
 fi
 
-if [ ! -e "${CONF_DIR}/sc-lsp.toml" ]; then
+if [ ! -e "${CONF_DIR}/sc-lsp.toml" ] && [ ! -L "${CONF_DIR}/sc-lsp.toml" ]; then
     cat > "$SC_CONFIG_TMP" <<EOF
 # Created by hooks/pre-start on first launch. Operator edits are preserved.
 [node]
@@ -113,10 +132,9 @@ api_key_path = "/data/ldk-server/${NETWORK}/api_key"
 # fcm_service_account_path = "/etc/sc-lsp/firebase-service-account.json"
 EOF
     chmod 600 "$SC_CONFIG_TMP"
+    own_new_path "$SC_CONFIG_TMP"
     mv -f -- "$SC_CONFIG_TMP" "${CONF_DIR}/sc-lsp.toml"
 fi
-
-chmod 600 "${CONF_DIR}/ldk-server.toml" "${CONF_DIR}/sc-lsp.toml"
 
 # The GUI setup helper uses this marker to locate sc-lsp's network-scoped API
 # key. Derive it from the persistent config, not the current Bitcoin export,
@@ -141,12 +159,11 @@ case "$SC_EFFECTIVE_NETWORK" in
         exit 1
         ;;
 esac
-printf '%s\n' "$SC_EFFECTIVE_NETWORK" > "${APP_DATA_DIR}/data/sc-lsp/network"
+NETWORK_FILE="${APP_DATA_DIR}/data/sc-lsp/network"
+if [ ! -e "$NETWORK_FILE" ]; then
+    touch "$NETWORK_FILE"
+    own_new_path "$NETWORK_FILE"
+fi
+printf '%s\n' "$SC_EFFECTIVE_NETWORK" > "$NETWORK_FILE"
 
 trap - EXIT HUP INT TERM
-
-# Umbrel runs hooks as root; local test containers may not, and Docker Desktop
-# handles bind-mount ownership itself.
-if [ "$(id -u)" = "0" ]; then
-    chown -R 1000:1000 "${APP_DATA_DIR}/data"
-fi
