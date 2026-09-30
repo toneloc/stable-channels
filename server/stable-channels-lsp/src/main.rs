@@ -9,6 +9,7 @@ mod handlers;
 pub mod messages;
 mod observability;
 mod price_task;
+mod payment_filter;
 mod push;
 mod revenue;
 mod stability_tick;

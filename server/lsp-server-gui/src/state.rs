@@ -691,8 +691,6 @@ pub struct ViewState {
 	pub revenue_categories: Vec<String>,
 	/// Stable tab also lists channels without a USD target (routing peers, bitcoin-only wallets).
 	pub stable_show_unpositioned: bool,
-	/// Payments tab also lists failed 1-msat protocol messages (balance syncs, trade replies).
-	pub payment_show_failed_syncs: bool,
 	/// Overview activity widened from 24 h to 7 days by "Show more".
 	pub activity_extended: bool,
 }
@@ -719,7 +717,6 @@ impl Default for ViewState {
 			revenue_window: RevenueWindow::default(),
 			revenue_categories: Vec::new(),
 			stable_show_unpositioned: false,
-			payment_show_failed_syncs: false,
 			activity_extended: false,
 		}
 	}

@@ -3,7 +3,6 @@ use hex::DisplayHex;
 
 use crate::actions;
 use crate::format::{csv_row, local_datetime, relative_short, truncate_id};
-use crate::health::is_failed_protocol_message;
 use crate::state::{AppCtx, Op, PaymentSortColumn, SettlementKind};
 use crate::ui::widgets::{
 	Amount, Bubble, Card, CopyBtn, Empty, Gate, Hover, Icon, IdCopy, Kv, Pill, RefreshBtn, SegBtn, SidePanel, SortTh,
@@ -50,18 +49,6 @@ const TYPE_FILTERS: [&str; 15] = [
 	"BOLT11", "BOLT12 Offer", "BOLT12 Refund", "Spontaneous", "On-chain", "Funding", "Splice", "Co-op close", "Force close",
 	"Fee bump", "Claim", "Sweep", "Stability", "Trade", "Sync",
 ];
-
-/// Rows without failed protocol messages unless `show`, and how many were hidden.
-fn without_failed_protocol_messages(rows: Vec<PaymentRow>, show: bool) -> (Vec<PaymentRow>, usize) {
-	if show {
-		return (rows, 0);
-	}
-	let total = rows.len();
-	let kept: Vec<PaymentRow> =
-		rows.into_iter().filter(|r| !is_failed_protocol_message(r.status, r.direction, r.amount_msat)).collect();
-	let hidden = total - kept.len();
-	(kept, hidden)
-}
 
 fn direction_label(direction: i32) -> &'static str {
 	match direction {
@@ -130,7 +117,6 @@ pub fn Payments() -> Element {
 	let dir_filter = v.payment_direction;
 	let type_filter = v.payment_type.clone();
 	let sort = v.payment_sort;
-	let show_failed_syncs = v.payment_show_failed_syncs;
 	drop(v);
 	let refresh = move |_| actions::fetch_payments(ctx, false);
 
@@ -149,11 +135,6 @@ pub fn Payments() -> Element {
 	};
 
 	let total = rows.len();
-	let (rows, hidden_syncs) = without_failed_protocol_messages(rows, show_failed_syncs);
-	let toggle_syncs = move |_| {
-		let show = !view.peek().payment_show_failed_syncs;
-		view.write().payment_show_failed_syncs = show;
-	};
 	// Build the rendered view by filtering the loaded rows.
 	let needle = filter.trim().to_lowercase();
 	let mut view_rows: Vec<PaymentRow> = rows
@@ -238,18 +219,6 @@ pub fn Payments() -> Element {
 					RefreshBtn { busy: busy_any, onclick: refresh, op: Op::Payments }
 				}
 			}
-			if hidden_syncs > 0 || show_failed_syncs {
-				div { class: "toolbar muted small",
-					span {
-						if show_failed_syncs {
-							"Showing failed 1-msat protocol messages (balance syncs and trade replies)"
-						} else {
-							"Hiding {hidden_syncs} failed 1-msat protocol messages (balance syncs and trade replies)"
-						}
-					}
-					button { class: "btn sm ghost", onclick: toggle_syncs, if show_failed_syncs { "hide" } else { "show" } }
-				}
-			}
 			if has_more && narrowed {
 				div { class: "banner",
 					Icon { name: "info", size: 16 }
@@ -263,8 +232,6 @@ pub fn Payments() -> Element {
 				if !loading {
 					Empty { icon: "receipt", title: "No payments found." }
 				}
-			} else if shown == 0 && hidden_syncs > 0 && !narrowed {
-				Empty { icon: "receipt", title: "Only failed balance syncs so far.", hint: "Load more pages, or Load all, to reach other payments." }
 			} else if shown == 0 {
 				Empty { icon: "search", title: "No loaded payments match these filters." }
 			} else {
@@ -568,29 +535,6 @@ fn PaymentKindDetails(kind: PaymentKind) -> Element {
 #[cfg(test)]
 mod tests {
 	use super::*;
-
-	fn row(id: &str, status: i32, direction: i32, amount_msat: u64) -> PaymentRow {
-		PaymentRow {
-			id: id.into(),
-			hash: String::new(),
-			type_label: "Spontaneous".into(),
-			amount_msat: Some(amount_msat),
-			fee_paid_msat: None,
-			direction,
-			status,
-			timestamp: 1_700_000_000,
-		}
-	}
-
-	#[test]
-	fn failed_protocol_messages_are_hidden_until_asked_for() {
-		let rows = vec![row("sync", 2, 1, 1), row("send", 2, 1, 5_000), row("reply", 1, 1, 1)];
-		let (shown, hidden) = without_failed_protocol_messages(rows.clone(), false);
-		assert_eq!(hidden, 1);
-		assert_eq!(shown.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), vec!["send", "reply"]);
-		let (shown, hidden) = without_failed_protocol_messages(rows, true);
-		assert_eq!((shown.len(), hidden), (3, 0));
-	}
 
 	#[test]
 	fn csv_export_lists_every_row_with_raw_units() {

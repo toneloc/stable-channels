@@ -16,6 +16,7 @@ use stable_channels::db::{Database, RevenueLedgerRow, SettlementLabel, TradeDeci
 use tracing::warn;
 
 use crate::stable_manager::LdkServerCalls;
+use crate::payment_filter::is_failed_protocol_message;
 use crate::state::AppState;
 
 pub const TRADE_FEE: &str = "trade_fee";
@@ -337,7 +338,7 @@ impl PaymentBook {
     /// Keeps the payment's latest state; true when it had not been listed before.
     fn absorb(&mut self, payment: Payment) -> bool {
         let new = self.seen.insert(id_hash(&payment.payment_id));
-        if payment.status == PaymentStatus::Failed as i32 && payment.amount_msat.unwrap_or(0) <= 1 {
+        if is_failed_protocol_message(&payment) {
             self.by_id.remove(&payment.payment_id);
         } else {
             self.by_id.insert(payment.payment_id.clone(), payment);
