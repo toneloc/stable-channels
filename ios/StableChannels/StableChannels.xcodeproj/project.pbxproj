@@ -193,6 +193,7 @@
 		D20000000000000000000011 /* Bech32.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000010 /* Bech32.swift */; };
 		D20000000000000000000019 /* LNURLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000018 /* LNURLService.swift */; };
 		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
+		D2000000000000000000001D /* SecureEndpointValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001C /* SecureEndpointValidator.swift */; };
 		D20000000000000000000037 /* Bech32Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000036 /* Bech32Tests.swift */; };
 		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
@@ -414,6 +415,7 @@
 		D20000000000000000000010 /* Bech32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32.swift; sourceTree = "<group>"; };
 		D20000000000000000000018 /* LNURLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLService.swift; sourceTree = "<group>"; };
 		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
+		D2000000000000000000001C /* SecureEndpointValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureEndpointValidator.swift; sourceTree = "<group>"; };
 		D20000000000000000000036 /* Bech32Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32Tests.swift; sourceTree = "<group>"; };
 		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -818,6 +820,7 @@
 			children = (
 				D20000000000000000000018 /* LNURLService.swift */,
 				D2000000000000000000001A /* LNURLModels.swift */,
+				D2000000000000000000001C /* SecureEndpointValidator.swift */,
 			);
 			path = LNURL;
 			sourceTree = "<group>";
@@ -1060,6 +1063,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				D2000000000000000000001B /* LNURLModels.swift in Sources */,
+				D2000000000000000000001D /* SecureEndpointValidator.swift in Sources */,
 				D20000000000000000000011 /* Bech32.swift in Sources */,
 				D20000000000000000000019 /* LNURLService.swift in Sources */,
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,

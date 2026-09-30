@@ -1,12 +1,6 @@
 import CryptoKit
 import Foundation
 
-// MARK: - Host IP Resolver Protocol
-
-protocol HostIPResolving: Sendable {
-    func resolveHostIPs(_ host: String) -> [String]
-}
-
 // MARK: - Service Protocol
 
 protocol LNURLServiceProtocol: Sendable {

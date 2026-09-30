@@ -119,25 +119,54 @@ final class LNURLServiceTests: XCTestCase {
     }
 
     func testResolveLightningAddressEndpoint() throws {
-        let standard = try LNURLService.resolveEndpoint(from: "satoshi@bitcoin.org")
+        let mockResolver = MockHostIPResolver(mapping: [
+            "bitcoin.org": ["93.184.216.34"],
+            "0xprabal.com": ["93.184.216.34"],
+            "service.com": ["93.184.216.34"]
+        ])
+        let standard = try LNURLService.resolveEndpoint(from: "satoshi@bitcoin.org", hostResolver: mockResolver)
         XCTAssertEqual(standard.absoluteString, "https://bitcoin.org/.well-known/lnurlp/satoshi")
 
-        let personal = try LNURLService.resolveEndpoint(from: "prabal@0xprabal.com")
+        let personal = try LNURLService.resolveEndpoint(from: "prabal@0xprabal.com", hostResolver: mockResolver)
         XCTAssertEqual(personal.absoluteString, "https://0xprabal.com/.well-known/lnurlp/prabal")
 
+        let uriStandard = try LNURLService.resolveEndpoint(
+            from: "lightning:satoshi@bitcoin.org",
+            hostResolver: mockResolver
+        )
+        XCTAssertEqual(uriStandard.absoluteString, "https://bitcoin.org/.well-known/lnurlp/satoshi")
+
+        let doubleSlash = try LNURLService.resolveEndpoint(
+            from: "lightning://satoshi@bitcoin.org",
+            hostResolver: mockResolver
+        )
+        XCTAssertEqual(doubleSlash.absoluteString, "https://bitcoin.org/.well-known/lnurlp/satoshi")
+
         let bech32Sample = "lnurl1dp68gurn8ghj7um9wfmxjcm99e3k7mf0v9cxjtmkxyhkcmn4wfkz7urp0yvwqajv"
-        let resolvedBech32 = try LNURLService.resolveEndpoint(from: bech32Sample)
+        let resolvedBech32 = try LNURLService.resolveEndpoint(from: bech32Sample, hostResolver: mockResolver)
         XCTAssertEqual(resolvedBech32.absoluteString, "https://service.com/api/v1/lnurl/pay")
 
-        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "invalid-target"))
-        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@@domain.com"))
-        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@nodomain"))
-        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "http://insecure-clearnet.com"))
+        let bech32DoubleSlash = try LNURLService.resolveEndpoint(
+            from: "lightning://\(bech32Sample)",
+            hostResolver: mockResolver
+        )
+        XCTAssertEqual(bech32DoubleSlash.absoluteString, "https://service.com/api/v1/lnurl/pay")
 
-        let torAddress = try LNURLService.resolveEndpoint(from: "anon@xyz.onion")
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "invalid-target", hostResolver: mockResolver))
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@@domain.com", hostResolver: mockResolver))
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "user@nodomain", hostResolver: mockResolver))
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(
+            from: "http://insecure-clearnet.com",
+            hostResolver: mockResolver
+        ))
+
+        let torAddress = try LNURLService.resolveEndpoint(from: "anon@xyz.onion", hostResolver: mockResolver)
         XCTAssertEqual(torAddress.absoluteString, "http://xyz.onion/.well-known/lnurlp/anon")
 
-        let directTor = try LNURLService.resolveEndpoint(from: "http://xyz.onion/api/lnurlp")
+        let directTor = try LNURLService.resolveEndpoint(
+            from: "http://xyz.onion/api/lnurlp",
+            hostResolver: mockResolver
+        )
         XCTAssertEqual(directTor.absoluteString, "http://xyz.onion/api/lnurlp")
     }
 
@@ -247,7 +276,8 @@ final class LNURLServiceTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
+        let mockResolver = MockHostIPResolver(mapping: ["service.example.com": ["93.184.216.34"]])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
         let targetURL = try XCTUnwrap(URL(string: "https://service.example.com/.well-known/lnurlp/invalid"))
         MockURLProtocol.requestHandler = { _ in
@@ -270,7 +300,8 @@ final class LNURLServiceTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
+        let mockResolver = MockHostIPResolver(mapping: ["service.example.com": ["93.184.216.34"]])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
         let targetURL = try XCTUnwrap(URL(string: "https://service.example.com/.well-known/lnurlp/prabal"))
         let responseJson = """
@@ -336,11 +367,14 @@ final class LNURLServiceTests: XCTestCase {
         )
     }
 
-    private func makeMockService() -> (LNURLService, URL) {
+    private func makeMockService(
+        hostMapping: [String: [String]] = ["service.example.com": ["93.184.216.34"]]
+    ) -> (LNURLService, URL) {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
+        let resolver = MockHostIPResolver(mapping: hostMapping)
+        let service = LNURLService(urlSession: session, hostResolver: resolver)
         let callbackURL = URL(string: "https://service.example.com/callback")!
         return (service, callbackURL)
     }
@@ -562,7 +596,8 @@ final class LNURLServiceTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
+        let mockResolver = MockHostIPResolver(mapping: ["service.example.com": ["93.184.216.34"]])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
         let targetURL = try XCTUnwrap(URL(string: "https://service.example.com/.well-known/lnurlp/alice"))
         let invalidMetadataJson = """
@@ -718,6 +753,14 @@ final class LNURLServiceTests: XCTestCase {
             "100.127.255.254",
             "198.18.0.1",
             "198.19.255.254",
+            "192.0.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "239.255.255.250",
+            "240.0.0.1",
+            "255.255.255.255",
             "0.0.0.0",
             "::1",
             "[::1]",
@@ -725,6 +768,14 @@ final class LNURLServiceTests: XCTestCase {
             "fe80::1",
             "fc00::1",
             "fd12:3456:789a::1",
+            "ff00::1",
+            "ff02::1",
+            "100::1",
+            "2001:db8::1",
+            "2002:0a00:0001::",
+            "2002:7f00:0001::",
+            "2001:0000:0000:0000:0000:0000:f5ff:fffe",
+            "::ffff:10.0.0.1",
             "::ffff:127.0.0.1",
             "::ffff:192.168.1.1"
         ]
@@ -745,7 +796,9 @@ final class LNURLServiceTests: XCTestCase {
             "172.32.0.1",
             "100.128.0.1",
             "198.20.0.1",
-            "1.1.1.1"
+            "1.1.1.1",
+            "2002:5db8:d822::",
+            "2606:4700:4700::1111"
         ]
         for host in allowed {
             XCTAssertFalse(LNURLService.isPrivateOrLoopbackHost(host), "Expected \(host) to be public")
@@ -775,10 +828,13 @@ final class LNURLServiceTests: XCTestCase {
             "https://localhost/lnurlp",
             "https://192.168.1.1/.well-known/lnurlp/alice",
             "http://127.0.0.1/lnurlp",
-            // Bech32 encoded LNURL targeting 127.0.0.1
-            "lnurl1dp68gurn8ghj7vfjxuhrqt3s9ccj7mrww4excuqw06qrc",
-            // Bech32 encoded LNURL targeting 192.168.1.1
-            "lnurl1dp68gurn8ghj7vfexghrzd3c9ccjuvf0wpshjj3y5xy"
+            // All 6 private targets encoded as Bech32 lnurl1
+            "lnurl1dp68gurn8ghj7mr0vdskc6r0wd6z7mrww4excuq5ex0g8", // localhost
+            "lnurl1dp68gurn8ghj7vfjxuhrqt3s9ccj7mrww4excuqw06qrc", // 127.0.0.1
+            "lnurl1dp68gurn8ghj7vfs9cczuvpwxyhkcmn4wfk8qdmhwmg", // 10.0.0.1
+            "lnurl1dp68gurn8ghj7vfk8yhrydf59ccnvwfwxg6ngtmvde6hymrsn3sg3p", // 169.254.169.254
+            "lnurl1dp68gurn8ghj7vfexghrzd3c9ccjuvf0d3h82unvwq0hrk4j", // 192.168.1.1
+            "lnurl1dp68gurn8ghj7mtev3jhv6trv5hxcmmrv9kz7mrww4excuq6q74wt" // mydevice.local
         ]
         for target in privateURLs {
             XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: target)) { error in
@@ -844,7 +900,8 @@ final class LNURLServiceTests: XCTestCase {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
+        let mockResolver = MockHostIPResolver(mapping: ["service.example.com": ["93.184.216.34"]])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
         let targetURL = try XCTUnwrap(URL(string: "https://service.example.com/.well-known/lnurlp/alice"))
         let overflowingJson = """
@@ -1029,6 +1086,81 @@ final class LNURLServiceTests: XCTestCase {
                 XCTFail("Expected invalidTarget, got \(error)")
                 return
             }
+        }
+    }
+
+    func testFetchPayParams_dnsResolutionFails_failsClosed() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let mockResolver = MockHostIPResolver(mapping: [:])
+        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
+
+        let targetURL = try XCTUnwrap(URL(string: "https://nonexistent.example.com/.well-known/lnurlp/alice"))
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, Data())
+        }
+
+        do {
+            _ = try await service.fetchPayParams(from: targetURL)
+            XCTFail("Expected LNURLError.insecureEndpoint for failed DNS resolution")
+        } catch LNURLError.insecureEndpoint {
+            // Expected - must fail closed and never touch network
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(targetURL))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testFetchInvoice_dnsRebindsToPrivateIP_isRejected() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let callbackURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/callback"))
+
+        final class StatefulResolver: HostIPResolving, @unchecked Sendable {
+            private let lock = NSLock()
+            private var callCount = 0
+
+            func resolveHostIPs(_: String) -> [String] {
+                lock.withLock {
+                    callCount += 1
+                    if callCount == 1 {
+                        return ["93.184.216.34"]
+                    } else {
+                        return ["10.0.0.1"]
+                    }
+                }
+            }
+        }
+
+        let statefulResolver = StatefulResolver()
+        let service = LNURLService(urlSession: session, hostResolver: statefulResolver)
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
+            return (response, Data(json.utf8))
+        }
+
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: nil
+            )
+            XCTFail("Expected LNURLError.insecureEndpoint when DNS rebinds to private IP on second check")
+        } catch LNURLError.insecureEndpoint {
+            // Rebinding was caught and rejected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
         }
     }
 }

@@ -1,78 +1,7 @@
 import Foundation
 import LDKNode
 
-// MARK: - Host IP Resolver
-
-final class SystemHostIPResolver: HostIPResolving {
-    func resolveHostIPs(_ host: String) -> [String] {
-        guard !host.hasSuffix(".onion") else { return [] }
-        var hints = addrinfo()
-        hints.ai_flags = 0
-        hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = SOCK_STREAM
-
-        var res: UnsafeMutablePointer<addrinfo>?
-        let status = getaddrinfo(host, nil, &hints, &res)
-        guard status == 0, let first = res else { return [] }
-        defer { freeaddrinfo(res) }
-
-        var results: [String] = []
-        var ptr: UnsafeMutablePointer<addrinfo>? = first
-        while let current = ptr {
-            var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(
-                current.pointee.ai_addr,
-                current.pointee.ai_addrlen,
-                &hostBuffer,
-                socklen_t(hostBuffer.count),
-                nil,
-                0,
-                NI_NUMERICHOST
-            ) == 0 {
-                let ipStr = String(cString: hostBuffer)
-                if !results.contains(ipStr) {
-                    results.append(ipStr)
-                }
-            }
-            ptr = current.pointee.ai_next
-        }
-        return results
-    }
-}
-
-// MARK: - Redirect Delegate
-
-final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _encounteredInsecureRedirect = false
-    private let hostResolver: HostIPResolving
-
-    var encounteredInsecureRedirect: Bool {
-        lock.withLock { _encounteredInsecureRedirect }
-    }
-
-    init(hostResolver: HostIPResolving = SystemHostIPResolver()) {
-        self.hostResolver = hostResolver
-    }
-
-    func urlSession(
-        _: URLSession,
-        task _: URLSessionTask,
-        willPerformHTTPRedirection _: HTTPURLResponse,
-        newRequest: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void
-    ) {
-        guard let targetURL = newRequest.url,
-              LNURLService.isSecureEndpoint(url: targetURL, hostResolver: hostResolver) else {
-            lock.withLock { _encounteredInsecureRedirect = true }
-            completionHandler(nil)
-            return
-        }
-        completionHandler(newRequest)
-    }
-}
-
-// MARK: - Service Implementation
+// MARK: - LNURL Service Implementation
 
 final class LNURLService: LNURLServiceProtocol {
     private let urlSession: URLSession
@@ -90,52 +19,30 @@ final class LNURLService: LNURLServiceProtocol {
         }
     }
 
-    private static func isPrivateIPv4(_ ip: UInt32) -> Bool {
-        let top8 = ip >> 24
-        return top8 == 0 || top8 == 127 || top8 == 10 || ip == 0xFFFFFFFF ||
-            (ip >> 16) == 0xC0A8 || (ip >> 16) == 0xA9FE ||
-            (ip >= 0xAC100000 && ip <= 0xAC1FFFFF) ||
-            (ip >= 0x64400000 && ip <= 0x647FFFFF) ||
-            (ip >= 0xC6120000 && ip <= 0xC613FFFF)
-    }
-
     /// Checks if a given host is a private, loopback, or link-local address to prevent SSRF.
     static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
-        var cleanHost = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleanHost.hasPrefix("[") && cleanHost.hasSuffix("]") {
-            cleanHost = String(cleanHost.dropFirst().dropLast())
-        }
-        if cleanHost == "localhost" || cleanHost.hasSuffix(".localhost") || cleanHost.hasSuffix(".local") || cleanHost
-            .hasSuffix(".internal") {
-            return true
-        }
-        var addr4 = in_addr()
-        if inet_aton(cleanHost, &addr4) != 0 {
-            return isPrivateIPv4(UInt32(bigEndian: addr4.s_addr))
-        }
-        var addr6 = in6_addr()
-        if inet_pton(AF_INET6, cleanHost, &addr6) == 1 {
-            let b = withUnsafeBytes(of: &addr6) { Array($0) }
-            let isZero = b.allSatisfy { $0 == 0 }
-            let isV6Loopback = b[0..<15].allSatisfy { $0 == 0 } && b[15] == 1
-            if isZero || isV6Loopback { return true }
-            if b[0] == 0xFE && (b[1] & 0xC0) == 0x80 { return true }
-            if (b[0] & 0xFE) == 0xFC { return true }
-            if b[0..<10].allSatisfy({ $0 == 0 }) && b[10] == 0xFF && b[11] == 0xFF {
-                let v4ip = (UInt32(b[12]) << 24) | (UInt32(b[13]) << 16) | (UInt32(b[14]) << 8) | UInt32(b[15])
-                return isPrivateIPv4(v4ip)
-            }
-        }
-        return false
+        SecureEndpointValidator.isPrivateOrLoopbackHost(host)
+    }
+
+    /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
+    /// Also rejects any loopback, private, or link-local hosts, as well as DNS names resolving to restricted IPs.
+    static func isSecureEndpoint(url: URL, hostResolver: HostIPResolving = SystemHostIPResolver()) -> Bool {
+        SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver)
     }
 
     /// Resolves an input destination into an actionable HTTPS LNURL endpoint URL.
     /// Handles Lightning addresses (LUD-16), Bech32 LNURL strings (LUD-01), and raw HTTPS URLs.
-    static func resolveEndpoint(from input: String, hostResolver: HostIPResolving? = nil) throws -> URL {
+    static func resolveEndpoint(
+        from input: String,
+        hostResolver: HostIPResolving = SystemHostIPResolver()
+    ) throws -> URL {
         var clean = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if clean.lowercased().hasPrefix("lightning:") {
-            clean = String(clean.dropFirst("lightning:".count))
+        if let range = clean.range(of: "lightning://", options: [.caseInsensitive, .anchored]) {
+            clean.removeSubrange(range)
+        } else if let range = clean.range(of: "lightning:", options: [.caseInsensitive, .anchored]) {
+            clean.removeSubrange(range)
         }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let resolvedURL: URL
         // LUD-16: Lightning Address (name@domain.com)
@@ -183,35 +90,11 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.invalidTarget
         }
 
-        guard Self.isSecureEndpoint(url: resolvedURL, hostResolver: hostResolver) else {
+        guard isSecureEndpoint(url: resolvedURL, hostResolver: hostResolver) else {
             throw LNURLError.invalidTarget
         }
 
         return resolvedURL
-    }
-
-    /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
-    /// Also rejects any loopback, private, or link-local hosts, as well as DNS names resolving to restricted IPs.
-    static func isSecureEndpoint(url: URL, hostResolver: HostIPResolving? = nil) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased(), !host.isEmpty else {
-            return false
-        }
-        guard !isPrivateOrLoopbackHost(host) else {
-            return false
-        }
-        if host.hasSuffix(".onion") {
-            return scheme == "http" || scheme == "https"
-        }
-        guard scheme == "https" else {
-            return false
-        }
-        if let hostResolver {
-            let ips = hostResolver.resolveHostIPs(host)
-            if ips.contains(where: { isPrivateOrLoopbackHost($0) }) {
-                return false
-            }
-        }
-        return true
     }
 
     private func executeSecureGet(url: URL) async throws -> (Data, HTTPURLResponse) {

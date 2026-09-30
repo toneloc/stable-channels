@@ -91,6 +91,12 @@ final class Bech32Tests: XCTestCase {
         let sampleLNURL = "lnurl1dp68gurn8ghj7um9wfmxjcm99e3k7mf0v9cxjtmkxyhkcmn4wfkz7urp0yvwqajv"
         let decoded = try Bech32.decodeLNURL(sampleLNURL)
         XCTAssertEqual(decoded.absoluteString, "https://service.com/api/v1/lnurl/pay")
+
+        let decodedUri = try Bech32.decodeLNURL("lightning:\(sampleLNURL)")
+        XCTAssertEqual(decodedUri.absoluteString, "https://service.com/api/v1/lnurl/pay")
+
+        let decodedDoubleSlash = try Bech32.decodeLNURL("lightning://\(sampleLNURL)")
+        XCTAssertEqual(decodedDoubleSlash.absoluteString, "https://service.com/api/v1/lnurl/pay")
     }
 
     func testLNURLDecoding_torHttpAllowed_andClearnetHttpRejected() throws {

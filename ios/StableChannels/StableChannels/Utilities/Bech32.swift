@@ -88,8 +88,9 @@ enum Bech32 {
         _ bechString: String,
         limitLength: Bool
     ) throws -> (hrp: String, payload5Bit: [UInt8], checksumType: ChecksumType) {
-        if limitLength && bechString.count > 90 { throw Error.invalidLength }
-        guard bechString.count >= 8 else { throw Error.invalidLength }
+        let utf8Count = bechString.utf8.count
+        if limitLength && utf8Count > 90 { throw Error.invalidLength }
+        guard utf8Count >= 8 else { throw Error.invalidLength }
 
         var hasLower = false
         var hasUpper = false
@@ -217,9 +218,12 @@ enum Bech32 {
     /// LUD-01 requires standard Bech32 checksum encoding and HTTPS scheme.
     static func decodeLNURL(_ lnurlString: String) throws -> URL {
         var clean = lnurlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        if clean.lowercased().hasPrefix("lightning:") {
-            clean = String(clean.dropFirst("lightning:".count))
+        if let range = clean.range(of: "lightning://", options: [.caseInsensitive, .anchored]) {
+            clean.removeSubrange(range)
+        } else if let range = clean.range(of: "lightning:", options: [.caseInsensitive, .anchored]) {
+            clean.removeSubrange(range)
         }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let (hrp, payload5Bit, checksumType) = try parse(clean, limitLength: false)
         guard hrp.lowercased() == "lnurl" else {
