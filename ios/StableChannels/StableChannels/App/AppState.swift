@@ -3862,7 +3862,13 @@ class AppState {
         )
         // If userChannelId was just discovered or changed, reload saved state (expectedUSD etc.) from DB
         if !stableChannel.userChannelId.isEmpty && stableChannel.userChannelId != oldUserChannelId {
-            loadChannelFromDB()
+            if !loadChannelFromDB() {
+                stableChannel.expectedUSD = .zero
+                stableChannel.backingSats = 0
+                stableChannel.nativeSats = 0
+                stableChannel.nativeChannelBTC = .zero
+                stableChannel.note = ""
+            }
         }
     }
 
@@ -3908,8 +3914,9 @@ class AppState {
         }
     }
 
-    private func loadChannelFromDB() {
-        guard let db = databaseService else { return }
+    @discardableResult
+    private func loadChannelFromDB() -> Bool {
+        guard let db = databaseService else { return false }
         do {
             if let record = try db.channelRepo.loadChannel(userChannelId: stableChannel.userChannelId),
                !record.userChannelId.isEmpty {
@@ -3940,16 +3947,12 @@ class AppState {
                 if record.latestPrice > 0 {
                     stableChannel.latestPrice = record.latestPrice
                 }
-            } else {
-                stableChannel.expectedUSD = .zero
-                stableChannel.backingSats = 0
-                stableChannel.nativeSats = 0
-                stableChannel.nativeChannelBTC = .zero
-                stableChannel.note = ""
+                return true
             }
         } catch {
             AuditService.log("DB_LOAD_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }
+        return false
     }
 
     // MARK: - Record Price

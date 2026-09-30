@@ -1556,14 +1556,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     /**
      * Gate for changing the LSP. A stopped/mid-restart node reports an empty channel list, so
-     * require the node running (making listChannels authoritative) and cross-check persisted
-     * channel state. Returns a user-facing reason to block, or null if the change is allowed.
+     * require the node running (making listChannels authoritative). Returns a user-facing reason to
+     * block, or null if the change is allowed.
      */
     private fun lspChangeBlockedReason(): String? {
         if (!nodeService.isRunning) return "Start the wallet before changing the LSP."
         nodeService.refreshChannels()
-        val hasChannel =
-            nodeService.channels.isNotEmpty() || (databaseService?.hasAnyChannel() ?: false)
+        val hasChannel = nodeService.channels.isNotEmpty()
         if (hasChannel) return "Close all channels before switching LSPs."
         return null
     }
@@ -4544,14 +4543,16 @@ class AppState(private val context: Context) : ViewModel() {
             if (sc.userChannelId.isNotEmpty() && sc.userChannelId != oldSc.userChannelId) {
                 val dbRow = databaseService?.loadChannel(sc.userChannelId)
                 if (dbRow != null) {
-                    sc.copy(
-                        expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
-                        backingSats = dbRow.backingSats,
-                        note = dbRow.note ?: "",
-                        nativeChannelBTC =
-                            com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
-                        counterparty = StableChannel.defaultWithLsp(context).counterparty,
-                    )
+                    val updatedSc =
+                        sc.copy(
+                            expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
+                            backingSats = dbRow.backingSats,
+                            note = dbRow.note ?: "",
+                            stableReceiverBTC =
+                                com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
+                        )
+                    StabilityService.recomputeNative(updatedSc)
+                    updatedSc
                 } else {
                     sc.copy(
                         expectedUSD = com.stablechannels.app.models.USD(0.0),
