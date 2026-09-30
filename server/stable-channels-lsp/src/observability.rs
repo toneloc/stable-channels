@@ -311,21 +311,30 @@ async fn poll_peers(
     }
     // current connection state, counterparties only
     let mut current: HashMap<String, bool> = HashMap::new();
-    let mut address: HashMap<String, String> = HashMap::new();
     for p in &peers {
         if cp_uids.contains_key(&p.node_id) {
             current.insert(p.node_id.clone(), p.is_connected);
-            address.insert(p.node_id.clone(), p.address.clone());
         }
     }
+    let stable_nodes: std::collections::HashSet<String> = state
+        .stable_manager
+        .lock()
+        .await
+        .stable_channels
+        .iter()
+        .map(|sc| sc.counterparty.to_string())
+        .collect();
+    let sightings: Vec<(String, String, bool)> =
+        peers.iter().map(|p| (p.node_id.clone(), p.address.clone(), p.is_connected)).collect();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    crate::geoip::record_sightings(&state.db, state.geoip.as_ref(), &sightings, &stable_nodes, now);
     for (node, connected) in peer_transitions(prev, &current, *first_run) {
         stable_channels::audit::audit_event(
             if connected { "PEER_CONNECTED" } else { "PEER_DISCONNECTED" },
-            serde_json::json!({
-                "counterparty_node_id": node,
-                "user_channel_ids": cp_uids.get(&node),
-                "address": address.get(&node),
-            }),
+            crate::geoip::peer_event_detail(&node, cp_uids.get(&node)),
         );
     }
     *prev = current;

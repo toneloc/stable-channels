@@ -15,6 +15,14 @@ pub struct Config {
     /// Defaults to audit-only for old-client compatibility. Enable only after shadow rollout.
     #[serde(default)]
     pub enforce_max_stabilization: bool,
+    #[serde(default)]
+    pub geoip: GeoIpSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct GeoIpSection {
+    /// DB-IP "IP to Country Lite" .mmdb; absent means IPs are recorded without country.
+    pub country_db: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

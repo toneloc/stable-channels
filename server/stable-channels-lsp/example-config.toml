@@ -49,3 +49,8 @@ apns_environment         = "sandbox"          # "sandbox" or "production"
 
 # FCM (Android)
 fcm_service_account_path = "/path/to/firebase-service-account.json"
+
+# Optional: offline IP-to-country database for the Stable tab's Location column.
+# DB-IP "IP to Country Lite" (https://db-ip.com/db/lite.php), CC BY 4.0. Without it, IPs show no country.
+# [geoip]
+# country_db = "/path/to/dbip-country-lite.mmdb"

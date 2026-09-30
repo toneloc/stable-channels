@@ -71,10 +71,18 @@ A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on t
 | `stable-channels-lsp/` | local | The daemon. axum REST server, HMAC auth, `ldk-server-client` wrapper. |
 | `sc-protos/` | local | Hand written `prost` types for SC specific REST endpoints, plus route path constants. |
 | `sc-rest-client/` | local | REST client library, linked into the GUI and consumed by mobile wallet apps. WASM compatible. |
-| `lsp-server-gui/` | local | Native + WASM egui GUI. Talks to `stable-channels-lsp` over REST. |
+| `lsp-server-gui/` | local | Native (Dioxus desktop) + WASM (Dioxus web) operator GUI. Talks to `stable-channels-lsp` over REST. |
 | `ldk-server-client` | LDK Server (`lightningdevkit/ldk-server`) | gRPC client used by `stable-channels-lsp` to dial LDK Server. Pinned to upstream via cargo git rev. |
 | `ldk-server-grpc` | LDK Server (`lightningdevkit/ldk-server`) | Wire types for LDK Server's gRPC surface (`GetNodeInfoRequest`, `Channel`, etc.). Pulled in transitively via `ldk-server-client`. |
 | `stable-channels` (root crate) | local | Shared utility lib (`db`, `audit`, `price_feeds`, `constants`). Path dep'd by the daemon. |
+
+### Operator GUI builds
+
+The GUI is a Dioxus app with two targets that share one codebase and stylesheet (`lsp-server-gui/assets/app.css`, light and dark themes).
+
+- **Desktop:** `cargo run --release --locked -p lsp-server-gui`. On Linux, install the webview toolkit first: `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev`. Native file dialogs go through the XDG desktop portal (`xdg-desktop-portal`). macOS and Windows 10/11 need nothing extra.
+- **Web (WASM):** `server/lsp-server-gui/web/build.sh` writes a static bundle to `server/lsp-server-gui/dist/`. It needs `rustup target add wasm32-unknown-unknown` and a `wasm-bindgen-cli` matching the `wasm-bindgen` version in `Cargo.lock` (the script prints the exact `cargo install` command). Serve `dist/` behind a reverse proxy that forwards `/api/` to the SC daemon, as `umbrel/docker/Dockerfile.lsp-gui` does.
+- **Tests:** `cargo test -p lsp-server-gui --locked`.
 
 ## Run the stack on Mutinynet (signet)
 
@@ -181,8 +189,8 @@ cargo run --release -p ldk-server --features experimental-lsps2-support -- contr
 cd /path/to/stable-channels
 cargo run --release -p stable-channels-lsp -- sc-config.toml
 
-# Terminal 3: Operator GUI
-cargo run --release -p lsp-server-gui
+# Terminal 3: Operator GUI (Linux: see "Operator GUI builds" for the webview packages)
+cargo run --release --locked -p lsp-server-gui
 
 # Terminal 4: Desktop wallet (after pasting the LSP node ID into src/constants.rs)
 cargo run --release --bin stable-channels

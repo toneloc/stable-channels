@@ -26,6 +26,10 @@ pub struct AppState {
     pub push: Arc<Mutex<PushService>>,
     /// In-memory + sqlite-backed stable channel manager.
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
+    /// Offline IP-to-country lookup for stable counterparties' connection history.
+    pub geoip: Arc<dyn crate::geoip::CountryLookup>,
+    /// Revenue snapshot rebuilt off the request path.
+    pub revenue: Arc<crate::revenue::RevenueStore>,
     /// LDK Server's log file path, resolved at daemon startup. None if not configured.
     pub ldk_log_file: Option<PathBuf>,
     /// Compatibility field: durable stream-gap boundary loaded at startup, NOT newest ledger

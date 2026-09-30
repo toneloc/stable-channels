@@ -42,13 +42,17 @@ pub fn set_audit_ledger(database: Database) {
     *AUDIT_LEDGER.lock().unwrap() = Some(database);
 }
 
-/// Record one event and then mirror the committed row to JSONL. A mirror error
-/// never changes the SQLite result.
+/// Record one event: channel state changes go to the SQLite ledger and are then mirrored to
+/// JSONL; operational events go to JSONL only. A mirror error never changes the SQLite result.
 pub fn record_event(event: &str, data: Value) -> rusqlite::Result<AppendOutcome> {
     if CAPTURE_ON.load(Ordering::SeqCst)
         && CAPTURE_OWNER.lock().unwrap().as_ref() == Some(&std::thread::current().id())
     {
         CAPTURE.lock().unwrap().push((event.to_owned(), data.clone()));
+    }
+    if !crate::ledger::records_channel_state(event) {
+        mirror_event(event, data, None);
+        return Ok(AppendOutcome { event_id: 0, inserted: true });
     }
     let draft = LedgerEventDraft::from_audit_event(event, data.clone());
     let database = AUDIT_LEDGER.lock().unwrap().clone();
@@ -139,6 +143,9 @@ fn rotate_if_oversize(path: &std::path::Path) {
 mod tests {
     use super::*;
 
+    // Tests that install the process-wide audit ledger must not interleave.
+    static GLOBAL_LEDGER_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_audit_event_no_panic_without_path() {
         // When no path is set, audit_event should silently do nothing
@@ -220,6 +227,7 @@ mod tests {
 
     #[test]
     fn generic_audit_events_do_not_infer_an_after_snapshot() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let database = Database::open_in_memory().unwrap();
         database
             .save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
@@ -243,6 +251,37 @@ mod tests {
             .find(|event| event.event_type == "PEER_CONNECTED")
             .unwrap();
         assert!(event.after.is_none());
+
+        *AUDIT_LEDGER.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn operational_events_stay_out_of_the_channel_ledger() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let database = Database::open_in_memory().unwrap();
+        set_audit_ledger(database.clone());
+
+        for _ in 0..3 {
+            record_event(
+                "SYNC_MESSAGE_FAILED",
+                serde_json::json!({"user_channel_id": "busy", "stage": "send", "error": "RouteNotFound"}),
+            )
+            .unwrap();
+        }
+        record_event("DB_READ_FAILED", serde_json::json!({"user_channel_id": "busy", "error": "locked"})).unwrap();
+        record_event("SYNC_RETRY_EXHAUSTED", serde_json::json!({"user_channel_id": "busy", "attempts": 10})).unwrap();
+        let types: Vec<String> = database
+            .list_ledger_events(&crate::ledger::LedgerQuery {
+                identifier: Some("busy".to_owned()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect();
+        assert_eq!(types, ["SYNC_RETRY_EXHAUSTED"]);
 
         *AUDIT_LEDGER.lock().unwrap() = None;
     }

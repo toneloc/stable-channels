@@ -11,6 +11,22 @@ pub struct GetPriceResponse {
 	pub price: f64,
 }
 
+/// One IP a stable counterparty connected from, with its country from the LSP's offline database.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerLocation {
+	#[prost(string, tag = "1")]
+	pub ip: ::prost::alloc::string::String,
+	#[prost(string, tag = "2")]
+	pub country_code: ::prost::alloc::string::String,
+	#[prost(string, tag = "3")]
+	pub country_name: ::prost::alloc::string::String,
+	#[prost(int64, tag = "4")]
+	pub first_seen_at: i64,
+	#[prost(int64, tag = "5")]
+	pub last_seen_at: i64,
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StableChannelInfo {
@@ -30,6 +46,12 @@ pub struct StableChannelInfo {
 	pub is_stable_receiver: bool,
 	#[prost(string, tag = "8")]
 	pub user_channel_id: ::prost::alloc::string::String,
+	/// The counterparty's most recent connection locations, newest first.
+	#[prost(message, repeated, tag = "9")]
+	pub recent_locations: ::prost::alloc::vec::Vec<PeerLocation>,
+	/// Unix seconds when the daemon started tracking the channel; 0 when unknown.
+	#[prost(int64, tag = "10")]
+	pub created_at: i64,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -192,6 +214,15 @@ pub struct ListChannelLedgerEventsRequest {
 	pub cursor: ::prost::alloc::string::String,
 	#[prost(uint32, tag = "6")]
 	pub page_size: u32,
+	/// Also return events sharing a payment, trade or settlement id with the identifier's own events.
+	#[prost(bool, tag = "7")]
+	pub include_linked: bool,
+	/// Only return channel state changes (hides operational rows).
+	#[prost(bool, tag = "8")]
+	pub state_changes_only: bool,
+	/// Newest channel-state events across every channel; `identifier` must be empty and `overview` is not returned.
+	#[prost(bool, tag = "9")]
+	pub all_channels: bool,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
