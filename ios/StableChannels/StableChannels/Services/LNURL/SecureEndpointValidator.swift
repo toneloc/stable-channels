@@ -86,6 +86,7 @@ final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked
             completionHandler(nil)
             return
         }
+        // Transitions to IP literals or .onion set expectedHost to nil, defaulting to system trust evaluation.
         lock.withLock { _expectedHost = pinned.expectedHost }
         completionHandler(pinned.request)
     }
@@ -150,12 +151,11 @@ enum SecureEndpointValidator {
             return true // 2001:10::/28, 2001:20::/28 ORCHID / ORCHIDv2 (RFC 4843, RFC 7343)
         }
         if bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xFF && bytes[3] == 0x9B {
-            if bytes[4] == 0x00 && bytes[5] ==
-                0x01 { return true } // 64:ff9b:1::/48 Local-Use IPv4/IPv6 Translation (RFC 8215)
+            if bytes[4] == 0x00 && bytes[5] == 0x01 { return true } // 64:ff9b:1::/48 Local-Use (RFC 8215)
             if bytes[4..<12].allSatisfy({ $0 == 0 }) {
                 let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
                     UInt32(bytes[15])
-                return isPrivateIPv4(v4ip) // 64:ff9b::/96 Well-Known IPv4/IPv6 Translation Prefix (RFC 6052)
+                return isPrivateIPv4(v4ip) // 64:ff9b::/96 Well-Known Prefix (RFC 6052)
             }
         }
         if (bytes[0..<10].allSatisfy { $0 == 0 } && bytes[10] == 0xFF && bytes[11] == 0xFF) ||
@@ -194,7 +194,7 @@ enum SecureEndpointValidator {
     /// Returns true if private/loopback, false if public numeric IP, and nil if domain name.
     static func evaluateNumericIP(_ cleanHost: String) -> Bool? {
         var addr4 = in_addr()
-        if inet_aton(cleanHost, &addr4) != 0 {
+        if inet_pton(AF_INET, cleanHost, &addr4) == 1 {
             return isPrivateIPv4(UInt32(bigEndian: addr4.s_addr))
         }
         var addr6 = in6_addr()
@@ -228,10 +228,14 @@ enum SecureEndpointValidator {
 
     /// Prepares an SSRF-safe pinned request for an HTTPS endpoint.
     /// Resolves clearnet hostnames to validated public IPs (preferring IPv4), strips any userinfo,
-    /// and rewrites the destination URL to the numeric IP to prevent DNS rebinding (TOCTOU).
-    /// Preserves the Host header for HTTP/1.1 virtual hosting.
-    /// Note: URLSession omits SNI when the URL host is an IP literal (RFC 6066); multi-tenant hosts
-    /// whose TLS certificates depend on SNI require connection-level SNI transport.
+    /// and rewrites the destination URL to the numeric IP literal. The IP-literal URL is what
+    /// prevents secondary DNS lookups and closes the DNS-rebinding (TOCTOU) window. The original
+    /// hostname is preserved as the HTTP Host header for virtual hosting.
+    ///
+    /// Known limitation: URLSession omits TLS SNI when the URL host is an IP literal (RFC 6066),
+    /// so servers behind CDN edges or shared hosting that select certificates via SNI will reject
+    /// the handshake. This fails closed (no security bypass), but prevents connecting to those
+    /// hosts until a connection-level SNI transport (e.g. NWConnection) is adopted.
     static func preparePinnedRequest(
         from url: URL,
         hostResolver: HostIPResolving = SystemHostIPResolver()

@@ -132,7 +132,6 @@ final class LNURLService: LNURLServiceProtocol {
 
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams {
         let (data, httpResponse) = try await executeSecureGet(url: url)
-        try parseErrorResponseIfPresent(data: data)
 
         guard (200...299).contains(httpResponse.statusCode) else {
             if httpResponse.statusCode == 404 {
@@ -140,6 +139,8 @@ final class LNURLService: LNURLServiceProtocol {
             }
             throw LNURLError.invalidResponse
         }
+
+        try throwIfErrorResponse(data: data)
 
         let decoder = JSONDecoder()
         guard let params = try? decoder.decode(LNURLPayParams.self, from: data) else {
@@ -210,11 +211,12 @@ final class LNURLService: LNURLServiceProtocol {
         }
 
         let (data, httpResponse) = try await executeSecureGet(url: url)
-        try parseErrorResponseIfPresent(data: data)
 
         guard (200...299).contains(httpResponse.statusCode) else {
             throw LNURLError.invalidResponse
         }
+
+        try throwIfErrorResponse(data: data)
 
         let decoder = JSONDecoder()
         guard let invoiceResponse = try? decoder.decode(LNURLPayInvoiceResponse.self, from: data) else {
@@ -260,7 +262,7 @@ final class LNURLService: LNURLServiceProtocol {
         return invoiceResponse
     }
 
-    private func parseErrorResponseIfPresent(data: Data) throws {
+    private func throwIfErrorResponse(data: Data) throws {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
 
         if let status = json["status"] as? String, status.uppercased() == "ERROR" {

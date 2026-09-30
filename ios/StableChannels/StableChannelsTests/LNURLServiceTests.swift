@@ -291,7 +291,8 @@ final class LNURLServiceTests: XCTestCase {
             _ = try await service.fetchPayParams(from: targetURL)
             XCTFail("Expected LNURLError.errorResponse")
         } catch let LNURLError.errorResponse(reason) {
-            XCTAssertEqual(reason, "User not found")
+            // After reordering, 404 status gate fires before body parsing
+            XCTAssertEqual(reason, "Recipient address not found.")
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -1290,6 +1291,46 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
+    func testSecureEndpointValidator_blocksNonCanonicalIPv4Literals() throws {
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0127.0.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("00127.0.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("010.0.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0172.016.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0100.064.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("169.0254.169.254"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0177.0.0.1"), false)
+
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("127.0.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("10.0.0.1"), true)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("8.8.8.8"), false)
+
+        XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("0127.0.0.1"))
+        XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("010.0.0.1"))
+        XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("169.0254.169.254"))
+        XCTAssertFalse(SecureEndpointValidator.isPrivateOrLoopbackHost("0177.0.0.1"))
+
+        let blockedURLs = [
+            "https://0127.0.0.1/api",
+            "https://00127.0.0.1/api",
+            "https://010.0.0.1/api",
+            "https://0172.016.0.1/api",
+            "https://0100.064.0.1/api",
+            "https://169.0254.169.254/api"
+        ]
+        for urlStr in blockedURLs {
+            let url = try XCTUnwrap(URL(string: urlStr))
+            XCTAssertFalse(
+                SecureEndpointValidator.isSecureEndpoint(url: url),
+                "Expected \(urlStr) to be blocked"
+            )
+        }
+
+        let publicURL = try XCTUnwrap(URL(string: "https://0177.0.0.1/api"))
+        let pinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(from: publicURL))
+        XCTAssertEqual(pinned.request.url?.host, "0177.0.0.1")
+        XCTAssertNil(pinned.expectedHost)
+    }
+
     func testPreparePinnedRequest_prefersIPv4OverIPv6_inDualStack() throws {
         let resolver = MockHostIPResolver(mapping: [
             "dual.example.com": ["2606:4700::1111", "93.184.216.34"]
@@ -1365,7 +1406,7 @@ final class LNURLServiceTests: XCTestCase {
         let sender = MockChallengeSender()
         let trust = try XCTUnwrap(Self.createTestServerTrust(host: "test.example.com", anchored: false))
         let space = MockProtectionSpace(
-            host: "test.example.com",
+            host: "93.184.216.34",
             port: 443,
             authMethod: NSURLAuthenticationMethodServerTrust,
             trust: trust
@@ -1393,7 +1434,7 @@ final class LNURLServiceTests: XCTestCase {
         let sender = MockChallengeSender()
         let trust = try XCTUnwrap(Self.createTestServerTrust(host: "test.example.com", anchored: true))
         let space = MockProtectionSpace(
-            host: "test.example.com",
+            host: "93.184.216.34",
             port: 443,
             authMethod: NSURLAuthenticationMethodServerTrust,
             trust: trust
@@ -1486,6 +1527,8 @@ final class LNURLServiceTests: XCTestCase {
         if anchored {
             SecTrustSetAnchorCertificates(serverTrust, [cert] as CFArray)
             SecTrustSetAnchorCertificatesOnly(serverTrust, true)
+            let verifyDate = Date(timeIntervalSince1970: 1790779091)
+            SecTrustSetVerifyDate(serverTrust, verifyDate as CFDate)
         }
         return serverTrust
     }
