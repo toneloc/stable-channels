@@ -1515,6 +1515,43 @@ final class DatabaseServiceTests: XCTestCase {
         try service.paymentRepo.updatePaymentStatus(paymentId: "sent-pending-1", status: "failed")
         XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
     }
+
+    func testUpdatePaymentStatus_settleBeforeInsert_createsPlaceholderRowAndBackfillsDetails() throws {
+        let paymentId = "race-payment-1"
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 1_500)
+
+        let placeholder = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(placeholder.status, "completed")
+        XCTAssertEqual(placeholder.feeMsat, 1_500)
+        XCTAssertEqual(placeholder.amountMsat, 0)
+
+        let recordResult = try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 50_000,
+            amountUSD: 5.0,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_123",
+            status: "pending"
+        )
+        XCTAssertFalse(recordResult)
+
+        try service.paymentRepo.backfillPaymentDetails(
+            paymentId: paymentId,
+            amountMsat: 50_000,
+            amountUSD: 5.0,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_123"
+        )
+
+        let populated = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(populated.status, "completed")
+        XCTAssertEqual(populated.amountMsat, 50_000)
+        XCTAssertEqual(populated.amountUSD, 5.0)
+        XCTAssertEqual(populated.counterparty, "node_pubkey_123")
+        XCTAssertEqual(populated.feeMsat, 1_500)
+    }
 }
 
 @MainActor
