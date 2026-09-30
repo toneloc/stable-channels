@@ -22,6 +22,7 @@ import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -148,16 +149,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.height(4.dp))
                             DetailRow("Funding Tx", "${txid.take(8)}...${txid.takeLast(8)}")
                             TextButton(
-                                onClick = {
-                                    val intent =
-                                        android.content.Intent(
-                                            android.content.Intent.ACTION_VIEW,
-                                            android.net.Uri.parse(
-                                                "https://mempool.space/tx/${txid.substringBefore(":")}"
-                                            ),
-                                        )
-                                    context.startActivity(intent)
-                                }
+                                onClick = { context.openInAppBrowser("https://mempool.space/tx/${txid.substringBefore(":")}") }
                             ) {
                                 Text("View on explorer", fontSize = 12.sp)
                             }
