@@ -109,6 +109,7 @@ protocol NodeServiceProtocol {
     var node: Node? { get }
     var isRunning: Bool { get }
     var nodeId: String { get }
+    var activeNetwork: Network? { get }
     var channels: [ChannelDetails] { get }
     var savedMnemonic: String? { get }
     func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
@@ -122,6 +123,7 @@ class NodeService: NodeServiceProtocol {
 
     private(set) var node: Node?
     private(set) var isRunning = false
+    private(set) var activeNetwork: Network?
     /// True while start() is in flight (incl. lock acquisition and build).
     /// Lets background-stop logic distinguish "abandoned before node came up"
     /// (safe to release the wallet-dir lock) from "start owns the lock".
@@ -277,6 +279,7 @@ class NodeService: NodeServiceProtocol {
         self.node = ldkNode
         self.isRunning = true
         self.nodeId = ldkNode.nodeId()
+        self.activeNetwork = network
 
         // Connect to LSP — propagate error if custom LSP fails so switchLSP rolls back
         do {
@@ -307,6 +310,7 @@ class NodeService: NodeServiceProtocol {
         eventTask = nil
         try? node?.stop()
         node = nil
+        activeNetwork = nil
         isRunning = false
         nodeId = ""
         channels = []
@@ -597,14 +601,18 @@ class NodeService: NodeServiceProtocol {
         return try node.onchainPayment().newAddress()
     }
 
-    func sendOnchain(address: String, amountSats: UInt64) throws -> Txid {
+    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: UInt64? = nil) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.onchainPayment().sendToAddress(address: address, amountSats: amountSats, feeRate: nil)
+        let ldkFeeRate: FeeRate? = feeRateSatVb
+            .map { FeeRate.fromSatPerVbU32(satVb: UInt32(min(UInt64(UInt32.max), $0))) }
+        return try node.onchainPayment().sendToAddress(address: address, amountSats: amountSats, feeRate: ldkFeeRate)
     }
 
-    func sendAllOnchain(address: String) throws -> Txid {
+    func sendAllOnchain(address: String, feeRateSatVb: UInt64? = nil) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: nil)
+        let ldkFeeRate: FeeRate? = feeRateSatVb
+            .map { FeeRate.fromSatPerVbU32(satVb: UInt32(min(UInt64(UInt32.max), $0))) }
+        return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: ldkFeeRate)
     }
 
     func syncWallets() throws {

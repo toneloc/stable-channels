@@ -71,17 +71,74 @@ final class PaymentRepository {
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
+        let updated: Int
         if let fee = feeMsat {
-            try rawSQL.execute(
+            updated = try rawSQL.executeReturningChanges(
                 "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
                 params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
             )
         } else {
-            try rawSQL.execute(
-                "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'",
-                params: [.text(status), .text(paymentId)]
+            updated = try rawSQL.executeReturningChanges(
+                "UPDATE payments SET status = ?, fee_msat = COALESCE(fee_msat, ?) WHERE payment_id = ? AND status = 'pending'",
+                params: [.text(status), .null, .text(paymentId)]
             )
         }
+
+        if updated == 0 {
+            if let existing = payment(paymentId: paymentId) {
+                if let fee = feeMsat, existing.feeMsat == nil {
+                    try? rawSQL.execute(
+                        "UPDATE payments SET fee_msat = ? WHERE payment_id = ?",
+                        params: [.integer(Int64(fee)), .text(paymentId)]
+                    )
+                }
+            } else {
+                // Settle or fail event arrived before recordPayment() inserted the row.
+                // Insert placeholder with terminal status so recordPayment won't downgrade it.
+                let sql = """
+                    INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, status, fee_msat)
+                    VALUES (?, 'lightning', 'sent', 0, ?, ?)
+                """
+                try? rawSQL.execute(
+                    sql,
+                    params: [
+                        .text(paymentId),
+                        .text(status),
+                        feeMsat.map { .integer(Int64($0)) } ?? .null
+                    ]
+                )
+            }
+        }
+    }
+
+    func backfillPaymentDetails(
+        paymentId: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        counterparty: String?,
+        address: String? = nil,
+        txid: String? = nil
+    ) throws {
+        let sql = """
+            UPDATE payments
+            SET amount_msat = CASE WHEN amount_msat = 0 THEN ? ELSE amount_msat END,
+                amount_usd = COALESCE(amount_usd, ?),
+                btc_price = COALESCE(btc_price, ?),
+                counterparty = COALESCE(counterparty, ?),
+                address = COALESCE(address, ?),
+                txid = COALESCE(txid, ?)
+            WHERE payment_id = ?
+        """
+        try rawSQL.execute(sql, params: [
+            .integer(Int64(amountMsat)),
+            amountUSD.map { .real($0) } ?? .null,
+            btcPrice.map { .real($0) } ?? .null,
+            counterparty.map { .text($0) } ?? .null,
+            address.map { .text($0) } ?? .null,
+            txid.map { .text($0) } ?? .null,
+            .text(paymentId)
+        ])
     }
 
     @discardableResult
