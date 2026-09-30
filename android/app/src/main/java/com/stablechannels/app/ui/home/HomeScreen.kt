@@ -773,7 +773,11 @@ private fun PendingRow(
         }
         if (txid != null) {
             IconButton(
-                onClick = { context.openInAppBrowser("https://mempool.space/tx/${txid.substringBefore(":")}") },
+                onClick = {
+                    context.openInAppBrowser(
+                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                    )
+                },
                 modifier = Modifier.size(28.dp),
             ) {
                 Icon(

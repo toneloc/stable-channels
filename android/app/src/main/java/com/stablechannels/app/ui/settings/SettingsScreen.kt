@@ -149,7 +149,11 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.height(4.dp))
                             DetailRow("Funding Tx", "${txid.take(8)}...${txid.takeLast(8)}")
                             TextButton(
-                                onClick = { context.openInAppBrowser("https://mempool.space/tx/${txid.substringBefore(":")}") }
+                                onClick = {
+                                    context.openInAppBrowser(
+                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                    )
+                                }
                             ) {
                                 Text("View on explorer", fontSize = 12.sp)
                             }

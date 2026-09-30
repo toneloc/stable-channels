@@ -100,7 +100,11 @@ fun ChannelView(appState: AppState) {
                             )
                             Spacer(Modifier.height(8.dp))
                             TextButton(
-                                onClick = { context.openInAppBrowser("https://mempool.space/tx/${txid.substringBefore(":")}") },
+                                onClick = {
+                                    context.openInAppBrowser(
+                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                    )
+                                },
                                 contentPadding = PaddingValues(0.dp),
                             ) {
                                 Text("View on explorer ↗", color = Color(0xFF3B82F6))

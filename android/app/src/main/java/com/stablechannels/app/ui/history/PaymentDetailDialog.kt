@@ -175,7 +175,11 @@ fun PaymentDetailBottomSheet(
                             setOf("channel_close", "onchain", "splice_in", "splice_out")
                         if (payment.paymentType in onchainTypes) {
                             TextButton(
-                                onClick = { context.openInAppBrowser("https://mempool.space/tx/${txid.substringBefore(":")}") },
+                                onClick = {
+                                    context.openInAppBrowser(
+                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                    )
+                                },
                                 contentPadding = PaddingValues(0.dp),
                             ) {
                                 Text(
