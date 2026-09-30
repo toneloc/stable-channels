@@ -46,9 +46,9 @@ jobs:
               -project ios/StableChannels/StableChannels.xcodeproj \
               -scheme StableChannels; then
               exit 0
+            else
+              last_status=$?
             fi
-
-            last_status=$?
             if [ "$attempt" -lt 4 ]; then
               sleep $((attempt * 15))
             fi

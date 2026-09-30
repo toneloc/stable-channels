@@ -4554,12 +4554,14 @@ class AppState(private val context: Context) : ViewModel() {
                     StabilityService.recomputeNative(updatedSc)
                     updatedSc
                 } else {
-                    sc.copy(
-                        expectedUSD = com.stablechannels.app.models.USD(0.0),
-                        backingSats = 0L,
-                        nativeChannelBTC = com.stablechannels.app.models.Bitcoin(0L),
-                        note = "",
-                    )
+                    val updatedSc =
+                        sc.copy(
+                            expectedUSD = com.stablechannels.app.models.USD(0.0),
+                            backingSats = 0L,
+                            note = "",
+                        )
+                    StabilityService.recomputeNative(updatedSc)
+                    updatedSc
                 }
             } else {
                 sc

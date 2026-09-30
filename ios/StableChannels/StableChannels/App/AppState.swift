@@ -3865,9 +3865,8 @@ class AppState {
             if !loadChannelFromDB() {
                 stableChannel.expectedUSD = .zero
                 stableChannel.backingSats = 0
-                stableChannel.nativeSats = 0
-                stableChannel.nativeChannelBTC = .zero
                 stableChannel.note = ""
+                StabilityService.recomputeNative(&stableChannel)
             }
         }
     }
