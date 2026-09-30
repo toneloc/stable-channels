@@ -6,21 +6,43 @@ import LDKNode
 final class LNURLService: LNURLServiceProtocol {
     private let transport: SecureHTTPTransporting
     private let hostResolver: HostIPResolving
+    private let expectedNetwork: Network
 
     init(
-        urlSession: URLSession? = nil,
+        expectedNetwork: Network,
         hostResolver: HostIPResolving = SystemHostIPResolver(),
         transport: SecureHTTPTransporting? = nil
     ) {
+        self.expectedNetwork = expectedNetwork
         self.hostResolver = hostResolver
-        if let transport {
-            self.transport = transport
-        } else if let session = urlSession {
-            self.transport = URLSessionTransport(urlSession: session, hostResolver: hostResolver)
-        } else {
-            self.transport = NWConnectionTransport(hostResolver: hostResolver)
-        }
+        self.transport = transport ?? NWConnectionTransport(hostResolver: hostResolver)
     }
+
+    #if DEBUG
+        convenience init(
+            urlSession: URLSession,
+            hostResolver: HostIPResolving = SystemHostIPResolver(),
+            expectedNetwork: Network = .regtest
+        ) {
+            self.init(
+                expectedNetwork: expectedNetwork,
+                hostResolver: hostResolver,
+                transport: URLSessionTransport(urlSession: urlSession, hostResolver: hostResolver)
+            )
+        }
+
+        convenience init(
+            transport: SecureHTTPTransporting,
+            hostResolver: HostIPResolving = SystemHostIPResolver(),
+            expectedNetwork: Network = .regtest
+        ) {
+            self.init(
+                expectedNetwork: expectedNetwork,
+                hostResolver: hostResolver,
+                transport: transport
+            )
+        }
+    #endif
 
     /// Checks if a given host is a private, loopback, or link-local address to prevent SSRF.
     static func isPrivateOrLoopbackHost(_ host: String) -> Bool {
@@ -28,53 +50,42 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     /// Validates transport security: strict HTTPS for clearnet, HTTP or HTTPS for Tor (.onion) hidden services.
-    /// Also rejects any loopback, private, or link-local hosts, as well as DNS names resolving to restricted IPs.
     static func isSecureEndpoint(url: URL, hostResolver: HostIPResolving = SystemHostIPResolver()) -> Bool {
         SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver)
     }
 
     /// Resolves an input destination into an actionable HTTPS LNURL endpoint URL.
-    /// Handles Lightning addresses (LUD-16), Bech32 LNURL strings (LUD-01), and raw HTTPS URLs.
     static func resolveEndpoint(
         from input: String,
         hostResolver: HostIPResolving = SystemHostIPResolver()
     ) throws -> URL {
         var clean = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let range = clean.range(of: "lightning://", options: [.caseInsensitive, .anchored]) {
-            clean.removeSubrange(range)
-        } else if let range = clean.range(of: "lightning:", options: [.caseInsensitive, .anchored]) {
-            clean.removeSubrange(range)
+        for prefix in ["lightning://", "lightning:"] {
+            if let range = clean.range(of: prefix, options: [.caseInsensitive, .anchored]) {
+                clean.removeSubrange(range)
+                break
+            }
         }
         clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let resolvedURL: URL
-        // LUD-16: Lightning Address (name@domain.com)
         if clean.contains("@") {
-            guard clean.filter({ $0 == "@" }).count == 1 else {
-                throw LNURLError.invalidTarget
-            }
+            guard clean.filter({ $0 == "@" }).count == 1 else { throw LNURLError.invalidTarget }
             let parts = clean.split(separator: "@", omittingEmptySubsequences: true)
             guard parts.count == 2 else { throw LNURLError.invalidTarget }
             let username = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
             let domain = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard !username.isEmpty, !domain.isEmpty else { throw LNURLError.invalidTarget }
 
-            // Prevent path traversal, query injection, or delimiter manipulation in username
-            let forbiddenUserChars = CharacterSet(charactersIn: "/?#@: \\\"%<>{}|^`[]")
-            guard username.rangeOfCharacter(from: forbiddenUserChars) == nil,
-                  username.rangeOfCharacter(from: .controlCharacters) == nil else {
+            let forbidden = CharacterSet(charactersIn: "/?#@: \\\"%<>{}|^`[]")
+            guard username.rangeOfCharacter(from: forbidden) == nil,
+                  username.rangeOfCharacter(from: .controlCharacters) == nil,
+                  domain.contains("."), !domain.hasPrefix("."), !domain.hasSuffix(".") else {
                 throw LNURLError.invalidTarget
             }
-
-            guard domain.contains("."), !domain.hasPrefix("."), !domain.hasSuffix(".") else {
-                throw LNURLError.invalidTarget
-            }
-            let allowedDomainChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-"))
-            guard domain.unicodeScalars.allSatisfy({ allowedDomainChars.contains($0) }) else {
-                throw LNURLError.invalidTarget
-            }
-
-            guard !isPrivateOrLoopbackHost(domain) else {
+            let allowedDomain = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-")
+            guard domain.unicodeScalars.allSatisfy({ allowedDomain.contains($0) }),
+                  !isPrivateOrLoopbackHost(domain) else {
                 throw LNURLError.invalidTarget
             }
 
@@ -84,10 +95,8 @@ final class LNURLService: LNURLServiceProtocol {
             }
             resolvedURL = url
         } else if clean.lowercased().hasPrefix("lnurl1") {
-            // LUD-01: Bech32 encoded LNURL
             resolvedURL = try Bech32.decodeLNURL(clean)
         } else if let directURL = URL(string: clean) {
-            // Direct URL (HTTPS for clearnet, HTTP/HTTPS for Tor .onion)
             resolvedURL = directURL
         } else {
             throw LNURLError.invalidTarget
@@ -96,7 +105,6 @@ final class LNURLService: LNURLServiceProtocol {
         guard isSecureEndpoint(url: resolvedURL, hostResolver: hostResolver) else {
             throw LNURLError.invalidTarget
         }
-
         return resolvedURL
     }
 
@@ -125,7 +133,6 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.unsupportedTag(tag: params.tag)
         }
 
-        // Validate metadata has at least one valid text/plain entry per LUD-06
         guard params.plainTextDescription != nil else {
             throw LNURLError.invalidMetadata
         }
@@ -146,7 +153,7 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
         }
         guard params.isCommentValid(comment) else {
-            throw LNURLError.invalidResponse
+            throw LNURLError.invalidComment
         }
         return try await fetchInvoiceRaw(
             callback: params.callback,
@@ -156,64 +163,69 @@ final class LNURLService: LNURLServiceProtocol {
         )
     }
 
-    private func fetchInvoiceRaw(
+    /// Pure function for assembling the invoice callback URL with escaped query parameters.
+    static func buildInvoiceCallbackURL(
         callback: String,
         amountMsat: UInt64,
-        comment: String?,
-        expectedMetadataHashHex: String
-    ) async throws -> LNURLPayInvoiceResponse {
-        guard let initialUrl = URL(string: callback) else {
-            throw LNURLError.insecureEndpoint
+        comment: String?
+    ) throws -> URL {
+        guard let initialUrl = URL(string: callback),
+              var components = URLComponents(url: initialUrl, resolvingAgainstBaseURL: false),
+              initialUrl.scheme != nil,
+              initialUrl.host != nil else {
+            throw LNURLError.invalidTarget
         }
 
-        guard var components = URLComponents(url: initialUrl, resolvingAgainstBaseURL: false) else {
-            throw LNURLError.invalidResponse
-        }
-
-        var queryItems = components.queryItems ?? []
+        var queryItems = components.percentEncodedQueryItems ?? []
         queryItems.append(URLQueryItem(name: "amount", value: "\(amountMsat)"))
         if let comment {
             let trimmed = comment.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                queryItems.append(URLQueryItem(name: "comment", value: trimmed))
+                var allowed = CharacterSet.urlQueryAllowed
+                allowed.remove(charactersIn: "+&?#/=;")
+                let encodedComment = trimmed.addingPercentEncoding(withAllowedCharacters: allowed) ?? trimmed
+                queryItems.append(URLQueryItem(name: "comment", value: encodedComment))
             }
         }
-        components.queryItems = queryItems
+        components.percentEncodedQueryItems = queryItems
 
         guard let url = components.url else {
             throw LNURLError.invalidResponse
         }
+        return url
+    }
 
-        let (data, httpResponse) = try await executeSecureGet(url: url)
-
-        guard (200...299).contains(httpResponse.statusCode) else {
+    /// Pure domain validation function verifying BOLT11 invoice parameters against request expectations.
+    static func validateBolt11Invoice(
+        pr: String,
+        amountMsat: UInt64,
+        expectedNetwork: Network,
+        expectedMetadataHashHex: String
+    ) throws {
+        guard !pr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LNURLError.invalidResponse
         }
 
-        try throwIfErrorResponse(data: data)
-
-        let decoder = JSONDecoder()
-        guard let invoiceResponse = try? decoder.decode(LNURLPayInvoiceResponse.self, from: data) else {
+        let bolt11: Bolt11Invoice
+        do {
+            bolt11 = try Bolt11Invoice.fromStr(invoiceStr: pr)
+        } catch {
             throw LNURLError.invalidResponse
         }
 
-        guard !invoiceResponse.isError else {
-            let reason = invoiceResponse.reason ?? "The recipient service reported an error."
-            throw LNURLError.errorResponse(reason: reason)
+        let currency = bolt11.currency()
+        let matches = (expectedNetwork == .bitcoin && currency == .bitcoin) ||
+            (expectedNetwork == .testnet && currency == .bitcoinTestnet) ||
+            (expectedNetwork == .signet && currency == .signet) ||
+            (expectedNetwork == .regtest && currency == .regtest)
+        guard matches else {
+            throw LNURLError.errorResponse(reason: "Invoice currency does not match wallet network.")
         }
 
-        guard !invoiceResponse.pr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw LNURLError.invalidResponse
-        }
-
-        // Verify BOLT11 invoice amount, expiration, and metadata hash
-        let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: invoiceResponse.pr)
         guard let invoiceMsat = bolt11.amountMilliSatoshis() else {
             throw LNURLError.errorResponse(reason: "Amountless invoices are not permitted for LNURL pay.")
         }
 
-        // LNURL-pay callback requests an exact amount in millisatoshis.
-        // Reject invoices whose encoded amount differs from the requested msat.
         guard invoiceMsat == amountMsat else {
             throw LNURLError.invoiceAmountMismatch(expectedMsat: amountMsat, actualMsat: invoiceMsat)
         }
@@ -232,6 +244,39 @@ final class LNURLService: LNURLServiceProtocol {
                 reason: "Invoice uses direct description instead of required description hash (h tag)."
             )
         }
+    }
+
+    private func fetchInvoiceRaw(
+        callback: String,
+        amountMsat: UInt64,
+        comment: String?,
+        expectedMetadataHashHex: String
+    ) async throws -> LNURLPayInvoiceResponse {
+        let url = try Self.buildInvoiceCallbackURL(callback: callback, amountMsat: amountMsat, comment: comment)
+        let (data, httpResponse) = try await executeSecureGet(url: url)
+
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw LNURLError.invalidResponse
+        }
+
+        try throwIfErrorResponse(data: data)
+
+        let decoder = JSONDecoder()
+        guard let invoiceResponse = try? decoder.decode(LNURLPayInvoiceResponse.self, from: data) else {
+            throw LNURLError.invalidResponse
+        }
+
+        guard !invoiceResponse.isError else {
+            let reason = invoiceResponse.reason ?? "The recipient service reported an error."
+            throw LNURLError.errorResponse(reason: reason)
+        }
+
+        try Self.validateBolt11Invoice(
+            pr: invoiceResponse.pr,
+            amountMsat: amountMsat,
+            expectedNetwork: expectedNetwork,
+            expectedMetadataHashHex: expectedMetadataHashHex
+        )
 
         return invoiceResponse
     }

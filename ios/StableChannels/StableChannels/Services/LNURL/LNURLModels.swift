@@ -118,27 +118,39 @@ struct LNURLSuccessAction: Codable, Equatable, Sendable {
         case unknown(tag: String)
     }
 
-    var actionType: ActionType {
+    /// Validates and parses the success action against LUD-09 specification limits and domain matching.
+    func validatedAction(callbackURL: URL) -> ActionType {
         switch tag.lowercased() {
         case "message":
-            return .message(message ?? "")
+            guard let msg = message, !msg.isEmpty, msg.count <= 144 else {
+                return .unknown(tag: tag)
+            }
+            return .message(msg)
         case "url":
-            if let desc = description,
-               let urlStr = url,
-               let parsedURL = URL(string: urlStr),
-               let scheme = parsedURL.scheme?.lowercased() {
-                let isSecure = scheme == "https" ||
-                    (scheme == "http" && parsedURL.host?.lowercased().hasSuffix(".onion") == true)
-                if isSecure {
-                    return .url(description: desc, url: parsedURL)
-                }
+            guard let desc = description, desc.count <= 144,
+                  let urlStr = url, urlStr.count <= 2048,
+                  let parsedURL = URL(string: urlStr),
+                  let scheme = parsedURL.scheme?.lowercased() else {
+                return .unknown(tag: tag)
             }
-            return .unknown(tag: tag)
+            guard isSameHostOrSubdomain(callbackURL: callbackURL) else {
+                return .unknown(tag: tag)
+            }
+            let isSecure = scheme == "https" ||
+                (scheme == "http" && parsedURL.host?.lowercased().hasSuffix(".onion") == true)
+            guard isSecure else {
+                return .unknown(tag: tag)
+            }
+            return .url(description: desc, url: parsedURL)
         case "aes":
-            if let desc = description, let cipher = ciphertext, let initVector = iv {
-                return .aes(description: desc, ciphertext: cipher, iv: initVector)
+            guard let desc = description, desc.count <= 144,
+                  let cipher = ciphertext, !cipher.isEmpty, cipher.count <= 4096,
+                  let initVector = iv,
+                  let ivData = Data(base64Encoded: initVector), ivData.count == 16,
+                  Data(base64Encoded: cipher) != nil else {
+                return .unknown(tag: tag)
             }
-            return .unknown(tag: tag)
+            return .aes(description: desc, ciphertext: cipher, iv: initVector)
         default:
             return .unknown(tag: tag)
         }
@@ -174,6 +186,7 @@ struct LNURLPayInvoiceResponse: Codable, Equatable, Sendable {
 enum LNURLError: Swift.Error, LocalizedError, Equatable {
     case invalidTarget
     case invalidResponse
+    case invalidComment
     case errorResponse(reason: String)
     case unsupportedTag(tag: String)
     case amountOutOfBounds(minSats: UInt64, maxSats: UInt64)
@@ -188,6 +201,8 @@ enum LNURLError: Swift.Error, LocalizedError, Equatable {
             return "The provided address or LNURL is invalid."
         case .invalidResponse:
             return "Received an invalid or malformed response from the LNURL server."
+        case .invalidComment:
+            return "Comment exceeds maximum allowed length or is not supported by the payee."
         case let .errorResponse(reason):
             return reason
         case let .unsupportedTag(tag):

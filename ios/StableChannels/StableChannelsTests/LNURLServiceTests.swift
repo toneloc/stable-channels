@@ -1,5 +1,6 @@
 import CryptoKit
 import LDKNode
+import Network
 import Security
 import XCTest
 @testable import StableChannels
@@ -171,10 +172,11 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(directTor.absoluteString, "http://xyz.onion/api/lnurlp")
     }
 
-    func testSuccessActionDomainMatching() throws {
+    func testSuccessAction_validationAndDomainMatching() throws {
         let callbackURL = try XCTUnwrap(URL(string: "https://pay.shop.com/callback"))
 
-        let safeAction = LNURLSuccessAction(
+        // Host and subdomain matching
+        let sameHostAction = LNURLSuccessAction(
             tag: "url",
             description: "Receipt",
             url: "https://pay.shop.com/receipt/123",
@@ -182,7 +184,13 @@ final class LNURLServiceTests: XCTestCase {
             ciphertext: nil,
             iv: nil
         )
-        XCTAssertTrue(safeAction.isSameHostOrSubdomain(callbackURL: callbackURL))
+        XCTAssertTrue(sameHostAction.isSameHostOrSubdomain(callbackURL: callbackURL))
+        if case .url(let desc, let url) = sameHostAction.validatedAction(callbackURL: callbackURL) {
+            XCTAssertEqual(desc, "Receipt")
+            XCTAssertEqual(url.absoluteString, "https://pay.shop.com/receipt/123")
+        } else {
+            XCTFail("Expected valid URL action")
+        }
 
         let subdomainAction = LNURLSuccessAction(
             tag: "url",
@@ -193,6 +201,9 @@ final class LNURLServiceTests: XCTestCase {
             iv: nil
         )
         XCTAssertTrue(subdomainAction.isSameHostOrSubdomain(callbackURL: callbackURL))
+        if case .url = subdomainAction.validatedAction(callbackURL: callbackURL) {} else {
+            XCTFail("Expected valid subdomain URL action")
+        }
 
         let phishingAction = LNURLSuccessAction(
             tag: "url",
@@ -203,24 +214,10 @@ final class LNURLServiceTests: XCTestCase {
             iv: nil
         )
         XCTAssertFalse(phishingAction.isSameHostOrSubdomain(callbackURL: callbackURL))
-    }
+        XCTAssertEqual(phishingAction.validatedAction(callbackURL: callbackURL), .unknown(tag: "url"))
 
-    func testSuccessActionSchemeValidation() {
-        let httpsAction = LNURLSuccessAction(
-            tag: "url",
-            description: "Receipt",
-            url: "https://pay.shop.com/receipt/123",
-            message: nil,
-            ciphertext: nil,
-            iv: nil
-        )
-        if case .url(let desc, let url) = httpsAction.actionType {
-            XCTAssertEqual(desc, "Receipt")
-            XCTAssertEqual(url.absoluteString, "https://pay.shop.com/receipt/123")
-        } else {
-            XCTFail("Expected .url action")
-        }
-
+        // Onion HTTP vs Clearnet HTTP vs javascript schemes
+        let torCallback = try XCTUnwrap(URL(string: "http://shop.onion/callback"))
         let torAction = LNURLSuccessAction(
             tag: "url",
             description: "Tor Receipt",
@@ -229,11 +226,11 @@ final class LNURLServiceTests: XCTestCase {
             ciphertext: nil,
             iv: nil
         )
-        if case .url(let desc, let url) = torAction.actionType {
+        if case .url(let desc, let url) = torAction.validatedAction(callbackURL: torCallback) {
             XCTAssertEqual(desc, "Tor Receipt")
             XCTAssertEqual(url.absoluteString, "http://shop.onion/receipt/123")
         } else {
-            XCTFail("Expected .url action for Tor")
+            XCTFail("Expected valid Tor URL action")
         }
 
         let insecureClearnetAction = LNURLSuccessAction(
@@ -244,7 +241,7 @@ final class LNURLServiceTests: XCTestCase {
             ciphertext: nil,
             iv: nil
         )
-        XCTAssertEqual(insecureClearnetAction.actionType, .unknown(tag: "url"))
+        XCTAssertEqual(insecureClearnetAction.validatedAction(callbackURL: callbackURL), .unknown(tag: "url"))
 
         let javascriptAction = LNURLSuccessAction(
             tag: "url",
@@ -254,23 +251,53 @@ final class LNURLServiceTests: XCTestCase {
             ciphertext: nil,
             iv: nil
         )
-        XCTAssertEqual(javascriptAction.actionType, .unknown(tag: "url"))
-    }
+        XCTAssertEqual(javascriptAction.validatedAction(callbackURL: callbackURL), .unknown(tag: "url"))
 
-    func testMockServiceSubstitution() async throws {
-        let mock = MockLNURLService()
-        await mock.setStubbedParams(LNURLPayParams(
-            tag: "payRequest",
-            callback: "https://test.com/cb",
-            minSendable: 1000,
-            maxSendable: 10000,
-            metadata: "[[\"text/plain\",\"Test\"]]",
-            commentAllowed: nil
-        ))
+        // Message character limits (max 144)
+        let validMessageAction = LNURLSuccessAction(
+            tag: "message",
+            description: nil,
+            url: nil,
+            message: "Payment received!",
+            ciphertext: nil,
+            iv: nil
+        )
+        XCTAssertEqual(validMessageAction.validatedAction(callbackURL: callbackURL), .message("Payment received!"))
 
-        let url = try XCTUnwrap(URL(string: "https://test.com/lnurlp"))
-        let params = try await mock.fetchPayParams(from: url)
-        XCTAssertEqual(params.callback, "https://test.com/cb")
+        let longMessageAction = LNURLSuccessAction(
+            tag: "message",
+            description: nil,
+            url: nil,
+            message: String(repeating: "a", count: 145),
+            ciphertext: nil,
+            iv: nil
+        )
+        XCTAssertEqual(longMessageAction.validatedAction(callbackURL: callbackURL), .unknown(tag: "message"))
+
+        // AES ciphertext and IV length validation (IV must be 16 bytes decoded)
+        let validAESAction = LNURLSuccessAction(
+            tag: "aes",
+            description: "Secret",
+            url: nil,
+            message: nil,
+            ciphertext: "AQIDBA==",
+            iv: "MDEyMzQ1Njc4OWFiY2RlZg=="
+        )
+        if case .aes(let desc, _, _) = validAESAction.validatedAction(callbackURL: callbackURL) {
+            XCTAssertEqual(desc, "Secret")
+        } else {
+            XCTFail("Expected valid AES action")
+        }
+
+        let invalidIVAction = LNURLSuccessAction(
+            tag: "aes",
+            description: "Secret",
+            url: nil,
+            message: nil,
+            ciphertext: "AQIDBA==",
+            iv: "AQID"
+        )
+        XCTAssertEqual(invalidIVAction.validatedAction(callbackURL: callbackURL), .unknown(tag: "aes"))
     }
 
     func testErrorResponseParsing() async throws {
@@ -400,23 +427,16 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertFalse(result.isError)
     }
 
-    func testFetchInvoice_withParams_validatesBoundsAndComment_andSucceeds() async throws {
+    func testFetchInvoice_amountOutOfBounds_throwsError() async throws {
         let (service, callbackURL) = makeMockService()
-        let metadataJSON = ""
         let params = LNURLPayParams(
             tag: "payRequest",
             callback: callbackURL.absoluteString,
             minSendable: 10_000,
             maxSendable: 100_000,
-            metadata: metadataJSON,
+            metadata: "",
             commentAllowed: 20
         )
-
-        MockURLProtocol.requestHandler = { _ in
-            let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
-            return (response, Data(json.utf8))
-        }
 
         // Amount below minSendable throws amountOutOfBounds
         do {
@@ -433,22 +453,6 @@ final class LNURLServiceTests: XCTestCase {
         } catch LNURLError.amountOutOfBounds {
             // Success
         }
-
-        // Comment too long throws invalidResponse
-        do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: String(repeating: "c", count: 25)
-            )
-            XCTFail("Expected invalidResponse for comment exceeding limit")
-        } catch LNURLError.invalidResponse {
-            // Success
-        }
-
-        // Valid params and amount within bounds succeeds
-        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: "Hello")
-        XCTAssertEqual(result.pr, Self.valid50kInvoice)
     }
 
     func testFetchInvoice_mismatchedAmount_throwsInvoiceAmountMismatch() async throws {
@@ -578,11 +582,11 @@ final class LNURLServiceTests: XCTestCase {
             return (response, Data(json.utf8))
         }
 
-        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "", commentAllowed: 100)
         _ = try await service.fetchInvoice(
             params: params,
             amountMsat: 50_000,
-            comment: "Thanks & hello? test=1"
+            comment: "coffee+croissant & hello? test=1"
         )
 
         let resolvedURL = try XCTUnwrap(capturedURL)
@@ -590,8 +594,10 @@ final class LNURLServiceTests: XCTestCase {
         let queryItems = try XCTUnwrap(components.queryItems)
 
         XCTAssertEqual(queryItems.first(where: { $0.name == "amount" })?.value, "50000")
-        XCTAssertEqual(queryItems.first(where: { $0.name == "comment" })?.value, "Thanks & hello? test=1")
-        XCTAssertTrue(resolvedURL.query?.contains("%26") ?? false)
+        XCTAssertEqual(queryItems.first(where: { $0.name == "comment" })?.value, "coffee+croissant & hello? test=1")
+        let rawQuery = try XCTUnwrap(resolvedURL.query(percentEncoded: true))
+        XCTAssertTrue(rawQuery.contains("%26"))
+        XCTAssertTrue(rawQuery.contains("%2B"))
     }
 
     func testFetchPayParams_missingPlainTextMetadata_throwsInvalidMetadata() async throws {
@@ -657,7 +663,7 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    func testFetchPayParams_torHttpAccepted_andClearnetHttpRejected() async throws {
+    func testLNURLService_torHttpAccepted_andClearnetHttpRejected() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -678,62 +684,31 @@ final class LNURLServiceTests: XCTestCase {
 
         MockURLProtocol.requestHandler = { req in
             let response = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            if req.url?.path.contains("callback") == true {
+                let invoiceJson = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
+                return (response, Data(invoiceJson.utf8))
+            }
             return (response, Data(validJson.utf8))
         }
 
-        // Tor hidden service over HTTP succeeds
+        // Tor hidden service over HTTP succeeds for both stages
         let params = try await service.fetchPayParams(from: torURL)
         XCTAssertEqual(params.callback, "http://service.onion/callback")
+        let torInvoiceParams = makeParams(callback: "http://service.onion/callback", metadata: "")
+        let invoiceResult = try await service.fetchInvoice(params: torInvoiceParams, amountMsat: 50_000, comment: nil)
+        XCTAssertEqual(invoiceResult.pr, Self.valid50kInvoice)
 
-        // Clearnet endpoint over HTTP is rejected
+        // Clearnet endpoint over HTTP is rejected for both stages
         do {
             _ = try await service.fetchPayParams(from: clearnetHttpURL)
-            XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP")
-        } catch LNURLError.insecureEndpoint {
-            // Expected
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-    }
+            XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP pay params")
+        } catch LNURLError.insecureEndpoint {}
 
-    func testFetchInvoice_torHttpAccepted_andClearnetHttpRejected() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let session = URLSession(configuration: config)
-        let service = LNURLService(urlSession: session)
-
-        let torCallback = "http://service.onion/callback"
-        let clearnetHttpCallback = "http://service.com/callback"
-
-        MockURLProtocol.requestHandler = { req in
-            let response = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let json = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}"
-            return (response, Data(json.utf8))
-        }
-
-        // Tor callback over HTTP succeeds
-        let torParams = makeParams(callback: torCallback, metadata: "")
-        let result = try await service.fetchInvoice(
-            params: torParams,
-            amountMsat: 50_000,
-            comment: nil
-        )
-        XCTAssertEqual(result.pr, Self.valid50kInvoice)
-
-        // Clearnet callback over HTTP is rejected
-        let clearnetParams = makeParams(callback: clearnetHttpCallback, metadata: "")
+        let clearnetParams = makeParams(callback: "http://service.com/callback", metadata: "")
         do {
-            _ = try await service.fetchInvoice(
-                params: clearnetParams,
-                amountMsat: 50_000,
-                comment: nil
-            )
+            _ = try await service.fetchInvoice(params: clearnetParams, amountMsat: 50_000, comment: nil)
             XCTFail("Expected LNURLError.insecureEndpoint for clearnet HTTP callback")
-        } catch LNURLError.insecureEndpoint {
-            // Expected
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        } catch LNURLError.insecureEndpoint {}
     }
 
     func testIsPrivateOrLoopbackHost_identifiesAllRestrictedRanges() {
@@ -848,56 +823,6 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    func testFetchInvoice_redirectsToLoopback_isVetoedPreHop() async throws {
-        let (service, callbackURL) = makeMockService()
-        let loopbackRedirectURL = try XCTUnwrap(URL(string: "https://127.0.0.1/callback"))
-
-        MockURLProtocol.requestHandler = { _ in
-            let response = HTTPURLResponse(
-                url: callbackURL,
-                statusCode: 302,
-                httpVersion: nil,
-                headerFields: ["Location": loopbackRedirectURL.absoluteString]
-            )!
-            return (response, Data())
-        }
-
-        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
-        do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected LNURLError.insecureEndpoint on loopback redirect")
-        } catch LNURLError.insecureEndpoint {
-            // Expected
-            XCTAssertFalse(MockURLProtocol.seenURLs.contains(loopbackRedirectURL))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-    }
-
-    func testBech32_verifySegwitAddress_trimsSurroundingWhitespace() {
-        let validAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
-        let paddedAddress = "  \n\t bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 \r\n  "
-
-        let direct = Bech32.verifySegwitAddress(validAddress, expectedHrp: "bc")
-        let padded = Bech32.verifySegwitAddress(paddedAddress, expectedHrp: "bc")
-        XCTAssertTrue(direct)
-        XCTAssertTrue(padded)
-    }
-
-    func testBech32_decode_multibyteHRPCharacter_throwsInvalidCharacterWithoutGarbling() {
-        XCTAssertThrowsError(try Bech32.decode("🔥1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")) { error in
-            guard case let Bech32.Error.invalidCharacter(c) = error else {
-                XCTFail("Expected invalidCharacter, got \(error)")
-                return
-            }
-            XCTAssertEqual(c, "🔥")
-        }
-    }
-
     func testFetchPayParams_uint64MaxMinSendable_doesNotTrapAndThrowsAmountOutOfBounds() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
@@ -969,7 +894,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(exactMultipleParams.minSats, 10)
     }
 
-    func testFetchInvoice_dnsResolvesToPrivateIP_isRejectedAsInsecureEndpoint() async throws {
+    func testLNURLService_dnsResolvesToPrivateIP_isRejectedAsInsecureEndpoint() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -979,97 +904,73 @@ final class LNURLServiceTests: XCTestCase {
         ])
         let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
-        let targetURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/callback"))
-        let params = makeParams(callback: targetURL.absoluteString, metadata: "")
+        let payURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/.well-known/lnurlp/alice"))
+        let callbackURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/callback"))
 
         MockURLProtocol.seenURLs = []
-        MockURLProtocol.requestHandler = { _ in
-            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        MockURLProtocol.requestHandler = { req in
+            let response = HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
             return (response, Data())
         }
 
         do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected LNURLError.insecureEndpoint for DNS resolving to private IP")
+            _ = try await service.fetchPayParams(from: payURL)
+            XCTFail("Expected LNURLError.insecureEndpoint for fetchPayParams")
         } catch LNURLError.insecureEndpoint {
-            // Expected - request must be vetoed before opening socket / making network call
-            XCTAssertFalse(MockURLProtocol.seenURLs.contains(targetURL))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
-    }
-
-    func testFetchPayParams_dnsResolvesToPrivateIP_isRejectedAsInsecureEndpoint() async throws {
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        let session = URLSession(configuration: config)
-
-        let mockResolver = MockHostIPResolver(mapping: [
-            "rebinding.example.com": ["10.0.0.5"]
-        ])
-        let service = LNURLService(urlSession: session, hostResolver: mockResolver)
-
-        let targetURL = try XCTUnwrap(URL(string: "https://rebinding.example.com/.well-known/lnurlp/alice"))
-
-        MockURLProtocol.seenURLs = []
-        MockURLProtocol.requestHandler = { _ in
-            let response = HTTPURLResponse(url: targetURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data())
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(payURL))
         }
 
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         do {
-            _ = try await service.fetchPayParams(from: targetURL)
-            XCTFail("Expected LNURLError.insecureEndpoint for DNS resolving to private IP")
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+            XCTFail("Expected LNURLError.insecureEndpoint for fetchInvoice")
         } catch LNURLError.insecureEndpoint {
-            // Expected - request must be vetoed before opening socket / making network call
-            XCTAssertFalse(MockURLProtocol.seenURLs.contains(targetURL))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
+            XCTAssertFalse(MockURLProtocol.seenURLs.contains(callbackURL))
         }
     }
 
-    func testFetchInvoice_redirectsToDnsResolvingToPrivateIP_isVetoedPreHop() async throws {
+    func testFetchInvoice_redirectsToPrivateTarget_isVetoedPreHop() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
 
         let callbackURL = try XCTUnwrap(URL(string: "https://service.example.com/callback"))
-        let redirectTargetURL = try XCTUnwrap(URL(string: "https://rebinding-redirect.example.com/internal-service"))
-
         let mockResolver = MockHostIPResolver(mapping: [
             "service.example.com": ["93.184.216.34"],
             "rebinding-redirect.example.com": ["192.168.1.50"]
         ])
         let service = LNURLService(urlSession: session, hostResolver: mockResolver)
 
-        MockURLProtocol.seenURLs = []
-        MockURLProtocol.requestHandler = { _ in
-            let response = HTTPURLResponse(
-                url: callbackURL,
-                statusCode: 302,
-                httpVersion: nil,
-                headerFields: ["Location": redirectTargetURL.absoluteString]
-            )!
-            return (response, Data())
-        }
+        let targets = [
+            try XCTUnwrap(URL(string: "https://127.0.0.1/callback")),
+            try XCTUnwrap(URL(string: "https://rebinding-redirect.example.com/internal-service"))
+        ]
 
-        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
-        do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected LNURLError.insecureEndpoint on redirect to host resolving to private IP")
-        } catch LNURLError.insecureEndpoint {
-            // Expected - redirect is vetoed pre-hop
-            XCTAssertFalse(MockURLProtocol.seenURLs.contains(redirectTargetURL))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
+        for redirectTargetURL in targets {
+            MockURLProtocol.seenURLs = []
+            MockURLProtocol.requestHandler = { _ in
+                let response = HTTPURLResponse(
+                    url: callbackURL,
+                    statusCode: 302,
+                    httpVersion: nil,
+                    headerFields: ["Location": redirectTargetURL.absoluteString]
+                )!
+                return (response, Data())
+            }
+
+            let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+            do {
+                _ = try await service.fetchInvoice(
+                    params: params,
+                    amountMsat: 50_000,
+                    comment: nil
+                )
+                XCTFail("Expected LNURLError.insecureEndpoint on redirect to \(redirectTargetURL)")
+            } catch LNURLError.insecureEndpoint {
+                XCTAssertFalse(MockURLProtocol.seenURLs.contains(redirectTargetURL))
+            } catch {
+                XCTFail("Unexpected error for \(redirectTargetURL): \(error)")
+            }
         }
     }
 
@@ -1118,7 +1019,7 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    func testFetchInvoice_dnsRebindsToPrivateIP_isRejected() async throws {
+    func testURLSessionTransport_dnsRebindsPostFlight_isRejected() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
@@ -1158,9 +1059,9 @@ final class LNURLServiceTests: XCTestCase {
                 amountMsat: 50_000,
                 comment: nil
             )
-            XCTFail("Expected LNURLError.insecureEndpoint when DNS rebinds to private IP on second check")
+            XCTFail("Expected LNURLError.insecureEndpoint when DNS rebinds to private IP on post-flight check")
         } catch LNURLError.insecureEndpoint {
-            // Rebinding was caught and rejected
+            // Rebinding was caught and rejected by post-flight validation
             XCTAssertFalse(MockURLProtocol.seenURLs.isEmpty)
         } catch {
             XCTFail("Unexpected error: \(error)")
@@ -1190,9 +1091,10 @@ final class LNURLServiceTests: XCTestCase {
         let torURL = try XCTUnwrap(URL(string: "http://service.onion/api"))
         XCTAssertTrue(SecureEndpointValidator.isSecureEndpoint(url: torURL, hostResolver: resolver))
 
-        // Public IP literal is accepted
+        // Clearnet IP literal is rejected for LNURL endpoints per RFC 6066 SNI rules
         let publicIPURL = try XCTUnwrap(URL(string: "https://8.8.8.8/api"))
-        XCTAssertTrue(SecureEndpointValidator.isSecureEndpoint(url: publicIPURL, hostResolver: resolver))
+        XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: publicIPURL, hostResolver: resolver))
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("8.8.8.8"), false)
 
         // Private IP literal returns false
         let privateIPURL = try XCTUnwrap(URL(string: "https://127.0.0.1/api"))
@@ -1251,7 +1153,8 @@ final class LNURLServiceTests: XCTestCase {
             "2002:c058:6301::", // 6to4 embedding 192.88.99.1
             "192.88.99.1", // 6to4 anycast relay (RFC 3068/7526)
             "::ffff:0:127.0.0.1", // SIIT IPv4-translated (RFC 2765)
-            "::ffff:0:10.0.0.1" // SIIT IPv4-translated (RFC 2765)
+            "::ffff:0:10.0.0.1", // SIIT IPv4-translated (RFC 2765)
+            "3fff::1" // IPv6 documentation prefix (RFC 9637)
         ]
         for ip in blocked {
             XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost(ip), "Expected \(ip) to be blocked")
@@ -1275,7 +1178,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0172.016.0.1"), true)
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0100.064.0.1"), true)
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("169.0254.169.254"), true)
-        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0177.0.0.1"), false)
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("0177.0.0.1"), true)
 
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("127.0.0.1"), true)
         XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("10.0.0.1"), true)
@@ -1289,7 +1192,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("0127.0.0.1"))
         XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("010.0.0.1"))
         XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("169.0254.169.254"))
-        XCTAssertFalse(SecureEndpointValidator.isPrivateOrLoopbackHost("0177.0.0.1"))
+        XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost("0177.0.0.1"))
 
         let blockedURLs = [
             "https://0127.0.0.1/api",
@@ -1297,7 +1200,8 @@ final class LNURLServiceTests: XCTestCase {
             "https://010.0.0.1/api",
             "https://0172.016.0.1/api",
             "https://0100.064.0.1/api",
-            "https://169.0254.169.254/api"
+            "https://169.0254.169.254/api",
+            "https://0177.0.0.1/api"
         ]
         for urlStr in blockedURLs {
             let url = try XCTUnwrap(URL(string: urlStr))
@@ -1307,8 +1211,9 @@ final class LNURLServiceTests: XCTestCase {
             )
         }
 
-        let publicURL = try XCTUnwrap(URL(string: "https://0177.0.0.1/api"))
-        XCTAssertTrue(SecureEndpointValidator.isSecureEndpoint(url: publicURL))
+        let publicURL = try XCTUnwrap(URL(string: "https://8.8.8.8/api"))
+        XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: publicURL))
+        XCTAssertEqual(SecureEndpointValidator.evaluateNumericIP("8.8.8.8"), false)
 
         // Legacy non-canonical forms fall through to DNS resolution and are blocked if resolving to loopback
         let legacyForms = ["https://0x7f.0.0.1/api", "https://2130706433/api", "https://127.1/api"]
@@ -1398,78 +1303,61 @@ final class LNURLServiceTests: XCTestCase {
         // Standard Content-Length response
         let rawContentLength = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}"
             .data(using: .utf8)!
-        let (body1, resp1) = try HTTPResponseParser.parse(data: rawContentLength, url: url)
+        let (body1, resp1) = try HTTPResponseParser.parse(data: rawContentLength, url: url, cleanClose: true)
         XCTAssertEqual(resp1.statusCode, 200)
         XCTAssertEqual(String(data: body1, encoding: .utf8), "{\"status\":\"OK\"}")
 
         // Chunked Transfer-Encoding response
         let rawChunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
             .data(using: .utf8)!
-        let (body2, resp2) = try HTTPResponseParser.parse(data: rawChunked, url: url)
+        let (body2, resp2) = try HTTPResponseParser.parse(data: rawChunked, url: url, cleanClose: true)
         XCTAssertEqual(resp2.statusCode, 200)
         XCTAssertEqual(String(data: body2, encoding: .utf8), "hello world")
 
         // 404 response
         let raw404 = "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found".data(using: .utf8)!
-        let (body3, resp3) = try HTTPResponseParser.parse(data: raw404, url: url)
+        let (body3, resp3) = try HTTPResponseParser.parse(data: raw404, url: url, cleanClose: true)
         XCTAssertEqual(resp3.statusCode, 404)
         XCTAssertEqual(String(data: body3, encoding: .utf8), "Not Found")
     }
 
-    func testHTTPResponseParser_maliciousChunkSizeOverflow_doesNotCrashAndIsRejected() throws {
+    func testHTTPResponseParser_malformedChunkedEncoding_isRejected() throws {
         let url = try XCTUnwrap(URL(string: "https://example.com/api"))
-
-        // Chunk size that overflows Int addition if not bounds-checked (SIGTRAP 133 regression test)
-        let maliciousOverflow = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFFFFFFFFFF\r\nAB\r\n0\r\n\r\n"
-            .data(using: .utf8)!
-        XCTAssertThrowsError(try HTTPResponseParser.parse(data: maliciousOverflow, url: url)) { error in
-            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
-                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
-                return
-            }
-        }
-
-        // Chunk size exceeding maxResponseBytes (2MB limit)
-        let maliciousLargeChunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n300000\r\nABC\r\n0\r\n\r\n"
-            .data(using: .utf8)!
-        XCTAssertThrowsError(try HTTPResponseParser.parse(data: maliciousLargeChunk, url: url)) { error in
-            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
-                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
-                return
+        let invalidPayloads = [
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFFFFFFFFFF\r\nAB\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n300000\r\nABC\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n-1\r\nX\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+5\r\nhello\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n"
+        ]
+        for payload in invalidPayloads {
+            XCTAssertThrowsError(try HTTPResponseParser.parse(
+                data: Data(payload.utf8),
+                url: url,
+                cleanClose: true
+            )) { error in
+                XCTAssertEqual(error as? LNURLError, .invalidResponse)
             }
         }
     }
 
-    func testHTTPResponseParser_negativeChunkSize_doesNotCrashAndIsRejected() throws {
+    func testHTTPResponseParser_invalidFramingAndHeaders_areRejected() throws {
         let url = try XCTUnwrap(URL(string: "https://example.com/api"))
-        let rawNegativeChunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n-1\r\nX\r\n0\r\n\r\n"
-            .data(using: .utf8)!
-        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawNegativeChunk, url: url)) { error in
-            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
-                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
-                return
-            }
-        }
-    }
-
-    func testHTTPResponseParser_truncatedChunkedBody_isRejected() throws {
-        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
-        let rawTruncated = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n".data(using: .utf8)!
-        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawTruncated, url: url)) { error in
-            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
-                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
-                return
-            }
-        }
-    }
-
-    func testHTTPResponseParser_contentLengthTruncation_isRejected() throws {
-        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
-        let rawTruncated = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort body".data(using: .utf8)!
-        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawTruncated, url: url)) { error in
-            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
-                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
-                return
+        let invalidPayloads = [
+            "HTTP/2.0 200 OK\r\nContent-Length: 4\r\n\r\ntest",
+            "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n1234567890",
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort body",
+            "HTTP/1.1 200 OK\r\nContent-Length: -5\r\n\r\nhello",
+            "HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999\r\n\r\nhello"
+        ]
+        for payload in invalidPayloads {
+            XCTAssertThrowsError(try HTTPResponseParser.parse(
+                data: Data(payload.utf8),
+                url: url,
+                cleanClose: true
+            )) { error in
+                XCTAssertEqual(error as? LNURLError, .invalidResponse)
             }
         }
     }
@@ -1511,6 +1399,32 @@ final class LNURLServiceTests: XCTestCase {
     }
 
     func testNWConnectionTransport_dnsRebindingToPrivateIP_isRejectedAtSocketDial() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        final class AtomicFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = false
+            func set() { lock.withLock { value = true } }
+            func get() -> Bool { lock.withLock { value } }
+        }
+        let listenerSawConnection = AtomicFlag()
+        listener.newConnectionHandler = { conn in
+            listenerSawConnection.set()
+            conn.cancel()
+        }
+        let queue = DispatchQueue(label: "org.stablechannels.testlistener")
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+
+        var listenerPort: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                listenerPort = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(listenerPort)
+
         final class StatefulResolver: HostIPResolving, @unchecked Sendable {
             var callCount = 0
             func resolveHostIPs(_: String) -> [String] {
@@ -1525,7 +1439,7 @@ final class LNURLServiceTests: XCTestCase {
 
         let resolver = StatefulResolver()
         let transport = NWConnectionTransport(hostResolver: resolver)
-        let rebindURL = try XCTUnwrap(URL(string: "https://rebind.example.com/test"))
+        let rebindURL = try XCTUnwrap(URL(string: "https://rebind.example.com:\(port)/test"))
 
         do {
             _ = try await transport.executeGet(url: rebindURL)
@@ -1534,19 +1448,22 @@ final class LNURLServiceTests: XCTestCase {
             // Success: socket pinning check caught the rebinding and rejected before connecting!
         }
         XCTAssertEqual(resolver.callCount, 2)
+        XCTAssertFalse(listenerSawConnection.get(), "Rebinding answer was contacted on listener!")
     }
 
-    func testNWConnectionTransport_crlfInURLPath_isRejected() throws {
-        let resolver = MockHostIPResolver(mapping: ["attacker.example": ["93.184.216.34"]])
-        let transport = NWConnectionTransport(hostResolver: resolver)
+    func testNWConnectionTransport_buildRequest_crlfInURLPath_isPreservedEncoded() throws {
         let injectedURL = try XCTUnwrap(URL(string: "https://attacker.example/a%0D%0AX-Injected:%201"))
 
-        // Path contains encoded CRLF which percent-decoding would make dangerous, but NWConnectionTransport preserves
-        // encoding
-        let path = injectedURL.path(percentEncoded: true)
-        XCTAssertFalse(path.contains("\r"))
-        XCTAssertFalse(path.contains("\n"))
-        XCTAssertTrue(path.contains("%0D%0A"))
+        // Path contains encoded CRLF which percent-decoding would make dangerous, but buildRequest preserves encoding
+        let reqData = try NWConnectionTransport.buildRequest(
+            url: injectedURL,
+            cleanHost: "attacker.example",
+            portValue: 443,
+            defaultPort: 443
+        )
+        let reqStr = try XCTUnwrap(String(data: reqData, encoding: .utf8))
+        XCTAssertTrue(reqStr.contains("GET /a%0D%0AX-Injected:%201 HTTP/1.1\r\n"))
+        XCTAssertTrue(reqStr.contains("Host: attacker.example\r\n"))
     }
 
     func testNWConnectionTransport_routesOnionEndpointsToOnionTransport() async throws {
@@ -1566,6 +1483,753 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(response.statusCode, 200)
         XCTAssertEqual(String(data: data, encoding: .utf8), "{\"status\":\"OK\"}")
         XCTAssertEqual(mockOnion.executedURL, onionURL)
+    }
+
+    func testNWConnectionTransport_onionEndpointRedirectingToClearnetRebindingHost_isVetoedAndNeverContacted(
+    ) async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        final class StatefulResolver: HostIPResolving, @unchecked Sendable {
+            var callCount = 0
+            func resolveHostIPs(_: String) -> [String] {
+                callCount += 1
+                if callCount == 1 {
+                    return ["93.184.216.34"] // Valid public IP during validation
+                } else {
+                    return ["127.0.0.1"] // Rebinds to loopback
+                }
+            }
+        }
+
+        let resolver = StatefulResolver()
+        let onionURL = try XCTUnwrap(URL(string: "http://attacker.onion/.well-known/lnurlp/alice"))
+        let clearnetRedirectURL = try XCTUnwrap(URL(string: "https://rebinding.attacker.com/internal-api"))
+
+        MockURLProtocol.seenURLs = []
+        MockURLProtocol.requestHandler = { request in
+            if request.url == onionURL {
+                let response = HTTPURLResponse(
+                    url: onionURL,
+                    statusCode: 302,
+                    httpVersion: nil,
+                    headerFields: ["Location": clearnetRedirectURL.absoluteString]
+                )!
+                return (response, Data())
+            } else {
+                let response = HTTPURLResponse(
+                    url: clearnetRedirectURL,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+                return (response, Data("EXPLOIT".utf8))
+            }
+        }
+
+        let onionTransport = URLSessionTransport(urlSession: session, hostResolver: resolver)
+        let transport = NWConnectionTransport(hostResolver: resolver, onionTransport: onionTransport)
+
+        do {
+            _ = try await transport.executeGet(url: onionURL)
+            XCTFail("Expected insecureEndpoint error when onion redirects to clearnet rebinding host")
+        } catch LNURLError.insecureEndpoint {
+            // Expected: SecureRedirectDelegate vetoed clearnet redirect from onion service pre-hop
+        }
+
+        // Prove the private address / clearnet redirect URL is never contacted
+        XCTAssertFalse(MockURLProtocol.seenURLs.contains(clearnetRedirectURL))
+    }
+
+    func testNWConnectionTransport_oversizedPort_throwsInvalidTargetWithoutCrashing() async throws {
+        let resolver = MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+        let transport = NWConnectionTransport(hostResolver: resolver)
+
+        let oversizedURL = try XCTUnwrap(URL(string: "https://example.com:99999/cb"))
+        do {
+            _ = try await transport.executeGet(url: oversizedURL)
+            XCTFail("Expected invalidTarget error for port > 65535")
+        } catch LNURLError.invalidTarget {
+            // Expected: safely rejected without UInt16 integer overflow trap
+        }
+
+        let zeroPortURL = try XCTUnwrap(URL(string: "https://example.com:0/cb"))
+        do {
+            _ = try await transport.executeGet(url: zeroPortURL)
+            XCTFail("Expected invalidTarget error for port 0")
+        } catch LNURLError.invalidTarget {
+            // Expected: port 0 rejected cleanly
+        }
+    }
+
+    func testSecureEndpointValidator_canonicalNumericIP_variousInputs() {
+        // Leading-zero dotted quad returns nil
+        XCTAssertNil(SecureEndpointValidator.canonicalNumericIP("0177.0.0.1"))
+
+        // Standard public IPv4 returns canonical string unchanged
+        XCTAssertEqual(SecureEndpointValidator.canonicalNumericIP("8.8.8.8"), "8.8.8.8")
+
+        // Uncompressed IPv6 compresses canonically
+        XCTAssertEqual(
+            SecureEndpointValidator.canonicalNumericIP("2606:4700:0:0:0:0:0:1111"),
+            "2606:4700::1111"
+        )
+
+        // Scoped IPv6 address with zone identifier returns nil
+        XCTAssertNil(SecureEndpointValidator.canonicalNumericIP("fe80::1%en0"))
+    }
+
+    func testResolveEndpoint_rejectsNonASCIIDomainHomograph() {
+        // Cyrillic 'a' (U+0430) instead of ASCII 'a'
+        let cyrillicDomain = "alice@ex\u{0430}mple.com"
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: cyrillicDomain)) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidTarget)
+        }
+    }
+
+    // MARK: - Cancellation & NWConnectionSession Tests
+
+    func testNWConnectionTransport_preCancelledTask_abortsBeforeDial() async throws {
+        final class TrackingResolver: HostIPResolving, @unchecked Sendable {
+            var callCount = 0
+            func resolveHostIPs(_: String) -> [String] {
+                callCount += 1
+                return ["93.184.216.34"]
+            }
+        }
+        let resolver = TrackingResolver()
+        let transport = NWConnectionTransport(hostResolver: resolver)
+        let testURL = try XCTUnwrap(URL(string: "https://example.com/test"))
+
+        let task = Task { () -> (Data, HTTPURLResponse) in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await transport.executeGet(url: testURL)
+        }
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected CancellationError for pre-cancelled task")
+        } catch is CancellationError {
+            // Expected: aborted before dial
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        XCTAssertEqual(resolver.callCount, 0, "Host resolver was contacted for pre-cancelled task!")
+    }
+
+    func testNWConnectionSession_roundTrip_succeedsOverLocalListener() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        let expectedResponse = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}"
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+            incoming.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, _ in
+                if data != nil {
+                    incoming.send(
+                        content: Data(expectedResponse.utf8),
+                        isComplete: true,
+                        completion: .contentProcessed { _ in
+                            incoming.cancel()
+                        }
+                    )
+                }
+            }
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testsession")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+
+        let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+            (data: Data, cleanClose: Bool),
+            Error
+        >) in
+            NWConnectionSession(
+                connection: connection,
+                requestData: requestData,
+                timeoutInterval: 5.0,
+                queue: listenerQueue,
+                continuation: continuation
+            ).start()
+        }
+
+        XCTAssertTrue(result.cleanClose)
+        let (body, response) = try HTTPResponseParser.parse(
+            data: result.data,
+            url: try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/test")),
+            cleanClose: result.cleanClose
+        )
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(String(data: body, encoding: .utf8), "{\"status\":\"OK\"}")
+    }
+
+    func testNWConnectionSession_uncleanClose_returnsCleanCloseFalse() async throws {
+        let serverFd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        var sin = sockaddr_in()
+        sin.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        sin.sin_family = sa_family_t(AF_INET)
+        sin.sin_port = 0
+        sin.sin_addr.s_addr = inet_addr("127.0.0.1")
+        withUnsafePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                _ = Darwin.bind(serverFd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        Darwin.listen(serverFd, 1)
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        Darwin.getsockname(serverFd, withUnsafeMutablePointer(to: &sin) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 }
+        }, &len)
+        let port = UInt16(bigEndian: sin.sin_port)
+        defer { Darwin.close(serverFd) }
+
+        DispatchQueue.global().async {
+            var clientSin = sockaddr_in()
+            var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let clientFd = Darwin.accept(serverFd, withUnsafeMutablePointer(to: &clientSin) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { $0 }
+            }, &clientLen)
+            var buf = [UInt8](repeating: 0, count: 1024)
+            _ = Darwin.read(clientFd, &buf, 1024)
+            let payload = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"part"
+            _ = Darwin.write(clientFd, payload, payload.utf8.count)
+            var sl = linger(l_onoff: 1, l_linger: 0)
+            Darwin.setsockopt(clientFd, SOL_SOCKET, SO_LINGER, &sl, socklen_t(MemoryLayout<linger>.size))
+            Darwin.close(clientFd)
+        }
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+        let queue = DispatchQueue(label: "org.stablechannels.uncleanclose")
+
+        let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+            (data: Data, cleanClose: Bool),
+            Error
+        >) in
+            NWConnectionSession(
+                connection: connection,
+                requestData: requestData,
+                timeoutInterval: 5.0,
+                queue: queue,
+                continuation: continuation
+            ).start()
+        }
+
+        XCTAssertFalse(result.cleanClose)
+        let testURL = try XCTUnwrap(URL(string: "http://127.0.0.1:\(port)/test"))
+        XCTAssertThrowsError(try HTTPResponseParser.parse(
+            data: result.data,
+            url: testURL,
+            cleanClose: result.cleanClose
+        )) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidResponse)
+        }
+    }
+
+    func testNWConnectionSession_timeout_throwsNetworkError() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testsession")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+                (data: Data, cleanClose: Bool),
+                Error
+            >) in
+                NWConnectionSession(
+                    connection: connection,
+                    requestData: requestData,
+                    timeoutInterval: 0.1,
+                    queue: listenerQueue,
+                    continuation: continuation
+                ).start()
+            }
+            XCTFail("Expected timeout network error")
+        } catch let LNURLError.networkError(msg) {
+            XCTAssertTrue(msg.contains("timed out"))
+        } catch {
+            XCTFail("Expected networkError, got \(error)")
+        }
+    }
+
+    func testNWConnectionSession_taskCancellation_abortsConnection() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testsession")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+
+        final class Holder: @unchecked Sendable {
+            var session: NWConnectionSession?
+        }
+        let holder = Holder()
+
+        let task = Task { () -> (data: Data, cleanClose: Bool) in
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    let session = NWConnectionSession(
+                        connection: connection,
+                        requestData: requestData,
+                        timeoutInterval: 10.0,
+                        queue: listenerQueue,
+                        continuation: continuation
+                    )
+                    holder.session = session
+                    session.start()
+                }
+            } onCancel: {
+                holder.session?.cancel()
+            }
+        }
+
+        try await Task.sleep(nanoseconds: 30_000_000)
+        task.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected CancellationError when task is cancelled")
+        } catch is CancellationError {
+            // Success: connection cancelled cleanly
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
+
+    func testNWConnectionSession_oversizedResponse_abortsWithInvalidResponse() async throws {
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+            incoming.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, _ in
+                if data != nil {
+                    let oversized = Data(repeating: 0x41, count: 2 * 1024 * 1024 + 1024)
+                    incoming.send(content: oversized, completion: .contentProcessed { _ in
+                        incoming.cancel()
+                    })
+                }
+            }
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testsession")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /test HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+                (data: Data, cleanClose: Bool),
+                Error
+            >) in
+                NWConnectionSession(
+                    connection: connection,
+                    requestData: requestData,
+                    timeoutInterval: 5.0,
+                    queue: listenerQueue,
+                    continuation: continuation
+                ).start()
+            }
+            XCTFail("Expected invalidResponse for oversized response")
+        } catch LNURLError.invalidResponse {
+            // Expected
+        } catch {
+            XCTFail("Expected invalidResponse, got \(error)")
+        }
+    }
+
+    // MARK: - cleanClose Unframed Body Tests (Finding 2)
+
+    func testHTTPResponseParser_unframedBody_cleanCloseRequired() throws {
+        let testURL = try XCTUnwrap(URL(string: "https://example.com/api"))
+        let rawHTTP = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"OK\"}"
+        let data = Data(rawHTTP.utf8)
+
+        // When cleanClose is true, unframed body parses successfully
+        let (bodyClean, responseClean) = try HTTPResponseParser.parse(data: data, url: testURL, cleanClose: true)
+        XCTAssertEqual(responseClean.statusCode, 200)
+        XCTAssertEqual(String(data: bodyClean, encoding: .utf8), "{\"status\":\"OK\"}")
+
+        // When cleanClose is false (connection dropped mid-stream), unframed body is rejected
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: data, url: testURL, cleanClose: false)) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidResponse)
+        }
+    }
+
+    func testHTTPResponseParser_framedBody_toleratesCleanCloseFalseIfDataComplete() throws {
+        let testURL = try XCTUnwrap(URL(string: "https://example.com/api"))
+
+        // Content-Length framed response: complete data is accepted even if socket close was unclean
+        let clHTTP = "HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}"
+        let clData = Data(clHTTP.utf8)
+        let (bodyCL, responseCL) = try HTTPResponseParser.parse(data: clData, url: testURL, cleanClose: false)
+        XCTAssertEqual(responseCL.statusCode, 200)
+        XCTAssertEqual(String(data: bodyCL, encoding: .utf8), "{\"status\":\"OK\"}")
+
+        // Chunked framed response: complete termination is accepted even if socket close was unclean
+        let chunkedHTTP = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nF\r\n{\"status\":\"OK\"}\r\n0\r\n\r\n"
+        let chunkedData = Data(chunkedHTTP.utf8)
+        let (bodyChunked, responseChunked) = try HTTPResponseParser.parse(
+            data: chunkedData,
+            url: testURL,
+            cleanClose: false
+        )
+        XCTAssertEqual(responseChunked.statusCode, 200)
+        XCTAssertEqual(String(data: bodyChunked, encoding: .utf8), "{\"status\":\"OK\"}")
+    }
+
+    // MARK: - Trailing-Dot Hosts Test (Finding 7)
+
+    func testSecureEndpointValidator_trailingDotHosts_areBlockedByStaticBlocklist() throws {
+        XCTAssertEqual(SecureEndpointValidator.cleanHostString("localhost."), "localhost")
+        XCTAssertEqual(SecureEndpointValidator.cleanHostString("service.internal."), "service.internal")
+        XCTAssertEqual(SecureEndpointValidator.cleanHostString("router.local."), "router.local")
+        XCTAssertEqual(SecureEndpointValidator.cleanHostString("myhost.localhost."), "myhost.localhost")
+
+        // Blocked at static validation stage before DNS lookup
+        let loopbackDotURL = try XCTUnwrap(URL(string: "https://localhost./pay"))
+        XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: loopbackDotURL))
+
+        let internalDotURL = try XCTUnwrap(URL(string: "https://server.internal./pay"))
+        XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: internalDotURL))
+
+        let localDotURL = try XCTUnwrap(URL(string: "https://gateway.local./pay"))
+        XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: localDotURL))
+    }
+
+    // MARK: - Appended Query Parameters Encoding Test (Finding 6)
+
+    func testFetchInvoice_preservesPreExistingQueryPlus_andEncodesAppendedPlus() async throws {
+        let callbackURL = try XCTUnwrap(URL(string: "https://example.com/api?tag=pay&search=hello+world"))
+        let mockTransport = MockSecureTransport()
+        let invoiceData = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}".data(using: .utf8)!
+        let httpResponse = try XCTUnwrap(HTTPURLResponse(
+            url: callbackURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        mockTransport.mockResult = (invoiceData, httpResponse)
+
+        let service = LNURLService(transport: mockTransport)
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+
+        _ = try await service.fetchInvoice(
+            params: params,
+            amountMsat: 50_000,
+            comment: "tip+bonus=yes;extra"
+        )
+
+        guard let executedURL = mockTransport.executedURL else {
+            XCTFail("No URL executed by transport")
+            return
+        }
+
+        let query = executedURL.query(percentEncoded: true) ?? ""
+        // Pre-existing search query should keep its '+' intact
+        XCTAssertTrue(
+            query.contains("search=hello+world"),
+            "Expected pre-existing query '+' to be preserved, got \(query)"
+        )
+        // Appended comment with '+', '=', and ';' should have them percent-encoded
+        XCTAssertTrue(
+            query.contains("comment=tip%2Bbonus%3Dyes%3Bextra"),
+            "Expected appended chars to be encoded as %2B, %3D, %3B, got \(query)"
+        )
+        XCTAssertTrue(query.contains("amount=50000"))
+    }
+
+    // MARK: - Bolt11 fromStr Error Mapping & Network Check (Finding 5)
+
+    func testFetchInvoice_malformedBolt11_mapsToInvalidResponse() async throws {
+        let callbackURL = try XCTUnwrap(URL(string: "https://example.com/callback"))
+        let mockTransport = MockSecureTransport()
+        // pr is malformed and fails Bolt11Invoice.fromStr
+        let invoiceData = "{\"pr\":\"lnbcnotaninvoice12345\",\"status\":\"OK\"}".data(using: .utf8)!
+        let httpResponse = try XCTUnwrap(HTTPURLResponse(
+            url: callbackURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        mockTransport.mockResult = (invoiceData, httpResponse)
+
+        let service = LNURLService(transport: mockTransport)
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+
+        do {
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000)
+            XCTFail("Expected LNURLError.invalidResponse for malformed bolt11 string")
+        } catch LNURLError.invalidResponse {
+            // Expected: correctly mapped to invalidResponse instead of escaping LDK error
+        } catch {
+            XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+        }
+    }
+
+    func testFetchInvoice_invoiceNetworkMismatch_throwsErrorResponse() async throws {
+        let callbackURL = try XCTUnwrap(URL(string: "https://example.com/callback"))
+        let mockTransport = MockSecureTransport()
+        // valid50kInvoice is a regtest invoice (lnbcrt...)
+        let invoiceData = "{\"pr\":\"\(Self.valid50kInvoice)\",\"status\":\"OK\"}".data(using: .utf8)!
+        let httpResponse = try XCTUnwrap(HTTPURLResponse(
+            url: callbackURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        mockTransport.mockResult = (invoiceData, httpResponse)
+
+        // Configure service expecting testnet (mismatches regtest invoice)
+        let service = LNURLService(transport: mockTransport, expectedNetwork: .testnet)
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+
+        do {
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000)
+            XCTFail("Expected errorResponse when invoice currency does not match wallet network")
+        } catch let LNURLError.errorResponse(reason) {
+            XCTAssertTrue(reason.contains("network"))
+        } catch {
+            XCTFail("Expected LNURLError.errorResponse, got \(error)")
+        }
+    }
+
+    // MARK: - Error Classification Tests (Finding 8)
+
+    func testResolveEndpoint_oversizedPort_throwsInvalidTarget() {
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "https://example.com:99999/pay")) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidTarget)
+        }
+        XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "https://example.com:0/pay")) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidTarget)
+        }
+    }
+
+    func testFetchInvoice_overlongComment_throwsInvalidComment() async throws {
+        let callbackURL = try XCTUnwrap(URL(string: "https://example.com/callback"))
+        let mockTransport = MockSecureTransport()
+        let service = LNURLService(transport: mockTransport)
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "", commentAllowed: 10)
+
+        do {
+            _ = try await service.fetchInvoice(
+                params: params,
+                amountMsat: 50_000,
+                comment: "this comment is far too long for limit 10"
+            )
+            XCTFail("Expected invalidComment error for comment exceeding limit")
+        } catch LNURLError.invalidComment {
+            // Expected
+        } catch {
+            XCTFail("Expected LNURLError.invalidComment, got \(error)")
+        }
+    }
+
+    func testFetchInvoice_unparsableCallback_throwsInvalidTarget() async throws {
+        let mockTransport = MockSecureTransport()
+        let service = LNURLService(transport: mockTransport)
+        let params = makeParams(callback: "not a valid url at all", metadata: "")
+
+        do {
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000)
+            XCTFail("Expected invalidTarget for unparsable callback")
+        } catch LNURLError.invalidTarget {
+            // Expected
+        } catch {
+            XCTFail("Expected LNURLError.invalidTarget, got \(error)")
+        }
+    }
+
+    // MARK: - Pure Functions: Pin Selection & Redirect Policy (Finding 9)
+
+    func testNWConnectionTransport_selectPinnedIP_prefersIPv4() throws {
+        let ips = ["2606:4700::1111", "93.184.216.34", "2606:4700::2222"]
+        let selected = try NWConnectionTransport.selectPinnedIP(for: "example.com", resolvedIPs: ips)
+        XCTAssertEqual(selected, "93.184.216.34")
+    }
+
+    func testNWConnectionTransport_selectPinnedIP_acceptsIPv6WhenOnlyIPv6Available() throws {
+        let ips = ["2606:4700::1111", "2606:4700::2222"]
+        let selected = try NWConnectionTransport.selectPinnedIP(for: "example.com", resolvedIPs: ips)
+        XCTAssertEqual(selected, "2606:4700::1111")
+    }
+
+    func testNWConnectionTransport_selectPinnedIP_failsClosedOnPrivateOrMixedIPs() {
+        // Pure private IP fails
+        XCTAssertThrowsError(
+            try NWConnectionTransport.selectPinnedIP(for: "internal.example", resolvedIPs: ["10.0.0.1"])
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+
+        // Mixed public and private IP fails closed (consistent with validate-time reject-all)
+        XCTAssertThrowsError(
+            try NWConnectionTransport.selectPinnedIP(
+                for: "split.example",
+                resolvedIPs: ["93.184.216.34", "127.0.0.1"]
+            )
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+    }
+
+    func testNWConnectionTransport_selectPinnedIP_failsClosedOnEmptyIPs() {
+        XCTAssertThrowsError(
+            try NWConnectionTransport.selectPinnedIP(for: "missing.example", resolvedIPs: [])
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+    }
+
+    func testNWConnectionTransport_selectPinnedIP_canonicalPublicNumericIP() throws {
+        let selected = try NWConnectionTransport.selectPinnedIP(for: "8.8.8.8", resolvedIPs: [])
+        XCTAssertEqual(selected, "8.8.8.8")
+
+        // Leading-zero non-canonical IP fails
+        XCTAssertThrowsError(
+            try NWConnectionTransport.selectPinnedIP(for: "0177.0.0.1", resolvedIPs: [])
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+    }
+
+    func testNWConnectionTransport_validateRedirectTarget_hopLimitAndLocation() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://example.com/api/v1/pay"))
+
+        // Relative redirect within limit
+        let target = try NWConnectionTransport.validateRedirectTarget(
+            currentURL: baseURL,
+            locationHeader: "/api/v2/pay",
+            hop: 0,
+            hostResolver: MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+        )
+        XCTAssertEqual(target.absoluteString, "https://example.com/api/v2/pay")
+
+        // Exceeding hop limit fails with networkError
+        XCTAssertThrowsError(
+            try NWConnectionTransport.validateRedirectTarget(
+                currentURL: baseURL,
+                locationHeader: "/api/v2/pay",
+                hop: 3,
+                hostResolver: MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+            )
+        ) { error in
+            guard case let LNURLError.networkError(msg) = error else {
+                XCTFail("Expected networkError, got \(error)")
+                return
+            }
+            XCTAssertTrue(msg.contains("Too many redirects"))
+        }
+
+        // Missing location header throws invalidResponse
+        XCTAssertThrowsError(
+            try NWConnectionTransport.validateRedirectTarget(
+                currentURL: baseURL,
+                locationHeader: nil,
+                hop: 0,
+                hostResolver: MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+            )
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidResponse)
+        }
+    }
+
+    func testNWConnectionTransport_validateRedirectTarget_clearnetToOnionVetoed() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://example.com/pay"))
+        XCTAssertThrowsError(
+            try NWConnectionTransport.validateRedirectTarget(
+                currentURL: baseURL,
+                locationHeader: "http://service.onion/pay",
+                hop: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+    }
+
+    func testNWConnectionTransport_validateRedirectTarget_httpsToHttpDowngradeVetoed() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://example.com/pay"))
+        XCTAssertThrowsError(
+            try NWConnectionTransport.validateRedirectTarget(
+                currentURL: baseURL,
+                locationHeader: "http://example.com/pay",
+                hop: 0,
+                hostResolver: MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+            )
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
+    }
+
+    func testNWConnectionTransport_validateRedirectTarget_privateIPRedirectVetoed() throws {
+        let baseURL = try XCTUnwrap(URL(string: "https://example.com/pay"))
+        XCTAssertThrowsError(
+            try NWConnectionTransport.validateRedirectTarget(
+                currentURL: baseURL,
+                locationHeader: "https://internal.lan/pay",
+                hop: 0,
+                hostResolver: MockHostIPResolver(mapping: ["internal.lan": ["10.0.0.1"]])
+            )
+        ) { error in
+            XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
+        }
     }
 }
 

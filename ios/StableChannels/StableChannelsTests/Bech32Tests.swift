@@ -137,4 +137,46 @@ final class Bech32Tests: XCTestCase {
             XCTAssertEqual(error as? Bech32.Error, .mixedCase)
         }
     }
+
+    func testDecodeLNURL_oversizedInput_isRejected() {
+        let oversizedLNURL = "lnurl1" + String(repeating: "q", count: 4097)
+        XCTAssertThrowsError(try Bech32.decodeLNURL(oversizedLNURL)) { error in
+            XCTAssertEqual(error as? Bech32.Error, .invalidLength)
+        }
+    }
+
+    func testDecodeLNURL_wrongHrp_throwsInvalidHrp() {
+        let segwitAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        XCTAssertThrowsError(try Bech32.decodeLNURL(segwitAddress)) { error in
+            XCTAssertEqual(error as? Bech32.Error, .invalidHrp("bc"))
+        }
+    }
+
+    func testVerifySegwitAddress_trimsSurroundingWhitespace() {
+        let validAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        let paddedAddress = "  \n\t bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4 \r\n  "
+
+        let direct = Bech32.verifySegwitAddress(validAddress, expectedHrp: "bc")
+        let padded = Bech32.verifySegwitAddress(paddedAddress, expectedHrp: "bc")
+        XCTAssertTrue(direct)
+        XCTAssertTrue(padded)
+    }
+
+    func testDecode_multibyteHRPCharacter_throwsInvalidCharacterWithoutGarbling() {
+        XCTAssertThrowsError(try Bech32.decode("\u{00E9}1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4")) { error in
+            guard case let Bech32.Error.invalidCharacter(c) = error else {
+                XCTFail("Expected invalidCharacter, got \(error)")
+                return
+            }
+            XCTAssertEqual(c, "\u{00E9}")
+        }
+    }
+
+    func testDecodeLNURL_missingScheme_throwsInvalidURL() throws {
+        // Valid Bech32 encoding for payload "service.com/pay" (no scheme)
+        let noSchemeLNURL = "lnurl1wdjhyanfvdjjucm0d5hhqcte4z2zax"
+        XCTAssertThrowsError(try Bech32.decodeLNURL(noSchemeLNURL)) { error in
+            XCTAssertEqual(error as? Bech32.Error, .invalidURL)
+        }
+    }
 }

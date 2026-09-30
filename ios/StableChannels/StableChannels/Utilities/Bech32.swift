@@ -20,9 +20,11 @@ enum Bech32 {
         case invalidCharacter(Character)
         case mixedCase
         case missingHrp
+        case invalidHrp(String)
         case invalidChecksum
         case bitsConversionFailed
         case invalidUtf8String
+        case invalidURL
         case insecureClearnetScheme
 
         var errorDescription: String? {
@@ -35,12 +37,16 @@ enum Bech32 {
                 return "The Bech32 string contains mixed uppercase and lowercase characters."
             case .missingHrp:
                 return "The Bech32 string is missing a human-readable prefix (HRP)."
+            case let .invalidHrp(hrp):
+                return "Invalid human-readable prefix: '\(hrp)'."
             case .invalidChecksum:
                 return "Invalid Bech32 checksum."
             case .bitsConversionFailed:
                 return "Failed to convert 5-bit Bech32 data to 8-bit bytes."
             case .invalidUtf8String:
                 return "The decoded payload is not a valid UTF-8 string."
+            case .invalidURL:
+                return "The decoded payload is not a valid URL or is missing a scheme."
             case .insecureClearnetScheme:
                 return "LNURL endpoint must use HTTPS."
             }
@@ -224,10 +230,13 @@ enum Bech32 {
             clean.removeSubrange(range)
         }
         clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.count <= 4096 else {
+            throw Error.invalidLength
+        }
 
         let (hrp, payload5Bit, checksumType) = try parse(clean, limitLength: false)
         guard hrp.lowercased() == "lnurl" else {
-            throw Error.missingHrp
+            throw Error.invalidHrp(hrp)
         }
 
         guard checksumType == .bech32 else {
@@ -238,13 +247,14 @@ enum Bech32 {
             throw Error.bitsConversionFailed
         }
 
-        guard let urlString = String(data: Data(converted8Bit), encoding: .utf8),
-              let url = URL(string: urlString) else {
+        guard let urlString = String(data: Data(converted8Bit), encoding: .utf8) else {
             throw Error.invalidUtf8String
         }
 
-        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else {
-            throw Error.invalidUtf8String
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased() else {
+            throw Error.invalidURL
         }
 
         if host.hasSuffix(".onion") {

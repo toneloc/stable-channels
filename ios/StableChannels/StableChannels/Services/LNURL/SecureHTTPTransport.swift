@@ -8,84 +8,108 @@ protocol SecureHTTPTransporting: Sendable {
     func executeGet(url: URL) async throws -> (Data, HTTPURLResponse)
 }
 
-// MARK: - HTTP Response Parser (Pure Functional Core)
+// MARK: - NWConnection Session (Lifecycle and Cancellation Manager)
 
-enum HTTPResponseParser {
-    static let maxResponseBytes: Int = 2 * 1024 * 1024 // 2 MB
-    static let maxHeaderBytes: Int = 64 * 1024 // 64 KB
+final class NWConnectionSession: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isFinished = false
+    private var buffer = Data()
+    private var timerItem: DispatchWorkItem?
+    private var selfRetain: NWConnectionSession?
+    private let connection: NWConnection
+    private let requestData: Data
+    private let timeoutInterval: TimeInterval
+    private let queue: DispatchQueue
+    private let continuation: CheckedContinuation<(data: Data, cleanClose: Bool), Error>
 
-    static func parse(data: Data, url: URL) throws -> (Data, HTTPURLResponse) {
-        guard data.count <= maxResponseBytes,
-              let crlf2Range = data.range(of: Data([0x0D, 0x0A, 0x0D, 0x0A])),
-              crlf2Range.lowerBound <= maxHeaderBytes,
-              let headerStr = String(data: data[..<crlf2Range.lowerBound], encoding: .utf8) else {
-            throw LNURLError.invalidResponse
-        }
-        let lines = headerStr.components(separatedBy: "\r\n")
-        guard let statusLine = lines.first else { throw LNURLError.invalidResponse }
-        let statusParts = statusLine.split(separator: " ")
-        guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else {
-            throw LNURLError.invalidResponse
-        }
-
-        var headers: [String: String] = [:]
-        for line in lines.dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { continue }
-            let key = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
-            let val = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
-            headers[key.lowercased()] = val
-        }
-
-        let rawBody = data[crlf2Range.upperBound...]
-        let body: Data
-        if headers["transfer-encoding"]?.lowercased().contains("chunked") == true {
-            guard let decoded = decodeChunked(data: Data(rawBody)) else {
-                throw LNURLError.invalidResponse
-            }
-            body = decoded
-        } else if let lengthStr = headers["content-length"], let expectedLen = Int(lengthStr), expectedLen >= 0 {
-            guard rawBody.count >= expectedLen else { throw LNURLError.invalidResponse }
-            body = Data(rawBody.prefix(expectedLen))
-        } else {
-            body = Data(rawBody)
-        }
-
-        guard let response = HTTPURLResponse(
-            url: url,
-            statusCode: statusCode,
-            httpVersion: "HTTP/1.1",
-            headerFields: headers
-        ) else {
-            throw LNURLError.invalidResponse
-        }
-        return (body, response)
+    init(
+        connection: NWConnection,
+        requestData: Data,
+        timeoutInterval: TimeInterval,
+        queue: DispatchQueue,
+        continuation: CheckedContinuation<(data: Data, cleanClose: Bool), Error>
+    ) {
+        self.connection = connection
+        self.requestData = requestData
+        self.timeoutInterval = timeoutInterval
+        self.queue = queue
+        self.continuation = continuation
     }
 
-    private static func decodeChunked(data: Data) -> Data? {
-        var result = Data()
-        var offset = 0
-        let count = data.count
-        var terminated = false
-
-        while offset < count {
-            guard let crlf = data[offset...].range(of: Data([0x0D, 0x0A])) else { return nil }
-            guard let hex = String(data: data[offset..<crlf.lowerBound], encoding: .utf8)?
-                .trimmingCharacters(in: .whitespaces) else { return nil }
-            let cleanHex = hex.split(separator: ";").first.map(String.init) ?? hex
-            guard let size = Int(cleanHex, radix: 16), size >= 0 else { return nil }
-            if size == 0 {
-                terminated = true
-                break
+    func start() {
+        lock.withLock {
+            guard !isFinished else { return }
+            selfRetain = self
+            connection.stateUpdateHandler = { [weak self] in self?.handleState($0) }
+            let item = DispatchWorkItem { [weak self] in
+                self?.complete(with: .failure(LNURLError.networkError("Connection timed out.")))
             }
-            let start = crlf.upperBound
-            guard size <= count - start, result.count + size <= maxResponseBytes else { return nil }
-            let end = start + size
-            result.append(data[start..<end])
-            guard end <= count - 2, data[end] == 0x0D, data[end + 1] == 0x0A else { return nil }
-            offset = end + 2
+            timerItem = item
+            queue.asyncAfter(deadline: .now() + timeoutInterval, execute: item)
+            connection.start(queue: queue)
         }
-        guard terminated else { return nil }
-        return result
+    }
+
+    func cancel() {
+        complete(with: .failure(CancellationError()))
+    }
+
+    private func complete(with result: Result<(data: Data, cleanClose: Bool), Error>) {
+        lock.withLock {
+            guard !isFinished else { return }
+            isFinished = true
+            timerItem?.cancel()
+            timerItem = nil
+            connection.stateUpdateHandler = nil
+            connection.cancel()
+            let retained = selfRetain
+            selfRetain = nil
+            continuation.resume(with: result)
+            _ = retained
+        }
+    }
+
+    private func handleState(_ state: NWConnection.State) {
+        switch state {
+        case .ready:
+            connection.send(content: requestData, completion: .contentProcessed { [weak self] sendError in
+                guard let self else { return }
+                if let sendError {
+                    self.complete(with: .failure(LNURLError.networkError(sendError.localizedDescription)))
+                } else {
+                    self.readLoop()
+                }
+            })
+        case let .failed(error), let .waiting(error):
+            complete(with: .failure(LNURLError.networkError(error.localizedDescription)))
+        case .cancelled:
+            complete(with: .failure(CancellationError()))
+        default:
+            break
+        }
+    }
+
+    private func readLoop() {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
+            guard let self else { return }
+            if let data, !data.isEmpty {
+                self.buffer.append(data)
+                if self.buffer.count > HTTPResponseParser.maxResponseBytes {
+                    self.complete(with: .failure(LNURLError.invalidResponse))
+                    return
+                }
+            }
+            if let error {
+                let res: Result<(data: Data, cleanClose: Bool), Error> = self.buffer.isEmpty ?
+                    .failure(LNURLError.networkError(error.localizedDescription)) :
+                    .success((data: self.buffer, cleanClose: false))
+                self.complete(with: res)
+            } else if isComplete {
+                self.complete(with: .success((data: self.buffer, cleanClose: true)))
+            } else {
+                self.readLoop()
+            }
+        }
     }
 }
 
@@ -94,7 +118,7 @@ enum HTTPResponseParser {
 final class NWConnectionTransport: SecureHTTPTransporting {
     private let hostResolver: HostIPResolving
     private let timeoutInterval: TimeInterval
-    private let onionTransport: SecureHTTPTransporting
+    private let onionTransport: SecureHTTPTransporting?
     private let nwQueue = DispatchQueue(label: "org.stablechannels.nwtransport")
 
     init(
@@ -104,187 +128,171 @@ final class NWConnectionTransport: SecureHTTPTransporting {
     ) {
         self.hostResolver = hostResolver
         self.timeoutInterval = timeoutInterval
-        self.onionTransport = onionTransport ?? URLSessionTransport(urlSession: .shared, hostResolver: hostResolver)
+        self.onionTransport = onionTransport
     }
 
-    func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        try await executeGetInternal(url: url, hop: 0)
-    }
-
-    private func executeGetInternal(url: URL, hop: Int) async throws -> (Data, HTTPURLResponse) {
-        guard hop <= 3, SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
-            throw LNURLError.insecureEndpoint
-        }
-
-        let rawHost = url.host ?? ""
-        let cleanHost = SecureEndpointValidator.cleanHostString(rawHost)
-        if cleanHost.hasSuffix(".onion") {
-            return try await onionTransport.executeGet(url: url)
-        }
-        let vettedIP: String
-        if SecureEndpointValidator.evaluateNumericIP(cleanHost) == false {
-            vettedIP = cleanHost
-        } else {
-            let ips = hostResolver.resolveHostIPs(cleanHost)
-            let allowedIPs = ips.filter { !SecureEndpointValidator.isPrivateOrLoopbackHost($0) }
-            guard let selected = allowedIPs.first(where: { $0.contains(".") }) ?? allowedIPs.first else {
-                throw LNURLError.insecureEndpoint
-            }
-            vettedIP = selected
-        }
-
-        let isHTTPS = url.scheme?.lowercased() == "https"
-        let defaultPort: UInt16 = isHTTPS ? 443 : 80
-        let portValue = UInt16(url.port ?? Int(defaultPort))
-        guard let port = NWEndpoint.Port(rawValue: portValue) else {
-            throw LNURLError.invalidResponse
-        }
-
-        let tcpOptions = NWProtocolTCP.Options()
-        let params: NWParameters
-        if isHTTPS {
-            let tlsOptions = NWProtocolTLS.Options()
-            sec_protocol_options_set_tls_server_name(tlsOptions.securityProtocolOptions, cleanHost)
-            params = NWParameters(tls: tlsOptions, tcp: tcpOptions)
-        } else {
-            params = NWParameters(tls: nil, tcp: tcpOptions)
-        }
-
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(vettedIP), port: port)
-        let connection = NWConnection(to: endpoint, using: params)
-
-        let rawPath = url.path(percentEncoded: true)
-        let cleanPath = rawPath.isEmpty ? "/" : rawPath
-        let query = url.query(percentEncoded: true).map { "?\($0)" } ?? ""
-        let path = cleanPath + query
-        let hostHeader = (url.port != nil && portValue != defaultPort) ? "\(cleanHost):\(portValue)" : cleanHost
+    /// Pure request builder validating CRLF injection and preserving percent encoding.
+    static func buildRequest(url: URL, cleanHost: String, portValue: UInt16, defaultPort: UInt16) throws -> Data {
+        let path = (url.path(percentEncoded: true).isEmpty ? "/" : url.path(percentEncoded: true)) +
+            (url.query(percentEncoded: true).map { "?\($0)" } ?? "")
+        let hostStr = cleanHost.contains(":") ? "[\(cleanHost)]" : cleanHost
+        let hostHeader = (url.port != nil && portValue != defaultPort) ? "\(hostStr):\(portValue)" : hostStr
 
         guard path.rangeOfCharacter(from: CharacterSet(charactersIn: "\r\n")) == nil,
               hostHeader.rangeOfCharacter(from: CharacterSet(charactersIn: "\r\n")) == nil,
-              let requestData = "GET \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: StableChannels\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+              let requestData = "GET \(path) HTTP/1.1\r\nHost: \(hostHeader)\r\nUser-Agent: StableChannels\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n"
               .data(using: .utf8) else {
             throw LNURLError.invalidResponse
         }
+        return requestData
+    }
 
-        let rawResponseData = try await sendAndReceive(connection: connection, requestData: requestData)
-        let (body, httpResponse) = try HTTPResponseParser.parse(data: rawResponseData, url: url)
+    /// Pure function for selecting the pinned IP address from resolved host IPs.
+    static func selectPinnedIP(for host: String, resolvedIPs: [String]) throws -> String {
+        let clean = SecureEndpointValidator.cleanHostString(host)
+        if let canonical = SecureEndpointValidator.canonicalNumericIP(clean),
+           SecureEndpointValidator.evaluateNumericIP(clean) == false {
+            return canonical
+        }
+        guard !resolvedIPs.isEmpty,
+              resolvedIPs.allSatisfy({ SecureEndpointValidator.evaluateNumericIP($0) == false }),
+              let selected = resolvedIPs.first(where: { $0.contains(".") }) ?? resolvedIPs.first else {
+            throw LNURLError.insecureEndpoint
+        }
+        return selected
+    }
 
-        if (300...399).contains(httpResponse.statusCode) {
-            guard let location = httpResponse.allHeaderFields["location"] as? String ??
-                httpResponse.allHeaderFields["Location"] as? String,
-                let targetURL = URL(string: location, relativeTo: url)?.absoluteURL else {
-                throw LNURLError.invalidResponse
+    /// Pure function for validating a redirect target against the current request URL.
+    static func validateRedirectTarget(
+        currentURL: URL,
+        locationHeader: String?,
+        hop: Int,
+        hostResolver: HostIPResolving = SystemHostIPResolver()
+    ) throws -> URL {
+        guard hop < 3 else { throw LNURLError.networkError("Too many redirects.") }
+        guard let locationHeader,
+              let targetURL = URL(string: locationHeader, relativeTo: currentURL)?.absoluteURL else {
+            throw LNURLError.invalidResponse
+        }
+        let currentHost = SecureEndpointValidator.cleanHostString(currentURL.host ?? "")
+        let targetHost = SecureEndpointValidator.cleanHostString(targetURL.host ?? "")
+        if !currentHost.hasSuffix(".onion") && targetHost.hasSuffix(".onion") {
+            throw LNURLError.insecureEndpoint
+        }
+        guard SecureEndpointValidator.isSecureEndpoint(url: targetURL, hostResolver: hostResolver) else {
+            throw LNURLError.insecureEndpoint
+        }
+        return targetURL
+    }
+
+    func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
+        try Task.checkCancellation()
+        return try await executeGetInternal(url: url, hop: 0)
+    }
+
+    private func executeGetInternal(url: URL, hop: Int) async throws -> (Data, HTTPURLResponse) {
+        try Task.checkCancellation()
+        guard hop <= 3 else { throw LNURLError.networkError("Too many redirects.") }
+
+        let isHTTPS = url.scheme?.lowercased() == "https"
+        let defaultPort: UInt16 = isHTTPS ? 443 : 80
+        if let rawPort = url.port {
+            guard let valid = UInt16(exactly: rawPort), valid > 0 else { throw LNURLError.invalidTarget }
+        }
+        let portValue = url.port.flatMap { UInt16(exactly: $0) } ?? defaultPort
+        guard portValue > 0, let port = NWEndpoint.Port(rawValue: portValue) else {
+            throw LNURLError.invalidTarget
+        }
+
+        guard SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
+            throw LNURLError.insecureEndpoint
+        }
+
+        let cleanHost = SecureEndpointValidator.cleanHostString(url.host ?? "")
+        if cleanHost.hasSuffix(".onion") {
+            guard let onionTransport else {
+                throw LNURLError.networkError("Tor .onion endpoints require an onion proxy transport.")
             }
-            guard SecureEndpointValidator.isSecureEndpoint(url: targetURL, hostResolver: hostResolver) else {
-                throw LNURLError.insecureEndpoint
-            }
-            return try await executeGetInternal(url: targetURL, hop: hop + 1)
+            return try await onionTransport.executeGet(url: url)
+        }
+
+        let vettedIP = try Self.selectPinnedIP(for: cleanHost, resolvedIPs: hostResolver.resolveHostIPs(cleanHost))
+        let tls = isHTTPS ? NWProtocolTLS.Options() : nil
+        if let tls, !SecureEndpointValidator.isNumericIP(cleanHost) {
+            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, cleanHost)
+        }
+        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(vettedIP), port: port)
+        let connection = NWConnection(to: endpoint, using: params)
+
+        let requestData = try Self.buildRequest(
+            url: url,
+            cleanHost: cleanHost,
+            portValue: portValue,
+            defaultPort: defaultPort
+        )
+        let rawResponse = try await sendAndReceive(connection: connection, requestData: requestData)
+        let (body, httpResponse) = try HTTPResponseParser.parse(
+            data: rawResponse.data,
+            url: url,
+            cleanClose: rawResponse.cleanClose
+        )
+
+        if [301, 302, 303, 307, 308].contains(httpResponse.statusCode) {
+            let loc = (httpResponse.allHeaderFields["location"] ?? httpResponse.allHeaderFields["Location"]) as? String
+            let target = try Self.validateRedirectTarget(
+                currentURL: url,
+                locationHeader: loc,
+                hop: hop,
+                hostResolver: hostResolver
+            )
+            return try await executeGetInternal(url: target, hop: hop + 1)
         }
 
         return (body, httpResponse)
     }
 
-    private func sendAndReceive(connection: NWConnection, requestData: Data) async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            let lock = NSLock()
-            var isFinished = false
-            var buffer = Data()
-            var timerItem: DispatchWorkItem?
-
-            func complete(with result: Result<Data, Error>) {
-                lock.withLock {
-                    guard !isFinished else { return }
-                    isFinished = true
-                    timerItem?.cancel()
-                    timerItem = nil
-                    connection.cancel()
-                    continuation.resume(with: result)
-                }
+    private func sendAndReceive(connection: NWConnection,
+                                requestData: Data) async throws -> (data: Data, cleanClose: Bool) {
+        try Task.checkCancellation()
+        let holder = SessionHolder()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let session = NWConnectionSession(
+                    connection: connection,
+                    requestData: requestData,
+                    timeoutInterval: self.timeoutInterval,
+                    queue: self.nwQueue,
+                    continuation: continuation
+                )
+                holder.setSession(session)
+                session.start()
             }
-
-            func readLoop() {
-                connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, isComplete, error in
-                    if let data, !data.isEmpty {
-                        buffer.append(data)
-                        if buffer.count > HTTPResponseParser.maxResponseBytes {
-                            complete(with: .failure(LNURLError.invalidResponse))
-                            return
-                        }
-                    }
-                    if let error {
-                        complete(with: buffer
-                            .isEmpty ? .failure(LNURLError.networkError(error.localizedDescription)) : .success(buffer))
-                        return
-                    }
-                    if isComplete {
-                        complete(with: .success(buffer))
-                        return
-                    }
-                    readLoop()
-                }
-            }
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    connection.send(content: requestData, completion: .contentProcessed { sendError in
-                        if let sendError {
-                            complete(with: .failure(LNURLError.networkError(sendError.localizedDescription)))
-                        } else {
-                            readLoop()
-                        }
-                    })
-                case .failed(let error):
-                    complete(with: .failure(LNURLError.networkError(error.localizedDescription)))
-                case .waiting(let error):
-                    complete(with: .failure(LNURLError.networkError(error.localizedDescription)))
-                default:
-                    break
-                }
-            }
-
-            connection.start(queue: nwQueue)
-
-            let timeoutWorkItem = DispatchWorkItem {
-                complete(with: .failure(LNURLError.networkError("Connection timed out.")))
-            }
-            timerItem = timeoutWorkItem
-            nwQueue.asyncAfter(deadline: .now() + self.timeoutInterval, execute: timeoutWorkItem)
+        } onCancel: {
+            holder.cancel()
+            connection.cancel()
         }
     }
 }
 
-// MARK: - URLSession Transport (Testing / Compatibility Fallback)
+private final class SessionHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var session: NWConnectionSession?
+    private var isCancelled = false
 
-final class URLSessionTransport: SecureHTTPTransporting {
-    private let urlSession: URLSession
-    private let hostResolver: HostIPResolving
-
-    init(urlSession: URLSession, hostResolver: HostIPResolving = SystemHostIPResolver()) {
-        self.urlSession = urlSession
-        self.hostResolver = hostResolver
+    func setSession(_ s: NWConnectionSession) {
+        let shouldCancel = lock.withLock { () -> Bool in
+            session = s
+            return isCancelled
+        }
+        if shouldCancel { s.cancel() }
     }
 
-    func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        guard SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
-            throw LNURLError.insecureEndpoint
+    func cancel() {
+        let s = lock.withLock { () -> NWConnectionSession? in
+            isCancelled = true
+            return session
         }
-
-        let request = SecureEndpointValidator.createSecureRequest(from: url)
-        let redirectDelegate = SecureRedirectDelegate(hostResolver: hostResolver)
-        do {
-            let (data, response) = try await urlSession.data(for: request, delegate: redirectDelegate)
-            guard !redirectDelegate.encounteredInsecureRedirect,
-                  let httpResponse = response as? HTTPURLResponse,
-                  let finalURL = httpResponse.url,
-                  SecureEndpointValidator.isSecureEndpoint(url: finalURL, hostResolver: hostResolver) else {
-                throw LNURLError.insecureEndpoint
-            }
-            return (data, httpResponse)
-        } catch let error as LNURLError {
-            throw error
-        } catch {
-            throw LNURLError.networkError(error.localizedDescription)
-        }
+        s?.cancel()
     }
 }
