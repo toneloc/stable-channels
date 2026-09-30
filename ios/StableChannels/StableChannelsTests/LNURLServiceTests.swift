@@ -1,5 +1,6 @@
 import CryptoKit
 import LDKNode
+import Security
 import XCTest
 @testable import StableChannels
 
@@ -1159,6 +1160,7 @@ final class LNURLServiceTests: XCTestCase {
             XCTFail("Expected LNURLError.insecureEndpoint when DNS rebinds to private IP on second check")
         } catch LNURLError.insecureEndpoint {
             // Rebinding was caught and rejected
+            XCTAssertFalse(MockURLProtocol.seenURLs.isEmpty)
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -1261,6 +1263,257 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(actualRequest.url?.host, "93.184.216.34")
         XCTAssertEqual(actualRequest.value(forHTTPHeaderField: "Host"), "pay.example.com")
         XCTAssertEqual(actualRequest.url?.path, "/.well-known/lnurlp/alice")
+    }
+
+    func testSecureEndpointValidator_blocksAllMissingSubnets() {
+        let blocked = [
+            "64:ff9b::a9fe:a9fe", // NAT64 169.254.169.254 (RFC 6052)
+            "64:ff9b::7f00:1", // NAT64 127.0.0.1 (RFC 6052)
+            "64:ff9b:1::1", // Local-use NAT64 (RFC 8215)
+            "fec0::1", // Deprecated site-local (RFC 3879)
+            "2001:10::1", // ORCHID (RFC 4843)
+            "2001:20::1", // ORCHIDv2 (RFC 7343)
+            "2002:c058:6301::", // 6to4 embedding 192.88.99.1
+            "192.88.99.1" // 6to4 anycast relay (RFC 3068/7526)
+        ]
+        for ip in blocked {
+            XCTAssertTrue(SecureEndpointValidator.isPrivateOrLoopbackHost(ip), "Expected \(ip) to be blocked")
+        }
+
+        let allowed = [
+            "2606:4700::1111",
+            "1.1.1.1",
+            "93.184.216.34"
+        ]
+        for ip in allowed {
+            XCTAssertFalse(SecureEndpointValidator.isPrivateOrLoopbackHost(ip), "Expected \(ip) to be allowed")
+        }
+    }
+
+    func testPreparePinnedRequest_prefersIPv4OverIPv6_inDualStack() throws {
+        let resolver = MockHostIPResolver(mapping: [
+            "dual.example.com": ["2606:4700::1111", "93.184.216.34"]
+        ])
+        let url = try XCTUnwrap(URL(string: "https://dual.example.com/api"))
+        let pinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(from: url, hostResolver: resolver))
+        XCTAssertEqual(pinned.request.url?.host, "93.184.216.34")
+        XCTAssertEqual(pinned.expectedHost, "dual.example.com")
+    }
+
+    func testPreparePinnedRequest_stripsUserinfo() throws {
+        let resolver = MockHostIPResolver(mapping: [
+            "auth.example.com": ["93.184.216.34"]
+        ])
+        let url = try XCTUnwrap(URL(string: "https://user:password@auth.example.com/api"))
+        let pinned = try XCTUnwrap(SecureEndpointValidator.preparePinnedRequest(from: url, hostResolver: resolver))
+        XCTAssertNil(pinned.request.url?.user)
+        XCTAssertNil(pinned.request.url?.password)
+        XCTAssertEqual(pinned.request.url?.host, "93.184.216.34")
+    }
+
+    func testSecureRedirectDelegate_challengeHandler_nonServerTrust_performsDefaultHandling() throws {
+        let sender = MockChallengeSender()
+        let space = MockProtectionSpace(host: "example.com", port: 443, authMethod: NSURLAuthenticationMethodHTTPBasic)
+        let challenge = URLAuthenticationChallenge(
+            protectionSpace: space,
+            proposedCredential: nil,
+            previousFailureCount: 0,
+            failureResponse: nil,
+            error: nil,
+            sender: sender
+        )
+        let delegate = SecureRedirectDelegate(initialExpectedHost: "example.com")
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://93.184.216.34")))
+
+        var disposition: URLSession.AuthChallengeDisposition?
+        delegate.urlSession(session, task: task, didReceive: challenge) { disp, _ in
+            disposition = disp
+        }
+        XCTAssertEqual(disposition, .performDefaultHandling)
+    }
+
+    func testSecureRedirectDelegate_challengeHandler_noExpectedHost_performsDefaultHandling() throws {
+        let sender = MockChallengeSender()
+        let trust = try XCTUnwrap(Self.createTestServerTrust(host: "test.example.com", anchored: true))
+        let space = MockProtectionSpace(
+            host: "test.example.com",
+            port: 443,
+            authMethod: NSURLAuthenticationMethodServerTrust,
+            trust: trust
+        )
+        let challenge = URLAuthenticationChallenge(
+            protectionSpace: space,
+            proposedCredential: nil,
+            previousFailureCount: 0,
+            failureResponse: nil,
+            error: nil,
+            sender: sender
+        )
+        let delegate = SecureRedirectDelegate(initialExpectedHost: nil)
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://93.184.216.34")))
+
+        var disposition: URLSession.AuthChallengeDisposition?
+        delegate.urlSession(session, task: task, didReceive: challenge) { disp, _ in
+            disposition = disp
+        }
+        XCTAssertEqual(disposition, .performDefaultHandling)
+    }
+
+    func testSecureRedirectDelegate_challengeHandler_invalidServerTrust_cancelsChallenge() throws {
+        let sender = MockChallengeSender()
+        let trust = try XCTUnwrap(Self.createTestServerTrust(host: "test.example.com", anchored: false))
+        let space = MockProtectionSpace(
+            host: "test.example.com",
+            port: 443,
+            authMethod: NSURLAuthenticationMethodServerTrust,
+            trust: trust
+        )
+        let challenge = URLAuthenticationChallenge(
+            protectionSpace: space,
+            proposedCredential: nil,
+            previousFailureCount: 0,
+            failureResponse: nil,
+            error: nil,
+            sender: sender
+        )
+        let delegate = SecureRedirectDelegate(initialExpectedHost: "test.example.com")
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://93.184.216.34")))
+
+        var disposition: URLSession.AuthChallengeDisposition?
+        delegate.urlSession(session, task: task, didReceive: challenge) { disp, _ in
+            disposition = disp
+        }
+        XCTAssertEqual(disposition, .cancelAuthenticationChallenge)
+    }
+
+    func testSecureRedirectDelegate_challengeHandler_validServerTrust_usesCredential() throws {
+        let sender = MockChallengeSender()
+        let trust = try XCTUnwrap(Self.createTestServerTrust(host: "test.example.com", anchored: true))
+        let space = MockProtectionSpace(
+            host: "test.example.com",
+            port: 443,
+            authMethod: NSURLAuthenticationMethodServerTrust,
+            trust: trust
+        )
+        let challenge = URLAuthenticationChallenge(
+            protectionSpace: space,
+            proposedCredential: nil,
+            previousFailureCount: 0,
+            failureResponse: nil,
+            error: nil,
+            sender: sender
+        )
+        let delegate = SecureRedirectDelegate(initialExpectedHost: "test.example.com")
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://93.184.216.34")))
+
+        var disposition: URLSession.AuthChallengeDisposition?
+        var credential: URLCredential?
+        delegate.urlSession(session, task: task, didReceive: challenge) { disp, cred in
+            disposition = disp
+            credential = cred
+        }
+        XCTAssertEqual(disposition, .useCredential)
+        XCTAssertNotNil(credential)
+    }
+
+    func testSecureRedirectDelegate_redirect_preservesAndUpdatesExpectedHost() throws {
+        let resolver = MockHostIPResolver(mapping: [
+            "redirected.example.com": ["93.184.216.35"]
+        ])
+        let delegate = SecureRedirectDelegate(hostResolver: resolver, initialExpectedHost: "initial.example.com")
+        let session = URLSession(configuration: .ephemeral)
+        let task = session.dataTask(with: try XCTUnwrap(URL(string: "https://93.184.216.34")))
+        let redirectResponse = try XCTUnwrap(HTTPURLResponse(
+            url: try XCTUnwrap(URL(string: "https://initial.example.com/step1")),
+            statusCode: 302,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        let targetRequest = URLRequest(url: try XCTUnwrap(URL(string: "https://redirected.example.com/step2")))
+
+        var nextRequest: URLRequest?
+        delegate.urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: redirectResponse,
+            newRequest: targetRequest
+        ) { req in
+            nextRequest = req
+        }
+
+        XCTAssertNotNil(nextRequest)
+        XCTAssertEqual(nextRequest?.url?.host, "93.184.216.35")
+        XCTAssertEqual(delegate.expectedHost, "redirected.example.com")
+        XCTAssertFalse(delegate.encounteredInsecureRedirect)
+
+        // Insecure redirect
+        let badRequest = URLRequest(url: try XCTUnwrap(URL(string: "https://127.0.0.1/bad")))
+        var rejectedRequest: URLRequest? = targetRequest
+        delegate.urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: redirectResponse,
+            newRequest: badRequest
+        ) { req in
+            rejectedRequest = req
+        }
+        XCTAssertNil(rejectedRequest)
+        XCTAssertTrue(delegate.encounteredInsecureRedirect)
+    }
+
+    private static let testCertDERHex =
+        "3082034b30820233a00302010202144d90f14da50236506fd50af32f453b7f312004e6300d06092a864886f70d01010b0500301b3119301706035504030c10746573742e6578616d706c652e636f6d301e170d3236303933303134333831315a170d3237303933303134333831315a301b3119301706035504030c10746573742e6578616d706c652e636f6d30820122300d06092a864886f70d01010105000382010f003082010a0282010100aab4f81a14396ca9f786e7bf1e2200d7aebf3d61dff5bca3781bca2f57e7c4919edd24b85ad64f60e2f1f6a929dcf626e3b782e38d12ef6c6115a578f3e08d05f314d3edddf3a84d70479b26dc0498c093f75b2ce6d9269d4cdfbe8fbce2326e83310f52b11b2406b6cf11ce87405bf0f44629d4ae5099da8091ede036b21207719aded57b63ac300e7431e8e2793c73f967f676d889f20010a70e40ff105298fd1e5c2b146b31688841e2853312a80418f2b29f9d8f79ddd32aade88828dcb86a651b8ae141f1ae4851030875f28a0d64b0f055bd7e825691f646116827ef364de8368a7dbeaca1c76d586ea0f3aa75ad60b9753975595049c16420ff1219530203010001a38186308183301d0603551d0e04160414f3b42dee41fca00094d8e7d5fb067f2ca0203e84301f0603551d23041830168014f3b42dee41fca00094d8e7d5fb067f2ca0203e84300f0603551d130101ff040530030101ff301b0603551d11041430128210746573742e6578616d706c652e636f6d30130603551d25040c300a06082b06010505070301300d06092a864886f70d01010b050003820101009fd841a151ba5aec6e81bdb42418ff26cdd0ecb57d508e9a2bcaaadac95897a4b0043a04078b9191ad7ea2859a7f2991e0ed83ec3844e2e91981a7d4e69adce08a13ed0c60f5b5a4401e7de9ea17e4794f61f11d3522aedde7d440f2bce653a6c97d4150e3fd610a818fabe35785dfb649e1dc778d83df04505cdfcf6250ef565f6b8a726fcf635cc44d41f58e0c4b61dd564b9d8e58bba72a46fc085b1fda19cebdd978d879c301be1697076f1d530931e93c5efc51d9dd3d0b32f6e15fa168286e150e334a08d0b8ca9c1f1ccd4ae72373c60c3503a834845cc9d122cc9d505ca7645f9d6beb0f7ddb3b56d82098d8b5905cc92920be4075c474eac35cd99e"
+
+    private static func createTestServerTrust(host: String, anchored: Bool) -> SecTrust? {
+        var data = Data()
+        var index = testCertDERHex.startIndex
+        while index < testCertDERHex.endIndex {
+            let nextIndex = testCertDERHex.index(index, offsetBy: 2)
+            if let byte = UInt8(testCertDERHex[index..<nextIndex], radix: 16) {
+                data.append(byte)
+            }
+            index = nextIndex
+        }
+        guard let cert = SecCertificateCreateWithData(nil, data as CFData) else { return nil }
+        var trust: SecTrust?
+        let policy = SecPolicyCreateSSL(true, host as CFString)
+        let status = SecTrustCreateWithCertificates([cert] as CFArray, policy, &trust)
+        guard status == errSecSuccess, let serverTrust = trust else { return nil }
+        if anchored {
+            SecTrustSetAnchorCertificates(serverTrust, [cert] as CFArray)
+            SecTrustSetAnchorCertificatesOnly(serverTrust, true)
+        }
+        return serverTrust
+    }
+}
+
+private final class MockChallengeSender: NSObject, URLAuthenticationChallengeSender, @unchecked Sendable {
+    func cancel(_: URLAuthenticationChallenge) {}
+    func continueWithoutCredential(for _: URLAuthenticationChallenge) {}
+    func performDefaultHandling(for _: URLAuthenticationChallenge) {}
+    func rejectProtectionSpaceAndContinue(with _: URLAuthenticationChallenge) {}
+    func use(_: URLCredential, for _: URLAuthenticationChallenge) {}
+}
+
+private final class MockProtectionSpace: URLProtectionSpace, @unchecked Sendable {
+    private let customTrust: SecTrust?
+
+    init(host: String, port: Int, authMethod: String, trust: SecTrust? = nil) {
+        self.customTrust = trust
+        super.init(host: host, port: port, protocol: "https", realm: nil, authenticationMethod: authMethod)
+    }
+
+    @available(*, unavailable)
+    required init?(coder _: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var serverTrust: SecTrust? {
+        customTrust
     }
 }
 

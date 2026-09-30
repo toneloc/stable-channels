@@ -125,7 +125,8 @@ enum SecureEndpointValidator {
         if ip >= 0x6440_0000 && ip <= 0x647F_FFFF { return true } // CGNAT 100.64.0.0/10
         if (ip >> 16) == 0xA9FE { return true } // Link Local 169.254.0.0/16
         if ip >= 0xAC10_0000 && ip <= 0xAC1F_FFFF { return true } // RFC 1918 172.16.0.0/12
-        if (ip >> 8) == 0xC00000 || (ip >> 8) == 0xC00002 { return true } // 192.0.0.0/24, 192.0.2.0/24
+        if (ip >> 8) == 0xC00000 || (ip >> 8) == 0xC00002 || (ip >> 8) ==
+            0xC05863 { return true } // 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24 (RFC 3068/7526)
         if (ip >> 16) == 0xC0A8 { return true } // RFC 1918 192.168.0.0/16
         if ip >= 0xC612_0000 && ip <= 0xC613_FFFF { return true } // Benchmark 198.18.0.0/15
         if (ip >> 8) == 0xC63364 || (ip >> 8) == 0xCB0071 { return true } // TEST-NET-2/3
@@ -139,16 +140,26 @@ enum SecureEndpointValidator {
         if bytes.allSatisfy({ $0 == 0 }) { return true } // ::/128 Unspecified
         if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true } // ::1/128 Loopback
         if bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80 { return true } // fe80::/10 Link-Local
+        if bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0xC0 { return true } // fec0::/10 Site-Local (RFC 3879)
         if (bytes[0] & 0xFE) == 0xFC { return true } // fc00::/7 ULA
         if bytes[0] == 0xFF { return true } // ff00::/8 Multicast
         if bytes[0] == 0x01 && bytes[1] == 0x00 && bytes[2..<8].allSatisfy({ $0 == 0 }) { return true } // 100::/64
         if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0D && bytes[3] == 0xB8 { return true } // 2001:db8::/32
-        if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xFF && bytes[11] == 0xFF {
-            let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
-                UInt32(bytes[15])
-            return isPrivateIPv4(v4ip)
+        if bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x00 &&
+            ((bytes[3] & 0xF0) == 0x10 || (bytes[3] & 0xF0) == 0x20) {
+            return true // 2001:10::/28, 2001:20::/28 ORCHID / ORCHIDv2 (RFC 4843, RFC 7343)
         }
-        if bytes[0..<12].allSatisfy({ $0 == 0 }) {
+        if bytes[0] == 0x00 && bytes[1] == 0x64 && bytes[2] == 0xFF && bytes[3] == 0x9B {
+            if bytes[4] == 0x00 && bytes[5] ==
+                0x01 { return true } // 64:ff9b:1::/48 Local-Use IPv4/IPv6 Translation (RFC 8215)
+            if bytes[4..<12].allSatisfy({ $0 == 0 }) {
+                let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
+                    UInt32(bytes[15])
+                return isPrivateIPv4(v4ip) // 64:ff9b::/96 Well-Known IPv4/IPv6 Translation Prefix (RFC 6052)
+            }
+        }
+        if (bytes[0..<10].allSatisfy { $0 == 0 } && bytes[10] == 0xFF && bytes[11] == 0xFF) ||
+            bytes[0..<12].allSatisfy({ $0 == 0 }) {
             let v4ip = (UInt32(bytes[12]) << 24) | (UInt32(bytes[13]) << 16) | (UInt32(bytes[14]) << 8) |
                 UInt32(bytes[15])
             return isPrivateIPv4(v4ip)
@@ -216,8 +227,11 @@ enum SecureEndpointValidator {
     }
 
     /// Prepares an SSRF-safe pinned request for an HTTPS endpoint.
-    /// Resolves clearnet hostnames to a validated public IP, rewrites the destination URL to the pinned IP,
-    /// and preserves the Host header so that URLSession avoids secondary DNS lookups (preventing DNS rebinding).
+    /// Resolves clearnet hostnames to validated public IPs (preferring IPv4), strips any userinfo,
+    /// and rewrites the destination URL to the numeric IP to prevent DNS rebinding (TOCTOU).
+    /// Preserves the Host header for HTTP/1.1 virtual hosting.
+    /// Note: URLSession omits SNI when the URL host is an IP literal (RFC 6066); multi-tenant hosts
+    /// whose TLS certificates depend on SNI require connection-level SNI transport.
     static func preparePinnedRequest(
         from url: URL,
         hostResolver: HostIPResolving = SystemHostIPResolver()
@@ -255,13 +269,15 @@ enum SecureEndpointValidator {
         }
 
         let ips = hostResolver.resolveHostIPs(cleanHost)
-        guard let pinnedIP = ips.first,
-              !ips.contains(where: { isPrivateOrLoopbackHost($0) }) else {
+        guard !ips.isEmpty, !ips.contains(where: { isPrivateOrLoopbackHost($0) }) else {
             return nil
         }
 
+        let pinnedIP = ips.first(where: { !$0.contains(":") }) ?? ips[0]
         let hostString = pinnedIP.contains(":") ? "[\(pinnedIP)]" : pinnedIP
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.user = nil
+        components?.password = nil
         components?.host = hostString
         guard let pinnedURL = components?.url else { return nil }
 
