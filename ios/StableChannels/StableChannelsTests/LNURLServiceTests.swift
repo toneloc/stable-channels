@@ -1396,7 +1396,7 @@ final class LNURLServiceTests: XCTestCase {
         let url = try XCTUnwrap(URL(string: "https://example.com/api"))
 
         // Standard Content-Length response
-        let rawContentLength = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"status\":\"OK\"}"
+        let rawContentLength = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}"
             .data(using: .utf8)!
         let (body1, resp1) = try HTTPResponseParser.parse(data: rawContentLength, url: url)
         XCTAssertEqual(resp1.statusCode, 200)
@@ -1414,6 +1414,64 @@ final class LNURLServiceTests: XCTestCase {
         let (body3, resp3) = try HTTPResponseParser.parse(data: raw404, url: url)
         XCTAssertEqual(resp3.statusCode, 404)
         XCTAssertEqual(String(data: body3, encoding: .utf8), "Not Found")
+    }
+
+    func testHTTPResponseParser_maliciousChunkSizeOverflow_doesNotCrashAndIsRejected() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
+
+        // Chunk size that overflows Int addition if not bounds-checked (SIGTRAP 133 regression test)
+        let maliciousOverflow = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7FFFFFFFFFFFFFFF\r\nAB\r\n0\r\n\r\n"
+            .data(using: .utf8)!
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: maliciousOverflow, url: url)) { error in
+            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
+                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+                return
+            }
+        }
+
+        // Chunk size exceeding maxResponseBytes (2MB limit)
+        let maliciousLargeChunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n300000\r\nABC\r\n0\r\n\r\n"
+            .data(using: .utf8)!
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: maliciousLargeChunk, url: url)) { error in
+            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
+                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testHTTPResponseParser_negativeChunkSize_doesNotCrashAndIsRejected() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
+        let rawNegativeChunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n-1\r\nX\r\n0\r\n\r\n"
+            .data(using: .utf8)!
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawNegativeChunk, url: url)) { error in
+            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
+                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testHTTPResponseParser_truncatedChunkedBody_isRejected() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
+        let rawTruncated = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n".data(using: .utf8)!
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawTruncated, url: url)) { error in
+            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
+                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testHTTPResponseParser_contentLengthTruncation_isRejected() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/api"))
+        let rawTruncated = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort body".data(using: .utf8)!
+        XCTAssertThrowsError(try HTTPResponseParser.parse(data: rawTruncated, url: url)) { error in
+            guard let lnurlError = error as? LNURLError, case .invalidResponse = lnurlError else {
+                XCTFail("Expected LNURLError.invalidResponse, got \(error)")
+                return
+            }
+        }
     }
 
     func testNWConnectionTransport_blocksInsecureEndpointsPreFlight() async throws {
@@ -1451,6 +1509,64 @@ final class LNURLServiceTests: XCTestCase {
             // Expected
         }
     }
+
+    func testNWConnectionTransport_dnsRebindingToPrivateIP_isRejectedAtSocketDial() async throws {
+        final class StatefulResolver: HostIPResolving, @unchecked Sendable {
+            var callCount = 0
+            func resolveHostIPs(_: String) -> [String] {
+                callCount += 1
+                if callCount == 1 {
+                    return ["93.184.216.34"] // Valid public IP on first call (validation)
+                } else {
+                    return ["127.0.0.1"] // Rebinds to loopback IP on second call (socket pin)
+                }
+            }
+        }
+
+        let resolver = StatefulResolver()
+        let transport = NWConnectionTransport(hostResolver: resolver)
+        let rebindURL = try XCTUnwrap(URL(string: "https://rebind.example.com/test"))
+
+        do {
+            _ = try await transport.executeGet(url: rebindURL)
+            XCTFail("Expected insecureEndpoint error when DNS rebinds to loopback")
+        } catch LNURLError.insecureEndpoint {
+            // Success: socket pinning check caught the rebinding and rejected before connecting!
+        }
+        XCTAssertEqual(resolver.callCount, 2)
+    }
+
+    func testNWConnectionTransport_crlfInURLPath_isRejected() throws {
+        let resolver = MockHostIPResolver(mapping: ["attacker.example": ["93.184.216.34"]])
+        let transport = NWConnectionTransport(hostResolver: resolver)
+        let injectedURL = try XCTUnwrap(URL(string: "https://attacker.example/a%0D%0AX-Injected:%201"))
+
+        // Path contains encoded CRLF which percent-decoding would make dangerous, but NWConnectionTransport preserves
+        // encoding
+        let path = injectedURL.path(percentEncoded: true)
+        XCTAssertFalse(path.contains("\r"))
+        XCTAssertFalse(path.contains("\n"))
+        XCTAssertTrue(path.contains("%0D%0A"))
+    }
+
+    func testNWConnectionTransport_routesOnionEndpointsToOnionTransport() async throws {
+        let mockOnion = MockSecureTransport()
+        let onionURL = try XCTUnwrap(URL(string: "http://testpaypoint.onion/.well-known/lnurlp/alice"))
+        let expectedResponse = try XCTUnwrap(HTTPURLResponse(
+            url: onionURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        ))
+        mockOnion.mockResult = (Data("{\"status\":\"OK\"}".utf8), expectedResponse)
+
+        let transport = NWConnectionTransport(onionTransport: mockOnion)
+        let (data, response) = try await transport.executeGet(url: onionURL)
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(String(data: data, encoding: .utf8), "{\"status\":\"OK\"}")
+        XCTAssertEqual(mockOnion.executedURL, onionURL)
+    }
 }
 
 private struct MockHostIPResolver: HostIPResolving {
@@ -1458,5 +1574,18 @@ private struct MockHostIPResolver: HostIPResolving {
 
     func resolveHostIPs(_ host: String) -> [String] {
         mapping[host] ?? []
+    }
+}
+
+private final class MockSecureTransport: SecureHTTPTransporting, @unchecked Sendable {
+    var executedURL: URL?
+    var mockResult: (Data, HTTPURLResponse)?
+
+    func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
+        executedURL = url
+        if let mockResult {
+            return mockResult
+        }
+        throw LNURLError.invalidResponse
     }
 }
