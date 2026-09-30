@@ -16,11 +16,15 @@ enum HTTPResponseParser {
             throw LNURLError.invalidResponse
         }
         let lines = headerStr.components(separatedBy: "\r\n")
-        guard let statusLine = lines.first else { throw LNURLError.invalidResponse }
+        guard let statusLine = lines.first else {
+            throw LNURLError.invalidResponse
+        }
         let statusParts = statusLine.split(separator: " ")
         guard statusParts.count >= 2,
-              statusParts[0].hasPrefix("HTTP/1."),
-              let statusCode = Int(statusParts[1]) else {
+              statusParts[0] == "HTTP/1.1" || statusParts[0] == "HTTP/1.0",
+              statusParts[1].count == 3,
+              let statusCode = Int(statusParts[1]),
+              (100...599).contains(statusCode) else {
             throw LNURLError.invalidResponse
         }
 
@@ -43,10 +47,15 @@ enum HTTPResponseParser {
         let body: Data
         let isChunked = headers["transfer-encoding"]?.lowercased().contains("chunked") == true
         if let lengthStr = headers["content-length"] {
-            guard !isChunked, let expectedLen = Int(lengthStr), expectedLen >= 0 else {
+            guard !isChunked,
+                  lengthStr.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  let expectedLen = Int(lengthStr),
+                  expectedLen >= 0 else {
                 throw LNURLError.invalidResponse
             }
-            guard rawBody.count >= expectedLen else { throw LNURLError.invalidResponse }
+            guard rawBody.count >= expectedLen else {
+                throw LNURLError.invalidResponse
+            }
             body = Data(rawBody.prefix(expectedLen))
         } else if isChunked {
             guard let decoded = decodeChunked(data: Data(rawBody)) else {

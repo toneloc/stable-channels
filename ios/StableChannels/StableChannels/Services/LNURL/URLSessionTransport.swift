@@ -82,7 +82,9 @@ import Foundation
                       SecureEndpointValidator.isSecureEndpoint(url: finalURL, hostResolver: hostResolver) else {
                     throw LNURLError.insecureEndpoint
                 }
-                guard data.count <= HTTPResponseParser.maxResponseBytes else { throw LNURLError.invalidResponse }
+                guard data.count <= HTTPResponseParser.maxResponseBytes else {
+                    throw LNURLError.invalidResponse
+                }
                 return (data, http)
             } catch let error as LNURLError {
                 throw error

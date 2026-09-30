@@ -199,6 +199,8 @@ enum SecureEndpointValidator {
 
         if let rawPort = url.port {
             guard let validPort = UInt16(exactly: rawPort), validPort > 0 else { return false }
+        } else if URLComponents(url: url, resolvingAgainstBaseURL: false)?.rangeOfPort != nil {
+            return false
         }
 
         let cleanHost = cleanHostString(rawHost)

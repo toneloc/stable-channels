@@ -40,7 +40,9 @@ final class NWConnectionSession: @unchecked Sendable {
         lock.withLock {
             guard !isFinished else { return }
             selfRetain = self
-            connection.stateUpdateHandler = { [weak self] in self?.handleState($0) }
+            connection.stateUpdateHandler = { [weak self] state in
+                self?.handleState(state)
+            }
             let item = DispatchWorkItem { [weak self] in
                 self?.complete(with: .failure(LNURLError.networkError("Connection timed out.")))
             }
@@ -121,6 +123,10 @@ final class NWConnectionTransport: SecureHTTPTransporting {
     private let onionTransport: SecureHTTPTransporting?
     private let nwQueue = DispatchQueue(label: "org.stablechannels.nwtransport")
 
+    #if DEBUG
+        var dialTargetOverride: ((_ endpoint: NWEndpoint, _ params: NWParameters) -> (NWEndpoint, NWParameters))?
+    #endif
+
     init(
         hostResolver: HostIPResolving = SystemHostIPResolver(),
         timeoutInterval: TimeInterval = 15.0,
@@ -169,7 +175,9 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         hop: Int,
         hostResolver: HostIPResolving = SystemHostIPResolver()
     ) throws -> URL {
-        guard hop < 3 else { throw LNURLError.networkError("Too many redirects.") }
+        guard hop < 3 else {
+            throw LNURLError.networkError("Too many redirects.")
+        }
         guard let locationHeader,
               let targetURL = URL(string: locationHeader, relativeTo: currentURL)?.absoluteURL else {
             throw LNURLError.invalidResponse
@@ -185,24 +193,46 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         return targetURL
     }
 
+    /// Pure function for constructing dial parameters (NWEndpoint and NWParameters with TLS SNI).
+    static func buildDialParameters(
+        cleanHost: String,
+        vettedIP: String,
+        port: NWEndpoint.Port,
+        isHTTPS: Bool
+    ) -> (endpoint: NWEndpoint, parameters: NWParameters) {
+        let tls = isHTTPS ? NWProtocolTLS.Options() : nil
+        if let tls, !SecureEndpointValidator.isNumericIP(cleanHost) {
+            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, cleanHost)
+        }
+        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(vettedIP), port: port)
+        return (endpoint, params)
+    }
+
     func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        try Task.checkCancellation()
-        return try await executeGetInternal(url: url, hop: 0)
+        try await executeGetInternal(url: url, hop: 0)
     }
 
     private func executeGetInternal(url: URL, hop: Int) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
-        guard hop <= 3 else { throw LNURLError.networkError("Too many redirects.") }
+        guard hop <= 3 else {
+            throw LNURLError.networkError("Too many redirects.")
+        }
 
         let isHTTPS = url.scheme?.lowercased() == "https"
         let defaultPort: UInt16 = isHTTPS ? 443 : 80
         if let rawPort = url.port {
-            guard let valid = UInt16(exactly: rawPort), valid > 0 else { throw LNURLError.invalidTarget }
-        }
-        let portValue = url.port.flatMap { UInt16(exactly: $0) } ?? defaultPort
-        guard portValue > 0, let port = NWEndpoint.Port(rawValue: portValue) else {
+            guard let valid = UInt16(exactly: rawPort), valid > 0 else {
+                throw LNURLError.invalidTarget
+            }
+        } else if URLComponents(url: url, resolvingAgainstBaseURL: false)?.rangeOfPort != nil {
             throw LNURLError.invalidTarget
         }
+        let portValue = url.port.flatMap { UInt16(exactly: $0) } ?? defaultPort
+        guard portValue > 0 else {
+            throw LNURLError.invalidTarget
+        }
+        let port = NWEndpoint.Port(rawValue: portValue)!
 
         guard SecureEndpointValidator.isSecureEndpoint(url: url, hostResolver: hostResolver) else {
             throw LNURLError.insecureEndpoint
@@ -217,12 +247,17 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         }
 
         let vettedIP = try Self.selectPinnedIP(for: cleanHost, resolvedIPs: hostResolver.resolveHostIPs(cleanHost))
-        let tls = isHTTPS ? NWProtocolTLS.Options() : nil
-        if let tls, !SecureEndpointValidator.isNumericIP(cleanHost) {
-            sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, cleanHost)
-        }
-        let params = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(vettedIP), port: port)
+        var (endpoint, params) = Self.buildDialParameters(
+            cleanHost: cleanHost,
+            vettedIP: vettedIP,
+            port: port,
+            isHTTPS: isHTTPS
+        )
+        #if DEBUG
+            if let override = dialTargetOverride {
+                (endpoint, params) = override(endpoint, params)
+            }
+        #endif
         let connection = NWConnection(to: endpoint, using: params)
 
         let requestData = try Self.buildRequest(
@@ -252,8 +287,10 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         return (body, httpResponse)
     }
 
-    private func sendAndReceive(connection: NWConnection,
-                                requestData: Data) async throws -> (data: Data, cleanClose: Bool) {
+    private func sendAndReceive(
+        connection: NWConnection,
+        requestData: Data
+    ) async throws -> (data: Data, cleanClose: Bool) {
         try Task.checkCancellation()
         let holder = SessionHolder()
         return try await withTaskCancellationHandler {
@@ -285,14 +322,15 @@ private final class SessionHolder: @unchecked Sendable {
             session = s
             return isCancelled
         }
-        if shouldCancel { s.cancel() }
+        if shouldCancel {
+            s.cancel()
+        }
     }
 
     func cancel() {
-        let s = lock.withLock { () -> NWConnectionSession? in
+        lock.withLock {
             isCancelled = true
-            return session
+            session?.cancel()
         }
-        s?.cancel()
     }
 }

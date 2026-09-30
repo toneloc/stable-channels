@@ -11,22 +11,28 @@ final class LNURLService: LNURLServiceProtocol {
     init(
         expectedNetwork: Network,
         hostResolver: HostIPResolving = SystemHostIPResolver(),
+        onionTransport: SecureHTTPTransporting? = nil,
         transport: SecureHTTPTransporting? = nil
     ) {
         self.expectedNetwork = expectedNetwork
         self.hostResolver = hostResolver
-        self.transport = transport ?? NWConnectionTransport(hostResolver: hostResolver)
+        self.transport = transport ?? NWConnectionTransport(
+            hostResolver: hostResolver,
+            onionTransport: onionTransport
+        )
     }
 
     #if DEBUG
         convenience init(
             urlSession: URLSession,
             hostResolver: HostIPResolving = SystemHostIPResolver(),
-            expectedNetwork: Network = .regtest
+            expectedNetwork: Network = .regtest,
+            onionTransport: SecureHTTPTransporting? = nil
         ) {
             self.init(
                 expectedNetwork: expectedNetwork,
                 hostResolver: hostResolver,
+                onionTransport: onionTransport,
                 transport: URLSessionTransport(urlSession: urlSession, hostResolver: hostResolver)
             )
         }
@@ -39,6 +45,7 @@ final class LNURLService: LNURLServiceProtocol {
             self.init(
                 expectedNetwork: expectedNetwork,
                 hostResolver: hostResolver,
+                onionTransport: nil,
                 transport: transport
             )
         }
@@ -60,31 +67,29 @@ final class LNURLService: LNURLServiceProtocol {
         hostResolver: HostIPResolving = SystemHostIPResolver()
     ) throws -> URL {
         var clean = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        for prefix in ["lightning://", "lightning:"] {
-            if let range = clean.range(of: prefix, options: [.caseInsensitive, .anchored]) {
-                clean.removeSubrange(range)
-                break
-            }
+        for prefix in ["lightning://", "lightning:"] where clean.lowercased().hasPrefix(prefix) {
+            clean = String(clean.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            break
         }
-        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
 
         let resolvedURL: URL
         if clean.contains("@") {
-            guard clean.filter({ $0 == "@" }).count == 1 else { throw LNURLError.invalidTarget }
             let parts = clean.split(separator: "@", omittingEmptySubsequences: true)
-            guard parts.count == 2 else { throw LNURLError.invalidTarget }
-            let username = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
-            let domain = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !username.isEmpty, !domain.isEmpty else { throw LNURLError.invalidTarget }
-
-            let forbidden = CharacterSet(charactersIn: "/?#@: \\\"%<>{}|^`[]")
-            guard username.rangeOfCharacter(from: forbidden) == nil,
-                  username.rangeOfCharacter(from: .controlCharacters) == nil,
-                  domain.contains("."), !domain.hasPrefix("."), !domain.hasSuffix(".") else {
+            guard clean.filter({ $0 == "@" }).count == 1, parts.count == 2 else {
                 throw LNURLError.invalidTarget
             }
+            let username = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let domain = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !username.isEmpty, !domain.isEmpty else {
+                throw LNURLError.invalidTarget
+            }
+
+            let forbidden = CharacterSet(charactersIn: "/?#@: \\\"%<>{}|^`[]")
             let allowedDomain = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789.-")
-            guard domain.unicodeScalars.allSatisfy({ allowedDomain.contains($0) }),
+            guard username.rangeOfCharacter(from: forbidden) == nil,
+                  username.rangeOfCharacter(from: .controlCharacters) == nil,
+                  domain.contains("."), !domain.hasPrefix("."), !domain.hasSuffix("."),
+                  domain.unicodeScalars.allSatisfy({ allowedDomain.contains($0) }),
                   !isPrivateOrLoopbackHost(domain) else {
                 throw LNURLError.invalidTarget
             }
@@ -132,7 +137,6 @@ final class LNURLService: LNURLServiceProtocol {
         guard params.tag.lowercased() == "payrequest" else {
             throw LNURLError.unsupportedTag(tag: params.tag)
         }
-
         guard params.plainTextDescription != nil else {
             throw LNURLError.invalidMetadata
         }
@@ -183,12 +187,11 @@ final class LNURLService: LNURLServiceProtocol {
             if !trimmed.isEmpty {
                 var allowed = CharacterSet.urlQueryAllowed
                 allowed.remove(charactersIn: "+&?#/=;")
-                let encodedComment = trimmed.addingPercentEncoding(withAllowedCharacters: allowed) ?? trimmed
-                queryItems.append(URLQueryItem(name: "comment", value: encodedComment))
+                let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: allowed) ?? trimmed
+                queryItems.append(URLQueryItem(name: "comment", value: encoded))
             }
         }
         components.percentEncodedQueryItems = queryItems
-
         guard let url = components.url else {
             throw LNURLError.invalidResponse
         }
@@ -206,10 +209,7 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.invalidResponse
         }
 
-        let bolt11: Bolt11Invoice
-        do {
-            bolt11 = try Bolt11Invoice.fromStr(invoiceStr: pr)
-        } catch {
+        guard let bolt11 = try? Bolt11Invoice.fromStr(invoiceStr: pr) else {
             throw LNURLError.invalidResponse
         }
 
@@ -282,7 +282,9 @@ final class LNURLService: LNURLServiceProtocol {
     }
 
     private func throwIfErrorResponse(data: Data) throws {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return
+        }
 
         if let status = json["status"] as? String, status.uppercased() == "ERROR" {
             let reason = (json["reason"] as? String) ?? "The recipient service reported an error."

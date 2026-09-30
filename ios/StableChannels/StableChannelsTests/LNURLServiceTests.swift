@@ -1485,25 +1485,19 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(mockOnion.executedURL, onionURL)
     }
 
-    func testNWConnectionTransport_onionEndpointRedirectingToClearnetRebindingHost_isVetoedAndNeverContacted(
+    func testNWConnectionTransport_onionEndpointRedirectingToClearnetHost_isVetoedAndNeverContacted(
     ) async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: config)
 
-        final class StatefulResolver: HostIPResolving, @unchecked Sendable {
-            var callCount = 0
+        final class ClearnetResolver: HostIPResolving, @unchecked Sendable {
             func resolveHostIPs(_: String) -> [String] {
-                callCount += 1
-                if callCount == 1 {
-                    return ["93.184.216.34"] // Valid public IP during validation
-                } else {
-                    return ["127.0.0.1"] // Rebinds to loopback
-                }
+                ["93.184.216.34"]
             }
         }
 
-        let resolver = StatefulResolver()
+        let resolver = ClearnetResolver()
         let onionURL = try XCTUnwrap(URL(string: "http://attacker.onion/.well-known/lnurlp/alice"))
         let clearnetRedirectURL = try XCTUnwrap(URL(string: "https://rebinding.attacker.com/internal-api"))
 
@@ -1533,7 +1527,7 @@ final class LNURLServiceTests: XCTestCase {
 
         do {
             _ = try await transport.executeGet(url: onionURL)
-            XCTFail("Expected insecureEndpoint error when onion redirects to clearnet rebinding host")
+            XCTFail("Expected insecureEndpoint error when onion redirects to clearnet host")
         } catch LNURLError.insecureEndpoint {
             // Expected: SecureRedirectDelegate vetoed clearnet redirect from onion service pre-hop
         }
@@ -1895,7 +1889,7 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    // MARK: - cleanClose Unframed Body Tests (Finding 2)
+    // MARK: - Unframed Body Clean Close Verification
 
     func testHTTPResponseParser_unframedBody_cleanCloseRequired() throws {
         let testURL = try XCTUnwrap(URL(string: "https://example.com/api"))
@@ -1935,7 +1929,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(String(data: bodyChunked, encoding: .utf8), "{\"status\":\"OK\"}")
     }
 
-    // MARK: - Trailing-Dot Hosts Test (Finding 7)
+    // MARK: - Trailing-Dot Host Validation
 
     func testSecureEndpointValidator_trailingDotHosts_areBlockedByStaticBlocklist() throws {
         XCTAssertEqual(SecureEndpointValidator.cleanHostString("localhost."), "localhost")
@@ -1954,7 +1948,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertFalse(SecureEndpointValidator.isSecureEndpoint(url: localDotURL))
     }
 
-    // MARK: - Appended Query Parameters Encoding Test (Finding 6)
+    // MARK: - Appended Query Parameter Encoding
 
     func testFetchInvoice_preservesPreExistingQueryPlus_andEncodesAppendedPlus() async throws {
         let callbackURL = try XCTUnwrap(URL(string: "https://example.com/api?tag=pay&search=hello+world"))
@@ -1996,7 +1990,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertTrue(query.contains("amount=50000"))
     }
 
-    // MARK: - Bolt11 fromStr Error Mapping & Network Check (Finding 5)
+    // MARK: - Bolt11 Invoice Validation & Network Check
 
     func testFetchInvoice_malformedBolt11_mapsToInvalidResponse() async throws {
         let callbackURL = try XCTUnwrap(URL(string: "https://example.com/callback"))
@@ -2051,7 +2045,7 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    // MARK: - Error Classification Tests (Finding 8)
+    // MARK: - Error Classification
 
     func testResolveEndpoint_oversizedPort_throwsInvalidTarget() {
         XCTAssertThrowsError(try LNURLService.resolveEndpoint(from: "https://example.com:99999/pay")) { error in
@@ -2097,7 +2091,7 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    // MARK: - Pure Functions: Pin Selection & Redirect Policy (Finding 9)
+    // MARK: - Pin Selection & Redirect Policy
 
     func testNWConnectionTransport_selectPinnedIP_prefersIPv4() throws {
         let ips = ["2606:4700::1111", "93.184.216.34", "2606:4700::2222"]
@@ -2231,6 +2225,303 @@ final class LNURLServiceTests: XCTestCase {
             XCTAssertEqual(error as? LNURLError, .insecureEndpoint)
         }
     }
+
+    // MARK: - Onion Transport Routing
+
+    func testLNURLService_defaultInitWithoutOnionTransport_onionEndpointThrowsProxyRequired() async throws {
+        let service = LNURLService(expectedNetwork: .regtest)
+        let onionURL = try XCTUnwrap(URL(string: "http://service.onion/lnurlp"))
+
+        do {
+            _ = try await service.fetchPayParams(from: onionURL)
+            XCTFail("Expected networkError when fetching onion endpoint without configured onion transport")
+        } catch let LNURLError.networkError(message) {
+            XCTAssertTrue(
+                message.contains("onion proxy transport"),
+                "Expected error message mentioning onion proxy transport, got: \(message)"
+            )
+        } catch {
+            XCTFail("Expected LNURLError.networkError, got \(error)")
+        }
+    }
+
+    func testLNURLService_initWithOnionTransport_delegatesOnionRequestToOnionTransport() async throws {
+        let onionURL = try XCTUnwrap(URL(string: "http://service.onion/lnurlp"))
+        let mockOnion = MockSecureTransport()
+        let validPayResponse = "{\"tag\":\"payRequest\",\"callback\":\"http://service.onion/callback\",\"minSendable\":1000,\"maxSendable\":100000000,\"metadata\":\"[[\\\"text/plain\\\",\\\"test\\\"]]\"}"
+        let httpResponse = try XCTUnwrap(HTTPURLResponse(
+            url: onionURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+        mockOnion.mockResult = (Data(validPayResponse.utf8), httpResponse)
+
+        let service = LNURLService(
+            expectedNetwork: .regtest,
+            onionTransport: mockOnion
+        )
+
+        let params = try await service.fetchPayParams(from: onionURL)
+        XCTAssertEqual(mockOnion.executedURL, onionURL)
+        XCTAssertEqual(params.callback, "http://service.onion/callback")
+    }
+
+    // MARK: - Virtual-Hosted TLS SNI Verification
+
+    func testNWConnectionTransport_virtualHostedTLS_routesSelectedCertificateBySNI() async throws {
+        let identityA = try XCTUnwrap(Self.loadTestIdentity(base64: Self.testCertP12Base64A))
+        let identityB = try XCTUnwrap(Self.loadTestIdentity(base64: Self.testCertP12Base64B))
+
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testtlslistener")
+        let listenerTLS = NWProtocolTLS.Options()
+        sec_protocol_options_set_challenge_block(listenerTLS.securityProtocolOptions, { metadata, completion in
+            let presentedSNI = sec_protocol_metadata_get_server_name(metadata).map { String(cString: $0) }
+            if presentedSNI == "vhost-a.example" {
+                completion(identityA)
+            } else if presentedSNI == "vhost-b.example" {
+                completion(identityB)
+            } else {
+                completion(nil)
+            }
+        }, listenerQueue)
+
+        let listener = try NWListener(
+            using: NWParameters(tls: listenerTLS, tcp: NWProtocolTCP.Options()),
+            on: .any
+        )
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: listenerQueue)
+            incoming.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, _ in
+                if data != nil {
+                    incoming.send(
+                        content: Data("HTTP/1.1 200 OK\r\nContent-Length: 15\r\n\r\n{\"status\":\"OK\"}".utf8),
+                        isComplete: true,
+                        completion: .contentProcessed { _ in incoming.cancel() }
+                    )
+                }
+            }
+        }
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+        let endpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: port))
+
+        for host in ["vhost-a.example", "vhost-b.example"] {
+            final class CertCapture: @unchecked Sendable {
+                let lock = NSLock()
+                var commonName: String?
+                func set(_ name: String?) { lock.withLock { commonName = name } }
+                func get() -> String? { lock.withLock { commonName } }
+            }
+            let capture = CertCapture()
+
+            let resolver = MockHostIPResolver(mapping: [host: ["93.184.216.34"]])
+            let transport = NWConnectionTransport(hostResolver: resolver, timeoutInterval: 5.0)
+
+            let clientQueue = DispatchQueue(label: "org.stablechannels.testtlsclient.\(host)")
+            transport.dialTargetOverride = { _, params in
+                if let tlsOpts = params.defaultProtocolStack.applicationProtocols.first(where: {
+                    $0 is NWProtocolTLS.Options
+                }) as? NWProtocolTLS.Options {
+                    sec_protocol_options_set_verify_block(tlsOpts.securityProtocolOptions, { _, secTrust, completion in
+                        let serverTrust = sec_trust_copy_ref(secTrust).takeRetainedValue()
+                        if let chain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate],
+                           let cert = chain.first,
+                           let summary = SecCertificateCopySubjectSummary(cert) as String? {
+                            capture.set(summary)
+                        }
+                        completion(true)
+                    }, clientQueue)
+                }
+                let localEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: endpointPort)
+                return (localEndpoint, params)
+            }
+
+            let testURL = try XCTUnwrap(URL(string: "https://\(host)/pay"))
+            let (body, response) = try await transport.executeGet(url: testURL)
+
+            XCTAssertEqual(response.statusCode, 200)
+            XCTAssertEqual(String(data: body, encoding: .utf8), "{\"status\":\"OK\"}")
+            XCTAssertEqual(capture.get(), host, "Expected TLS server to present SNI-selected certificate for \(host)")
+        }
+    }
+
+    // MARK: - Redirect Rebinding Acceptance Verification
+
+    func testNWConnectionTransport_redirectHopToRebindingHost_isVetoedAndTargetListenerNeverContacted() async throws {
+        // Listener 1: origin listener that returns 302 redirect to target
+        let originListener = try NWListener(using: .tcp, on: .any)
+        let originQueue = DispatchQueue(label: "org.stablechannels.testorigin")
+        originListener.newConnectionHandler = { conn in
+            conn.start(queue: originQueue)
+            conn.receive(minimumIncompleteLength: 1, maximumLength: 1024) { data, _, _, _ in
+                if data != nil {
+                    let resp = "HTTP/1.1 302 Found\r\nLocation: https://target.example.com/redirect\r\nContent-Length: 0\r\n\r\n"
+                    conn.send(content: Data(resp.utf8), isComplete: true, completion: .contentProcessed { _ in
+                        conn.cancel()
+                    })
+                }
+            }
+        }
+        originListener.start(queue: originQueue)
+        defer { originListener.cancel() }
+
+        var originPortValue: UInt16?
+        for _ in 0..<100 {
+            if let p = originListener.port?.rawValue, p > 0 {
+                originPortValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let originPort = try XCTUnwrap(originPortValue)
+        let originEndpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: originPort))
+
+        // Listener 2: target listener that must NEVER be contacted
+        let targetListener = try NWListener(using: .tcp, on: .any)
+        final class AtomicFlag: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = false
+            func set() { lock.withLock { value = true } }
+            func get() -> Bool { lock.withLock { value } }
+        }
+        let targetSawConnection = AtomicFlag()
+        targetListener.newConnectionHandler = { conn in
+            targetSawConnection.set()
+            conn.cancel()
+        }
+        let targetQueue = DispatchQueue(label: "org.stablechannels.testtarget")
+        targetListener.start(queue: targetQueue)
+        defer { targetListener.cancel() }
+
+        var targetPortValue: UInt16?
+        for _ in 0..<100 {
+            if let p = targetListener.port?.rawValue, p > 0 {
+                targetPortValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let targetPort = try XCTUnwrap(targetPortValue)
+        let targetEndpointPort = try XCTUnwrap(NWEndpoint.Port(rawValue: targetPort))
+
+        final class RedirectStatefulResolver: HostIPResolving, @unchecked Sendable {
+            private let lock = NSLock()
+            private var count = 0
+            func resolveHostIPs(_ host: String) -> [String] {
+                lock.withLock {
+                    if host == "origin.example.com" {
+                        return ["93.184.216.34"]
+                    }
+                    count += 1
+                    if count == 1 {
+                        return ["93.184.216.34"] // Valid public answer during pre-flight redirect check
+                    } else {
+                        return ["127.0.0.1"] // Rebinds to loopback on connection attempt
+                    }
+                }
+            }
+
+            func getCallCount() -> Int { lock.withLock { count } }
+        }
+
+        let resolver = RedirectStatefulResolver()
+        let transport = NWConnectionTransport(hostResolver: resolver, timeoutInterval: 5.0)
+
+        // Seam routes origin host to local originListener and target host to local targetListener
+        transport.dialTargetOverride = { endpoint, params in
+            switch endpoint {
+            case let .hostPort(host, _):
+                if host == "93.184.216.34" {
+                    return (.hostPort(host: "127.0.0.1", port: originEndpointPort), NWParameters.tcp)
+                } else {
+                    return (.hostPort(host: "127.0.0.1", port: targetEndpointPort), NWParameters.tcp)
+                }
+            default:
+                return (endpoint, params)
+            }
+        }
+
+        let originURL = try XCTUnwrap(URL(string: "https://origin.example.com/pay"))
+        do {
+            _ = try await transport.executeGet(url: originURL)
+            XCTFail("Expected insecureEndpoint when redirect target rebinds to loopback")
+        } catch LNURLError.insecureEndpoint {
+            // Expected: hop 1 rebind was intercepted and vetoed by selectPinnedIP/isSecureEndpoint
+        }
+
+        XCTAssertFalse(targetSawConnection.get(), "Target listener was contacted across redirect hop!")
+        XCTAssertEqual(resolver.getCallCount(), 2, "Expected target host to be resolved twice (pre-flight and dial)")
+    }
+
+    func testNWConnectionTransport_20DigitPort_throwsInvalidTargetWithoutCrashing() async throws {
+        let resolver = MockHostIPResolver(mapping: ["example.com": ["93.184.216.34"]])
+        let transport = NWConnectionTransport(hostResolver: resolver)
+
+        let port20URL = try XCTUnwrap(URL(string: "https://example.com:99999999999999999999/x"))
+        do {
+            _ = try await transport.executeGet(url: port20URL)
+            XCTFail("Expected invalidTarget for 20-digit port")
+        } catch LNURLError.invalidTarget {
+            // Success: unrepresentable port token rejected without coercion to 443
+        }
+
+        XCTAssertThrowsError(try LNURLService
+            .resolveEndpoint(from: "https://example.com:99999999999999999999/pay")) { error in
+                XCTAssertEqual(error as? LNURLError, .invalidTarget)
+            }
+    }
+
+    func testHTTPResponseParser_negativeStatusCode_andNonStandardHTTPVersion_areRejected() throws {
+        let testURL = try XCTUnwrap(URL(string: "https://example.com/api"))
+
+        let negativeStatus = "HTTP/1.1 -824 OK\r\nContent-Length: 2\r\n\r\nOK"
+        XCTAssertThrowsError(try HTTPResponseParser.parse(
+            data: Data(negativeStatus.utf8),
+            url: testURL,
+            cleanClose: true
+        )) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidResponse)
+        }
+
+        let nonStandardVersion = "HTTP/1.9 200 OK\r\nContent-Length: 2\r\n\r\nOK"
+        XCTAssertThrowsError(try HTTPResponseParser.parse(
+            data: Data(nonStandardVersion.utf8),
+            url: testURL,
+            cleanClose: true
+        )) { error in
+            XCTAssertEqual(error as? LNURLError, .invalidResponse)
+        }
+    }
+
+    private static func loadTestIdentity(base64: String) -> OS_sec_identity? {
+        guard let data = Data(base64Encoded: base64) else { return nil }
+        let options: [String: Any] = [kSecImportExportPassphrase as String: "testpass"]
+        var rawItems: CFArray?
+        guard SecPKCS12Import(data as CFData, options as CFDictionary, &rawItems) == 0,
+              let items = rawItems as? [[String: Any]],
+              let first = items.first,
+              let secIdentity = first[kSecImportItemIdentity as String] else {
+            return nil
+        }
+        return sec_identity_create(secIdentity as! SecIdentity)
+    }
+
+    private static let testCertP12Base64A =
+        "MIIFyQIBAzCCBY8GCSqGSIb3DQEHAaCCBYAEggV8MIIFeDCCAncGCSqGSIb3DQEHBqCCAmgwggJkAgEAMIICXQYJKoZIhvcNAQcBMBwGCiqGSIb3DQEMAQYwDgQI1UMnzxzUBcYCAggAgIICMEYkvm5QtYlmxe1xREWUwvg8bBkg3f7nTmpDpzqaRUrdsmBv572O+kXXFh5Z21gkMiZ4FDzJo6MfxQr3wgOHPAT1QntQAI0enPcrqEXr8q6M4zOj4GYTjm6D6aNN8QPkBVhKekQIlbA+ddjjT4WO3+8sk4EIIy9pvy9Ltsd7J2rbq6nCw4bNRscSKWBWY68yH7o4+3SjRpg/1nyKHWHGMgCKIrds43dR8rZMNJ5x+y9kk+/x+o13456VVim6VCSW+qxw+fKUgvwectpEvwTXr7BqTPut9BRBks8VNk/49c+G4MCGDeGOu2f7bU1e/cOcay01tzuPefWM3yp2w1IF9UXgNobNfHZrtJtebnleU3G6yg5V804pMihKBfGWl8hUNx713NzVvMah7pc+1Zkv6Kp62Od+iwc1At3mighK746Uxk3c/BsEEJSdk7Qa/cwIRhFfeuP8wydEnxrLDtI/fSC8ymm94Ar/0ZPE+yKbM2nIG8ykIou1IbhprfZz9ibDsID3WObmzOLuV3vCZ4ravSGTYZ8lALoDh/P+ZVF2Ma5XIvkINv6AyGBB14iXXTEl+44No+iTR0DmqDBTdMG1KxrOirFwY/8v6EIFByfw3zNCudOhDqsgmVmNfcvPQ55byF3JmhXSkk2I7y/VYuzSZSuq6oSi9oR+NMqlxHfTGCiWRGNg6Ty7eJdi0J5ZnKRKsTFawXyXwJ4lxMmuuYxTzXycY5e38gqa7DVKd0LCQv/zMIIC+QYJKoZIhvcNAQcBoIIC6gSCAuYwggLiMIIC3gYLKoZIhvcNAQwKAQKgggKmMIICojAcBgoqhkiG9w0BDAEDMA4ECKbHyQYqDoJOAgIIAASCAoBqT+X2x8RgJ8q71zW6DiIhhLsUpdgSAP8YHWUpPAeTjCIIOvOVyh5Jlv1eJp1bM5fyqQOzPwAh26g+OAWWy6ssZrzkW3KoR/vTJwNBskjSkNHNQEkpYq9Bn3IPMcb9WT7nRsIMhW78c/MV0+MZQEe6ue/+xNNF73ba/wFjizDrOjJxRgLHQfswFM8nR+3qIiSDjtD/DFNSmJ5NBK6oKFfJiOZtwW4DTqPWVmA23tuBfgYwDvQu+5RBtTpzilB3QzhYBAVVoGWibSNUep5b5KRgQoX3g8CjCvFMKKYj8G37rnB2bq4nMDQBFgUT7ALpzPhofvggq0NFRDj5lzGVqlZ+9c74LgzQ9CdpoYWdHLkYoae7ImBwOZFCEZaGzhAN0jmaMdhrIilPQPtLGCdBrf14Bl9dP7ZCS6LDoMy4Z79/5ztfLdKovw2Qnihivw/8EcLEcmZspRYiTegqOeDnDnnQuz+jXebeu69v0v2FMDvWEd1lpeRhYt0Dontv7lUheu3swZ20RaDv/DqQWVnShwukFZZ6uz46uniQXdWmFyTubzXZwJPBax9KAJmTpjuQ9rdG/UJAJBIM/2BI590ow4Oq6FYSpMAvosOqn7639CcVrnUaEggrVTk4QOsjKjfrr72xK1jBHU96D2gRFVlEK45sOvBXYKrngAb4Dn3CPo4I3M6jj9S0pn03/WH1QBGUcdKC8tUoo6rF1Re3vTdrR0eKm76zO2plqVXNhPk04Iw31Dp+z2isc4NPCBkKMYHeBUVZTVPjR09vPjgT1WoaekApaUmyKhb5UM+ux4N/VA6iTYl2Io0c9pHetHyAJPTMwpNLeZBGWKlf3dG/FQZNavg1MSUwIwYJKoZIhvcNAQkVMRYEFDoZhwbdbadqLSXgIA40dFIvXMy2MDEwITAJBgUrDgMCGgUABBSIZgeoci8+QDb/Vu0pHvI0jyOj4gQI5UdROF/zJS8CAggA"
+
+    private static let testCertP12Base64B =
+        "MIIFyQIBAzCCBY8GCSqGSIb3DQEHAaCCBYAEggV8MIIFeDCCAncGCSqGSIb3DQEHBqCCAmgwggJkAgEAMIICXQYJKoZIhvcNAQcBMBwGCiqGSIb3DQEMAQYwDgQImo8r39534IwCAggAgIICMLbMuWYIkPGABDcFj4QFxbzBR4j07G5RmW+2snCk+wSX/s+kXRWX1AZOKgZ4h6ICZL7dGCueZ2QopbB1L39q1I0GYNB5Yq6WacbepBJB04vEcpJx1r8WqVLBlTBRROK9J2rLOtrT1G84rPsIdZ3irFZesullNqWA8N9X/ZJoam6mnBa2SNdh7bVbbdt/EnEx5Y6n6/I3DYScfMy4eA0ApEf06zg2ObuHsOHNbYg1KYJrt8DkZVkfP+u1bndz+ERhPNeU5P8yEoFRkcMcofG+bgv5/UQoy68GQat7H+fwgZbnEmo9swjOrc2AYTUjM+c2k4os2uesKfpZbFAyL19f0VcqfZos6vWob8/4ICccLXv52jOk4uTR2jO8tD63rtpc2LpfUgF6oef2T8bn40e52t5ZijOgi+xGNkr/c1B8rDGMWRwQE/YOOFYG63Kuy9YBq3H45mIGmpdJFIYS9JmEQpXWNVzss7oyBfdCyVPyKq7EbWP9ya92fQZDbNf2mQlsRIL/9sZfBSUFUke39vyhYLL3yOyH+c3qdSbN1lFgtGEdzoxeLnqw4+K0yNAvEeqYi7wFWUcxH8d3ZOS6nR3EQ0K2xEEXpydZmwuIHMIIdF8Q9UhNbhQmtyGqHIOwJXFqQlQzjGI3jHiLLTuxCQRAaHXcFRdRO9Mdikjr2y/QfrsvokvEQjarBFvRwJgWCOlcX2CxFrMEO1YUo7mb3dKh3XG0MMj1OoCTDXWIsClZEA+QMIIC+QYJKoZIhvcNAQcBoIIC6gSCAuYwggLiMIIC3gYLKoZIhvcNAQwKAQKgggKmMIICojAcBgoqhkiG9w0BDAEDMA4ECPbRJVMOs7QiAgIIAASCAoArJ43gpQVEBiKPOXIuXRIbAULQanYPTRS5Gnmm4GDOcSox2jDuv4E1xyGWim54LEzZoB7hSHOroXgDxlO2nnQu+4uuMZe6TMzMtGllPVlbkfUpVTzYO/Wop8ZZq9eNIm01YuFy9SWazYkf0JxegjuA/XXZl6NBUokRZC/I0E3wyzMQfYEdqfhnhBH+z9M3BpRfGf76ULcucFjBQouFOQn6g2yBv3xsJ64aSXETzYA362xYEGwqmWuEBPVR0BT39vJms3cliAv+Gt+W9WVIEnFir4g/O9L8vyb+ZJ7VBVbPyiYHUhr6tcZV1wjO/QstoZr3myAI7SQ6A7eSTNp/e/rCz1v1WaZFcqkgWo7uyeRA4emGQdvnkghfDeI9RebOYqR3TWegsaJRIp2lab+MtPS7z+l3rtB05YxYipo+fTBTX9dW09kgRb7HGK8b/O6QydiBWAxhzusNUS4KM6rkZtd4P5VNOrtX3rFgw6XvQNfa1w3WUtdkPHgXE1wv5/MQ82QWboSIQM6A3EYDRn8vnQUxdyYYqSYCubC5RKiFyF7f2wvDEb6QWtnrcl3TA9LFmthP/Rw0Da2p0pFH3QbUqJFIyCe/dEaGhWlSRl3crUMEC3p390+2jp3ipNzcCliXfiC+EEClrdkY9W0u0+NBuRaGT2gTNf+20cwiP0PigU2oKtaN7Rpvd1vOd6QUyPEPbR89BkGglve9lRS7XFqn3RqSlNEVg6bRlH31ZnBFAaHcxg5r1OUOaTzmVkkzIox+KvFwSM+YxM+8EgKz65XEHiBmLNHZPsh9CYz/zdsZjTVCRBdFchsnjMpm/AZEl9OmJxRrUqChkCz4q2ZmS7oOqB+qMSUwIwYJKoZIhvcNAQkVMRYEFC+CfGcnUSKE/a1fx5i96bzSP48jMDEwITAJBgUrDgMCGgUABBRPxLdParpuWEquhRWWWFXHjYJVGQQIT/mzWW41YxoCAggA"
 }
 
 private struct MockHostIPResolver: HostIPResolving {
