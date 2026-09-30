@@ -104,8 +104,8 @@ pub async fn reconcile_event_history(
                         "PAYMENT_RECONSTRUCTED",
                         serde_json::json!({
                             "source": "reconnect_reconciliation",
-                            "dedup_key": format!("lsp:reconstructed-payment:{}:{}:{}", payment.id, payment.status, payment.latest_update_timestamp),
-                            "payment_id": payment.id,
+                            "dedup_key": format!("lsp:reconstructed-payment:{}:{}:{}", payment.payment_id, payment.status, payment.latest_update_timestamp),
+                            "payment_id": payment.payment_id,
                             "amount_msat": payment.amount_msat,
                             "fee_paid_msat": payment.fee_paid_msat,
                             "direction": payment.direction,

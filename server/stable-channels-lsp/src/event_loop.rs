@@ -224,7 +224,7 @@ async fn dispatch(
             }
         },
         Some(EventVariant::PaymentReceived(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             mgr.handle_payment_received(e.custom_records, payment_id, amount_msat, ldk, btc_price)
                 .await;
@@ -252,7 +252,7 @@ async fn dispatch(
             }
         },
         Some(EventVariant::PaymentSuccessful(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
@@ -316,7 +316,7 @@ async fn dispatch(
             }
         },
         Some(EventVariant::PaymentFailed(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let fee_paid_msat = e.payment.as_ref().and_then(|p| p.fee_paid_msat);
             let direction = e.payment.as_ref().map(|p| if p.direction == 1 { "outbound" } else { "inbound" });
@@ -359,7 +359,7 @@ async fn dispatch(
             );
         },
         Some(EventVariant::PaymentClaimable(e)) => {
-            let payment_id = e.payment.as_ref().map(|p| p.id.clone());
+            let payment_id = e.payment.as_ref().map(|p| p.payment_id.clone());
             let amount_msat = e.payment.as_ref().and_then(|p| p.amount_msat);
             let has_custom_records = !e.custom_records.is_empty();
             stable_channels::audit::audit_event(

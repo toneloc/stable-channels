@@ -291,6 +291,7 @@ impl StableChannelManager {
         }
         let send = ldk
             .spontaneous_send(SpontaneousSendRequest {
+                preimage: None,
                 amount_msat: 1,
                 node_id: response.counterparty.clone(),
                 route_parameters: None,
@@ -1943,6 +1944,7 @@ impl StableChannelManager {
                         }
                     };
                     let send_req = SpontaneousSendRequest {
+                preimage: None,
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
@@ -2162,6 +2164,7 @@ impl StableChannelManager {
         };
         let envelope = crate::messages::build_envelope(payload, signature);
         let req = SpontaneousSendRequest {
+                preimage: None,
             amount_msat: 1,
             node_id: counterparty.to_string(),
             route_parameters: None,
