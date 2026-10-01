@@ -1,5 +1,6 @@
 mod auth;
 mod backfill;
+mod channel_audit;
 mod channel_close;
 mod config;
 mod event_loop;
@@ -114,6 +115,12 @@ async fn main() -> Result<()> {
         ),
     }
     set_audit_ledger(db.clone());
+    // Persist the restart gap before any stream/reconciliation tasks start. Audit traffic is not
+    // evidence of stream health; a failed checkpoint must not silently invent startup coverage.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    let last_event_before_start_ms = Some(db.begin_event_stream_gap(now_ms)
+        .context("failed to persist event-stream startup gap")?.0);
     let channel_count = db
         .load_all_channels()
         .map_err(|e| anyhow::anyhow!("load_all_channels failed: {}", e))?
@@ -140,6 +147,7 @@ async fn main() -> Result<()> {
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         ldk_log_file,
+        last_event_before_start_ms,
     };
 
     let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
@@ -359,6 +367,7 @@ fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
         bytes_to_lower_hex(&bytes)
     } else {
         ldk_config::resolve_api_key(None, ldk_cfg_ref)
+            .map_err(|e| anyhow::anyhow!(e))?
             .ok_or_else(|| anyhow::anyhow!("Could not resolve LDK Server api_key"))?
     };
 

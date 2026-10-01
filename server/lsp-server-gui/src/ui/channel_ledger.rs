@@ -583,7 +583,15 @@ fn human_summary(event: &ChannelLedgerEvent) -> String {
         "SPLICE_OUT_STABLE_DEDUCTED" => "Splice out reduced stable backing".to_owned(),
         "STABILITY_PAYMENT_SENT" => "Stability payment sent".to_owned(),
         "STABILITY_PAYMENT_SETTLED" => "Stability payment completed".to_owned(),
-        "EVENT_STREAM_GAP_CLOSED" => "Channel recovered after reconnect".to_owned(),
+        "EVENT_STREAM_GAP_CLOSED" if stream_recovery_has_loss(event) => "Stream recovered with history loss".to_owned(),
+        "EVENT_STREAM_GAP_CLOSED" if recovery_detail(event, "history_complete").and_then(|value| value.as_bool()) == Some(false) => {
+            "Stream recovered; history incomplete".to_owned()
+        }
+        "EVENT_STREAM_GAP_CLOSED" => "Stream recovery completed".to_owned(),
+        "EVENT_STREAM_COVERAGE_UNKNOWN" => "Earlier stream coverage unknown".to_owned(),
+        "PAYMENT_FORWARDED" => "Forward observed live".to_owned(),
+        "PAYMENT_FORWARDED_BACKFILL" => "Forward observed in history".to_owned(),
+        "FORWARD_HISTORY_IDENTITY_GAP" => "Forward history identity unavailable".to_owned(),
         "CHANNEL_ACCOUNTING_STATE_COMMITTED" => "Channel accounting state recorded".to_owned(),
         "CHANNEL_CLOSED_COMMITTED" | "CHANNEL_CLOSED" => "Channel closed".to_owned(),
         "STABILITY_PAYMENT_RECORDED" => "Stability payment recorded".to_owned(),
@@ -592,6 +600,30 @@ fn human_summary(event: &ChannelLedgerEvent) -> String {
         "SYNC_MESSAGE_SENT" => "Accounting sync delivered".to_owned(),
         "PAYMENT_SETTLED" if event_amount_msat(event) == Some(1) => {
             "Accounting sync settled".to_owned()
+        }
+        "PAYMENT_FAILED" => match detail_text(event, "reason") {
+            Some(reason) => format!("Payment failed: {}", humanize_enum(&reason)),
+            None => "Payment failed".to_owned(),
+        },
+        "SPLICE_NEGOTIATED" => "Splice negotiated".to_owned(),
+        "SPLICE_NEGOTIATION_FAILED" => "Splice negotiation failed".to_owned(),
+        "CHANNEL_SHUTDOWN_STATE_CHANGED" => match detail_text(event, "shutdown_state") {
+            Some(state) => format!("Channel shutdown: {}", humanize_enum(&state)),
+            None => "Channel shutdown stage changed".to_owned(),
+        },
+        "CHANNEL_ONCHAIN_TX" => {
+            let state = if event.status == "failed" {
+                "failed"
+            } else if detail_text(event, "confirmation").as_deref() == Some("confirmed") {
+                if event.status == "pending" { "confirmed, still pending" } else { "confirmed" }
+            } else if detail_text(event, "confirmation").as_deref() == Some("unconfirmed") {
+                "unconfirmed"
+            } else if detail_value(event, "confirmation_height").and_then(|height| height.as_u64()).is_some() {
+                if event.status == "pending" { "confirmed, still pending" } else { "confirmed" }
+            } else {
+                "recorded"
+            };
+            format!("{} {state}", onchain_tx_label(detail_text(event, "tx_type").as_deref()))
         }
         unknown => title_case_event(unknown),
     }
@@ -638,11 +670,12 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         "EVENT_STREAM_CONNECTED" => {
             "The LSP connected to LDK Server's live event stream and resumed listening for activity."
         }
-        "EVENT_STREAM_GAP_OPENED" => {
+        "EVENT_STREAM_GAP_OPENED" | "EVENT_STREAM_GAP_STARTED" => {
             "The LSP lost the live LDK event stream, so activity during this interval may need reconstruction."
         }
-        "EVENT_STREAM_GAP_CLOSED" => {
-            "The LSP reconnected to LDK Server and completed its recovery check for the missed interval."
+        "EVENT_STREAM_GAP_CLOSED" => return stream_recovery_help(event),
+        "EVENT_STREAM_COVERAGE_UNKNOWN" => {
+            "Earlier stream coverage cannot be established from a stream-health checkpoint or an explicit open gap. This is uncertainty, not evidence that events were lost."
         }
         "CHANNEL_RECONSTRUCTED" => {
             "After reconnecting, the LSP rebuilt this snapshot from current LDK channel data. The channel itself was not recreated."
@@ -656,8 +689,18 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         "SWEEP_RECONSTRUCTED" => {
             "After reconnecting, the LSP rebuilt this pending sweep snapshot from LDK's current balances."
         }
-        "PAYMENT_FORWARDED_BACKFILL" => {
-            "The LSP found a forwarded payment in LDK history that was not observed on the live event stream and added it to the ledger."
+        "PAYMENT_FORWARDED_BACKFILL" | "PAYMENT_FORWARDED" => return forwarded_help(event),
+        "FORWARD_HISTORY_IDENTITY_GAP" => {
+            "LDK returned forward-history observations without durable IDs. Their multiplicity is preserved as evidence, but distinct payments cannot be counted reliably and coverage remains incomplete."
+        }
+        "SPLICE_NEGOTIATED" => {
+            "The splice was agreed with the peer and its new funding transaction is waiting for confirmation. The channel's accounting is reconciled when LDK reports it ready again."
+        }
+        "SPLICE_NEGOTIATION_FAILED" => {
+            "A splice negotiation round with the peer failed. Nothing changed on-chain: the channel keeps its current funding and any splice already negotiated."
+        }
+        "CHANNEL_SHUTDOWN_STATE_CHANGED" => {
+            "The channel moved to a new cooperative close stage. Pending HTLCs are resolved first, then the closing fee is negotiated and the close transaction is broadcast. The LSP checks every 30 seconds, so a quick close can skip stages, and a stage the channel falls back to after a disconnect is not recorded again."
         }
         "RECONCILIATION_SCOPE_FAILED" => {
             "Part of the reconnect recovery could not be queried. The affected scope and error are available in Raw JSON."
@@ -695,7 +738,8 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         "PAYMENT_SETTLED" | "PAYMENT_SUCCESSFUL" => {
             "The Lightning payment completed successfully."
         }
-        "PAYMENT_FAILED" => "The Lightning payment did not complete successfully.",
+        "PAYMENT_FAILED" => return failed_payment_help(event),
+        "CHANNEL_ONCHAIN_TX" => return onchain_tx_help(event),
         _ => {
             return format!(
                 "This is {}. Hover the badges for classification details or open Raw JSON for the exact recorded fields.",
@@ -704,6 +748,143 @@ fn event_help(event: &ChannelLedgerEvent) -> String {
         },
     };
     explanation.to_owned()
+}
+
+fn detail_value(event: &ChannelLedgerEvent, key: &str) -> Option<serde_json::Value> {
+    serde_json::from_str::<serde_json::Value>(&event.detail_json).ok()?.get(key).cloned()
+}
+
+fn detail_text(event: &ChannelLedgerEvent, key: &str) -> Option<String> {
+    detail_value(event, key)?.as_str().map(str::to_owned)
+}
+
+fn recovery_detail(event: &ChannelLedgerEvent, key: &str) -> Option<serde_json::Value> {
+    detail_value(event, key).filter(|value| !value.is_null())
+        .or_else(|| detail_value(event, "reconciliation")?.get(key).cloned())
+}
+
+fn stream_recovery_has_loss(event: &ChannelLedgerEvent) -> bool {
+    event.status == "completed_with_loss"
+        || recovery_detail(event, "status").and_then(|value| value.as_str().map(str::to_owned)).as_deref() == Some("completed_with_loss")
+}
+
+fn stream_recovery_help(event: &ChannelLedgerEvent) -> String {
+    if stream_recovery_has_loss(event) {
+        return "The live stream recovered and recovery checks finished, but some history could not be recovered. Closing the gap does not restore that lost history.".to_owned();
+    }
+    match recovery_detail(event, "history_complete").and_then(|value| value.as_bool()) {
+        Some(false) => "The live stream recovered, but this interval's history is marked incomplete. Closing the gap does not establish complete history.",
+        Some(true) => "The live stream recovered and recovery checks marked history complete for this interval.",
+        None => "The LSP closed this reconnect recovery interval. This record does not specify whether its history was complete.",
+    }.to_owned()
+}
+
+fn forwarded_help(event: &ChannelLedgerEvent) -> String {
+    let detail = serde_json::from_str::<serde_json::Value>(&event.detail_json).unwrap_or_default();
+    let source = if event.event_type == "PAYMENT_FORWARDED_BACKFILL" {
+        if detail["forward_identity"] == "history_id"
+            && detail["forwarded_payment_id"].as_str().is_some_and(|id| !id.is_empty()) {
+            "LDK history observation; replays of the same history ID are deduplicated."
+        } else {
+            "LDK history observation. This record does not establish history-ID replay deduplication."
+        }
+    } else {
+        "Live forwarding observation without a shared history ID."
+    };
+    let matching = match detail["forward_correlation"]["status"].as_str() {
+        Some("possible_match") => "A nearby observation is a possible match within the bounded matching window.",
+        Some("ambiguous") => "Several nearby observations could match; their identity is ambiguous.",
+        Some("unavailable") => "Matching is unavailable because suitable identity or timing information is missing.",
+        Some("unmatched") => "No eligible match was found within the bounded matching window; this does not prove a separate payment.",
+        _ => "Correlation information is unavailable in this record.",
+    };
+    let identity = if detail["forward_correlation"]["exact_identity"] == false {
+        "Exact identity is not established (exact_identity=false)."
+    } else {
+        "No exact live/history identity is established by this record."
+    };
+    with_skimmed_fee(event, &format!(
+        "{source} {matching} {identity} Separate observations may describe the same payment; adding their amounts can double-count."
+    ))
+}
+
+// LDK enum names such as ROUTE_NOT_FOUND read as "route not found".
+fn humanize_enum(name: &str) -> String {
+    name.to_ascii_lowercase().replace('_', " ").replace("htlcs", "HTLCs")
+}
+
+fn onchain_tx_label(tx_type: Option<&str>) -> &'static str {
+    match tx_type {
+        Some("FUNDING") => "Funding transaction",
+        Some("INTERACTIVE_FUNDING") => "Interactive funding transaction",
+        Some("COOPERATIVE_CLOSE") => "Cooperative close transaction",
+        Some("UNILATERAL_CLOSE") => "Force-close transaction",
+        Some("ANCHOR_BUMP") => "Close fee-bump transaction",
+        Some("CLAIM") => "Claim transaction",
+        Some("SWEEP") => "Sweep transaction",
+        _ => "On-chain channel transaction",
+    }
+}
+
+fn onchain_tx_help(event: &ChannelLedgerEvent) -> String {
+    let what = match detail_text(event, "tx_type").as_deref() {
+        Some("FUNDING") => "This transaction funds the channel.",
+        Some("INTERACTIVE_FUNDING") => "This transaction was negotiated together with the peer, such as a splice, and becomes the channel's new funding.",
+        Some("COOPERATIVE_CLOSE") => "Both sides agreed to close the channel, and this transaction pays out their balances.",
+        Some("UNILATERAL_CLOSE") => "One side force-closed the channel by broadcasting its latest commitment transaction.",
+        Some("ANCHOR_BUMP") => "LDK added fees to a closing transaction through its anchor output so it confirms in time.",
+        Some("CLAIM") => "LDK claimed funds from the channel's closing transaction.",
+        Some("SWEEP") => "LDK swept the channel's claimable outputs back to its on-chain wallet.",
+        _ => "LDK classified this on-chain transaction as belonging to the channel.",
+    };
+    let height = detail_value(event, "confirmation_height").and_then(|height| height.as_u64());
+    let confirmation = detail_text(event, "confirmation");
+    let when = if event.status == "failed" {
+        "LDK reports it failed; it may have been dropped or replaced.".to_owned()
+    } else if confirmation.as_deref() == Some("unconfirmed") {
+        "It is currently unconfirmed and waiting for confirmation. This can be an initial broadcast or a return to unconfirmed after a reorg.".to_owned()
+    } else if confirmation.as_deref() == Some("confirmed") || height.is_some() {
+        let location = height.map(|height| format!("It is confirmed in block {height}."))
+            .unwrap_or_else(|| "It is confirmed on-chain.".to_owned());
+        let completion = if event.status == "pending" {
+            "It remains pending in LDK, which may still be waiting for anti-reorg depth. Confirmation alone does not establish completion."
+        } else if detail_text(event, "ldk_status").as_deref() == Some("SUCCEEDED") {
+            "LDK reports its anti-reorg confirmation threshold reached. A later reorg can still change this state."
+        } else {
+            "Confirmation alone does not establish finality; this record does not specify LDK's anti-reorg completion state."
+        };
+        format!("{location} {completion}")
+    } else {
+        "No confirmation state was recorded.".to_owned()
+    };
+    format!("{what} {when}")
+}
+
+fn failed_payment_help(event: &ChannelLedgerEvent) -> String {
+    let base = "The Lightning payment did not complete successfully.";
+    let Some(reason) = detail_text(event, "reason") else {
+        return base.to_owned();
+    };
+    let cause = match reason.as_str() {
+        "ROUTE_NOT_FOUND" => "LDK found no route to the recipient. For a stability payment or sync this usually means the wallet was offline or the channel lacked capacity.".to_owned(),
+        "RECIPIENT_REJECTED" => "The recipient's node rejected it.".to_owned(),
+        "RETRIES_EXHAUSTED" => "LDK used up its retry attempts or its retry timeout.".to_owned(),
+        "PAYMENT_EXPIRED" => "It expired while LDK was still retrying.".to_owned(),
+        "USER_ABANDONED" => "It was abandoned before it completed.".to_owned(),
+        "UNEXPECTED_ERROR" => "LDK hit an unexpected routing error.".to_owned(),
+        other => format!("LDK reported the reason as {}.", humanize_enum(other)),
+    };
+    format!("{base} {cause}")
+}
+
+fn with_skimmed_fee(event: &ChannelLedgerEvent, explanation: &str) -> String {
+    match detail_value(event, "skimmed_fee_msat").and_then(|fee| fee.as_u64()).filter(|fee| *fee > 0) {
+        Some(fee) => format!(
+            "{explanation} {} of the fee was withheld as the channel-open fee for a just-in-time channel.",
+            format_msat(fee)
+        ),
+        None => explanation.to_owned(),
+    }
 }
 
 fn splice_direction(event: &ChannelLedgerEvent) -> Option<String> {
@@ -965,6 +1146,8 @@ fn status_help(status: &str) -> String {
         "observed" => "Informational event; no workflow completion is implied",
         "pending" => "Operation is still in progress",
         "completed" => "Operation finished or was applied successfully",
+        "completed_with_loss" => "Recovery finished, but some history could not be recovered",
+        "unknown" => "State or coverage is uncertain; loss is not established",
         "partial" => "Only part of the operation completed successfully",
         "failed" => "Operation failed or was rejected",
         "skipped" => "Operation was intentionally not performed",
@@ -1350,5 +1533,222 @@ mod tests {
             format_sats_with_usd(100_000, Some(80_000.0)),
             "100,000 sats · ≈ $80.00"
         );
+    }
+
+    fn with_detail(mut event: ChannelLedgerEvent, detail: &str) -> ChannelLedgerEvent {
+        event.detail_json = detail.to_owned();
+        event
+    }
+
+    #[test]
+    fn splice_negotiation_rows_read_as_splice_progress() {
+        let negotiated = event(1, "SPLICE_NEGOTIATED");
+        assert_eq!(human_summary(&negotiated), "Splice negotiated");
+        assert!(event_help(&negotiated).contains("waiting for confirmation"));
+        let failed = event(2, "SPLICE_NEGOTIATION_FAILED");
+        assert_eq!(human_summary(&failed), "Splice negotiation failed");
+        assert!(event_help(&failed).contains("Nothing changed on-chain"));
+    }
+
+    #[test]
+    fn shutdown_stage_rows_name_the_new_stage() {
+        let resolving = with_detail(
+            event(1, "CHANNEL_SHUTDOWN_STATE_CHANGED"),
+            r#"{"previous_shutdown_state":"SHUTDOWN_INITIATED","shutdown_state":"RESOLVING_HTLCS"}"#,
+        );
+        assert_eq!(human_summary(&resolving), "Channel shutdown: resolving HTLCs");
+        assert!(event_help(&resolving).contains("cooperative close"));
+        assert!(event_help(&resolving).contains("every 30 seconds"));
+        assert_eq!(
+            human_summary(&event(2, "CHANNEL_SHUTDOWN_STATE_CHANGED")),
+            "Channel shutdown stage changed"
+        );
+    }
+
+    #[test]
+    fn failed_payment_rows_explain_the_ldk_reason() {
+        let route = with_detail(event(1, "PAYMENT_FAILED"), r#"{"reason":"ROUTE_NOT_FOUND"}"#);
+        assert_eq!(human_summary(&route), "Payment failed: route not found");
+        assert!(event_help(&route).contains("wallet was offline"));
+        let exhausted = with_detail(event(5, "PAYMENT_FAILED"), r#"{"reason":"RETRIES_EXHAUSTED"}"#);
+        assert!(event_help(&exhausted).contains("used up its retry attempts"));
+        let rejected = with_detail(event(2, "PAYMENT_FAILED"), r#"{"reason":"RECIPIENT_REJECTED"}"#);
+        assert!(event_help(&rejected).contains("rejected"));
+        let novel = with_detail(event(3, "PAYMENT_FAILED"), r#"{"reason":"UNKNOWN(42)"}"#);
+        assert!(event_help(&novel).contains("unknown(42)"));
+        let legacy = with_detail(event(4, "PAYMENT_FAILED"), r#"{"reason":null}"#);
+        assert_eq!(human_summary(&legacy), "Payment failed");
+        assert_eq!(event_help(&legacy), "The Lightning payment did not complete successfully.");
+    }
+
+    #[test]
+    fn forwarded_rows_mention_a_skimmed_channel_open_fee() {
+        let jit = with_detail(event(1, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":2500000}"#);
+        assert!(event_help(&jit).contains("2,500 sats"));
+        assert!(event_help(&jit).contains("channel-open fee"));
+        let plain = with_detail(event(2, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":null}"#);
+        assert!(!event_help(&plain).contains("channel-open fee"));
+        let backfill = with_detail(
+            event(3, "PAYMENT_FORWARDED_BACKFILL"),
+            r#"{"skimmed_fee_msat":1500}"#,
+        );
+        assert!(event_help(&backfill).contains("LDK history observation"));
+        assert!(event_help(&backfill).contains("1,500 msat"));
+    }
+
+    #[test]
+    fn forward_history_help_distinguishes_id_replays_from_live_observations() {
+        let history = with_detail(
+            event(1, "PAYMENT_FORWARDED_BACKFILL"),
+            r#"{"forward_identity":"history_id","forwarded_payment_id":"history-1","forward_correlation":{"status":"possible_match","candidate_event_id":42,"exact_identity":false}}"#,
+        );
+        assert_eq!(human_summary(&history), "Forward observed in history");
+        let help = event_help(&history);
+        assert!(help.contains("replays of the same history ID are deduplicated"));
+        assert!(help.contains("possible match"));
+        assert!(help.contains("exact_identity=false"));
+        assert!(help.contains("Separate observations may describe the same payment"));
+        assert!(help.contains("adding their amounts can double-count"));
+        assert!(!help.contains("not observed on the live event stream"));
+    }
+
+    #[test]
+    fn forward_matching_states_never_establish_an_exact_payment_identity() {
+        for (state, explanation) in [
+            ("possible_match", "possible match within the bounded matching window"),
+            ("ambiguous", "their identity is ambiguous"),
+            ("unavailable", "Matching is unavailable"),
+            ("unmatched", "this does not prove a separate payment"),
+        ] {
+            for event_type in ["PAYMENT_FORWARDED", "PAYMENT_FORWARDED_BACKFILL"] {
+                let mut row = event(1, event_type);
+                row.detail_json = serde_json::json!({
+                    "forward_identity": "history_id",
+                    "forwarded_payment_id": "history-1",
+                    "forward_correlation": {"status": state, "exact_identity": false},
+                }).to_string();
+                let help = event_help(&row);
+                assert!(help.contains(explanation), "{event_type}: {help}");
+                assert!(help.contains("Exact identity is not established (exact_identity=false)"));
+                assert!(help.contains("adding their amounts can double-count"));
+                if event_type == "PAYMENT_FORWARDED" {
+                    assert_eq!(human_summary(&row), "Forward observed live");
+                    assert!(help.contains("without a shared history ID"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_and_idless_forwards_do_not_promise_replay_deduplication() {
+        for detail in ["{}", r#"{"forwarded_payment_id":"legacy-id"}"#, r#"{"forward_identity":"history_id","forwarded_payment_id":""}"#] {
+            let history = with_detail(event(1, "PAYMENT_FORWARDED_BACKFILL"), detail);
+            let help = event_help(&history);
+            assert!(help.contains("does not establish history-ID replay deduplication"));
+            assert!(help.contains("Correlation information is unavailable"));
+            assert!(help.contains("adding their amounts can double-count"));
+            assert!(!help.contains("exact_identity=false"), "absent metadata is not a recorded false flag");
+        }
+        let missing = event(2, "FORWARD_HISTORY_IDENTITY_GAP");
+        assert_eq!(human_summary(&missing), "Forward history identity unavailable");
+        assert!(event_help(&missing).contains("distinct payments cannot be counted reliably"));
+    }
+
+    #[test]
+    fn recovered_stream_can_still_have_lost_or_incomplete_history() {
+        let mut lost = with_detail(event(1, "EVENT_STREAM_GAP_CLOSED"), r#"{"history_complete":false}"#);
+        lost.status = "completed_with_loss".to_owned();
+        assert_eq!(human_summary(&lost), "Stream recovered with history loss");
+        assert!(event_help(&lost).contains("does not restore that lost history"));
+        assert!(status_help(&lost.status).contains("some history could not be recovered"));
+
+        lost.status = "completed".to_owned();
+        assert_eq!(human_summary(&lost), "Stream recovered; history incomplete");
+        assert!(event_help(&lost).contains("does not establish complete history"));
+        assert!(!event_help(&lost).contains("lost history"), "incomplete alone does not establish loss");
+
+        let complete = with_detail(event(2, "EVENT_STREAM_GAP_CLOSED"), r#"{"history_complete":true}"#);
+        assert_eq!(human_summary(&complete), "Stream recovery completed");
+        assert!(event_help(&complete).contains("marked history complete for this interval"));
+        let legacy = event(3, "EVENT_STREAM_GAP_CLOSED");
+        assert!(event_help(&legacy).contains("does not specify whether its history was complete"));
+        let nested = with_detail(legacy, r#"{"reconciliation":{"status":"completed_with_loss","history_complete":false}}"#);
+        assert_eq!(human_summary(&nested), "Stream recovered with history loss");
+        assert!(event_help(&nested).contains("does not restore that lost history"));
+    }
+
+    #[test]
+    fn unknown_stream_coverage_is_uncertainty_not_established_loss() {
+        let mut unknown = with_detail(event(1, "EVENT_STREAM_COVERAGE_UNKNOWN"), r#"{"history_before_ms":1234}"#);
+        unknown.status = "unknown".to_owned();
+        assert_eq!(human_summary(&unknown), "Earlier stream coverage unknown");
+        assert!(event_help(&unknown).contains("uncertainty, not evidence that events were lost"));
+        assert!(status_help(&unknown.status).contains("loss is not established"));
+    }
+
+    #[test]
+    fn onchain_channel_transactions_read_as_their_type_and_state() {
+        let mut funding = with_detail(
+            event(1, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"FUNDING","confirmation":"confirmed","confirmation_height":861204}"#,
+        );
+        assert_eq!(human_summary(&funding), "Funding transaction confirmed");
+        assert!(event_help(&funding).contains("funds the channel"));
+        assert!(event_help(&funding).contains("block 861204"));
+
+        let mut close = with_detail(
+            event(2, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"COOPERATIVE_CLOSE","confirmation":"unconfirmed"}"#,
+        );
+        close.status = "pending".to_owned();
+        assert_eq!(human_summary(&close), "Cooperative close transaction unconfirmed");
+        assert!(event_help(&close).contains("waiting for confirmation"));
+
+        funding.status = "failed".to_owned();
+        funding.detail_json = r#"{"tx_type":"FUNDING","confirmation":"unconfirmed"}"#.to_owned();
+        assert_eq!(human_summary(&funding), "Funding transaction failed");
+        assert!(event_help(&funding).contains("dropped or replaced"));
+
+        close.detail_json = r#"{"tx_type":"SOMETHING_NEW","confirmation":"unconfirmed"}"#.to_owned();
+        assert_eq!(human_summary(&close), "On-chain channel transaction unconfirmed");
+    }
+
+    #[test]
+    fn onchain_confirmation_does_not_imply_anti_reorg_completion() {
+        let mut pending = with_detail(
+            event(1, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"FUNDING","confirmation":"confirmed","confirmation_height":861204,"ldk_status":"PENDING"}"#,
+        );
+        pending.status = "pending".to_owned();
+        assert_eq!(human_summary(&pending), "Funding transaction confirmed, still pending");
+        let help = event_help(&pending);
+        assert!(help.contains("block 861204"));
+        assert!(help.contains("waiting for anti-reorg depth"));
+        assert!(help.contains("Confirmation alone does not establish completion"));
+
+        pending.status = "completed".to_owned();
+        pending.detail_json = r#"{"tx_type":"FUNDING","confirmation":"confirmed","ldk_status":"SUCCEEDED"}"#.to_owned();
+        assert_eq!(human_summary(&pending), "Funding transaction confirmed");
+        assert!(event_help(&pending).contains("anti-reorg confirmation threshold reached"));
+        assert!(event_help(&pending).contains("A later reorg can still change this state"));
+
+        let legacy = with_detail(event(2, "CHANNEL_ONCHAIN_TX"), r#"{"confirmation_height":861204}"#);
+        assert_eq!(human_summary(&legacy), "On-chain channel transaction confirmed");
+        assert!(event_help(&legacy).contains("does not specify LDK's anti-reorg completion state"));
+        assert!(event_help(&event(3, "CHANNEL_ONCHAIN_TX")).contains("No confirmation state was recorded"));
+    }
+
+    #[test]
+    fn unconfirmed_onchain_state_allows_reorg_without_claiming_a_new_broadcast() {
+        let mut reorg = with_detail(
+            event(1, "CHANNEL_ONCHAIN_TX"),
+            r#"{"tx_type":"COOPERATIVE_CLOSE","confirmation":"unconfirmed","ldk_status":"PENDING","confirmation_height":861204}"#,
+        );
+        reorg.status = "pending".to_owned();
+        assert_eq!(human_summary(&reorg), "Cooperative close transaction unconfirmed");
+        let help = event_help(&reorg);
+        assert!(help.contains("currently unconfirmed"));
+        assert!(help.contains("return to unconfirmed after a reorg"));
+        assert!(!help.contains("block 861204"), "explicit unconfirmed state overrides a stale height");
     }
 }

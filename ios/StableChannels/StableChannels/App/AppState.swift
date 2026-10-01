@@ -139,6 +139,7 @@ class AppState {
     }
 
     var paymentFlash: Bool = false
+    var lastReceivedPaymentHash: String?
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
@@ -1762,6 +1763,10 @@ class AppState {
         // (recomputed at the current price), which is exactly the "reverted to $0.57" bug.
         guard persistence.isNewPayment else { return }
 
+        if !isStabilityPayment {
+            lastReceivedPaymentHash = paymentHashStr
+        }
+
         if let usd = amountUSD {
             statusMessage = "Payment received: \(usd.usdFormatted)"
         } else if let usd = usdValue(sats: amountMsat / 1000, rowPrice: nil) {
@@ -1771,10 +1776,12 @@ class AppState {
             statusMessage = "Payment received: \(sats.btcSpacedFormatted) BTC"
         }
 
-        // Trigger payment received animation
-        paymentFlash = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.paymentFlash = false
+        // Trigger payment received animation for user payments only
+        if !isStabilityPayment {
+            paymentFlash = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.paymentFlash = false
+            }
         }
     }
 
@@ -3436,7 +3443,10 @@ class AppState {
                             "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
                             data: ["txid": txid, "sats": "\(amountSats)"]
                         )
-                        paymentFlash.toggle()
+                        paymentFlash = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                            self?.paymentFlash = false
+                        }
                     }
                 } catch {
                     AuditService.log("WEBSOCKET_RECORD_PAYMENT_FAILED", data: ["error": "\(error)"])
@@ -3931,6 +3941,11 @@ class AppState {
         guard price > 0 else { return }
         do {
             try databaseService?.priceRepo.recordPrice(price, source: "median")
+            Task { [weak self] in
+                guard let self else { return }
+                await priceHistoryProvider.invalidateCache()
+                NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+            }
         } catch {
             // Price recording is best-effort, don't log every failure
         }

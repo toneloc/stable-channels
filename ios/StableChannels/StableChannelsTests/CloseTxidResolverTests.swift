@@ -24,6 +24,13 @@ final class MockURLProtocol: URLProtocol {
             Self.seenURLs.append(url)
         }
         let (response, data) = handler(request)
+        if (300...399).contains(response.statusCode),
+           let location = (response.allHeaderFields["Location"] as? String) ??
+           (response.allHeaderFields["location"] as? String),
+           let redirectURL = URL(string: location, relativeTo: request.url) {
+            let redirectRequest = URLRequest(url: redirectURL)
+            client?.urlProtocol(self, wasRedirectedTo: redirectRequest, redirectResponse: response)
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
         client?.urlProtocolDidFinishLoading(self)

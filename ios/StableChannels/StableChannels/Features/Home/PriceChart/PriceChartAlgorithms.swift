@@ -29,6 +29,13 @@ enum PriceChartAlgorithms {
         return (lo * 0.98, hi * 1.02)
     }
 
+    /// Calculate percentage move between the first record and current/selected price.
+    /// Returns nil if first price <= 0 or not finite.
+    static func percentageChange(first: Double, current: Double) -> Double? {
+        guard first.isFinite, current.isFinite, first > 0 else { return nil }
+        return ((current - first) / first) * 100
+    }
+
     /// Largest Triangle Three Buckets (LTTB) downsampling algorithm.
     /// Preserves critical visual extrema (peaks and troughs).
     /// Accepts any RandomAccessCollection with Int indexing for zero-copy slicing.

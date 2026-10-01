@@ -483,4 +483,31 @@ final class TradeResponseRecoveryTests: XCTestCase {
         app.retryDeferredTradeResponses()
         XCTAssertTrue(try db.channelRepo.deferredTradeResponses().isEmpty)
     }
+
+    // MARK: - BuyAmountPolicy Tests
+
+    func testBuyAmountPolicyMaximumUsdTruncatesDown() {
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(10.25), 10.25, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(10.259), 10.25, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(10.299), 10.29, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(0.29), 0.29, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(0.2900000001), 0.29, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(0.0), 0.0, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(-5.0), 0.0, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(.nan), 0.0, accuracy: 0.0001)
+        XCTAssertEqual(BuyAmountPolicy.maximumUsd(.infinity), 0.0, accuracy: 0.0001)
+    }
+
+    func testBuyAmountPolicyAccepts() {
+        XCTAssertTrue(BuyAmountPolicy.accepts(amountUsd: 10.0, balanceUsd: 10.0))
+        XCTAssertTrue(BuyAmountPolicy.accepts(amountUsd: 5.50, balanceUsd: 10.0))
+        XCTAssertTrue(BuyAmountPolicy.accepts(amountUsd: 0.29, balanceUsd: 0.29))
+
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: 10.01, balanceUsd: 10.0))
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: 10.30, balanceUsd: 10.299))
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: 0.0, balanceUsd: 10.0))
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: -1.0, balanceUsd: 10.0))
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: .nan, balanceUsd: 10.0))
+        XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: 10.0, balanceUsd: 0.0))
+    }
 }

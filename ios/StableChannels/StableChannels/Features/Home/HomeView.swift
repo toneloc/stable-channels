@@ -63,6 +63,7 @@ struct HomeView: View {
             .navigationBarHidden(true)
             .refreshable {
                 appState.refreshBalances()
+                await appState.priceService.fetchPrice()
                 appState.recordCurrentPrice()
             }
         }
@@ -132,10 +133,13 @@ struct HomeView: View {
                             .font(.caption.bold())
                     }
                     .foregroundStyle(.green)
-                    Text(showBTC ? "\(allocation.stableSats.btcSpacedFormatted) BTC" : appState.stableUSD.usdFormatted)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .contentTransition(.numericText())
+                    RollingDigitLabel(
+                        text: showBTC ? "\(allocation.stableSats.btcSpacedFormatted) BTC" : appState.stableUSD
+                            .usdFormatted,
+                        value: showBTC ? Double(allocation.stableSats) : appState.stableUSD,
+                        font: .caption,
+                        baseColor: .primary
+                    )
                 }
 
                 Spacer()
@@ -148,11 +152,13 @@ struct HomeView: View {
                             .font(.caption2)
                     }
                     .foregroundStyle(.orange)
-                    Text(showBTC ? "\(allocation.nativeSats.btcSpacedFormatted) BTC" : allocation.nativeUSD
-                        .usdFormatted)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .contentTransition(.numericText())
+                    RollingDigitLabel(
+                        text: showBTC ? "\(allocation.nativeSats.btcSpacedFormatted) BTC" : allocation.nativeUSD
+                            .usdFormatted,
+                        value: showBTC ? Double(allocation.nativeSats) : allocation.nativeUSD,
+                        font: .caption,
+                        baseColor: .primary
+                    )
                 }
             }
             .onTapGesture {

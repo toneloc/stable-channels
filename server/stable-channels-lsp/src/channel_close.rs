@@ -7,7 +7,7 @@ use ldk_server_client::ldk_server_grpc::events::{
 use serde_json::{json, Value};
 
 /// Strip a prost enum's screaming prefix for readability.
-fn short(name: &str, prefix: &str) -> String {
+pub(crate) fn short(name: &str, prefix: &str) -> String {
     name.strip_prefix(prefix).unwrap_or(name).to_string()
 }
 

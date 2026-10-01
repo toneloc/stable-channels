@@ -24,6 +24,19 @@ struct PriceChartGraphView: View {
         }
     }
 
+    @Environment(AppState.self) private var appState: AppState?
+
+    private var isUp: Bool {
+        guard let first = priceHistory.first?.price else { return true }
+        let livePrice = (appState?.btcPrice ?? 0) > 0 ? appState?.btcPrice : nil
+        let current = selectedPricePoint?.price ?? livePrice ?? priceHistory.last?.price ?? first
+        return current >= first
+    }
+
+    private var trendColor: Color {
+        isUp ? .trendPositive : .trendNegative
+    }
+
     private var chartContent: some View {
         Chart(priceHistory) { record in
             AreaMark(
@@ -33,7 +46,7 @@ struct PriceChartGraphView: View {
             )
             .foregroundStyle(
                 LinearGradient(
-                    colors: [.blue.opacity(0.18), .blue.opacity(0.02)],
+                    colors: [trendColor.opacity(0.18), trendColor.opacity(0.02)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -43,7 +56,7 @@ struct PriceChartGraphView: View {
                 x: .value("Time", record.date),
                 y: .value("Price", record.price)
             )
-            .foregroundStyle(.blue)
+            .foregroundStyle(trendColor)
             .lineStyle(StrokeStyle(lineWidth: 2))
             .interpolationMethod(.catmullRom)
 
@@ -56,7 +69,7 @@ struct PriceChartGraphView: View {
                     x: .value("Time", selected.date),
                     y: .value("Price", selected.price)
                 )
-                .foregroundStyle(.blue)
+                .foregroundStyle(trendColor)
                 .symbolSize(40)
             }
         }
