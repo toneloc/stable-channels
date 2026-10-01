@@ -216,3 +216,8 @@ server/lsp-server-gui/dist/
 # SC daemon runtime data (when run from repo root)
 server/stable-channels-lsp/data/
 sc-config.toml
+
+# Local sensitive files
+.agents/
+seed_phrase_backup.txt
+
