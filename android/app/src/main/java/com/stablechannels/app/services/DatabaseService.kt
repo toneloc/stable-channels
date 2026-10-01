@@ -586,6 +586,25 @@ class DatabaseService(context: Context) :
         writableDatabase.delete("channels", "user_channel_id = ?", arrayOf(userChannelId))
     }
 
+    fun reconcileChannels(liveUserChannelIds: List<String>, liveChannelIds: List<String>) {
+        if (liveUserChannelIds.isEmpty() && liveChannelIds.isEmpty()) {
+            writableDatabase.delete("channels", null, null)
+        } else {
+            val userPlaceholders = liveUserChannelIds.joinToString(",") { "?" }
+            val channelPlaceholders = liveChannelIds.joinToString(",") { "?" }
+            val args = (liveUserChannelIds + liveChannelIds).toTypedArray()
+
+            // Delete any row that does not match any live user_channel_id AND does not match any
+            // live channel_id.
+            // If it matches either, it belongs to a live channel and should be spared.
+            writableDatabase.delete(
+                "channels",
+                "user_channel_id NOT IN ($userPlaceholders) AND channel_id NOT IN ($channelPlaceholders)",
+                args,
+            )
+        }
+    }
+
     /** Persisted second source of truth for the LSP-switch gate: true if any channel row exists. */
     fun hasAnyChannel(): Boolean {
         val cursor = readableDatabase.rawQuery("SELECT 1 FROM channels LIMIT 1", null)

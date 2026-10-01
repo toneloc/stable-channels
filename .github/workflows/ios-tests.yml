@@ -32,7 +32,32 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available
 
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -u
+
+          last_status=1
+          for attempt in 1 2 3 4; do
+            echo "Resolving Swift packages (attempt ${attempt}/4)"
+
+            if xcodebuild \
+              -resolvePackageDependencies \
+              -project ios/StableChannels/StableChannels.xcodeproj \
+              -scheme StableChannels; then
+              exit 0
+            else
+              last_status=$?
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              sleep $((attempt * 15))
+            fi
+          done
+
+          exit "$last_status"
+
       - name: Run iOS unit tests
+        shell: bash
         run: |
           set -o pipefail
           # Signing stays ENABLED: simulator builds get an automatic ad-hoc

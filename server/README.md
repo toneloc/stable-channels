@@ -85,9 +85,10 @@ A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on t
 ```bash
 git clone https://github.com/toneloc/stable-channels.git
 git clone https://github.com/lightningdevkit/ldk-server.git
+git -C ldk-server checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
 ```
 
-They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement.
+They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
 
 ### 2. Configure LDK Server
 
@@ -96,6 +97,8 @@ In `ldk-server/contrib/ldk-server-config.toml`:
 ```toml
 [node]
 network = "signet"
+# The SC daemon backfills missed forwards from LDK Server's detailed history (about the last two hours); the default "stats" keeps only totals.
+forwarded_payment_tracking_mode = "detailed"
 
 [esplora]
 server_url = "https://mutinynet.com/api"
@@ -108,6 +111,16 @@ min_payment_size_msat        = 1000000
 [tor]
 proxy_address = "127.0.0.1:9050"
 ```
+
+This field requires the pinned `bd95e187` LDK Server above; older Umbrel-pinned
+images reject it. Upgrade LDK Server and the SC daemon/client in lockstep and
+back up current configs and node data before changing versions. On rebuilt
+Umbrel images, the LDK image's entrypoint adds the key only if absent, preserving
+explicit operator choices (including `"stats"`). The host hook deliberately does
+not add it for older images. See [Umbrel's version-safe migration instructions](../umbrel/README.md#detailed-forwarded-payment-history-and-version-compatibility)
+for writable directory mounts, manual migration and downgrade requirements.
+Detailed tracking starts collecting forward records when enabled; it does not
+recover stats-only history or records older than LDK's retention window.
 
 LDK Server's LSPS2 channel-opening fee is configured here. The current Stable
 Channels prod-parity value is `channel_opening_fee_ppm = 0`, with
@@ -123,7 +136,7 @@ amount.
 
 For the LdkLog route to return content, set `[log] file = "/some/path/ldk-server.log"` in the same config so a file exists to tail.
 
-Comment out the `[bitcoind]`, `[electrum]`, and `[liquidity.lsps2_client]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.
+Comment out the `[bitcoind]`, `[electrum]`, and `[[liquidity.lsps_client]]` blocks. The `[tor]` block must stay uncommented even if Tor isn't running.
 
 ### 3. Configure the SC daemon
 

@@ -1556,14 +1556,13 @@ class AppState(private val context: Context) : ViewModel() {
 
     /**
      * Gate for changing the LSP. A stopped/mid-restart node reports an empty channel list, so
-     * require the node running (making listChannels authoritative) and cross-check persisted
-     * channel state. Returns a user-facing reason to block, or null if the change is allowed.
+     * require the node running (making listChannels authoritative). Returns a user-facing reason to
+     * block, or null if the change is allowed.
      */
     private fun lspChangeBlockedReason(): String? {
         if (!nodeService.isRunning) return "Start the wallet before changing the LSP."
         nodeService.refreshChannels()
-        val hasChannel =
-            nodeService.channels.isNotEmpty() || (databaseService?.hasAnyChannel() ?: false)
+        val hasChannel = nodeService.channels.isNotEmpty()
         if (hasChannel) return "Close all channels before switching LSPs."
         return null
     }
@@ -3104,7 +3103,14 @@ class AppState(private val context: Context) : ViewModel() {
                 sc.userChannelId == userChannelId ||
                 nodeService.channels.isEmpty()
         ) {
-            val balanceSats = sc.stableReceiverBTC.sats
+            val balanceSats =
+                if (sc.channelId == channelId || sc.userChannelId == userChannelId) {
+                    sc.stableReceiverBTC.sats
+                } else {
+                    context
+                        .getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                        .getLong("closing_receiver_sats", 0L)
+                }
             val price = priceService.currentPrice.value.let { if (it > 0) it else sc.latestPrice }
             val balanceUSD =
                 if (price > 0) (balanceSats.toDouble() / Constants.SATS_IN_BTC) * price else null
@@ -3196,7 +3202,7 @@ class AppState(private val context: Context) : ViewModel() {
                 )
             }
 
-            databaseService?.deleteChannel(sc.userChannelId)
+            databaseService?.deleteChannel(userChannelId)
             _stableChannel.value = StableChannel.defaultWithLsp(context)
             // Clear cached channel state
             context
@@ -4279,6 +4285,33 @@ class AppState(private val context: Context) : ViewModel() {
         val rawSpendable = balances.spendableOnchainBalanceSats.toLong()
         val hasReady = nodeService.channels.any { it.isChannelReady }
 
+        // Reconcile database channels: LDK is the source of truth for channel existence.
+        // Stale database rows from closed channels can cause incorrect aggregate Stable USD
+        // balances.
+        val liveUserChannelIds = nodeService.channels.map { it.userChannelId }
+        val liveChannelIds = nodeService.channels.map { it.channelId }
+        try {
+            databaseService?.reconcileChannels(liveUserChannelIds, liveChannelIds)
+        } catch (e: Exception) {
+            AuditService.log(
+                "DB_RECONCILE_FAILED",
+                mapOf("error" to (e.message ?: "Unknown error")),
+            )
+        }
+
+        if (nodeService.channels.isEmpty() && _stableChannel.value.userChannelId.isNotEmpty()) {
+            val closingReceiverSats = _stableChannel.value.stableReceiverBTC.sats
+            _stableChannel.value = StableChannel.defaultWithLsp(context)
+            context
+                .getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putLong("closing_receiver_sats", closingReceiverSats)
+                .remove(BalanceCacheKey.CACHED_CHANNEL_ID)
+                .remove(BalanceCacheKey.CACHED_USER_CHANNEL_ID)
+                .remove(BalanceCacheKey.CACHED_EXPECTED_USD)
+                .apply()
+        }
+
         // Resolve pending outbound deduction against raw wallet observation
         val effectivePending =
             synchronized(pendingLock) {
@@ -4507,13 +4540,41 @@ class AppState(private val context: Context) : ViewModel() {
 
     fun updateStableBalances() {
         val price = priceService.currentPrice.value
-        _stableChannel.update {
-            StabilityService.updateBalances(
-                it,
-                nodeService.channels,
-                _onchainBalanceSats.value,
-                price,
-            )
+        _stableChannel.update { oldSc ->
+            val sc =
+                StabilityService.updateBalances(
+                    oldSc,
+                    nodeService.channels,
+                    _onchainBalanceSats.value,
+                    price,
+                )
+
+            if (sc.userChannelId.isNotEmpty() && sc.userChannelId != oldSc.userChannelId) {
+                val dbRow = databaseService?.loadChannel(sc.userChannelId)
+                if (dbRow != null) {
+                    val updatedSc =
+                        sc.copy(
+                            expectedUSD = com.stablechannels.app.models.USD(dbRow.expectedUSD),
+                            backingSats = dbRow.backingSats,
+                            note = dbRow.note ?: "",
+                            stableReceiverBTC =
+                                com.stablechannels.app.models.Bitcoin(dbRow.receiverSats),
+                        )
+                    StabilityService.recomputeNative(updatedSc)
+                    updatedSc
+                } else {
+                    val updatedSc =
+                        sc.copy(
+                            expectedUSD = com.stablechannels.app.models.USD(0.0),
+                            backingSats = 0L,
+                            note = "",
+                        )
+                    StabilityService.recomputeNative(updatedSc)
+                    updatedSc
+                }
+            } else {
+                sc
+            }
         }
     }
 

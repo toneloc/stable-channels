@@ -22,7 +22,6 @@ use sc_rest_client::sc_protos::stable::{
 	EditStableChannelResponse, GetPriceResponse, ListChannelLedgerEventsResponse,
 	ListSettlementPaymentsResponse, ListStableChannelsResponse, LogResponse,
 };
-use sc_rest_client::ldk_server_grpc::types::PageToken;
 
 #[derive(Clone, PartialEq, Default)]
 pub enum ConnectionStatus {
@@ -518,12 +517,12 @@ pub struct AppState {
 	pub balances: Option<GetBalancesResponse>,
 	pub channels: Option<ListChannelsResponse>,
 	pub payments: Option<ListPaymentsResponse>,
-	pub payments_page_token: Option<PageToken>,
+	pub payments_page_token: Option<String>,
 	// True while a "Load More" fetch is in flight, so its result appends instead of replacing.
 	pub payments_appending: bool,
 	pub peers: Option<ListPeersResponse>,
 	pub forwarded_payments: Option<ListForwardedPaymentsResponse>,
-	pub forwarded_payments_page_token: Option<PageToken>,
+	pub forwarded_payments_page_token: Option<String>,
 	pub payment_details: Option<GetPaymentDetailsResponse>,
 	pub price: Option<GetPriceResponse>,
 	pub stable_channels: Option<ListStableChannelsResponse>,

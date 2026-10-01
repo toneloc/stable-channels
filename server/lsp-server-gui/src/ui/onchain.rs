@@ -426,9 +426,9 @@ fn render_history_table(ui: &mut Ui, app: &mut LspServerApp) {
 								// Payment ID
 								r.col(|ui| {
 									ui.horizontal(|ui| {
-										ui.monospace(truncate_id(&payment.id, 5, 4));
+										ui.monospace(truncate_id(&payment.payment_id, 5, 4));
 										if ui.small_button("Copy").clicked() {
-											ui.output_mut(|o| o.copied_text = payment.id.clone());
+											ui.output_mut(|o| o.copied_text = payment.payment_id.clone());
 										}
 									});
 								});

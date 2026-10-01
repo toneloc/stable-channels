@@ -28,4 +28,8 @@ pub struct AppState {
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
     /// LDK Server's log file path, resolved at daemon startup. None if not configured.
     pub ldk_log_file: Option<PathBuf>,
+    /// Compatibility field: durable stream-gap boundary loaded at startup, NOT newest ledger
+    /// activity. The event loop reloads the authoritative checkpoint (fixtures may leave None).
+    #[allow(dead_code)]
+    pub last_event_before_start_ms: Option<i64>,
 }

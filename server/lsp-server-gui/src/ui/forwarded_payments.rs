@@ -15,6 +15,9 @@ struct ForwardRow {
 	amount_msat: u64,
 }
 
+// Totals and rows cover only what LDK Server still holds individually.
+const RECENT_WINDOW_NOTE: &str = "LDK Server keeps individual forwards for about two hours, and only in detailed mode; older ones survive only as hourly totals.";
+
 pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 	ui.heading("Forwarded Payments");
 	ui.add_space(5.0);
@@ -64,8 +67,8 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 					widgets::empty_state(
 						ui,
 						"↪",
-						"No forwarded payments yet",
-						"Click Refresh to load",
+						"No recent forwarded payments",
+						RECENT_WINDOW_NOTE,
 					);
 				}
 			} else {
@@ -82,6 +85,7 @@ pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
 						ui.separator();
 						ui.label(format!("Forwarded: {}", app.fmt_msat(total_forwarded)));
 					});
+					ui.label(egui::RichText::new(RECENT_WINDOW_NOTE).small().weak());
 					ui.add_space(5.0);
 
 					TableBuilder::new(ui)
