@@ -190,6 +190,8 @@
 		CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B3E864653E657FB0FCA3D2 /* Trade.swift */; };
 		D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */; };
 		D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */; };
+		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
+		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
 		D20000000000000000000011 /* Bech32.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000010 /* Bech32.swift */; };
 		D20000000000000000000019 /* LNURLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000018 /* LNURLService.swift */; };
 		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
@@ -415,6 +417,8 @@
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupFailoverTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
+		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
 		D20000000000000000000010 /* Bech32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32.swift; sourceTree = "<group>"; };
 		D20000000000000000000018 /* LNURLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLService.swift; sourceTree = "<group>"; };
 		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
@@ -481,6 +485,7 @@
 				49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
+				D20000000000000000000001 /* Send */,
 			);
 			path = Domain;
 			sourceTree = "<group>";
@@ -821,6 +826,14 @@
 			path = Features;
 			sourceTree = "<group>";
 		};
+		D20000000000000000000001 /* Send */ = {
+			isa = PBXGroup;
+			children = (
+				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
+			);
+			path = Send;
+			sourceTree = "<group>";
+		};
 		D20000000000000000000002 /* LNURL */ = {
 			isa = PBXGroup;
 			children = (
@@ -893,6 +906,7 @@
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
+				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
 				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
@@ -1041,6 +1055,7 @@
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
+				D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
 				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
 				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
@@ -1079,6 +1094,7 @@
 				D20000000000000000000011 /* Bech32.swift in Sources */,
 				D20000000000000000000019 /* LNURLService.swift in Sources */,
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
+				D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,

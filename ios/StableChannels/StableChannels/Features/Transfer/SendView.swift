@@ -14,7 +14,7 @@ struct SendView: View {
     @State private var success = false
     @State private var sentAmountSats: UInt64 = 0
     @State private var qrAlertMessage = ""
-    @State private var feeRateSatVb: UInt64?
+    @State private var feeRateSatVb: Double?
 
     private enum InputType {
         case bolt11
@@ -107,11 +107,18 @@ struct SendView: View {
         guard let feeRateSatVb else {
             return String(localized: "info_fee_estimating", defaultValue: "Estimating...")
         }
-        let feeSats = feeRateSatVb * Constants.estimatedOnchainSendVBytes
+        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: false)
+        let displayRate: UInt64
+        if feeRateSatVb.isFinite && feeRateSatVb > 0 {
+            let rounded = feeRateSatVb.rounded()
+            displayRate = rounded >= Double(UInt64.max) ? UInt64.max : UInt64(max(1.0, rounded))
+        } else {
+            displayRate = 1
+        }
         return String(
             format: String(localized: "info_onchain_fee_estimate_value", defaultValue: "~%@ BTC (%llu sat/vB)"),
             feeSats.btcSpacedFormatted,
-            feeRateSatVb
+            displayRate
         )
     }
 

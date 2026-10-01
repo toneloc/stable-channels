@@ -505,6 +505,12 @@ class AppState {
                 self?.handleWebSocketTransactionDetected(event: event)
             }
         }
+        mempoolWebSocketService.onFeesUpdated = { [weak self] wsFees in
+            let rec = RecommendedFees(wsFees: wsFees)
+            Task { [weak self] in
+                await self?.feeRateService.updateRecommendedFees(rec)
+            }
+        }
 
         // Set audit log path
         let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
