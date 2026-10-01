@@ -1354,4 +1354,44 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(depositPayments.count, 1)
         XCTAssertEqual(depositPayments.first?.amountMsat, 100_000_000)
     }
+    func testUpdateBalancesNoRowBranchTracksUnhedgedReceiverBalance() {
+        // 1. Live channel differs from in-memory stable channel
+        let staleUserChannelId = "stale_id"
+        let liveUserChannelId = "live_id"
+        let liveReceiverSats: UInt64 = 150_000
+
+        let mockChannel = makeMockChannel(
+            userChannelId: liveUserChannelId,
+            outboundCapacityMsat: liveReceiverSats * 1000,
+            unspendablePunishmentReserve: 0,
+            channelValueSats: liveReceiverSats * 2,
+            isChannelReady: true
+        )
+
+        // 2. Drive updateBalances with the mismatched channel IDs
+        var sc = StableChannel.default
+        sc.userChannelId = staleUserChannelId
+        sc.expectedUSD = USD(amount: 100.0)
+        sc.backingSats = 50_000
+        sc.nativeChannelBTC = Bitcoin(sats: 10_000)
+
+        _ = StabilityService.updateBalances(
+            &sc,
+            channels: [mockChannel],
+            onchainBalanceSats: 0,
+            price: 100_000.0
+        )
+
+        // 3. Apply the no-row DB reset branch
+        sc.expectedUSD = USD(amount: 0.0)
+        sc.backingSats = 0
+        sc.note = ""
+
+        // 4. Call recomputeNative
+        StabilityService.recomputeNative(&sc)
+
+        // 5. Assert nativeChannelBTC == liveReceiverSats and expectedUSD == 0
+        XCTAssertEqual(sc.expectedUSD.amount, 0.0, accuracy: 0.001)
+        XCTAssertEqual(sc.nativeChannelBTC.sats, liveReceiverSats)
+    }
 }

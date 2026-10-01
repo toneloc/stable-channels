@@ -3103,7 +3103,13 @@ class AppState(private val context: Context) : ViewModel() {
                 sc.userChannelId == userChannelId ||
                 nodeService.channels.isEmpty()
         ) {
-            val balanceSats = sc.stableReceiverBTC.sats
+            val balanceSats =
+                if (sc.channelId == channelId || sc.userChannelId == userChannelId) {
+                    sc.stableReceiverBTC.sats
+                } else {
+                    context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                        .getLong("closing_receiver_sats", 0L)
+                }
             val price = priceService.currentPrice.value.let { if (it > 0) it else sc.latestPrice }
             val balanceUSD =
                 if (price > 0) (balanceSats.toDouble() / Constants.SATS_IN_BTC) * price else null
@@ -4293,10 +4299,12 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         if (nodeService.channels.isEmpty() && _stableChannel.value.userChannelId.isNotEmpty()) {
+            val closingReceiverSats = _stableChannel.value.stableReceiverBTC.sats
             _stableChannel.value = StableChannel.defaultWithLsp(context)
             context
                 .getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                 .edit()
+                .putLong("closing_receiver_sats", closingReceiverSats)
                 .remove(BalanceCacheKey.CACHED_CHANNEL_ID)
                 .remove(BalanceCacheKey.CACHED_USER_CHANNEL_ID)
                 .remove(BalanceCacheKey.CACHED_EXPECTED_USD)
