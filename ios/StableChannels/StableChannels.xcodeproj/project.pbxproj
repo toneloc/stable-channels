@@ -190,9 +190,10 @@
 		CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B3E864653E657FB0FCA3D2 /* Trade.swift */; };
 		D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */; };
 		D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */; };
-		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
-		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
 		D20000000000000000000011 /* Bech32.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000010 /* Bech32.swift */; };
+		D20000000000000000000013 /* SendDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000012 /* SendDestination.swift */; };
+		D20000000000000000000015 /* AddressVisualChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000014 /* AddressVisualChunker.swift */; };
+		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
 		D20000000000000000000019 /* LNURLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000018 /* LNURLService.swift */; };
 		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
 		D2000000000000000000001D /* SecureEndpointValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001C /* SecureEndpointValidator.swift */; };
@@ -200,12 +201,11 @@
 		D20000000000000000000021 /* HTTPResponseParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000020 /* HTTPResponseParser.swift */; };
 		D20000000000000000000023 /* URLSessionTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000022 /* URLSessionTransport.swift */; };
 		D20000000000000000000037 /* Bech32Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000036 /* Bech32Tests.swift */; };
-		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
-		D20000000000000000000013 /* SendDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000012 /* SendDestination.swift */; };
-		D20000000000000000000015 /* AddressVisualChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000014 /* AddressVisualChunker.swift */; };
-		D20000000000000000000051 /* Base58Check.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000050 /* Base58Check.swift */; };
 		D20000000000000000000039 /* AddressVisualChunkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000038 /* AddressVisualChunkerTests.swift */; };
 		D20000000000000000000041 /* PaymentDestinationClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */; };
+		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
+		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
+		D20000000000000000000051 /* Base58Check.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000050 /* Base58Check.swift */; };
 		D20000000000000000000053 /* Base58CheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000052 /* Base58CheckTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
 		E7E67B65EAD4FF5732460856 /* ChannelSweepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */; };
@@ -424,9 +424,10 @@
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupFailoverTests.swift; sourceTree = "<group>"; };
-		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
-		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
 		D20000000000000000000010 /* Bech32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32.swift; sourceTree = "<group>"; };
+		D20000000000000000000012 /* SendDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendDestination.swift; sourceTree = "<group>"; };
+		D20000000000000000000014 /* AddressVisualChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunker.swift; sourceTree = "<group>"; };
+		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
 		D20000000000000000000018 /* LNURLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLService.swift; sourceTree = "<group>"; };
 		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
 		D2000000000000000000001C /* SecureEndpointValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureEndpointValidator.swift; sourceTree = "<group>"; };
@@ -434,12 +435,11 @@
 		D20000000000000000000020 /* HTTPResponseParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPResponseParser.swift; sourceTree = "<group>"; };
 		D20000000000000000000022 /* URLSessionTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionTransport.swift; sourceTree = "<group>"; };
 		D20000000000000000000036 /* Bech32Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32Tests.swift; sourceTree = "<group>"; };
-		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
-		D20000000000000000000012 /* SendDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendDestination.swift; sourceTree = "<group>"; };
-		D20000000000000000000014 /* AddressVisualChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunker.swift; sourceTree = "<group>"; };
-		D20000000000000000000050 /* Base58Check.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58Check.swift; sourceTree = "<group>"; };
 		D20000000000000000000038 /* AddressVisualChunkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunkerTests.swift; sourceTree = "<group>"; };
 		D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDestinationClassifierTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
+		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
+		D20000000000000000000050 /* Base58Check.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58Check.swift; sourceTree = "<group>"; };
 		D20000000000000000000052 /* Base58CheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58CheckTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -668,6 +668,7 @@
 			isa = PBXGroup;
 			children = (
 				49DDB0022FF0000200000001 /* ChannelRepository.swift */,
+				49DDB0092FF0000200000001 /* HeaderRepository.swift */,
 				49DDB0012FF0000200000001 /* Models.swift */,
 				49DDB0042FF0000200000001 /* OnchainReceiveRepository.swift */,
 				49DDB0032FF0000200000001 /* PaymentRepository.swift */,
@@ -675,7 +676,6 @@
 				49DDB0052FF0000200000001 /* PriceRepository.swift */,
 				49DDB0062FF0000200000001 /* SpliceRepository.swift */,
 				49DDB0072FF0000200000001 /* StabilitySendRepository.swift */,
-				49DDB0092FF0000200000001 /* HeaderRepository.swift */,
 			);
 			path = Repositories;
 			sourceTree = "<group>";
@@ -845,8 +845,8 @@
 			children = (
 				D20000000000000000000014 /* AddressVisualChunker.swift */,
 				D20000000000000000000050 /* Base58Check.swift */,
-				D20000000000000000000012 /* SendDestination.swift */,
 				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
+				D20000000000000000000012 /* SendDestination.swift */,
 			);
 			path = Send;
 			sourceTree = "<group>";
@@ -854,11 +854,11 @@
 		D20000000000000000000002 /* LNURL */ = {
 			isa = PBXGroup;
 			children = (
-				D20000000000000000000018 /* LNURLService.swift */,
+				D20000000000000000000020 /* HTTPResponseParser.swift */,
 				D2000000000000000000001A /* LNURLModels.swift */,
+				D20000000000000000000018 /* LNURLService.swift */,
 				D2000000000000000000001C /* SecureEndpointValidator.swift */,
 				D2000000000000000000001E /* SecureHTTPTransport.swift */,
-				D20000000000000000000020 /* HTTPResponseParser.swift */,
 				D20000000000000000000022 /* URLSessionTransport.swift */,
 			);
 			path = LNURL;
@@ -908,11 +908,11 @@
 			children = (
 				D20000000000000000000038 /* AddressVisualChunkerTests.swift */,
 				D20000000000000000000052 /* Base58CheckTests.swift */,
-				D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */,
 				D20000000000000000000036 /* Bech32Tests.swift */,
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
 				49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */,
 				49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */,
+				DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -923,23 +923,23 @@
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
+				D20000000000000000000040 /* PaymentDestinationClassifierTests.swift */,
+				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
-				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
-				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
+				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 				490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */,
 				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
-				DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
