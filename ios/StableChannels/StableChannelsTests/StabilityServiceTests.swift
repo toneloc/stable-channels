@@ -1354,6 +1354,7 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(depositPayments.count, 1)
         XCTAssertEqual(depositPayments.first?.amountMsat, 100_000_000)
     }
+
     func testUpdateBalancesNoRowBranchTracksUnhedgedReceiverBalance() {
         // 1. Live channel differs from in-memory stable channel
         let staleUserChannelId = "stale_id"

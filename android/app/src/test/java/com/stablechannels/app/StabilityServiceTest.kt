@@ -345,35 +345,41 @@ class StabilityServiceTest {
         val liveUserChannelId = "live_id"
         val liveReceiverSats = 150_000L
 
-        val mockChannel = org.mockito.Mockito.mock(org.lightningdevkit.ldknode.ChannelDetails::class.java)
+        val mockChannel =
+            org.mockito.Mockito.mock(org.lightningdevkit.ldknode.ChannelDetails::class.java)
         org.mockito.Mockito.`when`(mockChannel.userChannelId).thenReturn(liveUserChannelId)
         org.mockito.Mockito.`when`(mockChannel.isChannelReady).thenReturn(true)
-        org.mockito.Mockito.`when`(mockChannel.outboundCapacityMsat).thenReturn((liveReceiverSats * 1000).toULong())
+        org.mockito.Mockito.`when`(mockChannel.outboundCapacityMsat)
+            .thenReturn((liveReceiverSats * 1000).toULong())
         org.mockito.Mockito.`when`(mockChannel.unspendablePunishmentReserve).thenReturn(0UL)
-        org.mockito.Mockito.`when`(mockChannel.channelValueSats).thenReturn((liveReceiverSats * 2).toULong())
+        org.mockito.Mockito.`when`(mockChannel.channelValueSats)
+            .thenReturn((liveReceiverSats * 2).toULong())
         org.mockito.Mockito.`when`(mockChannel.channelId).thenReturn("live_id_bytes")
 
         // 2. Drive updateBalances with the mismatched channel IDs
-        val oldSc = StableChannel(
-            userChannelId = staleUserChannelId,
-            expectedUSD = USD(100.0),
-            backingSats = 50_000L,
-            nativeChannelBTC = Bitcoin(10_000L)
-        )
+        val oldSc =
+            StableChannel(
+                userChannelId = staleUserChannelId,
+                expectedUSD = USD(100.0),
+                backingSats = 50_000L,
+                nativeChannelBTC = Bitcoin(10_000L),
+            )
 
-        val updated = StabilityService.updateBalances(
-            oldSc,
-            listOf(mockChannel),
-            onchainBalanceSats = 0L,
-            price = 100_000.0
-        )
+        val updated =
+            StabilityService.updateBalances(
+                oldSc,
+                listOf(mockChannel),
+                onchainBalanceSats = 0L,
+                price = 100_000.0,
+            )
 
         // 3. Apply the no-row DB reset branch
-        val resetSc = updated.copy(
-            expectedUSD = USD(0.0),
-            backingSats = 0L,
-            note = ""
-        )
+        val resetSc =
+            updated.copy(
+                expectedUSD = USD(0.0),
+                backingSats = 0L,
+                note = "",
+            )
 
         // 4. Call recomputeNative
         StabilityService.recomputeNative(resetSc)

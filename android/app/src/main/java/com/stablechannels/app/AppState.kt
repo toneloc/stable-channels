@@ -3107,7 +3107,8 @@ class AppState(private val context: Context) : ViewModel() {
                 if (sc.channelId == channelId || sc.userChannelId == userChannelId) {
                     sc.stableReceiverBTC.sats
                 } else {
-                    context.getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
+                    context
+                        .getSharedPreferences("balance_cache", android.content.Context.MODE_PRIVATE)
                         .getLong("closing_receiver_sats", 0L)
                 }
             val price = priceService.currentPrice.value.let { if (it > 0) it else sc.latestPrice }
