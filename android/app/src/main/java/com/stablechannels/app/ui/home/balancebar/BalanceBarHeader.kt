@@ -4,6 +4,8 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -37,6 +39,7 @@ fun BalanceBarHeader(
     stableColor: Color,
     nativeColor: Color,
     modifier: Modifier = Modifier,
+    onEmptyInteraction: (() -> Unit)? = null,
 ) {
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer()
@@ -80,6 +83,15 @@ fun BalanceBarHeader(
             Row(
                 modifier =
                     Modifier.graphicsLayer { alpha = conversionAlpha }
+                        .then(
+                            if (showDepositPrompt && onEmptyInteraction != null) {
+                                Modifier.clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { onEmptyInteraction() },
+                                )
+                            } else Modifier
+                        )
                         .background(
                             color = MaterialTheme.colorScheme.surfaceVariant,
                             shape = RoundedCornerShape(12.dp),

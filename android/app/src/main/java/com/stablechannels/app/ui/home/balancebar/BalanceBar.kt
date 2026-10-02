@@ -1,9 +1,7 @@
 package com.stablechannels.app.ui.home.balancebar
 
-import android.view.HapticFeedbackConstants
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.EaseInOut
-import androidx.compose.animation.core.EaseOut
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.tween
@@ -20,10 +18,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.util.Constants
 import kotlin.math.abs
-import kotlin.math.min
 import kotlin.math.roundToInt
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 @Composable
 fun BalanceBar(
@@ -49,31 +44,25 @@ fun BalanceBar(
     val interactive = onTradeRequest != null || onEmptyInteraction != null
     val barHeight = if (interactive) 12.dp else 8.dp
     val thumbDiameter = 22.dp
-    val minTradeUSD = 1.0
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
-    var isDragging by remember { mutableStateOf(false) }
-    var isSnappingBack by remember { mutableStateOf(false) }
-    var hasTriggeredHaptic by remember { mutableStateOf(false) }
-    var atSellLimit by remember { mutableStateOf(false) }
-    var showDepositPrompt by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val view = LocalView.current
 
-    var dragOffsetPx by remember { mutableFloatStateOf(0f) }
-    val snapBackAnim = remember { Animatable(0f) }
-    val animator = rememberBalanceBarAnimationCoordinator()
+    val state =
+        rememberBalanceBarState(
+            totalUSD = totalUSD,
+            stableUSD = stableUSD,
+            maxSellUSD = maxSellUSD,
+            isEmpty = isEmpty,
+            density = density.density,
+            view = view,
+            onDragStarted = onDragStarted,
+            onTradeRequest = onTradeRequest,
+            onEmptyInteraction = onEmptyInteraction,
+        )
 
-    fun triggerSnapBack(fromOffset: Float) {
-        isSnappingBack = true
-        scope.launch {
-            snapBackAnim.snapTo(fromOffset)
-            snapBackAnim.animateTo(0f, tween(350, easing = EaseOut))
-            dragOffsetPx = 0f
-            isSnappingBack = false
-        }
-    }
+    val animator = rememberBalanceBarAnimationCoordinator()
 
     var wasEmpty by remember { mutableStateOf(isEmpty) }
     LaunchedEffect(isEmpty) {
@@ -86,14 +75,14 @@ fun BalanceBar(
     var wasTrading by remember { mutableStateOf(false) }
     LaunchedEffect(isTrading) {
         if (wasTrading && !isTrading) {
-            triggerSnapBack(dragOffsetPx)
+            state.triggerSnapBack(state.dragOffsetPx)
         }
         wasTrading = isTrading
     }
 
     LaunchedEffect(canonicalFraction) {
-        if (!isTrading && !isDragging && dragOffsetPx != 0f) {
-            triggerSnapBack(dragOffsetPx)
+        if (!isTrading && !state.isDragging && state.dragOffsetPx != 0f) {
+            state.triggerSnapBack(state.dragOffsetPx)
         }
     }
 
@@ -104,7 +93,6 @@ fun BalanceBar(
             else -> canonicalFraction
         }
 
-    val currentOffsetPx = if (isSnappingBack) snapBackAnim.value else dragOffsetPx
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
     val baseXPx = barWidthPx * currentFraction
     val maxSellOffset =
@@ -115,7 +103,7 @@ fun BalanceBar(
             )
         } else 0f
 
-    val thumbXPx = (baseXPx + currentOffsetPx).coerceIn(0f, barWidthPx)
+    val thumbXPx = (baseXPx + state.currentOffsetPx).coerceIn(0f, barWidthPx)
     val visFrac = if (barWidthPx > 0) (thumbXPx / barWidthPx).coerceIn(0f, 1f) else currentFraction
     val usdPct = (visFrac * 100).roundToInt()
     val btcPct = 100 - usdPct
@@ -139,16 +127,21 @@ fun BalanceBar(
 
     Column(modifier = modifier.fillMaxWidth()) {
         if (interactive) {
-            val showConversion = isDragging || abs(currentOffsetPx) > 0.5f || animator.isAwakening
+            val showConversion =
+                state.isDragging ||
+                    abs(state.currentOffsetPx) > 0.5f ||
+                    animator.isAwakening ||
+                    state.showDepositPrompt
             BalanceBarHeader(
                 usdPct = usdPct,
                 btcPct = btcPct,
-                atSellLimit = atSellLimit,
+                atSellLimit = state.atSellLimit,
                 maxSellUSD = maxSellUSD,
                 showConversion = showConversion,
-                showDepositPrompt = showDepositPrompt,
+                showDepositPrompt = state.showDepositPrompt,
                 stableColor = stableColor,
                 nativeColor = nativeColor,
+                onEmptyInteraction = onEmptyInteraction,
             )
             Spacer(Modifier.height(4.dp))
         }
@@ -163,79 +156,19 @@ fun BalanceBar(
                             Modifier.pointerInput(currentFraction, maxSellUSD, totalUSD, isEmpty) {
                                 detectDragGestures(
                                     onDragStart = { offset ->
-                                        if (isEmpty) {
-                                            view.performHapticFeedback(
-                                                HapticFeedbackConstants.CLOCK_TICK
-                                            )
-                                            showDepositPrompt = true
-                                            onEmptyInteraction?.invoke()
-                                            scope.launch {
-                                                delay(1800)
-                                                showDepositPrompt = false
-                                            }
-                                            return@detectDragGestures
-                                        }
-                                        if (abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f) {
-                                            isDragging = true
-                                            isSnappingBack = false
-                                            hasTriggeredHaptic = false
-                                            atSellLimit = false
-                                            dragOffsetPx = 0f
-                                            onDragStarted?.invoke()
-                                            view.performHapticFeedback(
-                                                HapticFeedbackConstants.CLOCK_TICK
-                                            )
-                                        }
+                                        state.onDragStart(offset, baseXPx, thumbDiameterPx)
                                     },
                                     onDrag = { change, dragAmount ->
-                                        if (isEmpty) return@detectDragGestures
-                                        if (isDragging) {
-                                            change.consume()
-                                            val proposedOffset = dragOffsetPx + dragAmount.x
-                                            atSellLimit = proposedOffset > maxSellOffset
-                                            val newOffset =
-                                                proposedOffset.coerceIn(-baseXPx, maxSellOffset)
-                                            dragOffsetPx = newOffset
-
-                                            if (!hasTriggeredHaptic && barWidthPx > 0) {
-                                                val fraction = abs(newOffset) / barWidthPx
-                                                val tradeUSD = fraction * totalUSD
-                                                if (tradeUSD >= minTradeUSD) {
-                                                    hasTriggeredHaptic = true
-                                                    view.performHapticFeedback(
-                                                        HapticFeedbackConstants.CLOCK_TICK
-                                                    )
-                                                }
-                                            }
-                                        }
+                                        state.onDrag(
+                                            change = change,
+                                            dragAmount = dragAmount,
+                                            baseXPx = baseXPx,
+                                            barWidthPx = barWidthPx,
+                                            maxSellOffset = maxSellOffset,
+                                        )
                                     },
-                                    onDragEnd = {
-                                        if (isEmpty || !isDragging) {
-                                            dragOffsetPx = 0f
-                                            return@detectDragGestures
-                                        }
-                                        isDragging = false
-                                        val offset = dragOffsetPx
-                                        val fraction =
-                                            if (barWidthPx > 0) offset / barWidthPx else 0f
-                                        val tradeUSD = abs(fraction) * totalUSD
-                                        if (tradeUSD < minTradeUSD) {
-                                            triggerSnapBack(offset)
-                                            return@detectDragGestures
-                                        }
-                                        val direction =
-                                            if (offset > 0) TradeDirection.SELL
-                                            else TradeDirection.BUY
-                                        val clamped =
-                                            if (direction == TradeDirection.BUY)
-                                                min(tradeUSD, stableUSD)
-                                            else min(tradeUSD, maxSellUSD)
-                                        onTradeRequest?.invoke(direction, clamped)
-                                    },
-                                    onDragCancel = {
-                                        isDragging = false
-                                        triggerSnapBack(dragOffsetPx)
-                                    },
+                                    onDragEnd = { state.onDragEnd(barWidthPx) },
+                                    onDragCancel = { state.onDragCancel() },
                                 )
                             }
                         } else Modifier
@@ -264,7 +197,7 @@ fun BalanceBar(
                 val currentScale =
                     when {
                         animator.isAwakening -> animator.thumbAwakenScale.value
-                        isDragging -> 1.15f
+                        state.isDragging -> 1.15f
                         isEmpty -> 1.0f
                         else -> pulseScale.value
                     }

@@ -21,11 +21,13 @@ import kotlin.math.max
 
 @Composable
 fun BalanceBarEmptyTrack(
+    visFrac: Float,
     height: Dp,
     modifier: Modifier = Modifier,
 ) {
     val stableFaded = Color(0xFF10B981).copy(alpha = 0.22f)
     val nativeFaded = Color(0xFFF59E0B).copy(alpha = 0.22f)
+    val clampedFrac = visFrac.coerceIn(0.01f, 0.99f)
 
     Row(
         modifier =
@@ -41,7 +43,7 @@ fun BalanceBarEmptyTrack(
     ) {
         Box(
             modifier =
-                Modifier.weight(0.5f)
+                Modifier.weight(clampedFrac)
                     .fillMaxHeight()
                     .background(
                         Brush.horizontalGradient(
@@ -57,7 +59,7 @@ fun BalanceBarEmptyTrack(
         )
         Box(
             modifier =
-                Modifier.weight(0.5f)
+                Modifier.weight(1f - clampedFrac)
                     .fillMaxHeight()
                     .background(
                         Brush.horizontalGradient(
@@ -79,7 +81,7 @@ fun BalanceBarTrack(
     modifier: Modifier = Modifier,
 ) {
     if (isEmpty && !isAwakening) {
-        BalanceBarEmptyTrack(height = barHeight, modifier = modifier)
+        BalanceBarEmptyTrack(visFrac = visFrac, height = barHeight, modifier = modifier)
     } else {
         Row(modifier = modifier.fillMaxWidth().height(barHeight).clip(RoundedCornerShape(6.dp))) {
             if (visFrac > 0.005f) {
