@@ -1035,6 +1035,41 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "TRADE_INTENT_PERSIST_FAILED",
     "TRADE_PAYMENT_FAILURE_PERSIST_FAILED",
     "TRADE_PAYMENT_ID_PERSIST_FAILED",
+    // Failure records the operator needs next to the money they concern.
+    "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
+    "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
+    "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+    "CHANNEL_READY_UID_UNPARSEABLE",
+    "TRADE_PARSE_PAYLOAD_FAILED",
+    "TRADE_PARSE_SIGNED_FAILED",
+    "TRADE_CHANNEL_UID_UNPARSEABLE",
+    // --- Added 2026-10-02: every emitted name is classified; these record a money or channel
+    // outcome, or the reason one did not happen, and were in SQLite on main.
+    // Shared accounting (src/stable.rs)
+    "BALANCE_UPDATE", "BALANCE_UPDATE_FAILED", "OVERBACKED_REPAIR_SKIPPED_PENDING_HTLC",
+    "STABILITY_SKIP", "STABILITY_SKIP_HTLC_SAFETY", "STABILITY_PAYMENT_SERIALIZE_FAILED",
+    // Stability settlement decisions and failures (daemon and client)
+    "STABILITY_SKIP_HIGH_RISK", "STABILITY_PAYMENT_BINDING_INVALID", "STABILITY_PAYMENT_CHANNEL_LOOKUP_FAILED",
+    "STABILITY_PAYMENT_CHANNEL_UNAVAILABLE", "STABILITY_PAYMENT_EXPIRED", "STABILITY_PAYMENT_PAYLOAD_INVALID",
+    "STABILITY_PAYMENT_PRICE_UNAVAILABLE", "STABILITY_PAYMENT_SIGNATURE_CHECK_FAILED", "STABILITY_PAYMENT_SIGNATURE_INVALID",
+    "STABILITY_PAYMENT_SIGN_FAILED", "STABILITY_PAYMENT_ALLOCATION_INVALID", "STABILITY_PAYMENT_ALLOCATION_RETRY_DEFERRED",
+    "LEGACY_STABILITY_MARKER_INVALID", "LEGACY_STABILITY_MARKER_UNAUTHENTICATED",
+    // Trade decisions: why a trade was or was not applied, and whether the answer reached the user
+    "MESSAGE_RECEIVED", "TRADE_PARSED_PAYLOAD_OK", "TRADE_SIGNATURE_VALID", "TRADE_SIGNATURE_INVALID",
+    "TRADE_ALLOCATION_REJECTED", "TRADE_CHANNEL_NOT_FOUND", "TRADE_CORRELATION_INVALID", "TRADE_EXCEEDS_BALANCE",
+    "TRADE_FEE_INVALID", "TRADE_INVALID_AMOUNT", "TRADE_INVALID_QUOTE", "TRADE_QUOTE_DEVIATION_EXCEEDED",
+    "TRADE_STABLE_ENTRY_NOT_FOUND", "TRADE_STALE", "TRADE_UNHANDLED_TYPE", "TRADE_REJECTION_SIGN_FAILED",
+    "TRADE_RESPONSE_SENT", "TRADE_RESPONSE_SEND_FAILED", "LDK_CALL_FAILED",
+    // Client-side reconciliation of received money (src/user.rs)
+    "ONCHAIN_DEPOSIT_DEFERRED", "ONCHAIN_OUTBOUND_CONFIRMATION_FAILED", "OUTGOING_RECONCILE_DEFERRED_NO_PRICE",
+    "SPLICE_OUT_RECONCILE_DEFERRED", "SPLICE_OUT_RECONCILE_DEFERRED_NO_PRICE", "SPLICE_OUT_LOOKUP_STATE_INVALID",
+    "SPLICE_RECONCILE_SKIPPED_ALREADY_DEDUCTED", "SPLICE_PENDING_LOOKUP_FAILED", "PAYMENT_RECEIVED_IGNORED",
+    "LIGHTNING_RECEIVE_FAILED", "JIT_INVOICE_FAILED", "INVOICE_GENERATION_FAILED", "INVOICE_INPUT_INVALID",
+    "SYNC_V1_PROCESSED", "SYNC_V1_PAYLOAD_INVALID", "SYNC_V1_CORRELATION_INVALID", "SYNC_V1_CORRELATED_AMOUNT_INVALID",
+    "TRADE_LOCAL_ALLOCATION_REJECTED", "TRADE_MESSAGE_FAILED", "TRADE_RESULT_SIGNATURE_INVALID",
+    "TRADE_REJECTED_V1_CONTEXT_INVALID", "TRADE_REJECTED_V1_PAYLOAD_INVALID", "TRADE_REJECTED_V1_UNMATCHED",
+    // Integrity and authentication
+    "EVENT_STREAM_COVERAGE_UNKNOWN", "REGISTER_PUSH_LEGACY_INVALID", "REGISTER_PUSH_SIGNATURE_INVALID",
 ];
 
 /// True when an audit event belongs in the channel ledger.
@@ -1056,6 +1091,22 @@ const DIRECT_STATE_EVENTS: &[&str] = &[
     "STABILITY_PAYMENT_ROLLED_BACK",
     "SPLICE_RECONCILED",
     "TRADE_RESERVED",
+];
+
+/// Events that are deliberately JSONL-only: high-volume or transport noise whose durable signal
+/// is carried by another record. Every emitted event name must be in exactly one of the three lists.
+pub const OPERATIONAL_EVENTS: &[&str] = &[
+    // One row per sync keysend attempt, hundreds an hour against offline phones; SYNC_RETRY_BLOCKED
+    // and SYNC_RETRY_EXHAUSTED are the durable records of a channel that cannot be reached.
+    "SYNC_MESSAGE_FAILED",
+    // Price-feed transport.
+    "WEBSOCKET_DISCONNECTED",
+    // Per-tick and per-attempt traces whose outcome is recorded elsewhere, transport, and UI.
+    "STABILITY_CHECK", "STABILITY_COOLDOWN", "STABILITY_PAY_COOLDOWN_CHECK", "RECONCILE_FORWARDED_COOLDOWN_SET",
+    "TRADE_PROTOCOL_PATH", "CHANNEL_EXISTS_CHECK", "REGISTER_PUSH_OK", "REGISTER_PUSH_LEGACY_OK",
+    "EVENT_IGNORED", "INVOICE_GENERATED", "JIT_INVOICE_ATTEMPT", "JIT_INVOICE_GENERATED", "LIGHTNING_RECEIVE_INVOICE",
+    "QR_GENERATION_FAILED", "SPLICE_PENDING_LOOKUP",
+    "WEBSOCKET_CONNECTED", "WEBSOCKET_CONNECT_FAILED", "WEBSOCKET_TRACKING_FAILED",
 ];
 
 fn category_for(event: &str) -> &'static str {
@@ -1662,6 +1713,51 @@ mod tests {
         assert_eq!(draft.before.as_ref().and_then(|state| state.live_receiver_sats), Some(154_516));
         assert_eq!(draft.after.as_ref().and_then(|state| state.live_receiver_sats), Some(164_285));
         assert_eq!(draft.after.as_ref().and_then(|state| state.amount_sats), Some(9_769));
+    }
+
+    #[test]
+    fn every_emitted_event_is_explicitly_classified() {
+        // Every string literal handed to audit_event / record_event in non-test code must sit in
+        // exactly one of the three lists, so a new money record cannot default to "dropped" and a
+        // name deleted from CHANNEL_STATE_EVENTS fails here rather than silently going JSONL-only.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut dirs = vec![root.join("src"), root.join("server/stable-channels-lsp/src")];
+        let mut unclassified = Vec::new();
+        let mut seen = 0;
+        while let Some(dir) = dirs.pop() {
+            for path in std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().path()) {
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let production = text.split("#[cfg(test)]").next().unwrap_or("");
+                for call in ["audit_event(", "record_event("] {
+                    for (idx, _) in production.match_indices(call) {
+                        let rest = production[idx + call.len()..].trim_start();
+                        let Some(literal) = rest.strip_prefix('"') else { continue };
+                        let Some(end) = literal.find('"') else { continue };
+                        let name = &literal[..end];
+                        seen += 1;
+                        let lists = [CHANNEL_STATE_EVENTS, DIRECT_STATE_EVENTS, OPERATIONAL_EVENTS];
+                        let hits = lists.iter().filter(|list| list.contains(&name)).count();
+                        if hits != 1 {
+                            unclassified.push(format!("{name} x{hits} ({})", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        unclassified.sort();
+        unclassified.dedup();
+        assert!(seen > 100, "the scan found only {seen} emitted events; the call-site pattern no longer matches");
+        assert!(unclassified.is_empty(), "events no list (or two lists) classify: {unclassified:?}");
+        for name in OPERATIONAL_EVENTS {
+            assert!(!records_channel_state(name), "{name} is operational and must not reach the ledger");
+        }
     }
 
     #[test]

@@ -960,12 +960,15 @@ impl Database {
         amount_msat: u64,
         counterparty: &str,
         now: i64,
+        refund_payment_id: Option<&str>,
     ) -> SqliteResult<Option<TradeFeeRefund>> {
         let conn = self.conn.lock().unwrap();
+        // The deterministic payment id is written with the claim, before anything is sent, so a
+        // crash or ambiguous error afterwards leaves a row that a lookup by that id can resolve.
         let inserted = conn.execute(
-            "INSERT OR IGNORE INTO trade_fee_refunds (trade_payment_id, amount_msat, counterparty, created_at)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![trade_payment_id, amount_msat as i64, counterparty, now],
+            "INSERT OR IGNORE INTO trade_fee_refunds (trade_payment_id, amount_msat, counterparty, created_at, refund_payment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![trade_payment_id, amount_msat as i64, counterparty, now, refund_payment_id],
         )?;
         if inserted == 1 {
             return Ok(None);
@@ -1005,12 +1008,14 @@ impl Database {
         tx.commit()
     }
 
-    /// Drops a claim whose keysend never left, so the operator can try again.
-    pub fn release_trade_fee_refund(&self, trade_payment_id: &str) -> SqliteResult<()> {
+    /// Drops a claim whose keysend never left, so the operator can try again. Only a claim still
+    /// carrying no id or the id this attempt would have used is dropped, never a recorded send.
+    pub fn release_trade_fee_refund(&self, trade_payment_id: &str, attempted_payment_id: Option<&str>) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "DELETE FROM trade_fee_refunds WHERE trade_payment_id = ?1 AND refund_payment_id IS NULL",
-            params![trade_payment_id],
+            "DELETE FROM trade_fee_refunds
+             WHERE trade_payment_id = ?1 AND (refund_payment_id IS NULL OR refund_payment_id = ?2)",
+            params![trade_payment_id, attempted_payment_id],
         )?;
         Ok(())
     }
@@ -4736,18 +4741,20 @@ mod tests {
     #[test]
     fn a_trade_fee_refund_is_claimed_once_and_retaken_only_after_its_payment_failed() {
         let db = Database::open_in_memory().unwrap();
-        assert_eq!(db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 100).unwrap(), None, "first claim wins");
-        let existing = db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 101).unwrap().expect("second claim sees the row");
+        assert_eq!(db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 100, None).unwrap(), None, "first claim wins");
+        let existing = db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 101, Some("ignored")).unwrap().expect("second claim sees the row");
         assert_eq!(existing.refund_payment_id, None);
         db.record_trade_fee_refund_payment("trade-1", "refund-1").unwrap();
         assert!(!db.retake_failed_trade_fee_refund("trade-1", "other", 102).unwrap(), "only the recorded payment can be retaken");
         assert!(db.retake_failed_trade_fee_refund("trade-1", "refund-1", 103).unwrap());
         assert!(!db.retake_failed_trade_fee_refund("trade-1", "refund-1", 104).unwrap(), "a retake happens once");
-        db.release_trade_fee_refund("trade-1").unwrap();
+        db.release_trade_fee_refund("trade-1", None).unwrap();
         assert!(db.list_trade_fee_refunds().unwrap().is_empty(), "an unsent claim can be released");
-        db.claim_trade_fee_refund("trade-2", 5_000, "02cd", 200).unwrap();
+        db.claim_trade_fee_refund("trade-2", 5_000, "02cd", 200, Some("expected-2")).unwrap();
+        db.release_trade_fee_refund("trade-2", Some("other")).unwrap();
+        assert_eq!(db.list_trade_fee_refunds().unwrap().len(), 1, "a claim with a different id is not released");
         db.record_trade_fee_refund_payment("trade-2", "refund-2").unwrap();
-        db.release_trade_fee_refund("trade-2").unwrap();
+        db.release_trade_fee_refund("trade-2", Some("expected-2")).unwrap();
         let rows = db.list_trade_fee_refunds().unwrap();
         assert_eq!(rows.len(), 1, "a sent refund is never released");
         assert_eq!((rows[0].amount_msat, rows[0].counterparty.as_str(), rows[0].refund_payment_id.as_deref()), (5_000, "02cd", Some("refund-2")));

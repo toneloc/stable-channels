@@ -38,6 +38,11 @@ pub const CLAIM_SWEEP_FEE: &str = "claim_sweep_fee";
 pub const LIGHTNING_SEND_FEE: &str = "lightning_send_fee";
 pub const STABILITY_IN: &str = "stability_in";
 pub const STABILITY_OUT: &str = "stability_out";
+/// Spent categories whose amounts come from the payment list; an incomplete scan makes each unknown.
+const PAYMENT_LIST_SPENT_CATEGORIES: [&str; 9] = [
+    JIT_OPEN_FEE, CHANNEL_FUNDING_FEE, CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE, ONCHAIN_FEE, LIGHTNING_SEND_FEE, PROTOCOL_MESSAGE,
+    TRADE_FEE_REFUND,
+];
 
 pub const DEFAULT_PAGE_LIMIT: usize = 50;
 pub const MAX_PAGE_LIMIT: usize = 500;
@@ -256,17 +261,23 @@ pub fn classify(src: &Sources) -> (Vec<RevenueItem>, HashSet<&'static str>) {
             (false, _, Some((txid, tx_type))) => {
                 item.txid = txid.to_owned();
                 let opened = opened_channel.get(txid).filter(|uid| private_outbound(uid));
-                match (tx_type, opened) {
+                let category = match (tx_type, opened) {
                     // A first private outbound funding is a JIT open whatever LDK calls it.
                     (Some(Kind::Funding(_)) | None, Some(uid)) => {
                         item.user_channel_id = uid.to_string();
                         item.node_id = node_of.get(uid).map(|n| n.to_string()).unwrap_or_default();
-                        (JIT_OPEN_FEE, fee)
+                        JIT_OPEN_FEE
                     },
-                    (Some(_), _) => (CHANNEL_FUNDING_FEE, fee),
-                    (None, None) if funding.contains(txid) => (CHANNEL_FUNDING_FEE, fee),
-                    (None, None) => (ONCHAIN_FEE, fee),
+                    (Some(_), _) => CHANNEL_FUNDING_FEE,
+                    (None, None) if funding.contains(txid) => CHANNEL_FUNDING_FEE,
+                    (None, None) => ONCHAIN_FEE,
+                };
+                // Same rule as closes: BDK's 0 is a fee it could not price, never a free transaction.
+                if fee == 0 {
+                    unpriced.insert(category);
+                    continue;
                 }
+                (category, fee)
             },
             (false, _, None) => (LIGHTNING_SEND_FEE, fee),
             (true, _, _) => continue,
@@ -593,6 +604,15 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
             untracked.push(category.into());
         }
     }
+    // A scan that stopped early cannot vouch for any cost read from the payment list, so every
+    // such category is unknown and the tiles read as a floor, not an exact figure.
+    if partial_scan {
+        for category in PAYMENT_LIST_SPENT_CATEGORIES {
+            if !untracked.iter().any(|c| c == category) {
+                untracked.push(category.to_string());
+            }
+        }
+    }
     *store.snapshot.write().unwrap() = Some(Arc::new(Snapshot { items, built_at: now, partial_scan, truncated, pruned_before, untracked }));
     Ok(())
 }
@@ -656,8 +676,12 @@ pub async fn refund_trade_fee(
         .and_then(|p| p.amount_msat)
         .filter(|amount| *amount > 0)
         .ok_or(RefundError::NotRejectedTradeFee)?;
-    if let Some(existing) = db.claim_trade_fee_refund(trade_payment_id, amount_msat, &decision.counterparty, now).map_err(db_error)? {
+    let (preimage, expected_payment_id) = stable_channels::trade::trade_fee_refund_preimage(trade_payment_id);
+    if let Some(existing) =
+        db.claim_trade_fee_refund(trade_payment_id, amount_msat, &decision.counterparty, now, Some(&expected_payment_id)).map_err(db_error)?
+    {
         let Some(previous) = existing.refund_payment_id else {
+            // A claim written before refunds carried a deterministic id: nothing can say whether it left.
             return Err(RefundError::OutcomeUnknown);
         };
         let status = details(previous.clone()).await.map_err(|e| RefundError::Send(e.to_string()))?.payment.map(|p| p.status);
@@ -668,7 +692,11 @@ pub async fn refund_trade_fee(
                 }
             },
             Some(s) if s == PaymentStatus::Succeeded as i32 => return Err(RefundError::AlreadyRefunded),
-            _ => return Err(RefundError::RefundPending),
+            Some(_) => return Err(RefundError::RefundPending),
+            // LDK holds no payment under the id this refund always uses: the earlier attempt never
+            // left. Sending the same preimage again can only produce that same payment, never a second refund.
+            None if previous == expected_payment_id => {},
+            None => return Err(RefundError::RefundPending),
         }
     }
     let request = SpontaneousSendRequest {
@@ -676,7 +704,7 @@ pub async fn refund_trade_fee(
         node_id: decision.counterparty.clone(),
         route_parameters: None,
         custom_tlvs: Vec::new(),
-        preimage: None,
+        preimage: Some(preimage),
     };
     let refund_payment_id = match ldk.spontaneous_send(request).await {
         Ok(response) => response.payment_id,
@@ -685,9 +713,11 @@ pub async fn refund_trade_fee(
             error.error_code,
             LdkServerErrorCode::LightningError | LdkServerErrorCode::InvalidRequestError | LdkServerErrorCode::AuthError
         ) => {
-            let _ = db.release_trade_fee_refund(trade_payment_id);
+            let _ = db.release_trade_fee_refund(trade_payment_id, Some(&expected_payment_id));
             return Err(RefundError::Send(error.to_string()));
         },
+        // The claim keeps the deterministic id: the next attempt asks LDK for it and either finds
+        // the payment or learns nothing left, so an ambiguous error is a pause, not a lockout.
         Err(error) => {
             stable_channels::audit::audit_event(
                 "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
@@ -874,11 +904,12 @@ mod tests {
     }
 
     #[test]
-    fn unset_amounts_count_as_zero() {
+    fn an_unpriced_onchain_fee_is_unknown_not_zero() {
         let payments = vec![pay("spend", false, PaymentStatus::Succeeded, None, None, 5, Some("bb"))];
         let ledger = LedgerFacts::default();
-        let (items, _) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &[], ledger: &ledger });
-        assert_eq!((items[0].category.as_str(), items[0].amount_msat), (ONCHAIN_FEE, 0));
+        let (items, unpriced) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &[], ledger: &ledger });
+        assert!(items.iter().all(|item| item.category != ONCHAIN_FEE), "a fee BDK could not price books no cost: {items:?}");
+        assert!(unpriced.contains(ONCHAIN_FEE), "the category is reported unknown instead");
     }
 
     #[test]
@@ -1249,6 +1280,8 @@ mod tests {
         assert_eq!((refund_id.as_str(), amount), ("refund-1", 1_234_000));
         let sends = fake.sends.lock().unwrap().clone();
         assert_eq!((sends.len(), sends[0].amount_msat, sends[0].node_id.as_str(), sends[0].custom_tlvs.len()), (1, 1_234_000, "02aa", 0));
+        let (preimage, _) = stable_channels::trade::trade_fee_refund_preimage("t1");
+        assert_eq!(sends[0].preimage.as_deref(), Some(preimage.as_str()), "the refund always uses the same preimage");
         assert_eq!(db.list_trade_fee_refunds().unwrap()[0].refund_payment_id.as_deref(), Some("refund-1"));
         assert_eq!(refund_trade_fee(&db, &fake, "t1", 201).await, Err(RefundError::RefundPending), "the refund payment is not in LDK's list yet");
         fake.payments.lock().unwrap().push(pay("refund-1", false, PaymentStatus::Succeeded, Some(1_234_000), Some(0), 202, None));
@@ -1288,20 +1321,36 @@ mod tests {
         let (_dir, db) = temp_db();
         let fake = Fake::default();
         rejected_trade(&db, &fake, "t1", 5_000);
-        db.claim_trade_fee_refund("t1", 5_000, "02aa", 10).unwrap();
-        assert_eq!(refund_trade_fee(&db, &fake, "t1", 11).await, Err(RefundError::OutcomeUnknown));
+        db.claim_trade_fee_refund("t1", 5_000, "02aa", 10, None).unwrap();
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 11).await, Err(RefundError::OutcomeUnknown), "a pre-deterministic claim stays unknown");
         assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
-    async fn an_ambiguous_send_error_keeps_the_claim_so_the_fee_is_never_sent_twice() {
+    async fn an_ambiguous_send_error_keeps_the_claim_and_a_retry_resolves_it() {
         let (_dir, db) = temp_db();
+        let (_, expected_id) = stable_channels::trade::trade_fee_refund_preimage("t1");
         let fake = Fake { ambiguous_send: true, ..Default::default() };
         rejected_trade(&db, &fake, "t1", 5_000);
         assert_eq!(refund_trade_fee(&db, &fake, "t1", 10).await, Err(RefundError::OutcomeUnknown));
         let claims = db.list_trade_fee_refunds().unwrap();
-        assert_eq!((claims.len(), claims[0].refund_payment_id.as_deref()), (1, None), "the claim survives");
+        assert_eq!((claims.len(), claims[0].refund_payment_id.as_deref()), (1, Some(expected_id.as_str())), "the claim survives with its id");
+        // Still ambiguous: no lockout, the same answer again, and nothing was sent.
         assert_eq!(refund_trade_fee(&db, &fake, "t1", 11).await, Err(RefundError::OutcomeUnknown));
+        assert!(fake.sends.lock().unwrap().is_empty());
+        // LDK has no payment under the deterministic id, so the earlier attempt never left: a retry sends it, once.
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        let (sent, amount) = refund_trade_fee(&db, &fake, "t1", 12).await.unwrap();
+        assert_eq!((sent.as_str(), amount, fake.sends.lock().unwrap().len()), ("refund-1", 5_000, 1));
+        // Had the first attempt actually left, LDK would list it and the retry would stop there.
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        db.claim_trade_fee_refund("t1", 5_000, "02aa", 20, Some(&expected_id)).unwrap();
+        fake.payments.lock().unwrap().push(pay(&expected_id, false, PaymentStatus::Succeeded, Some(5_000), Some(0), 21, None));
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 22).await, Err(RefundError::AlreadyRefunded));
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     #[test]
