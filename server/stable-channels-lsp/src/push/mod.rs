@@ -19,6 +19,8 @@ pub struct PushService {
     last_push_sent: HashMap<String, Instant>,
     #[cfg(test)]
     test_backend_available: bool,
+    #[cfg(test)]
+    last_push_direction: HashMap<String, String>,
 }
 
 impl PushService {
@@ -31,6 +33,8 @@ impl PushService {
             last_push_sent: HashMap::new(),
             #[cfg(test)]
             test_backend_available: false,
+            #[cfg(test)]
+            last_push_direction: HashMap::new(),
         }
     }
 
@@ -54,8 +58,16 @@ impl PushService {
         }
     }
 
-    fn mark_notified(&mut self, node_id: &str) {
+    fn mark_notified(&mut self, node_id: &str, direction: &str) {
         self.last_push_sent.insert(node_id.to_string(), Instant::now());
+        #[cfg(test)]
+        self.last_push_direction
+            .insert(node_id.to_string(), direction.to_string());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_notification_direction(&self, node_id: &str) -> Option<&str> {
+        self.last_push_direction.get(node_id).map(String::as_str)
     }
 
     /// Whether a successful wake notification for this node is still within the push cooldown.
@@ -90,7 +102,7 @@ impl PushService {
         let environment = token_info.environment;
         #[cfg(test)]
         if self.test_backend_available {
-            self.mark_notified(node_id);
+            self.mark_notified(node_id, direction);
             return true;
         }
         let sent = if platform == "android" {
@@ -118,7 +130,7 @@ impl PushService {
         };
 
         if sent {
-            self.mark_notified(node_id);
+            self.mark_notified(node_id, direction);
             info!(
                 "[push] Sent {} notification to {} ({})",
                 direction, node_id, platform
@@ -161,7 +173,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut push = PushService::new(&PushConfig::default(), dir.path());
 
-        push.mark_notified("node");
+        push.mark_notified("node", "lsp_to_user");
         assert!(!push.should_notify("node"));
         assert!(push.has_recent_notification("node"));
         assert!(push.should_notify("other-node"));
