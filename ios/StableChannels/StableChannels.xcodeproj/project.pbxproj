@@ -99,6 +99,11 @@
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
+		49BB0200305552960AA8E746 /* BalanceBarAnimationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB010030D8514082B8D345 /* BalanceBarAnimationCoordinator.swift */; };
+		49BB04003048605DEF7F8E45 /* BalanceBarModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB030030E88AA38BA21C43 /* BalanceBarModels.swift */; };
+		49BB0600301492E84C89044D /* BalanceBarTrackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB050030B92528D286D346 /* BalanceBarTrackView.swift */; };
+		49BB080030D6ED7499BFE342 /* SliderConversionMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */; };
+		49BB0A0030B22C3344556677 /* BalanceBarHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
 		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
@@ -134,6 +139,7 @@
 		49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */; };
 		49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */; };
 		49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */; };
+		49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */; };
 		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
 		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -190,9 +196,8 @@
 		CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45B3E864653E657FB0FCA3D2 /* Trade.swift */; };
 		D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */; };
 		D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */; };
-		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
-		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
 		D20000000000000000000011 /* Bech32.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000010 /* Bech32.swift */; };
+		D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000016 /* PaymentFeeEstimator.swift */; };
 		D20000000000000000000019 /* LNURLService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000018 /* LNURLService.swift */; };
 		D2000000000000000000001B /* LNURLModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001A /* LNURLModels.swift */; };
 		D2000000000000000000001D /* SecureEndpointValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000001C /* SecureEndpointValidator.swift */; };
@@ -201,6 +206,7 @@
 		D20000000000000000000023 /* URLSessionTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000022 /* URLSessionTransport.swift */; };
 		D20000000000000000000037 /* Bech32Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000036 /* Bech32Tests.swift */; };
 		D20000000000000000000043 /* LNURLServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D20000000000000000000042 /* LNURLServiceTests.swift */; };
+		D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */; };
 		DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D62A82EA774DC10F10A6574A /* ContentView.swift */; };
 		E7E67B65EAD4FF5732460856 /* ChannelSweepTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */; };
 		E7E816D3AF095B47E1F58407 /* HistoricalPrices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B46630309755AE15EF291D4 /* HistoricalPrices.swift */; };
@@ -327,6 +333,11 @@
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
+		49BB010030D8514082B8D345 /* BalanceBarAnimationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarAnimationCoordinator.swift; sourceTree = "<group>"; };
+		49BB030030E88AA38BA21C43 /* BalanceBarModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarModels.swift; sourceTree = "<group>"; };
+		49BB050030B92528D286D346 /* BalanceBarTrackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarTrackView.swift; sourceTree = "<group>"; };
+		49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetrics.swift; sourceTree = "<group>"; };
+		49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarHeaderView.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
 		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
@@ -362,6 +373,7 @@
 		49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepairPolicyTests.swift; sourceTree = "<group>"; };
 		49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepairBooksUseCaseTests.swift; sourceTree = "<group>"; };
 		49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityStatusAdaptersTests.swift; sourceTree = "<group>"; };
+		49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetricsTests.swift; sourceTree = "<group>"; };
 		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
 		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -418,9 +430,8 @@
 		CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuditService.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SPVHeaderChainServiceTests.swift; sourceTree = "<group>"; };
 		D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupFailoverTests.swift; sourceTree = "<group>"; };
-		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
-		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
 		D20000000000000000000010 /* Bech32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32.swift; sourceTree = "<group>"; };
+		D20000000000000000000016 /* PaymentFeeEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimator.swift; sourceTree = "<group>"; };
 		D20000000000000000000018 /* LNURLService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLService.swift; sourceTree = "<group>"; };
 		D2000000000000000000001A /* LNURLModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLModels.swift; sourceTree = "<group>"; };
 		D2000000000000000000001C /* SecureEndpointValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureEndpointValidator.swift; sourceTree = "<group>"; };
@@ -429,6 +440,7 @@
 		D20000000000000000000022 /* URLSessionTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = URLSessionTransport.swift; sourceTree = "<group>"; };
 		D20000000000000000000036 /* Bech32Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bech32Tests.swift; sourceTree = "<group>"; };
 		D20000000000000000000042 /* LNURLServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLServiceTests.swift; sourceTree = "<group>"; };
+		D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentFeeEstimatorTests.swift; sourceTree = "<group>"; };
 		D34C08DCF6ACD28A3898859D /* StableChannelsTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = StableChannelsTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		D62A82EA774DC10F10A6574A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChainView.swift; sourceTree = "<group>"; };
@@ -650,6 +662,19 @@
 				499E5370301A92900050E3F8 /* SettingsIconBadgeView.swift */,
 			);
 			path = Components;
+			sourceTree = "<group>";
+		};
+		49BB000030E900144C6D1943 /* BalanceBar */ = {
+			isa = PBXGroup;
+			children = (
+				49BB010030D8514082B8D345 /* BalanceBarAnimationCoordinator.swift */,
+				49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */,
+				49BB030030E88AA38BA21C43 /* BalanceBarModels.swift */,
+				49BB050030B92528D286D346 /* BalanceBarTrackView.swift */,
+				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
+				49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */,
+			);
+			path = BalanceBar;
 			sourceTree = "<group>";
 		};
 		49DDB0002FF0000000000001 /* Repositories */ = {
@@ -874,7 +899,6 @@
 			isa = PBXGroup;
 			children = (
 				49D2229F078D1812443B9072 /* ActionButton.swift */,
-				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */,
 				49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */,
@@ -883,6 +907,7 @@
 				49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
 				49DDD0073054000100B5A146 /* TactileCardButtonStyle.swift */,
+				49BB000030E900144C6D1943 /* BalanceBar */,
 				497DA314306716B900B0D7C5 /* PriceChart */,
 			);
 			path = Home;
@@ -895,6 +920,7 @@
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
 				49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */,
 				49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */,
+				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -1079,6 +1105,7 @@
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 				D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */,
 				49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */,
+				49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */,
 				49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */,
 				49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */,
 				49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */,
@@ -1128,6 +1155,11 @@
 				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				581786C32C021D8FB9E63DC2 /* BalanceBarView.swift in Sources */,
+				49BB0200305552960AA8E746 /* BalanceBarAnimationCoordinator.swift in Sources */,
+				49BB04003048605DEF7F8E45 /* BalanceBarModels.swift in Sources */,
+				49BB0600301492E84C89044D /* BalanceBarTrackView.swift in Sources */,
+				49BB080030D6ED7499BFE342 /* SliderConversionMetrics.swift in Sources */,
+				49BB0A0030B22C3344556677 /* BalanceBarHeaderView.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
