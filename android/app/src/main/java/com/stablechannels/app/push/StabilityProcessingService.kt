@@ -142,7 +142,10 @@ class StabilityProcessingService : Service() {
 
     companion object {
         private const val TAG = "StabilityBgService"
-        private const val POLL_TIMEOUT_SECS = 25
+        // The foreground service can remain active while the LDK node starts, reconnects, and
+        // receives the wake-triggered settlement. Keep this longer than the LSP wake poll so
+        // Android still has a receiver when the server sends after a slow reconnect.
+        private const val POLL_TIMEOUT_SECS = 60
         private const val DB_RETRY_BACKOFF_MS = 500L
         private const val SYNC_FRESHNESS_POLL_MS = 500L
 

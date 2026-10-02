@@ -983,6 +983,9 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "STABILITY_RECEIVE_UNATTRIBUTED",
     "STABILITY_PUSH_QUEUED",
     "STABILITY_CHECK_ONLY",
+    "STABILITY_WAKE_POLL_ONLINE",
+    "STABILITY_WAKE_POLL_TIMEOUT",
+    "STABILITY_CHANNEL_SNAPSHOT_AMBIGUOUS",
     // SYNC publications and their final outcomes (never each retry).
     "SYNC_MESSAGE_SENT",
     "SYNC_RETRY_EXHAUSTED",
@@ -1099,6 +1102,8 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     // One row per sync keysend attempt, hundreds an hour against offline phones; SYNC_RETRY_BLOCKED
     // and SYNC_RETRY_EXHAUSTED are the durable records of a channel that cannot be reached.
     "SYNC_MESSAGE_FAILED",
+    // Poll startup is diagnostic; reconnect and timeout outcomes are kept in the channel ledger.
+    "STABILITY_WAKE_POLL_STARTED",
     // Price-feed transport.
     "WEBSOCKET_DISCONNECTED",
     // Per-tick and per-attempt traces whose outcome is recorded elsewhere, transport, and UI.
