@@ -42,8 +42,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run affected Rust tests
-        run: cargo test -p stable-channels -p stable-channels-lsp --locked
+      # The GUI's native build links WebKitGTK; the web build needs the wasm target.
+      - name: Install GUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev pkg-config
+          rustup target add wasm32-unknown-unknown
 
-      - name: Build affected Rust packages
-        run: cargo build -p stable-channels -p stable-channels-lsp --locked
+      - name: Run Rust tests
+        run: cargo test -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+
+      - name: Build Rust packages
+        run: cargo build -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+
+      - name: Check the GUI web build
+        run: cargo check -p lsp-server-gui --locked --target wasm32-unknown-unknown --no-default-features --features web

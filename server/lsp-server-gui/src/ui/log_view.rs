@@ -1,43 +1,67 @@
-use eframe::egui;
+use dioxus::prelude::*;
 
-/// Filter / Copy-all / Wrap / Follow-tail control row. State lives in egui temp memory keyed by `id_salt`.
-pub fn controls(ui: &mut egui::Ui, id_salt: &str, copy_source: &str) -> (String, bool, bool) {
-	let filter_id = ui.id().with((id_salt, "filter"));
-	let wrap_id = ui.id().with((id_salt, "wrap"));
-	let follow_id = ui.id().with((id_salt, "follow"));
+use crate::actions;
+use crate::state::{AppCtx, LogViewState};
+use crate::ui::widgets::{Check, Icon, TextInput};
 
-	let mut filter = ui.memory_mut(|m| m.data.get_temp::<String>(filter_id).unwrap_or_default());
-	let mut wrap = ui.memory_mut(|m| m.data.get_temp::<bool>(wrap_id).unwrap_or(false));
-	let mut follow = ui.memory_mut(|m| m.data.get_temp::<bool>(follow_id).unwrap_or(true));
-
-	ui.horizontal(|ui| {
-		ui.label("Filter:");
-		ui.text_edit_singleline(&mut filter);
-		if ui.button("Copy all").clicked() && !copy_source.is_empty() {
-			ui.output_mut(|o| o.copied_text = copy_source.to_string());
-		}
-		ui.checkbox(&mut wrap, "Wrap");
-		ui.checkbox(&mut follow, "Follow tail");
-	});
-
-	ui.memory_mut(|m| m.data.insert_temp(filter_id, filter.clone()));
-	ui.memory_mut(|m| m.data.insert_temp(wrap_id, wrap));
-	ui.memory_mut(|m| m.data.insert_temp(follow_id, follow));
-	(filter, wrap, follow)
+#[derive(Clone, Copy, PartialEq)]
+pub enum LogKind {
+	Audit,
+	Ldk,
 }
 
-/// Monospace, scrollable, read-only text area that fills the remaining panel width and height.
-pub fn text_area(ui: &mut egui::Ui, display: &str, wrap: bool, follow: bool) {
-	let avail = ui.available_size();
-	let scroll = egui::ScrollArea::both().auto_shrink([false, false]).stick_to_bottom(follow);
-	scroll.show(ui, |ui| {
-		let mut binding = display;
-		let desired_w = if wrap { avail.x } else { f32::INFINITY };
-		ui.add(
-			egui::TextEdit::multiline(&mut binding)
-				.font(egui::TextStyle::Monospace)
-				.desired_width(desired_w)
-				.min_size(egui::vec2(avail.x, avail.y)),
-		);
-	});
+fn state(ctx: AppCtx, kind: LogKind) -> LogViewState {
+	let view = ctx.view.read();
+	match kind {
+		LogKind::Audit => view.audit_view.clone(),
+		LogKind::Ldk => view.ldk_view.clone(),
+	}
+}
+
+fn update(ctx: AppCtx, kind: LogKind, f: impl FnOnce(&mut LogViewState)) {
+	let mut view = ctx.view;
+	let mut view = view.write();
+	match kind {
+		LogKind::Audit => f(&mut view.audit_view),
+		LogKind::Ldk => f(&mut view.ldk_view),
+	}
+}
+
+/// Filter / Copy-all / Wrap / Follow-tail control row plus the scrollable monospace log.
+#[component]
+pub fn LogView(kind: LogKind, text: String) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let s = state(ctx, kind);
+	let display: String = if s.filter.is_empty() {
+		text.clone()
+	} else {
+		text.lines().filter(|line| line.contains(&s.filter)).collect::<Vec<_>>().join("\n")
+	};
+	let dom_id = match kind {
+		LogKind::Audit => "audit-log-view",
+		LogKind::Ldk => "ldk-log-view",
+	};
+	let follow = s.follow;
+	let length = display.len();
+	// Stick to the bottom whenever the content changes while following the tail.
+	use_effect(use_reactive!(|(length, follow)| {
+		let _ = length;
+		if follow {
+			let _ = document::eval(&format!(
+				"requestAnimationFrame(() => {{ const el = document.getElementById('{dom_id}'); if (el) el.scrollTop = el.scrollHeight; }});"
+			));
+		}
+	}));
+	rsx! {
+		div { class: "row",
+			div { class: "search",
+				Icon { name: "search", size: 15 }
+				TextInput { value: s.filter.clone(), small: true, placeholder: "Filter lines", oninput: move |v| update(ctx, kind, |s| s.filter = v) }
+			}
+			button { class: "btn sm", disabled: text.is_empty(), onclick: move |_| actions::copy(ctx, &text), Icon { name: "copy", size: 14 } "Copy all" }
+			Check { checked: s.wrap, label: "Wrap", onchange: move |v| update(ctx, kind, |s| s.wrap = v) }
+			Check { checked: s.follow, label: "Follow tail", onchange: move |v| update(ctx, kind, |s| s.follow = v) }
+		}
+		pre { id: dom_id, class: if s.wrap { "log wrap" } else { "log" }, tabindex: "0", "{display}" }
+	}
 }

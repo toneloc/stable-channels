@@ -115,6 +115,16 @@ pub fn is_channel_id(value: &str) -> bool {
     is_canonical_32_byte_hex(value)
 }
 
+/// Keysend preimage for refunding a rejected trade's fee, derived from the trade payment id.
+/// LDK keys a spontaneous payment by its hash, so a retry after an ambiguous send error can only
+/// reproduce the same payment, and a lookup by that hash tells whether the first attempt ever left.
+/// Returns `(preimage_hex, payment_id_hex)`.
+pub fn trade_fee_refund_preimage(trade_payment_id: &str) -> (String, String) {
+    let preimage = sha256::Hash::hash(format!("stable-channels/trade-fee-refund/{trade_payment_id}").as_bytes());
+    let hash = sha256::Hash::hash(preimage.as_byte_array());
+    (preimage.to_string(), hash.to_string())
+}
+
 /// Hash the exact signed TRADE_V1 payload bytes, without parsing or reserialization.
 pub fn request_hash(payload: &[u8]) -> String {
     sha256::Hash::hash(payload).to_string()
