@@ -120,6 +120,7 @@ final class DatabaseService {
                 confirmations INTEGER NOT NULL DEFAULT 0,
                 resolution_id INTEGER,
                 tx_block_height INTEGER,
+                is_placeholder INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
@@ -306,6 +307,11 @@ final class DatabaseService {
         // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
+        }
+
+        // Migrate: add is_placeholder to payments if missing (temporary row for settle-before-insert races)
+        if !paymentsColNames.contains("is_placeholder") {
+            try rawSQL.execute("ALTER TABLE payments ADD COLUMN is_placeholder INTEGER NOT NULL DEFAULT 0")
         }
 
         // Must come after the resolution_id ALTER above — on legacy DBs the column

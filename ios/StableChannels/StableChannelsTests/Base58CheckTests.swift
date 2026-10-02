@@ -50,4 +50,32 @@ final class Base58CheckTests: XCTestCase {
         let short = "1A1zP1eP5QGefi2"
         XCTAssertFalse(Base58Check.verify(short))
     }
+
+    func testUnsupportedPrefixOrVersionByte() {
+        // Valid Base58Check checksum with unsupported version byte (0x1e)
+        let unsupportedVersion = "D5ERdEN1gsouFSs7zsq7VYJxyWP6dP28H1"
+        XCTAssertFalse(Base58Check.verify(unsupportedVersion))
+    }
+
+    func testLeadingOnesPreservedAsZeroBytes() {
+        // "11" should decode to two leading zero bytes [0x00, 0x00]
+        let decoded = Base58Check.decode("11")
+        XCTAssertEqual(decoded, [0x00, 0x00])
+
+        // Address with leading 1s:
+        let leadingOnesAddr = "1111111111111111111114oLvT2"
+        let decodedAddr = Base58Check.decode(leadingOnesAddr)
+        XCTAssertNotNil(decodedAddr)
+        XCTAssertEqual(decodedAddr?.count, 25)
+        // Verify all 21 payload bytes are 0x00
+        if let payload = decodedAddr?.prefix(21) {
+            XCTAssertTrue(payload.allSatisfy { $0 == 0x00 })
+        }
+        XCTAssertTrue(Base58Check.verify(leadingOnesAddr))
+    }
+
+    func testDecodeEmptyReturnsNil() {
+        XCTAssertNil(Base58Check.decode(""))
+        XCTAssertNil(Base58Check.decode("   "))
+    }
 }

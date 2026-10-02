@@ -34,6 +34,7 @@ enum Base58Check {
                 b256[j] = UInt8(c & 0xFF)
                 c >>= 8
             }
+            guard c == 0 else { return nil }
         }
 
         var start = 0
@@ -53,6 +54,14 @@ enum Base58Check {
         let hash1 = SHA256.hash(data: Data(payload))
         let hash2 = SHA256.hash(data: Data(hash1))
         let expected = Array(hash2.prefix(4))
-        return Array(checksum) == expected
+        guard Array(checksum) == expected else { return false }
+
+        guard let version = payload.first else { return false }
+        switch version {
+        case 0x00, 0x05, 0x6F, 0xC4:
+            return true
+        default:
+            return false
+        }
     }
 }

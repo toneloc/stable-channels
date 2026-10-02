@@ -46,6 +46,17 @@ final class PaymentRepository {
                 params: [.text(pid)]
             )
             if !existing.isEmpty {
+                try backfillPaymentDetails(
+                    paymentId: pid,
+                    paymentType: paymentType,
+                    direction: direction,
+                    amountMsat: amountMsat,
+                    amountUSD: amountUSD,
+                    btcPrice: btcPrice,
+                    counterparty: counterparty,
+                    address: address,
+                    txid: txid
+                )
                 return false
             }
         }
@@ -67,52 +78,71 @@ final class PaymentRepository {
             txid.map { .text($0) } ?? .null,
             address.map { .text($0) } ?? .null
         ])
+        if inserted == 0, let pid = paymentId, !pid.isEmpty {
+            try backfillPaymentDetails(
+                paymentId: pid,
+                paymentType: paymentType,
+                direction: direction,
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: btcPrice,
+                counterparty: counterparty,
+                address: address,
+                txid: txid
+            )
+        }
         return inserted > 0
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
-        let updated: Int
-        if let fee = feeMsat {
-            updated = try rawSQL.executeReturningChanges(
-                "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
-                params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
-            )
-        } else {
-            updated = try rawSQL.executeReturningChanges(
-                "UPDATE payments SET status = ?, fee_msat = COALESCE(fee_msat, ?) WHERE payment_id = ? AND status = 'pending'",
-                params: [.text(status), .null, .text(paymentId)]
-            )
-        }
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            let updated: Int
+            if let fee = feeMsat {
+                updated = try rawSQL.executeReturningChanges(
+                    "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
+                    params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
+                )
+            } else {
+                updated = try rawSQL.executeReturningChanges(
+                    "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'",
+                    params: [.text(status), .text(paymentId)]
+                )
+            }
 
-        if updated == 0 {
-            if let existing = payment(paymentId: paymentId) {
-                if let fee = feeMsat, existing.feeMsat == nil {
-                    try? rawSQL.execute(
-                        "UPDATE payments SET fee_msat = ? WHERE payment_id = ?",
-                        params: [.integer(Int64(fee)), .text(paymentId)]
+            if updated == 0 {
+                if let existing = payment(paymentId: paymentId) {
+                    // Terminal status is immutable; only backfill fee if incoming event matches existing status and
+                    // existing fee is zero.
+                    if existing.status == status, let fee = feeMsat, existing.feeMsat == 0 {
+                        try rawSQL.execute(
+                            "UPDATE payments SET fee_msat = ? WHERE payment_id = ?",
+                            params: [.integer(Int64(fee)), .text(paymentId)]
+                        )
+                    }
+                } else {
+                    // Settle or fail event arrived before recordPayment() inserted the row.
+                    // Insert placeholder with terminal status so recordPayment won't downgrade it.
+                    let sql = """
+                        INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, status, fee_msat, is_placeholder)
+                        VALUES (?, 'lightning', 'sent', 0, ?, ?, 1)
+                    """
+                    try rawSQL.execute(
+                        sql,
+                        params: [
+                            .text(paymentId),
+                            .text(status),
+                            .integer(Int64(feeMsat ?? 0))
+                        ]
                     )
                 }
-            } else {
-                // Settle or fail event arrived before recordPayment() inserted the row.
-                // Insert placeholder with terminal status so recordPayment won't downgrade it.
-                let sql = """
-                    INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, status, fee_msat)
-                    VALUES (?, 'lightning', 'sent', 0, ?, ?)
-                """
-                try? rawSQL.execute(
-                    sql,
-                    params: [
-                        .text(paymentId),
-                        .text(status),
-                        feeMsat.map { .integer(Int64($0)) } ?? .null
-                    ]
-                )
             }
         }
     }
 
     func backfillPaymentDetails(
         paymentId: String,
+        paymentType: String? = nil,
+        direction: String? = nil,
         amountMsat: UInt64,
         amountUSD: Double?,
         btcPrice: Double?,
@@ -122,15 +152,20 @@ final class PaymentRepository {
     ) throws {
         let sql = """
             UPDATE payments
-            SET amount_msat = CASE WHEN amount_msat = 0 THEN ? ELSE amount_msat END,
+            SET payment_type = CASE WHEN is_placeholder = 1 THEN COALESCE(?, payment_type) ELSE payment_type END,
+                direction = CASE WHEN is_placeholder = 1 THEN COALESCE(?, direction) ELSE direction END,
+                amount_msat = CASE WHEN is_placeholder = 1 OR amount_msat = 0 THEN ? ELSE amount_msat END,
                 amount_usd = COALESCE(amount_usd, ?),
                 btc_price = COALESCE(btc_price, ?),
                 counterparty = COALESCE(counterparty, ?),
                 address = COALESCE(address, ?),
-                txid = COALESCE(txid, ?)
+                txid = COALESCE(txid, ?),
+                is_placeholder = 0
             WHERE payment_id = ?
         """
         try rawSQL.execute(sql, params: [
+            paymentType.map { .text($0) } ?? .null,
+            direction.map { .text($0) } ?? .null,
             .integer(Int64(amountMsat)),
             amountUSD.map { .real($0) } ?? .null,
             btcPrice.map { .real($0) } ?? .null,
@@ -171,6 +206,7 @@ final class PaymentRepository {
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
         FROM payments
         WHERE direction = "received"
+        AND is_placeholder = 0
         AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
         ORDER BY id DESC LIMIT 1
         """
@@ -358,7 +394,8 @@ final class PaymentRepository {
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
                    counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
             FROM payments
-            WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000)
+            WHERE is_placeholder = 0
+            AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
             ORDER BY id DESC LIMIT ?
         """
         let rows = try rawSQL.query(sql, params: [.integer(Int64(limit))])
@@ -407,6 +444,17 @@ final class PaymentRepository {
                     params: [.text(pid)]
                 )
                 if !existing.isEmpty {
+                    try backfillPaymentDetails(
+                        paymentId: pid,
+                        paymentType: paymentType,
+                        direction: direction,
+                        amountMsat: amountMsat,
+                        amountUSD: amountUSD,
+                        btcPrice: btcPrice,
+                        counterparty: nil,
+                        address: nil,
+                        txid: nil
+                    )
                     let backing = try authoritativeBacking(
                         userChannelId: userChannelId,
                         required: backingDeltaSats != nil

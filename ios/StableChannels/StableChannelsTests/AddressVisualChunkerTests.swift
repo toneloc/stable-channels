@@ -50,15 +50,15 @@ final class AddressVisualChunkerTests: XCTestCase {
         let dest = SendDestination.bolt11(invoice: invoice, raw: rawInvoice, amountMsat: 10_000_000)
         let rep = AddressVisualChunker.formatDestination(dest)
 
-        guard case .invoice(let prefix, let middle, let suffix, let raw) = rep else {
+        guard case .invoice(let preview) = rep else {
             XCTFail("Expected .invoice representation")
             return
         }
-        XCTAssertEqual(raw, rawInvoice)
-        XCTAssertEqual(prefix, String(rawInvoice.prefix(14)))
-        XCTAssertEqual(middle, "········")
-        XCTAssertEqual(suffix, String(rawInvoice.suffix(10)))
-        XCTAssertTrue(rawInvoice.hasSuffix(suffix))
+        XCTAssertEqual(preview.raw, rawInvoice)
+        XCTAssertEqual(preview.prefix, String(rawInvoice.prefix(14)))
+        XCTAssertEqual(preview.middle, "········")
+        XCTAssertEqual(preview.suffix, String(rawInvoice.suffix(10)))
+        XCTAssertTrue(rawInvoice.hasSuffix(preview.suffix))
     }
 
     func testChunkingSegWitAddressBoundaryHighlights() {
@@ -119,12 +119,13 @@ final class AddressVisualChunkerTests: XCTestCase {
         XCTAssertFalse(twelve.chunks[1].isHighlighted)
         XCTAssertTrue(twelve.chunks[2].isHighlighted)
 
-        // 16 chars = 4 chunks (all 4 highlighted because index < 2 || index >= 2)
+        // 16 chars = 4 chunks (boundary highlighting: first and last chunk highlighted, middle unhighlighted)
         let sixteen = AddressVisualChunker.chunkAddress("1234567890123456")
         XCTAssertEqual(sixteen.chunks.count, 4)
-        for chunk in sixteen.chunks {
-            XCTAssertTrue(chunk.isHighlighted)
-        }
+        XCTAssertTrue(sixteen.chunks[0].isHighlighted)
+        XCTAssertFalse(sixteen.chunks[1].isHighlighted)
+        XCTAssertFalse(sixteen.chunks[2].isHighlighted)
+        XCTAssertTrue(sixteen.chunks[3].isHighlighted)
 
         // 20 chars = 5 chunks (chunks 0, 1, 3, 4 highlighted, chunk 2 unhighlighted)
         let twenty = AddressVisualChunker.chunkAddress("12345678901234567890")
@@ -157,22 +158,44 @@ final class AddressVisualChunkerTests: XCTestCase {
             raw: invoice28,
             amountMsat: nil
         ))
-        if case .invoice(let p, let m, let s, _) = shortRep {
-            XCTAssertEqual(p, invoice28)
-            XCTAssertEqual(m, "")
-            XCTAssertEqual(s, "")
+        if case .invoice(let preview) = shortRep {
+            XCTAssertEqual(preview.prefix, invoice28)
+            XCTAssertEqual(preview.middle, "")
+            XCTAssertEqual(preview.suffix, "")
+            XCTAssertEqual(preview.raw, invoice28)
         } else {
             XCTFail("Expected .invoice representation")
         }
 
         let invoice29 = "lnbc1234567890123456789012345"
         let longRep = AddressVisualChunker.formatDestination(.bolt11(invoice: invoice, raw: invoice29, amountMsat: nil))
-        if case .invoice(let p, let m, let s, _) = longRep {
-            XCTAssertEqual(p, String(invoice29.prefix(14)))
-            XCTAssertEqual(m, "········")
-            XCTAssertEqual(s, String(invoice29.suffix(10)))
+        if case .invoice(let preview) = longRep {
+            XCTAssertEqual(preview.prefix, String(invoice29.prefix(14)))
+            XCTAssertEqual(preview.middle, "········")
+            XCTAssertEqual(preview.suffix, String(invoice29.suffix(10)))
+            XCTAssertEqual(preview.raw, invoice29)
         } else {
             XCTFail("Expected .invoice representation")
         }
+    }
+
+    func testChunkingEmptyAddress() {
+        let empty = AddressVisualChunker.chunkAddress("")
+        XCTAssertEqual(empty.chunks.count, 0)
+        XCTAssertEqual(empty.raw, "")
+
+        let whitespaceOnly = AddressVisualChunker.chunkAddress("   \n\t  ")
+        XCTAssertEqual(whitespaceOnly.chunks.count, 0)
+        XCTAssertEqual(whitespaceOnly.raw, "")
+    }
+
+    func testChunkingZeroOrNegativeChunkSizeDoesNotCrash() {
+        let zero = AddressVisualChunker.chunkAddress("bc1qar0s", chunkSize: 0)
+        XCTAssertEqual(zero.chunks.count, 0)
+        XCTAssertEqual(zero.raw, "bc1qar0s")
+
+        let negative = AddressVisualChunker.chunkAddress("bc1qar0s", chunkSize: -4)
+        XCTAssertEqual(negative.chunks.count, 0)
+        XCTAssertEqual(negative.raw, "bc1qar0s")
     }
 }

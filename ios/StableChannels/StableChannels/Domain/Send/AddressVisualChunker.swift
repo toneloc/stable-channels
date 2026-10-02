@@ -16,17 +16,25 @@ struct ChunkedAddress: Equatable, Sendable {
     }
 }
 
+/// Value object representing a formatted invoice preview for human verification.
+struct InvoicePreview: Equatable, Sendable {
+    let prefix: String
+    let middle: String
+    let suffix: String
+    let raw: String
+}
+
 /// Domain representation of how a payment recipient is visually formatted for human verification.
 enum DestinationVisualRepresentation: Equatable, Sendable {
     case onchain(ChunkedAddress)
-    case invoice(prefix: String, middle: String, suffix: String, raw: String)
+    case invoice(InvoicePreview)
     case lightningAddress(handle: String, domain: String)
     case lnurl(host: String, rawUrl: String)
 
     var rawDestination: String {
         switch self {
         case .onchain(let chunked): return chunked.raw
-        case .invoice(_, _, _, let raw): return raw
+        case .invoice(let preview): return preview.raw
         case .lightningAddress(let handle, let domain): return "\(handle)@\(domain)"
         case .lnurl(_, let rawUrl): return rawUrl
         }
@@ -38,22 +46,22 @@ enum DestinationVisualRepresentation: Equatable, Sendable {
 enum AddressVisualChunker {
     static func formatDestination(_ destination: SendDestination) -> DestinationVisualRepresentation {
         switch destination {
-        case .onchain(let address):
+        case .onchain(let address, _):
             return .onchain(chunkAddress(address, chunkSize: 4))
         case .bolt11(_, let raw, _), .bolt12(_, let raw):
             let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard trimmed.count > 28 else {
-                return .invoice(prefix: trimmed, middle: "", suffix: "", raw: trimmed)
+                return .invoice(InvoicePreview(prefix: trimmed, middle: "", suffix: "", raw: trimmed))
             }
             let pIdx = trimmed.index(trimmed.startIndex, offsetBy: 14, limitedBy: trimmed.endIndex) ?? trimmed.endIndex
             let sIdx = trimmed.index(trimmed.endIndex, offsetBy: -10, limitedBy: trimmed.startIndex) ?? trimmed
                 .startIndex
-            return .invoice(
+            return .invoice(InvoicePreview(
                 prefix: String(trimmed[..<pIdx]),
                 middle: "········",
                 suffix: String(trimmed[sIdx...]),
                 raw: trimmed
-            )
+            ))
         case .lightningAddress(let handle, let domain, _):
             return .lightningAddress(handle: handle, domain: domain)
         case .lnurlPay(let url):
@@ -63,8 +71,8 @@ enum AddressVisualChunker {
 
     static func chunkAddress(_ raw: String, chunkSize: Int = 4) -> ChunkedAddress {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return ChunkedAddress(chunks: [], raw: raw)
+        guard chunkSize > 0, !trimmed.isEmpty else {
+            return ChunkedAddress(chunks: [], raw: trimmed)
         }
 
         let totalChunks = (trimmed.count + chunkSize - 1) / chunkSize
@@ -78,7 +86,7 @@ enum AddressVisualChunker {
                 .endIndex
             let chunkText = String(trimmed[currentIndex..<nextIndex])
             let isHighlighted: Bool
-            if totalChunks <= 3 {
+            if totalChunks <= 4 {
                 isHighlighted = (chunkIndex == 0 || chunkIndex == totalChunks - 1)
             } else {
                 isHighlighted = (chunkIndex < 2 || chunkIndex >= totalChunks - 2)

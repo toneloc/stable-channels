@@ -1524,11 +1524,14 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(placeholder.status, "completed")
         XCTAssertEqual(placeholder.feeMsat, 1_500)
         XCTAssertEqual(placeholder.amountMsat, 0)
+        XCTAssertEqual(placeholder.paymentType, "lightning")
+        XCTAssertEqual(placeholder.direction, "sent")
 
+        // recordPayment should refuse duplicate insertion but backfill the real details (including type and direction)
         let recordResult = try service.paymentRepo.recordPayment(
             paymentId: paymentId,
-            paymentType: "lightning",
-            direction: "sent",
+            paymentType: "onchain",
+            direction: "received",
             amountMsat: 50_000,
             amountUSD: 5.0,
             btcPrice: 100_000,
@@ -1537,20 +1540,150 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertFalse(recordResult)
 
-        try service.paymentRepo.backfillPaymentDetails(
-            paymentId: paymentId,
-            amountMsat: 50_000,
-            amountUSD: 5.0,
-            btcPrice: 100_000,
-            counterparty: "node_pubkey_123"
-        )
-
         let populated = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
         XCTAssertEqual(populated.status, "completed")
+        XCTAssertEqual(populated.paymentType, "onchain")
+        XCTAssertEqual(populated.direction, "received")
         XCTAssertEqual(populated.amountMsat, 50_000)
         XCTAssertEqual(populated.amountUSD, 5.0)
         XCTAssertEqual(populated.counterparty, "node_pubkey_123")
         XCTAssertEqual(populated.feeMsat, 1_500)
+    }
+
+    func testUpdatePaymentStatus_settleBeforeInsert_noFee_createsPlaceholderAndBackfillsDetails() throws {
+        let paymentId = "race-payment-no-fee"
+        // Payment failed before recordPayment runs, with no fee passed
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "failed", feeMsat: nil)
+
+        let placeholder = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(placeholder.status, "failed")
+        XCTAssertEqual(placeholder.feeMsat, 0)
+        XCTAssertEqual(placeholder.amountMsat, 0)
+
+        let recordResult = try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 42_000,
+            amountUSD: 4.2,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_456",
+            status: "pending"
+        )
+        XCTAssertFalse(recordResult)
+
+        let populated = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(populated.status, "failed")
+        XCTAssertEqual(populated.amountMsat, 42_000)
+        XCTAssertEqual(populated.amountUSD, 4.2)
+        XCTAssertEqual(populated.counterparty, "node_pubkey_456")
+        XCTAssertEqual(populated.feeMsat, 0)
+    }
+
+    func testUpdatePaymentStatus_terminalRowGetsFeeBackfilled() throws {
+        let paymentId = "terminal-fee-backfill"
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 50_000,
+            amountUSD: 5.0,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_123",
+            status: "completed"
+        )
+
+        let initial = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(initial.feeMsat, 0)
+        XCTAssertEqual(initial.status, "completed")
+
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 1_500)
+
+        let updated = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(updated.status, "completed")
+        XCTAssertEqual(updated.feeMsat, 1_500)
+    }
+
+    func testUpdatePaymentStatus_terminalStatusIsImmutable() throws {
+        let completedId = "terminal-immutable-completed"
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: completedId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 30_000,
+            amountUSD: 3.0,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_789",
+            status: "completed"
+        )
+
+        // Attempting to downgrade or change status of a completed payment must be a no-op
+        // Stale pending call with feeMsat must NOT backfill fee into a completed row
+        try service.paymentRepo.updatePaymentStatus(paymentId: completedId, status: "pending", feeMsat: 200)
+        var row = try XCTUnwrap(service.paymentRepo.payment(paymentId: completedId))
+        XCTAssertEqual(row.status, "completed")
+        XCTAssertEqual(row.feeMsat, 0)
+
+        // Stale failed call with feeMsat must NOT backfill fee into a completed row
+        try service.paymentRepo.updatePaymentStatus(paymentId: completedId, status: "failed", feeMsat: 300)
+        row = try XCTUnwrap(service.paymentRepo.payment(paymentId: completedId))
+        XCTAssertEqual(row.status, "completed")
+        XCTAssertEqual(row.feeMsat, 0)
+
+        // Matching completed status call CAN backfill fee if fee was 0
+        try service.paymentRepo.updatePaymentStatus(paymentId: completedId, status: "completed", feeMsat: 500)
+        row = try XCTUnwrap(service.paymentRepo.payment(paymentId: completedId))
+        XCTAssertEqual(row.status, "completed")
+        XCTAssertEqual(row.feeMsat, 500)
+
+        let failedId = "terminal-immutable-failed"
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: failedId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 15_000,
+            amountUSD: 1.5,
+            btcPrice: 100_000,
+            counterparty: "node_pubkey_789",
+            status: "failed"
+        )
+
+        try service.paymentRepo.updatePaymentStatus(paymentId: failedId, status: "pending")
+        row = try XCTUnwrap(service.paymentRepo.payment(paymentId: failedId))
+        XCTAssertEqual(row.status, "failed")
+
+        try service.paymentRepo.updatePaymentStatus(paymentId: failedId, status: "completed")
+        row = try XCTUnwrap(service.paymentRepo.payment(paymentId: failedId))
+        XCTAssertEqual(row.status, "failed")
+    }
+
+    func testRecordPaymentAndMaybeUpdateBacking_placeholderRow_healsDetails() throws {
+        let paymentId = "race-stability-placeholder-1"
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 500)
+
+        let placeholder = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(placeholder.status, "completed")
+        XCTAssertEqual(placeholder.amountMsat, 0)
+        XCTAssertEqual(placeholder.feeMsat, 500)
+
+        let result = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 60_000,
+            amountUSD: 6.0,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: nil,
+            backingDeltaSats: nil
+        )
+        XCTAssertFalse(result.isNewPayment)
+
+        let populated = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(populated.status, "completed")
+        XCTAssertEqual(populated.amountMsat, 60_000)
+        XCTAssertEqual(populated.amountUSD, 6.0)
+        XCTAssertEqual(populated.feeMsat, 500)
     }
 }
 

@@ -180,8 +180,18 @@ class NodeService: NodeServiceProtocol {
         // failover retry never opens a window for the NSE to grab the wallet dir.
         var startSucceeded = false
         defer {
-            if !startSucceeded && lease.newlyAcquired {
-                NodeDirLock.shared.release()
+            if !startSucceeded {
+                self.eventTask?.cancel()
+                self.eventTask = nil
+                try? self.node?.stop()
+                self.node = nil
+                self.isRunning = false
+                self.activeNetwork = nil
+                self.nodeId = ""
+                self.channels = []
+                if lease.newlyAcquired {
+                    NodeDirLock.shared.release()
+                }
             }
         }
 
@@ -601,17 +611,30 @@ class NodeService: NodeServiceProtocol {
         return try node.onchainPayment().newAddress()
     }
 
-    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: UInt64? = nil) throws -> Txid {
+    private func validateAndBuildFeeRate(_ feeRateSatVb: Double?) throws -> FeeRate? {
+        guard let rate = feeRateSatVb else { return nil }
+        guard rate.isFinite && rate >= Constants.minAllowedFeeRateSatVb && rate <= Constants.maxAllowedFeeRateSatVb
+        else {
+            throw NodeServiceError.invalidFeeRate
+        }
+        return FeeRate.fromSatPerVbU32(satVb: UInt32(round(rate)))
+    }
+
+    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double? = nil) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        let ldkFeeRate: FeeRate? = feeRateSatVb
-            .map { FeeRate.fromSatPerVbU32(satVb: UInt32(min(UInt64(UInt32.max), $0))) }
+        if let rate = feeRateSatVb, amountSats > 0 {
+            let estimatedFee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: rate, isSendAll: false)
+            guard estimatedFee <= amountSats else {
+                throw NodeServiceError.invalidFeeRate
+            }
+        }
+        let ldkFeeRate = try validateAndBuildFeeRate(feeRateSatVb)
         return try node.onchainPayment().sendToAddress(address: address, amountSats: amountSats, feeRate: ldkFeeRate)
     }
 
-    func sendAllOnchain(address: String, feeRateSatVb: UInt64? = nil) throws -> Txid {
+    func sendAllOnchain(address: String, feeRateSatVb: Double? = nil) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        let ldkFeeRate: FeeRate? = feeRateSatVb
-            .map { FeeRate.fromSatPerVbU32(satVb: UInt32(min(UInt64(UInt32.max), $0))) }
+        let ldkFeeRate = try validateAndBuildFeeRate(feeRateSatVb)
         return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: ldkFeeRate)
     }
 
@@ -668,6 +691,7 @@ enum NodeServiceError: LocalizedError {
     case alreadyRunning
     case dataDirLocked
     case staleLightningSync
+    case invalidFeeRate
 
     var errorDescription: String? {
         switch self {
@@ -675,6 +699,8 @@ enum NodeServiceError: LocalizedError {
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
+        case .invalidFeeRate:
+            return "Fee rate must be between \(Int(Constants.minAllowedFeeRateSatVb)) and \(Int(Constants.maxAllowedFeeRateSatVb)) sat/vB"
         }
     }
 }
