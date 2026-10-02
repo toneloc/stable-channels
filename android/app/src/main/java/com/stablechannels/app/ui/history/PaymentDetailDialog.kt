@@ -1,7 +1,5 @@
 package com.stablechannels.app.ui.history
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -18,6 +16,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.shortString
 import com.stablechannels.app.util.usdFormatted
@@ -177,13 +176,9 @@ fun PaymentDetailBottomSheet(
                         if (payment.paymentType in onchainTypes) {
                             TextButton(
                                 onClick = {
-                                    val cleanTxid = txid.substringBefore(":")
-                                    val intent =
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse("https://mempool.space/tx/$cleanTxid"),
-                                        )
-                                    context.startActivity(intent)
+                                    context.openInAppBrowser(
+                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                    )
                                 },
                                 contentPadding = PaddingValues(0.dp),
                             ) {
