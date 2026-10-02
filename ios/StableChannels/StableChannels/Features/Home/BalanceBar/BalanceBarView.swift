@@ -17,6 +17,7 @@ struct BalanceBarView: View {
     @State private var pulseScale: CGFloat = 1.0
     @State private var hasTriggeredHaptic = false
     @State private var animator = BalanceBarAnimationCoordinator()
+    @State private var depositPromptTimer: DispatchWorkItem?
 
     private let thumbDiameter: CGFloat = 28
     private let barHeight: CGFloat = 20
@@ -65,7 +66,8 @@ struct BalanceBarView: View {
                         isAwakening: animator.isAwakening,
                         atSellLimit: atSellLimit,
                         maxSellUSD: maxSellUSD,
-                        showDepositPrompt: showDepositPrompt
+                        showDepositPrompt: showDepositPrompt,
+                        onEmptyInteraction: onEmptyInteraction
                     )
                     .frame(height: currentHeaderHeight)
                     .animation(.easeInOut(duration: 0.15), value: atSellLimit)
@@ -109,6 +111,9 @@ struct BalanceBarView: View {
                 guard !isTrading else { return }
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { userSelectedFraction = nil }
             }
+            .onDisappear {
+                depositPromptTimer?.cancel()
+            }
         }
         .frame(height: totalHeight)
     }
@@ -144,30 +149,26 @@ struct BalanceBarView: View {
     private func handleDragChange(gesture: DragGesture.Value, barWidth: CGFloat, currentThumbX: CGFloat) {
         guard interactive, barWidth > 0, !animator.isAwakening else { return }
 
-        if allocation.isEmpty {
-            if !isPressing {
-                isPressing = true
-                showDepositPrompt = true
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                onEmptyInteraction?()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
-                    showDepositPrompt = false
-                }
-            }
-            return
-        }
-
         if !isPressing {
-            guard abs(gesture.startLocation.x - currentThumbX) < thumbDiameter * 1.5 else { return }
+            let withinThumb = abs(gesture.startLocation.x - currentThumbX) < thumbDiameter * 1.5
+            guard allocation.isEmpty || withinThumb else { return }
             isPressing = true
             hasTriggeredHaptic = false
             atSellLimit = false
+            depositPromptTimer?.cancel()
+            showDepositPrompt = false
             onDragStarted?()
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
         guard isPressing else { return }
 
         let rawFraction = min(max(gesture.location.x / barWidth, 0.0), 1.0)
+
+        if allocation.isEmpty {
+            userSelectedFraction = rawFraction
+            return
+        }
+
         let baseFraction = CGFloat(allocation.stableFraction)
         let totalUSD = allocation.totalUSD
         let maxSellFraction = totalUSD > 0 ? CGFloat(max(0, maxSellUSD) / totalUSD) : 0
@@ -189,12 +190,37 @@ struct BalanceBarView: View {
         }
     }
 
-    private func handleDragEnd(gesture _: DragGesture.Value, barWidth: CGFloat) {
+    private func handleDragEnd(gesture: DragGesture.Value, barWidth: CGFloat) {
         guard isPressing else { return }
         isPressing = false
         atSellLimit = false
 
-        if allocation.isEmpty { return }
+        if allocation.isEmpty {
+            let dragDistance = abs(gesture.translation.width)
+            if dragDistance < 5 {
+                userSelectedFraction = nil
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onEmptyInteraction?()
+            } else {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                withAnimation(reduceMotion ? .easeInOut(duration: 0.25) : .spring(
+                    response: 0.38,
+                    dampingFraction: 0.68
+                )) {
+                    userSelectedFraction = nil
+                }
+                showDepositPrompt = true
+                depositPromptTimer?.cancel()
+                let timer = DispatchWorkItem {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showDepositPrompt = false
+                    }
+                }
+                depositPromptTimer = timer
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: timer)
+            }
+            return
+        }
 
         guard barWidth > 0, !animator.isAwakening,
               let selected = userSelectedFraction else { return }

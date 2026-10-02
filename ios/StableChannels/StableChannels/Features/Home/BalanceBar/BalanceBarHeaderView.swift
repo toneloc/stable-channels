@@ -8,6 +8,7 @@ struct BalanceBarHeaderView: View {
     let atSellLimit: Bool
     let maxSellUSD: Double
     let showDepositPrompt: Bool
+    var onEmptyInteraction: (() -> Void)?
 
     private var usdPct: Int {
         Int(round(visFrac * 100))
@@ -43,21 +44,26 @@ struct BalanceBarHeaderView: View {
     }
 
     private var depositPromptPill: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.caption2)
-                .foregroundStyle(.green)
-            Text(String(localized: "deposit_to_balance_prompt", defaultValue: "Deposit to balance channel"))
-                .font(.caption2.bold())
-                .foregroundStyle(.primary)
+        Button {
+            onEmptyInteraction?()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.circle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.green)
+                Text(String(localized: "deposit_to_balance_prompt", defaultValue: "Deposit to balance channel"))
+                    .font(.caption2.bold())
+                    .foregroundStyle(.primary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
+            )
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
-        )
+        .buttonStyle(.plain)
     }
 
     private var sellLimitPill: some View {

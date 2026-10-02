@@ -12,7 +12,7 @@ struct BalanceBarTrackView: View {
     var body: some View {
         ZStack {
             if isEmpty && !isAwakening {
-                emptyTrack
+                emptyTrack(fraction: fraction)
             } else {
                 trackBar(fraction: fraction)
             }
@@ -39,9 +39,11 @@ struct BalanceBarTrackView: View {
         }
     }
 
-    private var emptyTrack: some View {
+    private func emptyTrack(fraction: CGFloat) -> some View {
         let spacing: CGFloat = 2
-        let halfWidth = max((barWidth - spacing) / 2, 0)
+        let availableWidth = max(barWidth - spacing, 0)
+        let greenWidth = availableWidth * fraction
+        let orangeWidth = availableWidth - greenWidth
 
         return HStack(spacing: spacing) {
             RoundedRectangle(cornerRadius: 5)
@@ -52,7 +54,7 @@ struct BalanceBarTrackView: View {
                         endPoint: .trailing
                     )
                 )
-                .frame(width: halfWidth, height: height)
+                .frame(width: max(greenWidth, 0), height: height)
 
             RoundedRectangle(cornerRadius: 5)
                 .fill(
@@ -62,7 +64,7 @@ struct BalanceBarTrackView: View {
                         endPoint: .trailing
                     )
                 )
-                .frame(width: halfWidth, height: height)
+                .frame(width: max(orangeWidth, 0), height: height)
         }
         .frame(width: barWidth, height: height)
         .clipShape(RoundedRectangle(cornerRadius: 5))
