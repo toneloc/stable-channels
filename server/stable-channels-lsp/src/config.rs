@@ -15,6 +15,18 @@ pub struct Config {
     /// Defaults to audit-only for old-client compatibility. Enable only after shadow rollout.
     #[serde(default)]
     pub enforce_max_stabilization: bool,
+    #[serde(default)]
+    pub geoip: GeoIpSection,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct GeoIpSection {
+    /// DB-IP "IP to Country Lite" .mmdb used to enrich recorded IPs with a country.
+    pub country_db: Option<String>,
+    /// Record stable users' IPs at all; defaults to true only when `country_db` is set.
+    pub record_ips: Option<bool>,
+    /// Drop recorded IPs not seen for this many days (default 90).
+    pub retention_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

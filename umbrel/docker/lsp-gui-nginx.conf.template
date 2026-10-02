@@ -14,6 +14,15 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # The wasm bundle compresses ~3x; application/wasm comes from the stock mime.types.
+    gzip on;
+    gzip_types application/wasm application/javascript text/css;
+
+    # The shell references the bundle by content hash, so it must never be served stale.
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
     location = /setup {
         return 302 /setup/;
     }
