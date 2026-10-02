@@ -22,6 +22,7 @@ val SellPlum = Color(0xFFC78CFF)
 @Composable
 fun HomeActionButtons(
     hasReadyChannel: Boolean,
+    pulseReceive: Boolean = !hasReadyChannel,
     onSend: () -> Unit,
     onReceive: () -> Unit,
     onBuy: () -> Unit,
@@ -47,7 +48,7 @@ fun HomeActionButtons(
                 title = "Receive",
                 icon = Icons.Default.ArrowDownward,
                 color = ReceiveGreen,
-                pulse = !hasReadyChannel,
+                pulse = pulseReceive,
                 modifier = Modifier.weight(1f),
                 onClick = onReceive,
             )
