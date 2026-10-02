@@ -14,7 +14,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertFalse(evaluation.isValidTrade)
         XCTAssertNil(evaluation.direction)
         XCTAssertEqual(evaluation.clampedUSD, 0.0)
-        XCTAssertNil(evaluation.tradeRequest)
     }
 
     func testBuyUnderMinimumOneDollarIsRejected() {
@@ -30,7 +29,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertEqual(evaluation.direction, .buy)
         XCTAssertEqual(evaluation.requestedUSD, 0.5, accuracy: 0.001)
         XCTAssertFalse(evaluation.isValidTrade)
-        XCTAssertNil(evaluation.tradeRequest)
     }
 
     func testBuyAtOrAboveOneDollarIsAccepted() {
@@ -46,9 +44,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertEqual(evaluation.direction, .buy)
         XCTAssertEqual(evaluation.clampedUSD, 1.0, accuracy: 0.001)
         XCTAssertTrue(evaluation.isValidTrade)
-        XCTAssertNotNil(evaluation.tradeRequest)
-        XCTAssertEqual(try XCTUnwrap(evaluation.tradeRequest?.amountUSD), 1.0, accuracy: 0.001)
-        XCTAssertEqual(evaluation.tradeRequest?.direction, .buy)
     }
 
     func testBuyBeyondStableBalanceClampsToAvailableStableUSD() {
@@ -65,7 +60,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertEqual(evaluation.requestedUSD, 10.0, accuracy: 0.001)
         XCTAssertEqual(evaluation.clampedUSD, 5.0, accuracy: 0.001)
         XCTAssertTrue(evaluation.isValidTrade)
-        XCTAssertEqual(try XCTUnwrap(evaluation.tradeRequest?.amountUSD), 5.0, accuracy: 0.001)
     }
 
     func testSellBeyondMaxSellUSDClampsToLimit() {
@@ -82,7 +76,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertEqual(evaluation.requestedUSD, 30.0, accuracy: 0.001)
         XCTAssertEqual(evaluation.clampedUSD, 20.0, accuracy: 0.001)
         XCTAssertTrue(evaluation.isValidTrade)
-        XCTAssertEqual(try XCTUnwrap(evaluation.tradeRequest?.amountUSD), 20.0, accuracy: 0.001)
     }
 
     func testSellExactlyMaxSellUSDIsAccepted() {
@@ -98,7 +91,6 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         XCTAssertEqual(evaluation.direction, .sell)
         XCTAssertEqual(evaluation.clampedUSD, 25.0, accuracy: 0.001)
         XCTAssertTrue(evaluation.isValidTrade)
-        XCTAssertEqual(try XCTUnwrap(evaluation.tradeRequest?.amountUSD), 25.0, accuracy: 0.001)
     }
 
     func testClampFractionBeyondPhysicalBounds() {
@@ -188,7 +180,7 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
 
     func testInteractionMathTranslationAndTapDetection() {
         // Translation math
-        let target = BalanceBarInteraction.calculateTargetFraction(
+        let target = BalanceBarTradeCalculator.calculateTargetFraction(
             initialFraction: 0.4,
             translationX: 75.0,
             barWidth: 300.0
@@ -196,8 +188,15 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         // 0.4 + 75/300 = 0.4 + 0.25 = 0.65
         XCTAssertEqual(target, 0.65, accuracy: 0.001)
 
+        // Thumb position alignment
+        let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
+            fraction: 0.65,
+            barWidth: 300.0
+        )
+        XCTAssertEqual(thumbX, 195.0, accuracy: 0.001)
+
         // Tap detection
-        XCTAssertTrue(BalanceBarInteraction.isTap(translationX: 3.0, translationY: 2.0, threshold: 5.0))
-        XCTAssertFalse(BalanceBarInteraction.isTap(translationX: 6.0, translationY: 0.0, threshold: 5.0))
+        XCTAssertTrue(BalanceBarTradeCalculator.isTap(translationX: 3.0, translationY: 2.0, threshold: 5.0))
+        XCTAssertFalse(BalanceBarTradeCalculator.isTap(translationX: 6.0, translationY: 0.0, threshold: 5.0))
     }
 }

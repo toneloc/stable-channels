@@ -190,7 +190,7 @@ class BalanceBarTradeCalculatorTest {
     @Test
     fun interactionMathTranslationAndTapDetection() {
         val target =
-            BalanceBarInteraction.calculateTargetFraction(
+            BalanceBarTradeCalculator.calculateTargetFraction(
                 initialFraction = 0.4f,
                 translationX = 75.0f,
                 barWidth = 300.0f,
@@ -198,11 +198,27 @@ class BalanceBarTradeCalculatorTest {
         // 0.4 + 75/300 = 0.4 + 0.25 = 0.65
         assertEquals(0.65f, target, 0.001f)
 
+        // Thumb position alignment
+        val thumbX =
+            BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = 0.65f,
+                barWidth = 300.0f,
+            )
+        assertEquals(195.0f, thumbX, 0.001f)
+
         assertTrue(
-            BalanceBarInteraction.isTap(translationX = 3.0f, translationY = 2.0f, threshold = 5.0f)
+            BalanceBarTradeCalculator.isTap(
+                translationX = 3.0f,
+                translationY = 2.0f,
+                threshold = 5.0f,
+            )
         )
         assertFalse(
-            BalanceBarInteraction.isTap(translationX = 6.0f, translationY = 0.0f, threshold = 5.0f)
+            BalanceBarTradeCalculator.isTap(
+                translationX = 6.0f,
+                translationY = 0.0f,
+                threshold = 5.0f,
+            )
         )
     }
 }
