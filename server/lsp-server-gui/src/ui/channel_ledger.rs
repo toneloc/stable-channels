@@ -1,1483 +1,496 @@
-use std::collections::HashSet;
+use dioxus::prelude::*;
+use sc_rest_client::sc_protos::stable::{AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef};
 
-use chrono::{TimeZone, Utc};
-use eframe::egui;
-use egui::{Color32, RichText};
-use sc_rest_client::sc_protos::stable::{
-    AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, LedgerRef,
-    ListChannelLedgerEventsResponse,
+use crate::actions;
+use crate::ledger::{
+	category_help, completeness_help, completeness_label, completeness_tone, decimal_delta, event_help,
+	exact_timestamp, filter_choice_label, format_sats_with_usd, forwarding_path, human_summary,
+	latest_state_caption, loaded_events_caption, relative_timestamp, sats_delta, snapshot_rows, status_help,
+	status_tone, timeline_order, ForwardingLeg,
 };
+use crate::state::{AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Op};
+use crate::ui::widgets::{Empty, Hover, Icon, IdCopy, InfoTip, Pill, SegBtn, Spinner, Stat, TextInput};
 
-use crate::app::LspServerApp;
-use crate::state::{ChannelLedgerRequestKey, StatusMessage};
-use crate::ui::layout::{AMBER, SECONDARY};
-use crate::ui::widgets;
+const CATEGORIES: [&str; 10] =
+	["channel", "payment", "forwarding", "trade", "stability", "peer", "sweep", "reconciliation", "operator", "system"];
+const STATUSES: [&str; 6] = ["observed", "pending", "completed", "partial", "failed", "skipped"];
+const COMPLETENESS: [&str; 4] = ["observed", "reconstructed", "legacy", "gap"];
 
-pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
-    ui.heading("Channel Ledger");
-    ui.add_space(8.0);
-
-    let request_before = ChannelLedgerRequestKey::from(&app.state.forms.channel_ledger);
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Identifier:");
-        ui.add(
-            egui::TextEdit::singleline(&mut app.state.forms.channel_ledger.identifier)
-                .desired_width(300.0)
-                .hint_text("user_channel_id / channel_id / payment_id / txid"),
-        );
-        filter_combo(
-            ui,
-            "ledger_category",
-            "Category",
-            &mut app.state.forms.channel_ledger.category,
-            &[
-                "channel",
-                "payment",
-                "forwarding",
-                "trade",
-                "stability",
-                "peer",
-                "sweep",
-                "reconciliation",
-                "operator",
-                "system",
-            ],
-        );
-        filter_combo(
-            ui,
-            "ledger_status",
-            "Status",
-            &mut app.state.forms.channel_ledger.status,
-            &[
-                "observed",
-                "pending",
-                "completed",
-                "partial",
-                "failed",
-                "skipped",
-            ],
-        );
-        filter_combo(
-            ui,
-            "ledger_completeness",
-            "Completeness",
-            &mut app.state.forms.channel_ledger.completeness,
-            &["observed", "reconstructed", "legacy", "gap"],
-        );
-    });
-    if request_before != ChannelLedgerRequestKey::from(&app.state.forms.channel_ledger) {
-        // Never display or merge data fetched for the previous identifier/filter set.
-        app.state.tasks.channel_ledger = None;
-        app.state.tasks.channel_ledger_export = None;
-        app.state.channel_ledger = None;
-        app.state.channel_ledger_cursor = None;
-        app.state.channel_ledger_appending = false;
-    }
-
-    ui.horizontal_wrapped(|ui| {
-        let loading = app.state.tasks.channel_ledger.is_some();
-        let exporting = app.state.tasks.channel_ledger_export.is_some();
-        let has_identifier = !app.state.forms.channel_ledger.identifier.trim().is_empty();
-        if ui
-            .add_enabled(!loading && has_identifier, egui::Button::new("Refresh"))
-            .on_disabled_hover_text("Enter one exact identifier")
-            .clicked()
-        {
-            app.state.channel_ledger_cursor = None;
-            app.state.channel_ledger_appending = false;
-            app.fetch_channel_ledger();
-        }
-        if ui
-            .add_enabled(
-                !loading && app.state.channel_ledger_cursor.is_some(),
-                egui::Button::new("Load older"),
-            )
-            .clicked()
-        {
-            app.state.channel_ledger_appending = true;
-            app.fetch_channel_ledger();
-        }
-        if ui
-            .add_enabled(
-                !exporting && has_identifier,
-                egui::Button::new("Export matching JSONL"),
-            )
-            .on_hover_text("Export every page matching the current identifier and filters")
-            .on_disabled_hover_text("Enter one exact identifier")
-            .clicked()
-        {
-            app.export_channel_ledger();
-        }
-        ui.separator();
-        ui.selectable_value(
-            &mut app.state.forms.channel_ledger.newest_first,
-            true,
-            "Newest first",
-        );
-        ui.selectable_value(
-            &mut app.state.forms.channel_ledger.newest_first,
-            false,
-            "Oldest first",
-        );
-        if loading || exporting {
-            ui.spinner();
-        }
-    });
-    ui.separator();
-
-    let history = app.state.channel_ledger.clone();
-    let newest_first = app.state.forms.channel_ledger.newest_first;
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| match history {
-            Some(history) if history.events.is_empty() => {
-                if let Some(overview) = history.overview.as_ref() {
-                    render_overview(ui, overview);
-                }
-                ui.label("No ledger events match these exact filters.");
-            }
-            Some(history) => {
-                if let Some(overview) = history.overview.as_ref() {
-                    render_overview(ui, overview);
-                    if let Some(caption) = loaded_events_caption(
-                        history.events.len(),
-                        overview.matching_events,
-                        history.next_cursor.is_some(),
-                    ) {
-                        ui.label(RichText::new(caption).small().color(SECONDARY));
-                    }
-                    ui.add_space(10.0);
-                }
-                for index in timeline_order(&history.events, newest_first) {
-                    render_event(ui, &history.events[index], &mut app.state.status_message);
-                    ui.add_space(6.0);
-                }
-            }
-            None => {
-                widgets::empty_state(
-                    ui,
-                    "🧾",
-                    "Ledger not loaded",
-                    "Enter one exact identifier and click Refresh",
-                );
-            }
-        });
+/// Edit the ledger form; any change to the identifier or server filters discards loaded data.
+fn edit_form(ctx: AppCtx, f: impl FnOnce(&mut ChannelLedgerForm)) {
+	let mut forms = ctx.forms;
+	let before = ChannelLedgerRequestKey::from(&forms.peek().channel_ledger);
+	f(&mut forms.write().channel_ledger);
+	if before != ChannelLedgerRequestKey::from(&forms.peek().channel_ledger) {
+		// Never display or merge data fetched for the previous identifier/filter set.
+		actions::invalidate_channel_ledger(ctx);
+	}
 }
 
-fn loaded_events_caption(loaded: usize, matching: u64, has_more: bool) -> Option<String> {
-    has_more.then(|| format!("Showing {loaded} of {matching} matching events — Load older for more"))
+#[component]
+fn FilterSelect(label: &'static str, value: String, choices: Vec<&'static str>, onchange: EventHandler<String>) -> Element {
+	rsx! {
+		select {
+			class: "select sm",
+			style: "width: auto; min-width: 150px;",
+			"aria-label": "{label}",
+			onchange: move |e| onchange.call(e.value()),
+			option { value: "", selected: value.is_empty(), "All {label}" }
+			for choice in choices {
+				option { key: "{choice}", value: "{choice}", selected: value == choice, "{filter_choice_label(label, choice)}" }
+			}
+		}
+	}
 }
 
-fn filter_combo(ui: &mut egui::Ui, id: &str, label: &str, value: &mut String, choices: &[&str]) {
-    ui.scope(|ui| {
-        // Match the single-line TextEdit's default two-point vertical margin.
-        ui.spacing_mut().button_padding.y = 2.0;
-        egui::ComboBox::from_id_salt(id)
-            .selected_text(if value.is_empty() {
-                format!("All {label}")
-            } else {
-                filter_choice_label(label, value).to_owned()
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(value, String::new(), format!("All {label}"));
-                for choice in choices {
-                    ui.selectable_value(
-                        value,
-                        (*choice).to_owned(),
-                        filter_choice_label(label, choice),
-                    );
-                }
-            });
-    });
+#[component]
+pub fn ChannelLedger() -> Element {
+	let ctx = use_context::<AppCtx>();
+	// The channel picker lists the node's channels; load them if this tab is opened first.
+	use_hook(move || {
+		if ctx.data.peek().channels.is_none() {
+			actions::fetch_channels(ctx);
+		}
+	});
+	let form = ctx.forms.read().channel_ledger.clone();
+	let loading = ctx.busy(Op::ChannelLedger);
+	let exporting = ctx.busy(Op::ChannelLedgerExport);
+	let has_identifier = !form.identifier.trim().is_empty();
+	let has_cursor = ctx.data.read().channel_ledger_cursor.is_some();
+	let history = ctx.data.read().channel_ledger.clone();
+	let newest_first = form.newest_first;
+	let show_technical = form.show_technical;
+	let selected = form.identifier.trim().to_owned();
+	let choices: Vec<(String, String)> = {
+		let data = ctx.data.read();
+		data.channels
+			.as_ref()
+			.map(|list| {
+				list.channels
+					.iter()
+					.map(|ch| {
+						let peer = data
+							.alias(&ch.counterparty_node_id)
+							.unwrap_or_else(|| crate::format::truncate_id(&ch.counterparty_node_id, 8, 6));
+						(ch.user_channel_id.clone(), format!("{peer} · {} sats", crate::format::format_sats(ch.channel_value_sats)))
+					})
+					.collect()
+			})
+			.unwrap_or_default()
+	};
+	rsx! {
+		div { class: "card stack", style: "gap: 12px;",
+			div { class: "row",
+				select {
+					class: "select sm",
+					style: "width: auto; min-width: 260px;",
+					"aria-label": "Channel",
+					onchange: move |e| {
+						let id = e.value();
+						edit_form(ctx, |f| f.identifier = id);
+						actions::fetch_channel_ledger(ctx, false);
+					},
+					option { value: "", selected: selected.is_empty(), "Choose a channel" }
+					for (id, label) in choices {
+						option { key: "{id}", value: "{id}", selected: selected == id, "{label}" }
+					}
+				}
+				div { class: "search", style: "flex: 1 1 260px; max-width: 420px;",
+					Icon { name: "search", size: 15 }
+					TextInput { value: form.identifier.clone(), small: true, mono: true, placeholder: "or paste any channel, payment or transaction id", oninput: move |v| edit_form(ctx, |f| f.identifier = v) }
+				}
+				label { class: "check",
+					input {
+						r#type: "checkbox",
+						checked: show_technical,
+						onchange: move |e| {
+							let on = e.checked();
+							edit_form(ctx, |f| f.show_technical = on);
+							actions::fetch_channel_ledger(ctx, false);
+						},
+					}
+					"Show technical events"
+				}
+			}
+			if show_technical {
+				div { class: "row",
+					FilterSelect { label: "Category", value: form.category.clone(), choices: CATEGORIES.to_vec(), onchange: move |v| edit_form(ctx, |f| f.category = v) }
+					FilterSelect { label: "Status", value: form.status.clone(), choices: STATUSES.to_vec(), onchange: move |v| edit_form(ctx, |f| f.status = v) }
+					FilterSelect { label: "Completeness", value: form.completeness.clone(), choices: COMPLETENESS.to_vec(), onchange: move |v| edit_form(ctx, |f| f.completeness = v) }
+				}
+			}
+			div { class: "row",
+				button {
+					class: "btn sm primary",
+					disabled: loading || !has_identifier,
+					title: if has_identifier { "" } else { "Pick a channel or paste an identifier" },
+					onclick: move |_| actions::fetch_channel_ledger(ctx, false),
+					Icon { name: "refresh", size: 14 }
+					"Refresh"
+				}
+				button { class: "btn sm", disabled: loading || !has_cursor, onclick: move |_| actions::fetch_channel_ledger(ctx, true),
+					Icon { name: "chevron-down", size: 14 }
+					"Load older"
+				}
+				button {
+					class: "btn sm",
+					disabled: exporting || !has_identifier,
+					title: if has_identifier { "Export every page for this channel as JSONL" } else { "Pick a channel or paste an identifier" },
+					onclick: move |_| actions::export_channel_ledger(ctx),
+					Icon { name: "download", size: 14 }
+					"Export JSONL"
+				}
+				div { class: "seg",
+					SegBtn { active: newest_first, onclick: move |_| edit_form(ctx, |f| f.newest_first = true), "Newest first" }
+					SegBtn { active: !newest_first, onclick: move |_| edit_form(ctx, |f| f.newest_first = false), "Oldest first" }
+				}
+				if loading || exporting {
+					Spinner {}
+				}
+			}
+		}
+		match history {
+			None => rsx! {
+				div { class: "card",
+					Empty { icon: "list", title: "Pick a channel", hint: "Its full history appears here, from opening until now." }
+				}
+			},
+			Some(history) if !show_technical => rsx! {
+				Timeline { events: history.events.clone(), overview: history.overview.clone(), channel: selected.clone(), newest_first }
+			},
+			Some(history) => {
+				let caption = history.overview.as_ref().and_then(|overview| {
+					loaded_events_caption(history.events.len(), overview.matching_events, history.next_cursor.is_some())
+				});
+				let order = timeline_order(&history.events, newest_first);
+				rsx! {
+					if let Some(overview) = history.overview.clone() {
+						Overview { overview }
+					}
+					if let Some(caption) = caption {
+						span { class: "small muted", "{caption}" }
+					}
+					if history.events.is_empty() {
+						div { class: "card", Empty { icon: "list", title: "No ledger events match these exact filters." } }
+					}
+					for index in order {
+						EventCard { key: "{history.events[index].id}", event: history.events[index].clone() }
+					}
+				}
+			},
+		}
+	}
 }
 
-fn filter_choice_label<'a>(filter: &str, value: &'a str) -> &'a str {
-    if filter == "Completeness" && value == "observed" {
-        "direct"
-    } else {
-        value
-    }
+/// Summary of the channel the history belongs to.
+#[component]
+fn HistoryHeader(channel: String, overview: Option<ChannelLedgerOverview>, first_ms: Option<i64>, last_ms: Option<i64>) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let data = ctx.data.read();
+	let live = data.channels.as_ref().and_then(|list| list.channels.iter().find(|ch| ch.user_channel_id == channel).cloned());
+	let peer = live.as_ref().map(|ch| {
+		data.alias(&ch.counterparty_node_id).unwrap_or_else(|| crate::format::truncate_id(&ch.counterparty_node_id, 8, 6))
+	});
+	drop(data);
+	// The ledger's own oldest row dates the history; the loaded page may start much later.
+	let first_ms = overview.as_ref().and_then(|o| o.oldest_occurred_at_ms).or(first_ms);
+	let latest = overview.and_then(|o| o.latest_accounting);
+	let or_dash = |value: Option<String>| value.unwrap_or_else(|| "—".to_owned());
+	let capacity = live
+		.as_ref()
+		.map(|ch| format!("{} sats capacity", crate::format::format_sats(ch.channel_value_sats)))
+		.unwrap_or_default();
+	let target = latest.as_ref().and_then(|s| s.expected_usd).map(crate::format::format_usd);
+	let split = latest.as_ref().and_then(|s| {
+		Some(format!("{} / {}", crate::format::format_sats(s.backing_sats?), crate::format::format_sats(s.native_sats?)))
+	});
+	let since = last_ms.map(|t| format!("last activity {}", relative_timestamp(t))).unwrap_or_default();
+	rsx! {
+		div { class: "grid-4",
+			Stat { title: "Counterparty", value: or_dash(peer), sub: capacity }
+			Stat { title: "Stable target", value: or_dash(target), sub: "Current recorded target" }
+			Stat { title: "Backing / native", value: or_dash(split), sub: "sats" }
+			Stat { title: "History since", value: or_dash(first_ms.map(crate::history::day_label)), sub: since }
+		}
+	}
 }
 
-fn render_overview(ui: &mut egui::Ui, overview: &ChannelLedgerOverview) {
-    let state = overview.latest_accounting.as_ref();
-    let values = [
-        (
-            "Expected USD",
-            state
-                .and_then(|snapshot| snapshot.expected_usd)
-                .map(|value| format!("${value:.2}"))
-                .unwrap_or_else(|| "—".to_owned()),
-            "Current recorded target".to_owned(),
-        ),
-        (
-            "Backing",
-            state
-                .and_then(|snapshot| {
-                    snapshot
-                        .backing_sats
-                        .map(|value| (value, snapshot.btc_price))
-                })
-                .map(|(value, price)| format_sats_with_usd(value, price))
-                .unwrap_or_else(|| "—".to_owned()),
-            "Stable allocation".to_owned(),
-        ),
-        (
-            "Native",
-            state
-                .and_then(|snapshot| {
-                    snapshot
-                        .native_sats
-                        .map(|value| (value, snapshot.btc_price))
-                })
-                .map(|(value, price)| format_sats_with_usd(value, price))
-                .unwrap_or_else(|| "—".to_owned()),
-            "Non-stable allocation".to_owned(),
-        ),
-        (
-            "Live balance",
-            state
-                .and_then(|snapshot| {
-                    snapshot
-                        .live_receiver_sats
-                        .map(|value| (value, snapshot.btc_price))
-                })
-                .map(|(value, price)| format_sats_with_usd(value, price))
-                .unwrap_or_else(|| "—".to_owned()),
-            latest_state_caption(overview),
-        ),
-        (
-            "Events",
-            if overview.matching_events == overview.total_events {
-                overview.total_events.to_string()
-            } else {
-                format!("{} / {}", overview.matching_events, overview.total_events)
-            },
-            if overview.matching_events == overview.total_events {
-                "Exact identifier total".to_owned()
-            } else {
-                "Matching current filters / total".to_owned()
-            },
-        ),
-        (
-            "Coverage",
-            format!("{} direct", overview.observed_events),
-            format!(
-                "{} reconstructed · {} legacy · {} gaps",
-                overview.reconstructed_events, overview.legacy_events, overview.gap_events
-            ),
-        ),
-    ];
-    let column_count = responsive_column_count(ui.available_width(), 320.0, 3);
-    for row in values.chunks(column_count) {
-        ui.columns(column_count, |columns| {
-            for (column, (title, value, caption)) in columns.iter_mut().zip(row.iter()) {
-                widgets::stat_card(column, title, value, caption);
-            }
-        });
-    }
-    if overview.oldest_occurred_at_ms.is_some() || overview.newest_occurred_at_ms.is_some() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Ledger span:").small().color(SECONDARY));
-            ui.label(
-                RichText::new(format!(
-                    "{} -> {}",
-                    overview
-                        .oldest_occurred_at_ms
-                        .map(exact_timestamp)
-                        .unwrap_or_else(|| "—".to_owned()),
-                    overview
-                        .newest_occurred_at_ms
-                        .map(exact_timestamp)
-                        .unwrap_or_else(|| "—".to_owned())
-                ))
-                .small(),
-            );
-        });
-    }
+/// Day-grouped, one line per business event; a row expands into its underlying ledger steps.
+#[component]
+fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverview>, channel: String, newest_first: bool) -> Element {
+	let mut open = use_signal(std::collections::HashSet::<i64>::new);
+	let first_ms = events.iter().map(|e| e.occurred_at_ms).min();
+	let last_ms = events.iter().map(|e| e.occurred_at_ms).max();
+	let mut entries = crate::history::build_entries(&events, &channel);
+	if newest_first {
+		entries.reverse();
+	}
+	let mut days: Vec<(String, Vec<crate::history::HistoryEntry>)> = Vec::new();
+	for entry in entries {
+		let day = crate::history::day_label(entry.occurred_at_ms);
+		match days.last_mut() {
+			Some((current, list)) if *current == day => list.push(entry),
+			_ => days.push((day, vec![entry])),
+		}
+	}
+	rsx! {
+		HistoryHeader { channel: channel.clone(), overview, first_ms, last_ms }
+		if days.is_empty() {
+			div { class: "card", Empty { icon: "list", title: "No history yet for this channel." } }
+		}
+		for (day, list) in days {
+			section { key: "{day}", class: "card flush hist-day",
+				div { class: "hist-day-head", "{day}" }
+				for entry in list {
+					div {
+						key: "{entry.key}",
+						class: if open.read().contains(&entry.key) { "hist-row open" } else { "hist-row" },
+						onclick: move |_| {
+							let key = entry.key;
+							let mut set = open.write();
+							if !set.remove(&key) {
+								set.insert(key);
+							}
+						},
+						span { class: "hist-time num", "{exact_timestamp(entry.occurred_at_ms)}" }
+						span { class: "hist-summary",
+							"{entry.summary}"
+							if entry.repeats > 1 {
+								span { class: "hist-repeats", " ×{entry.repeats} since {crate::history::day_label(entry.started_at_ms)}" }
+							}
+						}
+						span { class: "hist-amount num",
+							if let Some(msat) = entry.amount_msat.filter(|m| *m >= 1_000) {
+								"{format_sats_with_usd(msat / 1_000, entry.btc_price)}"
+							}
+						}
+						span {
+							if let Some(target) = entry.target_after.filter(|_| entry.target_changed) {
+								Pill { tone: "info", "target {crate::format::format_usd(target)}" }
+							}
+						}
+					}
+					if open.read().contains(&entry.key) {
+						div { class: "hist-steps",
+							for event in entry.events.clone() {
+								EventCard { key: "{event.id}", event }
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
-fn latest_state_caption(overview: &ChannelLedgerOverview) -> String {
-    let source = match overview.latest_accounting_source.as_str() {
-        "channels" => "Current SQLite state",
-        "ledger" => "Latest complete snapshot",
-        _ => "No complete state",
-    };
-    match overview.latest_accounting_at_ms {
-        Some(timestamp) => format!("{source} · {}", relative_timestamp(timestamp)),
-        None => source.to_owned(),
-    }
+#[component]
+fn Overview(overview: ChannelLedgerOverview) -> Element {
+	let state = overview.latest_accounting.clone();
+	let sats = |value: Option<u64>, price: Option<f64>| {
+		value.map(|value| format_sats_with_usd(value, price)).unwrap_or_else(|| "—".to_owned())
+	};
+	let price = state.as_ref().and_then(|s| s.btc_price);
+	let expected = state
+		.as_ref()
+		.and_then(|s| s.expected_usd)
+		.map(|value| format!("${value:.2}"))
+		.unwrap_or_else(|| "—".to_owned());
+	let same = overview.matching_events == overview.total_events;
+	let events = if same {
+		overview.total_events.to_string()
+	} else {
+		format!("{} / {}", overview.matching_events, overview.total_events)
+	};
+	let span = (overview.oldest_occurred_at_ms.is_some() || overview.newest_occurred_at_ms.is_some()).then(|| {
+		format!(
+			"{} -> {}",
+			overview.oldest_occurred_at_ms.map(exact_timestamp).unwrap_or_else(|| "—".to_owned()),
+			overview.newest_occurred_at_ms.map(exact_timestamp).unwrap_or_else(|| "—".to_owned())
+		)
+	});
+	// Headline sats, with the "≈ $" part moved onto the caption line.
+	let split = |text: String, caption: String| match text.split_once(" · ") {
+		Some((value, usd)) => (value.to_owned(), format!("{usd} · {caption}")),
+		None => (text, caption),
+	};
+	let (backing, backing_sub) = split(sats(state.as_ref().and_then(|s| s.backing_sats), price), "Stable allocation".to_owned());
+	let (native, native_sub) = split(sats(state.as_ref().and_then(|s| s.native_sats), price), "Non-stable allocation".to_owned());
+	let (live, live_sub) = split(sats(state.as_ref().and_then(|s| s.live_receiver_sats), price), latest_state_caption(&overview));
+	rsx! {
+		div { class: "grid-3",
+			Stat { title: "Expected USD", value: expected, sub: "Current recorded target" }
+			Stat { title: "Backing", value: backing, sub: backing_sub }
+			Stat { title: "Native", value: native, sub: native_sub }
+			Stat { title: "Live balance", value: live, sub: live_sub }
+			Stat { title: "Events", value: events, sub: if same { "Exact identifier total" } else { "Matching current filters / total" } }
+			Stat {
+				title: "Coverage",
+				value: format!("{} direct", overview.observed_events),
+				sub: format!("{} reconstructed · {} legacy · {} gaps", overview.reconstructed_events, overview.legacy_events, overview.gap_events),
+			}
+		}
+		if let Some(span) = span {
+			div { class: "row small", style: "gap: 6px;", span { class: "muted", "Ledger span:" } span { class: "num", "{span}" } }
+		}
+	}
 }
 
-fn timeline_order(events: &[ChannelLedgerEvent], newest_first: bool) -> Vec<usize> {
-    let mut order = (0..events.len()).collect::<Vec<_>>();
-    order.sort_by_key(|index| (events[*index].occurred_at_ms, events[*index].id));
-    if newest_first {
-        order.reverse();
-    }
-    order
+#[component]
+fn EventCard(event: ChannelLedgerEvent) -> Element {
+	let ctx = use_context::<AppCtx>();
+	// Re-render every second so the relative time stays current.
+	let _ = ctx.now.read();
+	let pretty = serde_json::from_str::<serde_json::Value>(&event.detail_json)
+		.and_then(|value| serde_json::to_string_pretty(&value))
+		.unwrap_or_else(|_| event.detail_json.clone());
+	let path = forwarding_path(&event);
+	rsx! {
+		article { class: "card event",
+			div { class: "event-head",
+				InfoTip { text: event_help(&event) }
+				span { class: "event-title", "{human_summary(&event)}" }
+				Hover { tip: category_help(&event.category), Pill { tone: "info", "{event.category}" } }
+				Hover { tip: status_help(&event.status), Pill { tone: status_tone(&event.status), "{event.status}" } }
+				Hover { tip: completeness_help(&event.completeness), Pill { tone: completeness_tone(&event.completeness), "{completeness_label(&event.completeness)}" } }
+			}
+			div { class: "row between small",
+				span { class: "muted num", "{exact_timestamp(event.occurred_at_ms)}" }
+				span { class: "muted", "{relative_timestamp(event.occurred_at_ms)}" }
+			}
+			Accounting { before: event.before.clone(), after: event.after.clone() }
+			if let Some(path) = path {
+				div { class: "grid-2", style: "gap: 12px;",
+					Leg { title: "Incoming channel", help: "Payment arrived through this channel.", leg: path.incoming }
+					Leg { title: "Outgoing channel", help: "Payment was forwarded through this channel.", leg: path.outgoing }
+				}
+			} else if !event.refs.is_empty() {
+				References { refs: event.refs.clone() }
+			}
+			details { class: "disclosure",
+				summary { Icon { name: "chevron-right", size: 14 } "Raw JSON" }
+				div { class: "body", pre { class: "raw", "{pretty}" } }
+			}
+		}
+	}
 }
 
-fn render_event(ui: &mut egui::Ui, event: &ChannelLedgerEvent, status: &mut Option<StatusMessage>) {
-    egui::Frame::group(ui.style())
-        .inner_margin(egui::Margin::same(10.0))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                widgets::info_icon(ui, event_help(event));
-                ui.label(RichText::new(human_summary(event)).strong().size(15.0));
-                badge(
-                    ui,
-                    &event.category,
-                    Color32::from_rgb(70, 110, 170),
-                    category_help(&event.category),
-                );
-                badge(
-                    ui,
-                    &event.status,
-                    status_color(&event.status),
-                    status_help(&event.status),
-                );
-                badge(
-                    ui,
-                    completeness_label(&event.completeness),
-                    completeness_color(&event.completeness),
-                    completeness_help(&event.completeness),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(exact_timestamp(event.occurred_at_ms))
-                        .small()
-                        .color(SECONDARY),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(relative_timestamp(event.occurred_at_ms))
-                            .small()
-                            .color(SECONDARY),
-                    );
-                });
-            });
-            render_accounting(ui, event.before.as_ref(), event.after.as_ref());
-            if let Some(path) = forwarding_path(event) {
-                ui.add_space(4.0);
-                render_forwarding_path(ui, &path, status);
-            } else if !event.refs.is_empty() {
-                ui.add_space(4.0);
-                render_references(ui, &event.refs, status);
-            }
-            egui::CollapsingHeader::new("Raw JSON")
-                .id_salt(("ledger_raw", event.id))
-                .show(ui, |ui| {
-                    let pretty = serde_json::from_str::<serde_json::Value>(&event.detail_json)
-                        .and_then(|value| serde_json::to_string_pretty(&value))
-                        .unwrap_or_else(|_| event.detail_json.clone());
-                    ui.add(egui::Label::new(RichText::new(pretty).monospace()).wrap());
-                });
-        });
+#[component]
+fn Accounting(before: Option<AccountingSnapshot>, after: Option<AccountingSnapshot>) -> Element {
+	match (before, after) {
+		(Some(before), Some(after)) => {
+			let sats = |value: Option<u64>, price: Option<f64>| value.map(|v| format_sats_with_usd(v, price));
+			let usd = |value: Option<f64>| value.map(|v| format!("${v:.2}"));
+			let rows = vec![
+				("Expected USD", usd(before.expected_usd), usd(after.expected_usd), decimal_delta(before.expected_usd, after.expected_usd, "$")),
+				("Backing", sats(before.backing_sats, before.btc_price), sats(after.backing_sats, after.btc_price), sats_delta(before.backing_sats, after.backing_sats)),
+				("Native", sats(before.native_sats, before.btc_price), sats(after.native_sats, after.btc_price), sats_delta(before.native_sats, after.native_sats)),
+				(
+					"Live balance",
+					sats(before.live_receiver_sats, before.btc_price),
+					sats(after.live_receiver_sats, after.btc_price),
+					sats_delta(before.live_receiver_sats, after.live_receiver_sats),
+				),
+			];
+			let missing = || "Not recorded".to_owned();
+			rsx! {
+				div { class: "card inner stack tight",
+					span { class: "field-label", "Balance change" }
+					div { class: "change",
+						for (label, before, after, delta) in rows {
+							if before.is_some() || after.is_some() {
+								span { key: "{label}", class: "change-label", "{label}" }
+								match delta {
+									// Unchanged values are shown once instead of "x -> x (+0)".
+									Some((_, 0)) => rsx! {
+										span { class: "change-same num", "{after.clone().unwrap_or_else(missing)}" }
+										span { class: "delta flat", "unchanged" }
+									},
+									Some((text, sign)) => rsx! {
+										span { class: "change-before num", "{before.clone().unwrap_or_else(missing)}" }
+										span { class: "change-arrow", Icon { name: "arrow-right", size: 14 } }
+										span { class: "change-after num", "{after.clone().unwrap_or_else(missing)}" }
+										span { class: if sign > 0 { "delta up" } else { "delta down" }, "{text}" }
+									},
+									None => rsx! {
+										span { class: "change-before num", "{before.clone().unwrap_or_else(missing)}" }
+										span { class: "change-arrow", Icon { name: "arrow-right", size: 14 } }
+										span { class: "change-after num", "{after.clone().unwrap_or_else(missing)}" }
+										span {}
+									},
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		(None, Some(after)) => rsx! { Snapshot { snapshot: after, title: None } },
+		(Some(before), None) => rsx! { Snapshot { snapshot: before, title: "Previous recorded state" } },
+		(None, None) => rsx! {},
+	}
 }
 
-fn render_accounting(
-    ui: &mut egui::Ui,
-    before: Option<&AccountingSnapshot>,
-    after: Option<&AccountingSnapshot>,
-) {
-    match (before, after) {
-        (Some(before), Some(after)) => {
-            ui.add_space(6.0);
-            ui.label(RichText::new("Accounting change").small().color(AMBER));
-            egui::Grid::new(ui.next_auto_id())
-                .num_columns(4)
-                .spacing([12.0, 5.0])
-                .show(ui, |ui| {
-                    render_change_row(
-                        ui,
-                        "Expected USD",
-                        before.expected_usd.map(|value| format!("${value:.2}")),
-                        after.expected_usd.map(|value| format!("${value:.2}")),
-                        decimal_delta(before.expected_usd, after.expected_usd, "$"),
-                    );
-                    render_change_row(
-                        ui,
-                        "Backing",
-                        before
-                            .backing_sats
-                            .map(|value| format_sats_with_usd(value, before.btc_price)),
-                        after
-                            .backing_sats
-                            .map(|value| format_sats_with_usd(value, after.btc_price)),
-                        sats_delta(before.backing_sats, after.backing_sats),
-                    );
-                    render_change_row(
-                        ui,
-                        "Native",
-                        before
-                            .native_sats
-                            .map(|value| format_sats_with_usd(value, before.btc_price)),
-                        after
-                            .native_sats
-                            .map(|value| format_sats_with_usd(value, after.btc_price)),
-                        sats_delta(before.native_sats, after.native_sats),
-                    );
-                    render_change_row(
-                        ui,
-                        "Live balance",
-                        before
-                            .live_receiver_sats
-                            .map(|value| format_sats_with_usd(value, before.btc_price)),
-                        after
-                            .live_receiver_sats
-                            .map(|value| format_sats_with_usd(value, after.btc_price)),
-                        sats_delta(before.live_receiver_sats, after.live_receiver_sats),
-                    );
-                });
-        }
-        (None, Some(after)) => {
-            ui.add_space(6.0);
-            render_snapshot(ui, after);
-        }
-        (Some(before), None) => {
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new("Previous recorded state")
-                    .small()
-                    .color(AMBER),
-            );
-            render_snapshot(ui, before);
-        }
-        (None, None) => {}
-    }
+#[component]
+fn Snapshot(snapshot: AccountingSnapshot, title: Option<String>) -> Element {
+	let rows = snapshot_rows(&snapshot);
+	rsx! {
+		div { class: "card inner stack tight",
+			if let Some(title) = title {
+				span { class: "small", style: "color: var(--orange-text); font-weight: 600;", "{title}" }
+			}
+			div { class: "kv",
+				for (label, value) in rows {
+					div { class: "k small", "{label}" }
+					div { class: "v", "{value}" }
+				}
+			}
+		}
+	}
 }
 
-fn render_change_row(
-    ui: &mut egui::Ui,
-    label: &str,
-    before: Option<String>,
-    after: Option<String>,
-    delta: Option<(String, i8)>,
-) {
-    if before.is_none() && after.is_none() {
-        return;
-    }
-    ui.label(RichText::new(label).small().color(SECONDARY));
-    ui.label(before.unwrap_or_else(|| "Not recorded".to_owned()));
-    ui.label(format!(
-        "-> {}",
-        after.unwrap_or_else(|| "Not recorded".to_owned())
-    ));
-    if let Some((delta, sign)) = delta {
-        let color = match sign {
-            1 => Color32::GREEN,
-            -1 => Color32::RED,
-            _ => SECONDARY,
-        };
-        ui.label(RichText::new(delta).color(color));
-    } else {
-        ui.label("");
-    }
-    ui.end_row();
+#[component]
+fn Leg(title: &'static str, help: &'static str, leg: ForwardingLeg) -> Element {
+	rsx! {
+		div { class: "card inner stack tight",
+			Hover { tip: help.to_string(), span { class: "strong", "{title}" } }
+			for (label, value) in [("Channel ID", leg.channel_id.clone()), ("User channel ID", leg.user_channel_id.clone()), ("Node ID", leg.node_id.clone())] {
+				if let Some(value) = value {
+					div { key: "{label}", class: "row", style: "gap: 6px;",
+						span { class: "small muted", "{label}:" }
+						IdCopy { value }
+					}
+				}
+			}
+		}
+	}
 }
 
-fn render_snapshot(ui: &mut egui::Ui, snapshot: &AccountingSnapshot) {
-    let rows = snapshot_rows(snapshot);
-    egui::Grid::new(ui.next_auto_id())
-        .num_columns(2)
-        .spacing([12.0, 5.0])
-        .show(ui, |ui| {
-            for (label, value) in rows {
-                ui.label(RichText::new(label).small().color(SECONDARY));
-                ui.label(value);
-                ui.end_row();
-            }
-        });
-}
-
-fn snapshot_rows(snapshot: &AccountingSnapshot) -> Vec<(&'static str, String)> {
-    let mut rows = Vec::new();
-    if let Some(value) = snapshot.expected_usd {
-        rows.push(("Expected USD", format!("${value:.2}")));
-    }
-    if let Some(value) = snapshot.backing_sats {
-        rows.push(("Backing", format_sats_with_usd(value, snapshot.btc_price)));
-    }
-    if let Some(value) = snapshot.native_sats {
-        rows.push(("Native", format_sats_with_usd(value, snapshot.btc_price)));
-    }
-    if let Some(value) = snapshot.live_receiver_sats {
-        rows.push((
-            "Live balance",
-            format_sats_with_usd(value, snapshot.btc_price),
-        ));
-    }
-    if let Some(value) = snapshot.amount_sats {
-        rows.push(("Amount", format_sats_with_usd(value, snapshot.btc_price)));
-    } else if let Some(value) = snapshot.amount_msat {
-        rows.push(("Amount", format_msat(value)));
-    }
-    if let Some(value) = snapshot.amount_usd {
-        rows.push(("Recorded amount", format!("${value:.2}")));
-    }
-    if let Some(value) = snapshot.fee_sats {
-        rows.push(("Fee", format_sats_with_usd(value, snapshot.btc_price)));
-    } else if let Some(value) = snapshot.fee_msat {
-        rows.push(("Fee", format_msat(value)));
-    }
-    rows
-}
-
-fn decimal_delta(before: Option<f64>, after: Option<f64>, prefix: &str) -> Option<(String, i8)> {
-    let delta = after? - before?;
-    let sign = if delta > 0.0 {
-        1
-    } else if delta < 0.0 {
-        -1
-    } else {
-        0
-    };
-    Some((format!("({prefix}{delta:+.2})"), sign))
-}
-
-fn sats_delta(before: Option<u64>, after: Option<u64>) -> Option<(String, i8)> {
-    let delta = after? as i128 - before? as i128;
-    Some((format!("({delta:+} sats)"), delta.signum() as i8))
-}
-
-#[cfg(test)]
-fn accounting_delta(
-    before: Option<&AccountingSnapshot>,
-    after: Option<&AccountingSnapshot>,
-) -> Option<String> {
-    let before = before?;
-    let after = after?;
-    let mut parts = Vec::new();
-    if let (Some(a), Some(b)) = (before.expected_usd, after.expected_usd) {
-        parts.push(format!("expected_usd {a:.2} -> {b:.2} ({:+.2})", b - a));
-    }
-    if let (Some(a), Some(b)) = (before.backing_sats, after.backing_sats) {
-        parts.push(format!("backing {a} -> {b} ({:+})", b as i128 - a as i128));
-    }
-    if let (Some(a), Some(b)) = (before.native_sats, after.native_sats) {
-        parts.push(format!("native {a} -> {b} ({:+})", b as i128 - a as i128));
-    }
-    (!parts.is_empty()).then(|| parts.join("  •  "))
-}
-
-fn human_summary(event: &ChannelLedgerEvent) -> String {
-    match event.event_type.as_str() {
-        "CHANNEL_PENDING" => "Channel opening started".to_owned(),
-        "CHANNEL_READY_TRACKED" => "Channel ready".to_owned(),
-        "CHANNEL_OPEN_FAILED" => "Channel opening failed".to_owned(),
-        "STABLE_EDITED" | "TRADE_APPLIED" | "SYNC_V1_APPLIED" => "Stable target changed".to_owned(),
-        "PAYMENT_OUTGOING_RECONCILED" | "OUTGOING_STABLE_DEDUCTED" | "STABLE_SPEND_DEDUCTED" => {
-            "Outgoing payment reduced stable backing".to_owned()
-        }
-        "SPLICE_IN_RECONCILED" => "Splice in completed".to_owned(),
-        "SPLICE_OUT_STABLE_RECONCILED" => "Splice out completed".to_owned(),
-        "CHANNEL_READY_SPLICE" => match splice_direction(event).as_deref() {
-            Some("in") => "Splice in completed".to_owned(),
-            Some("out") => "Splice out completed".to_owned(),
-            _ => "Splice completed".to_owned(),
-        },
-        "SPLICE_RECONCILED" => "Splice completed".to_owned(),
-        "SPLICE_OUT_STABLE_DEDUCTED" => "Splice out reduced stable backing".to_owned(),
-        "STABILITY_PAYMENT_SENT" => "Stability payment sent".to_owned(),
-        "STABILITY_PAYMENT_SETTLED" => "Stability payment completed".to_owned(),
-        "EVENT_STREAM_GAP_CLOSED" => "Channel recovered after reconnect".to_owned(),
-        "CHANNEL_ACCOUNTING_STATE_COMMITTED" => "Channel accounting state recorded".to_owned(),
-        "CHANNEL_CLOSED_COMMITTED" | "CHANNEL_CLOSED" => "Channel closed".to_owned(),
-        "STABILITY_PAYMENT_RECORDED" => "Stability payment recorded".to_owned(),
-        "MESSAGE_RECEIVED" => "Channel message received".to_owned(),
-        "TRADE_SIGNATURE_VALID" => "Channel message signature verified".to_owned(),
-        "SYNC_MESSAGE_SENT" => "Accounting sync delivered".to_owned(),
-        "PAYMENT_SETTLED" if event_amount_msat(event) == Some(1) => {
-            "Accounting sync settled".to_owned()
-        }
-        "PAYMENT_FAILED" => match detail_text(event, "reason") {
-            Some(reason) => format!("Payment failed: {}", humanize_enum(&reason)),
-            None => "Payment failed".to_owned(),
-        },
-        "SPLICE_NEGOTIATED" => "Splice negotiated".to_owned(),
-        "SPLICE_NEGOTIATION_FAILED" => "Splice negotiation failed".to_owned(),
-        "CHANNEL_SHUTDOWN_STATE_CHANGED" => match detail_text(event, "shutdown_state") {
-            Some(state) => format!("Channel shutdown: {}", humanize_enum(&state)),
-            None => "Channel shutdown stage changed".to_owned(),
-        },
-        unknown => title_case_event(unknown),
-    }
-}
-
-fn event_help(event: &ChannelLedgerEvent) -> String {
-    let explanation = match event.event_type.as_str() {
-        "STABLE_EDITED" => "An operator changed the channel's target stable USD amount.",
-        "TRADE_APPLIED" => "A validated BTC/USD trade updated the channel's stable allocation.",
-        "SYNC_V1_APPLIED" => {
-            "A newer signed allocation from the wallet was accepted and applied to this channel."
-        }
-        "PAYMENT_OUTGOING_RECONCILED" | "OUTGOING_STABLE_DEDUCTED" | "STABLE_SPEND_DEDUCTED" => {
-            "An outgoing Lightning payment used stable-backed capacity, so the recorded stable backing was reduced."
-        }
-        "SPLICE_RECONCILED" => {
-            "LDK reported the channel ready after a splice, and the LSP reconciled its current capacity and allocation."
-        }
-        "SPLICE_IN_RECONCILED" => {
-            "A splice in added funds to the channel. The channel became ready again and its accounting was updated."
-        }
-        "SPLICE_OUT_STABLE_RECONCILED" => {
-            "A splice out removed funds from the channel. The channel became ready again and its stable accounting was updated."
-        }
-        "CHANNEL_READY_SPLICE" => return splice_help(event),
-        "SPLICE_OUT_STABLE_DEDUCTED" => {
-            "The splice out removed more than the channel's native balance, so the remaining amount reduced its stable backing."
-        }
-        "STABILITY_PUSH_QUEUED" => {
-            "The wallet was offline, so the LSP queued a push notification asking it to reconnect and check stability. No stability payment was sent yet."
-        }
-        "STABILITY_CHECK_ONLY" => {
-            "The channel was above its target, but the LSP cannot pull value from the wallet, so it recorded the check without sending a payment."
-        }
-        "STABILITY_PAYMENT_SENT" => {
-            "The LSP sent a Lightning payment to move the channel's stable value toward its target."
-        }
-        "STABILITY_PAYMENT_SETTLED" => {
-            "The stability payment completed successfully and is no longer in flight."
-        }
-        "STABILITY_PAYMENT_RECORDED" => {
-            "A stability payment was associated with this channel and stored for settlement tracking."
-        }
-        "EVENT_STREAM_CONNECTED" => {
-            "The LSP connected to LDK Server's live event stream and resumed listening for activity."
-        }
-        "EVENT_STREAM_GAP_OPENED" => {
-            "The LSP lost the live LDK event stream, so activity during this interval may need reconstruction."
-        }
-        "EVENT_STREAM_GAP_CLOSED" => {
-            "The LSP reconnected to LDK Server and completed its recovery check for the missed interval."
-        }
-        "CHANNEL_RECONSTRUCTED" => {
-            "After reconnecting, the LSP rebuilt this snapshot from current LDK channel data. The channel itself was not recreated."
-        }
-        "PAYMENT_RECONSTRUCTED" => {
-            "After reconnecting, the LSP rebuilt this payment record from LDK's current payment history."
-        }
-        "PEER_RECONSTRUCTED" => {
-            "After reconnecting, the LSP rebuilt this peer snapshot from LDK's current peer list."
-        }
-        "SWEEP_RECONSTRUCTED" => {
-            "After reconnecting, the LSP rebuilt this pending sweep snapshot from LDK's current balances."
-        }
-        "PAYMENT_FORWARDED_BACKFILL" => {
-            return with_skimmed_fee(
-                event,
-                "The LSP found a forwarded payment in LDK history that was not observed on the live event stream and added it to the ledger.",
-            );
-        }
-        "PAYMENT_FORWARDED" => {
-            return with_skimmed_fee(
-                event,
-                "The LSP routed this payment between the incoming and outgoing channels shown below.",
-            );
-        }
-        "SPLICE_NEGOTIATED" => {
-            "The splice was agreed with the peer and its new funding transaction is waiting for confirmation. The channel's accounting is reconciled when LDK reports it ready again."
-        }
-        "SPLICE_NEGOTIATION_FAILED" => {
-            "A splice negotiation round with the peer failed. Nothing changed on-chain: the channel keeps its current funding and any splice already negotiated."
-        }
-        "CHANNEL_SHUTDOWN_STATE_CHANGED" => {
-            "The channel moved to a new cooperative close stage. Pending HTLCs are resolved first, then the closing fee is negotiated and the close transaction is broadcast. The LSP checks every 30 seconds, so a quick close can skip stages, and a stage the channel falls back to after a disconnect is not recorded again."
-        }
-        "RECONCILIATION_SCOPE_FAILED" => {
-            "Part of the reconnect recovery could not be queried. The affected scope and error are available in Raw JSON."
-        }
-        "CHANNEL_ACCOUNTING_STATE_COMMITTED" => {
-            "The latest expected USD, backing, native balance, and live balance were saved as one accounting snapshot."
-        }
-        "CHANNEL_READY_TRACKED" => {
-            "The channel opening finished. LDK marked the channel ready for Lightning payments, and the LSP began tracking its stable accounting."
-        }
-        "CHANNEL_PENDING" => {
-            "The channel opening started. Its funding transaction was created, and it is waiting for confirmations before it can carry Lightning payments."
-        }
-        "CHANNEL_OPEN_FAILED" => {
-            "The channel opening stopped before the channel became usable. Open Raw JSON to see the recorded reason."
-        }
-        "CHANNEL_CLOSED_COMMITTED" | "CHANNEL_CLOSED" => {
-            "The channel was closed and can no longer carry payments. The LSP stopped tracking it as an active stable channel."
-        }
-        "MESSAGE_RECEIVED" => {
-            "The LSP received a Stable Channels protocol message carried in a custom Lightning record."
-        }
-        "TRADE_PARSED_PAYLOAD_OK" => {
-            "The received trade message had the expected structure and could be decoded."
-        }
-        "TRADE_SIGNATURE_VALID" => {
-            "The cryptographic signature on the received channel message was successfully verified."
-        }
-        "SYNC_MESSAGE_SENT" | "TRADE_MESSAGE_SENT" => {
-            "A Stable Channels protocol message was delivered to the counterparty over Lightning."
-        }
-        "PAYMENT_SETTLED" if event_amount_msat(event) == Some(1) => {
-            "The 1-msat carrier payment used to deliver an accounting sync completed successfully."
-        }
-        "PAYMENT_SETTLED" | "PAYMENT_SUCCESSFUL" => {
-            "The Lightning payment completed successfully."
-        }
-        "PAYMENT_FAILED" => return failed_payment_help(event),
-        _ => {
-            return format!(
-                "This is {}. Hover the badges for classification details or open Raw JSON for the exact recorded fields.",
-                category_help_phrase(&event.category)
-            );
-        },
-    };
-    explanation.to_owned()
-}
-
-fn detail_value(event: &ChannelLedgerEvent, key: &str) -> Option<serde_json::Value> {
-    serde_json::from_str::<serde_json::Value>(&event.detail_json).ok()?.get(key).cloned()
-}
-
-fn detail_text(event: &ChannelLedgerEvent, key: &str) -> Option<String> {
-    detail_value(event, key)?.as_str().map(str::to_owned)
-}
-
-// LDK enum names such as ROUTE_NOT_FOUND read as "route not found".
-fn humanize_enum(name: &str) -> String {
-    name.to_ascii_lowercase().replace('_', " ").replace("htlcs", "HTLCs")
-}
-
-fn failed_payment_help(event: &ChannelLedgerEvent) -> String {
-    let base = "The Lightning payment did not complete successfully.";
-    let Some(reason) = detail_text(event, "reason") else {
-        return base.to_owned();
-    };
-    let cause = match reason.as_str() {
-        "ROUTE_NOT_FOUND" => "LDK found no route to the recipient. For a stability payment or sync this usually means the wallet was offline or the channel lacked capacity.".to_owned(),
-        "RECIPIENT_REJECTED" => "The recipient's node rejected it.".to_owned(),
-        "RETRIES_EXHAUSTED" => "LDK used up its retry attempts or its retry timeout.".to_owned(),
-        "PAYMENT_EXPIRED" => "It expired while LDK was still retrying.".to_owned(),
-        "USER_ABANDONED" => "It was abandoned before it completed.".to_owned(),
-        "UNEXPECTED_ERROR" => "LDK hit an unexpected routing error.".to_owned(),
-        other => format!("LDK reported the reason as {}.", humanize_enum(other)),
-    };
-    format!("{base} {cause}")
-}
-
-fn with_skimmed_fee(event: &ChannelLedgerEvent, explanation: &str) -> String {
-    match detail_value(event, "skimmed_fee_msat").and_then(|fee| fee.as_u64()).filter(|fee| *fee > 0) {
-        Some(fee) => format!(
-            "{explanation} {} of the fee was withheld as the channel-open fee for a just-in-time channel.",
-            format_msat(fee)
-        ),
-        None => explanation.to_owned(),
-    }
-}
-
-fn splice_direction(event: &ChannelLedgerEvent) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(&event.detail_json)
-        .ok()?
-        .get("direction")?
-        .as_str()
-        .map(str::to_owned)
-}
-
-fn splice_amount_sats(event: &ChannelLedgerEvent) -> Option<u64> {
-    event
-        .after
-        .as_ref()
-        .and_then(|snapshot| snapshot.amount_sats)
-        .or_else(|| {
-            serde_json::from_str::<serde_json::Value>(&event.detail_json)
-                .ok()?
-                .get("amount_sats")?
-                .as_u64()
-        })
-}
-
-fn splice_help(event: &ChannelLedgerEvent) -> String {
-    let amount = splice_amount_sats(event)
-        .map(|amount| format!("{} sats net", format_integer(amount)))
-        .unwrap_or_else(|| "funds".to_owned());
-    match splice_direction(event).as_deref() {
-        Some("in") => format!(
-            "A splice in added {amount} to the channel. The channel became ready again and its new balance was stored."
-        ),
-        Some("out") => format!(
-            "A splice out removed {amount} from the channel. The channel became ready again and its stable accounting was reconciled."
-        ),
-        Some("unchanged") => {
-            "LDK reported the channel ready after a splice, but its recorded balance was unchanged. This can be a replay or recovery event."
-                .to_owned()
-        },
-        _ => {
-            "LDK reported the channel ready after a splice, and the LSP reconciled its current balance and stable accounting."
-                .to_owned()
-        },
-    }
-}
-
-fn category_help_phrase(category: &str) -> &'static str {
-    match category {
-        "channel" => "a channel lifecycle event",
-        "payment" => "a Lightning payment event",
-        "forwarding" => "a routed-payment event",
-        "trade" => "a trade or stable-allocation event",
-        "stability" => "a stabilization or accounting-sync event",
-        "peer" => "a peer-connection event",
-        "sweep" => "a channel-closing sweep event",
-        "reconciliation" => "a recovery or backfill event",
-        "operator" => "an operator action",
-        "system" => "an internal system event",
-        _ => "an unclassified ledger event",
-    }
-}
-
-fn title_case_event(event_type: &str) -> String {
-    let mut words = event_type
-        .split('_')
-        .filter(|word| !word.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect::<Vec<_>>();
-    if let Some(first) = words.first_mut() {
-        if let Some(initial) = first.get_mut(0..1) {
-            initial.make_ascii_uppercase();
-        }
-    }
-    if words.is_empty() {
-        "Unknown event".to_owned()
-    } else {
-        words.join(" ")
-    }
-}
-
-fn event_amount_msat(event: &ChannelLedgerEvent) -> Option<u64> {
-    event
-        .after
-        .as_ref()
-        .and_then(|snapshot| snapshot.amount_msat)
-        .or_else(|| {
-            serde_json::from_str::<serde_json::Value>(&event.detail_json)
-                .ok()
-                .and_then(|detail| detail.get("amount_msat").and_then(|value| value.as_u64()))
-        })
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ForwardingLeg {
-    channel_id: Option<String>,
-    user_channel_id: Option<String>,
-    node_id: Option<String>,
-}
-
-impl ForwardingLeg {
-    fn is_empty(&self) -> bool {
-        self.channel_id.is_none() && self.user_channel_id.is_none() && self.node_id.is_none()
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct ForwardingPath {
-    incoming: ForwardingLeg,
-    outgoing: ForwardingLeg,
-}
-
-fn forwarding_path(event: &ChannelLedgerEvent) -> Option<ForwardingPath> {
-    if !matches!(
-        event.event_type.as_str(),
-        "PAYMENT_FORWARDED" | "PAYMENT_FORWARDED_BACKFILL"
-    ) {
-        return None;
-    }
-    let detail = serde_json::from_str::<serde_json::Value>(&event.detail_json).ok()?;
-    let text = |key: &str| {
-        detail.get(key).and_then(|value| match value {
-            serde_json::Value::String(value) if !value.is_empty() => Some(value.clone()),
-            serde_json::Value::Number(value) => Some(value.to_string()),
-            _ => None,
-        })
-    };
-    let path = ForwardingPath {
-        incoming: ForwardingLeg {
-            channel_id: text("prev_channel_id"),
-            user_channel_id: text("prev_user_channel_id"),
-            node_id: text("prev_node_id"),
-        },
-        outgoing: ForwardingLeg {
-            channel_id: text("next_channel_id"),
-            user_channel_id: text("next_user_channel_id"),
-            node_id: text("next_node_id"),
-        },
-    };
-    (!path.incoming.is_empty() || !path.outgoing.is_empty()).then_some(path)
-}
-
-fn render_forwarding_path(
-    ui: &mut egui::Ui,
-    path: &ForwardingPath,
-    status: &mut Option<StatusMessage>,
-) {
-    let legs = [
-        (
-            "Incoming channel",
-            "Payment arrived through this channel.",
-            &path.incoming,
-        ),
-        (
-            "Outgoing channel",
-            "Payment was forwarded through this channel.",
-            &path.outgoing,
-        ),
-    ];
-    let column_count = responsive_column_count(ui.available_width(), 430.0, 2);
-    for row in legs.chunks(column_count) {
-        ui.columns(column_count, |columns| {
-            for (column, (title, help, leg)) in columns.iter_mut().zip(row) {
-                egui::Frame::group(column.style())
-                    .inner_margin(egui::Margin::same(8.0))
-                    .show(column, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(*title).strong())
-                            .on_hover_text(*help);
-                        render_leg_identifier(ui, "Channel ID", leg.channel_id.as_deref(), status);
-                        render_leg_identifier(
-                            ui,
-                            "User channel ID",
-                            leg.user_channel_id.as_deref(),
-                            status,
-                        );
-                        render_leg_identifier(ui, "Node ID", leg.node_id.as_deref(), status);
-                    });
-            }
-        });
-    }
-}
-
-fn render_leg_identifier(
-    ui: &mut egui::Ui,
-    label: &str,
-    value: Option<&str>,
-    status: &mut Option<StatusMessage>,
-) {
-    let Some(value) = value else {
-        return;
-    };
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new(format!("{label}:")).small().color(SECONDARY));
-        widgets::id_with_copy(ui, value, status);
-    });
-}
-
-fn render_references(
-    ui: &mut egui::Ui,
-    references: &[LedgerRef],
-    status: &mut Option<StatusMessage>,
-) {
-    let column_count = responsive_column_count(ui.available_width(), 360.0, 3);
-    for row in references.chunks(column_count) {
-        ui.columns(column_count, |columns| {
-            for (column, reference) in columns.iter_mut().zip(row) {
-                column.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{}:", reference.role))
-                            .small()
-                            .color(SECONDARY),
-                    );
-                    widgets::id_with_copy(ui, &reference.value, status);
-                });
-            }
-        });
-    }
-}
-
-fn responsive_column_count(
-    available_width: f32,
-    minimum_column_width: f32,
-    maximum: usize,
-) -> usize {
-    ((available_width / minimum_column_width).floor() as usize).clamp(1, maximum)
-}
-
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32, help: String) {
-    egui::Frame::none()
-        .fill(color.gamma_multiply(0.22))
-        .stroke(egui::Stroke::new(1.0, color))
-        .rounding(4.0)
-        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-        .show(ui, |ui| {
-            ui.small(text);
-        })
-        .response
-        .on_hover_text(help);
-}
-
-fn category_help(category: &str) -> String {
-    let meaning = match category {
-        "channel" => "Channel lifecycle, readiness, splice, or closure activity",
-        "payment" => "Lightning payment activity",
-        "forwarding" => "Routed payment activity",
-        "trade" => "BTC/USD trade or stable-allocation activity",
-        "stability" => "Stabilization payment or accounting-sync activity",
-        "peer" => "Peer connection activity",
-        "sweep" => "Closing-output sweep activity",
-        "reconciliation" => "Recovery, backfill, or event-gap processing",
-        "operator" => "Manual edit or configuration activity",
-        "system" => "Internal system activity",
-        _ => "Unclassified ledger activity",
-    };
-    format!("Category: {meaning}")
-}
-
-fn status_help(status: &str) -> String {
-    let meaning = match status {
-        "observed" => "Informational event; no workflow completion is implied",
-        "pending" => "Operation is still in progress",
-        "completed" => "Operation finished or was applied successfully",
-        "partial" => "Only part of the operation completed successfully",
-        "failed" => "Operation failed or was rejected",
-        "skipped" => "Operation was intentionally not performed",
-        _ => "Unrecognized event status",
-    };
-    format!("Status: {meaning}")
-}
-
-fn completeness_label(completeness: &str) -> &str {
-    match completeness {
-        "observed" => "direct",
-        other => other,
-    }
-}
-
-fn completeness_help(completeness: &str) -> String {
-    let meaning = match completeness {
-        "observed" => "Recorded directly when the event occurred",
-        "reconstructed" => "Rebuilt later from other available records",
-        "legacy" => "Imported from the older JSONL audit log and may lack structured state",
-        "gap" => "Marks known missing or incomplete event coverage",
-        _ => "Unrecognized record completeness",
-    };
-    format!("Completeness: {meaning}")
-}
-
-fn status_color(status: &str) -> Color32 {
-    match status {
-        "failed" => Color32::RED,
-        "completed" => Color32::GREEN,
-        "skipped" => Color32::GRAY,
-        _ => Color32::YELLOW,
-    }
-}
-
-fn completeness_color(completeness: &str) -> Color32 {
-    match completeness {
-        "observed" => Color32::GREEN,
-        "gap" => Color32::RED,
-        "legacy" => Color32::GRAY,
-        _ => Color32::YELLOW,
-    }
-}
-
-fn format_sats_with_usd(sats: u64, btc_price: Option<f64>) -> String {
-    let display = format!("{} sats", format_integer(sats));
-    match btc_price.filter(|price| price.is_finite() && *price > 0.0) {
-        Some(price) => format!("{display} · ≈ ${:.2}", sats_to_usd(sats, price)),
-        None => display,
-    }
-}
-
-fn sats_to_usd(sats: u64, btc_price: f64) -> f64 {
-    sats as f64 / 100_000_000.0 * btc_price
-}
-
-fn format_integer(value: u64) -> String {
-    let digits = value.to_string();
-    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            output.push(',');
-        }
-        output.push(character);
-    }
-    output
-}
-
-fn format_msat(msat: u64) -> String {
-    if msat % 1_000 == 0 {
-        format!("{} sats", format_integer(msat / 1_000))
-    } else {
-        format!("{} msat", format_integer(msat))
-    }
-}
-
-fn relative_timestamp(timestamp_ms: i64) -> String {
-    let seconds = (Utc::now().timestamp_millis() - timestamp_ms) / 1_000;
-    if seconds < 0 {
-        return "in the future".to_owned();
-    }
-    match seconds {
-        0..=4 => "just now".to_owned(),
-        5..=59 => format!("{seconds} seconds ago"),
-        60..=119 => "1 minute ago".to_owned(),
-        120..=3_599 => format!("{} minutes ago", seconds / 60),
-        3_600..=7_199 => "1 hour ago".to_owned(),
-        7_200..=86_399 => format!("{} hours ago", seconds / 3_600),
-        86_400..=172_799 => "1 day ago".to_owned(),
-        172_800..=2_591_999 => format!("{} days ago", seconds / 86_400),
-        2_592_000..=5_183_999 => "1 month ago".to_owned(),
-        5_184_000..=31_535_999 => format!("{} months ago", seconds / 2_592_000),
-        31_536_000..=63_071_999 => "1 year ago".to_owned(),
-        _ => format!("{} years ago", seconds / 31_536_000),
-    }
-}
-
-fn exact_timestamp(timestamp_ms: i64) -> String {
-    Utc.timestamp_millis_opt(timestamp_ms)
-        .single()
-        .map(|timestamp| timestamp.format("%d %b %Y, %H:%M:%S%.3f UTC").to_string())
-        .unwrap_or_else(|| format!("{timestamp_ms} ms"))
-}
-
-fn snapshot_json(snapshot: &AccountingSnapshot) -> serde_json::Value {
-    serde_json::json!({
-        "expected_usd": snapshot.expected_usd,
-        "backing_sats": snapshot.backing_sats,
-        "native_sats": snapshot.native_sats,
-        "live_receiver_sats": snapshot.live_receiver_sats,
-        "btc_price": snapshot.btc_price,
-        "amount_sats": snapshot.amount_sats,
-        "amount_msat": snapshot.amount_msat,
-        "amount_usd": snapshot.amount_usd,
-        "fee_sats": snapshot.fee_sats,
-        "fee_msat": snapshot.fee_msat,
-    })
-}
-
-fn history_jsonl(history: &ListChannelLedgerEventsResponse) -> String {
-    let mut events = history.events.iter().collect::<Vec<_>>();
-    events.sort_by_key(|event| (event.occurred_at_ms, event.id));
-    let mut seen = HashSet::new();
-    events
-        .into_iter()
-        .filter(|event| seen.insert(event.id))
-        .map(|event| {
-            serde_json::json!({
-                "ledger_id": event.id,
-                "occurred_at_ms": event.occurred_at_ms,
-                "recorded_at_ms": event.recorded_at_ms,
-                "event": event.event_type,
-                "category": event.category,
-                "severity": event.severity,
-                "status": event.status,
-                "source": event.source,
-                "completeness": event.completeness,
-                "dedup_key": event.dedup_key,
-                "before": event.before.as_ref().map(snapshot_json),
-                "after": event.after.as_ref().map(snapshot_json),
-                "refs": event.refs.iter().map(|reference| serde_json::json!({
-                    "role": reference.role,
-                    "value": reference.value,
-                })).collect::<Vec<_>>(),
-                "data": serde_json::from_str::<serde_json::Value>(&event.detail_json)
-                    .unwrap_or_else(|_| serde_json::Value::String(event.detail_json.clone())),
-            })
-            .to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-pub(crate) fn export_jsonl(
-    history: &ListChannelLedgerEventsResponse,
-    status: &mut Option<StatusMessage>,
-) {
-    let content = history_jsonl(history);
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        if let Some(path) = rfd::FileDialog::new()
-            .set_file_name("channel-ledger.jsonl")
-            .save_file()
-        {
-            match std::fs::write(&path, content) {
-                Ok(()) => {
-                    *status = Some(StatusMessage::success(format!(
-                        "Exported {} matching events to {}",
-                        history.events.len(),
-                        path.display()
-                    )))
-                }
-                Err(error) => {
-                    *status = Some(StatusMessage::error(format!("Export failed: {error}")))
-                }
-            }
-        }
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = content;
-        *status = Some(StatusMessage::error(
-            "JSONL download is not available in this web build",
-        ));
-    }
+#[component]
+fn References(refs: Vec<LedgerRef>) -> Element {
+	rsx! {
+		div { class: "grid-3", style: "gap: 8px;",
+			for (i, reference) in refs.into_iter().enumerate() {
+				div { key: "{i}", class: "row nowrap", style: "gap: 6px; min-width: 0;",
+					span { class: "small muted", "{reference.role}:" }
+					IdCopy { value: reference.value.clone() }
+				}
+			}
+		}
+	}
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+	use super::*;
 
-    fn event(id: i64, event_type: &str) -> ChannelLedgerEvent {
-        ChannelLedgerEvent {
-            id,
-            event_type: event_type.to_owned(),
-            occurred_at_ms: id * 10,
-            status: "completed".to_owned(),
-            severity: "info".to_owned(),
-            completeness: "observed".to_owned(),
-            detail_json: "{}".to_owned(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn completeness_display_distinguishes_direct_records_from_status() {
-        assert_eq!(completeness_label("observed"), "direct");
-        assert_eq!(filter_choice_label("Completeness", "observed"), "direct");
-        assert_eq!(filter_choice_label("Status", "observed"), "observed");
-        assert!(completeness_help("observed").contains("Recorded directly"));
-        assert!(status_help("observed").contains("Informational event"));
-    }
-
-    #[test]
-    fn responsive_columns_follow_available_width() {
-        assert_eq!(responsive_column_count(359.0, 360.0, 3), 1);
-        assert_eq!(responsive_column_count(720.0, 360.0, 3), 2);
-        assert_eq!(responsive_column_count(1_080.0, 360.0, 3), 3);
-        assert_eq!(responsive_column_count(2_000.0, 360.0, 3), 3);
-    }
-
-    #[test]
-    fn accounting_delta_reports_before_after() {
-        let before = AccountingSnapshot {
-            backing_sats: Some(10),
-            native_sats: Some(5),
-            ..Default::default()
-        };
-        let after = AccountingSnapshot {
-            backing_sats: Some(12),
-            native_sats: Some(3),
-            ..Default::default()
-        };
-        let text = accounting_delta(Some(&before), Some(&after)).unwrap();
-        assert!(text.contains("backing 10 -> 12 (+2)"));
-        assert!(text.contains("native 5 -> 3 (-2)"));
-        assert!(accounting_delta(None, Some(&after)).is_none());
-    }
-
-    #[test]
-    fn human_summaries_and_unknown_fallback_are_readable() {
-        assert_eq!(
-            human_summary(&event(1, "STABLE_EDITED")),
-            "Stable target changed"
-        );
-        assert_eq!(
-            human_summary(&event(2, "PAYMENT_OUTGOING_RECONCILED")),
-            "Outgoing payment reduced stable backing"
-        );
-        assert_eq!(
-            human_summary(&event(3, "SPLICE_RECONCILED")),
-            "Splice completed"
-        );
-        assert_eq!(human_summary(&event(4, "A_NEW_EVENT")), "A new event");
-        assert_eq!(
-            human_summary(&event(5, "CHANNEL_PENDING")),
-            "Channel opening started"
-        );
-        assert_eq!(
-            human_summary(&event(6, "CHANNEL_READY_TRACKED")),
-            "Channel ready"
-        );
-
-        let mut splice_in = event(7, "CHANNEL_READY_SPLICE");
-        splice_in.detail_json = r#"{"direction":"in","amount_sats":9769}"#.to_owned();
-        assert_eq!(human_summary(&splice_in), "Splice in completed");
-
-        let mut splice_out = event(8, "CHANNEL_READY_SPLICE");
-        splice_out.detail_json = r#"{"direction":"out","amount_sats":5000}"#.to_owned();
-        assert_eq!(human_summary(&splice_out), "Splice out completed");
-    }
-
-    #[test]
-    fn event_help_explains_operator_facing_titles() {
-        assert!(event_help(&event(1, "STABILITY_PUSH_QUEUED")).contains("No stability payment"));
-        assert!(event_help(&event(2, "CHANNEL_RECONSTRUCTED")).contains("not recreated"));
-        assert!(event_help(&event(3, "SPLICE_RECONCILED")).contains("reconciled"));
-        assert!(
-            event_help(&event(4, "CHANNEL_PENDING")).contains("funding transaction was created")
-        );
-        assert!(event_help(&event(5, "CHANNEL_READY_TRACKED")).contains("opening finished"));
-
-        let mut one_msat = event(6, "PAYMENT_SETTLED");
-        one_msat.detail_json = r#"{"amount_msat":1}"#.to_owned();
-        assert!(event_help(&one_msat).contains("carrier payment"));
-
-        let mut splice_in = event(7, "CHANNEL_READY_SPLICE");
-        splice_in.detail_json = r#"{"direction":"in","amount_sats":9769}"#.to_owned();
-        assert!(event_help(&splice_in).contains("9,769 sats net"));
-
-        let legacy_splice = event(8, "CHANNEL_READY_SPLICE");
-        assert_eq!(human_summary(&legacy_splice), "Splice completed");
-        assert!(event_help(&legacy_splice).contains("reconciled"));
-
-        let settled = event(9, "STABILITY_PAYMENT_SETTLED");
-        assert_eq!(human_summary(&settled), "Stability payment completed");
-        assert!(event_help(&settled).contains("no longer in flight"));
-    }
-
-    #[test]
-    fn loaded_count_explains_remaining_pages() {
-        assert_eq!(
-            loaded_events_caption(50, 300, true).as_deref(),
-            Some("Showing 50 of 300 matching events — Load older for more")
-        );
-        assert_eq!(loaded_events_caption(50, 50, false), None);
-    }
-
-    #[test]
-    fn forwarded_payment_preserves_incoming_and_outgoing_leg_roles() {
-        let mut forwarded = event(5, "PAYMENT_FORWARDED");
-        forwarded.detail_json = serde_json::json!({
-            "prev_channel_id": "incoming-channel",
-            "prev_user_channel_id": "incoming-user-channel",
-            "prev_node_id": "incoming-peer",
-            "next_channel_id": "outgoing-channel",
-            "next_user_channel_id": "outgoing-user-channel",
-            "next_node_id": "outgoing-peer",
-        })
-        .to_string();
-
-        let path = forwarding_path(&forwarded).unwrap();
-        assert_eq!(
-            path.incoming.channel_id.as_deref(),
-            Some("incoming-channel")
-        );
-        assert_eq!(
-            path.incoming.user_channel_id.as_deref(),
-            Some("incoming-user-channel")
-        );
-        assert_eq!(path.incoming.node_id.as_deref(), Some("incoming-peer"));
-        assert_eq!(
-            path.outgoing.channel_id.as_deref(),
-            Some("outgoing-channel")
-        );
-        assert_eq!(
-            path.outgoing.user_channel_id.as_deref(),
-            Some("outgoing-user-channel")
-        );
-        assert_eq!(path.outgoing.node_id.as_deref(), Some("outgoing-peer"));
-        assert!(forwarding_path(&event(6, "CHANNEL_RECONSTRUCTED")).is_none());
-    }
-
-    #[test]
-    fn timeline_keeps_every_event_in_requested_order() {
-        let events = vec![
-            event(1, "MESSAGE_RECEIVED"),
-            event(2, "TRADE_SIGNATURE_VALID"),
-            event(3, "STABLE_EDITED"),
-        ];
-        assert_eq!(timeline_order(&events, false), vec![0, 1, 2]);
-        assert_eq!(timeline_order(&events, true), vec![2, 1, 0]);
-    }
-
-    #[test]
-    fn jsonl_export_is_chronological_complete_and_deduplicated() {
-        let mut newest = event(2, "E2");
-        newest.detail_json = r#"{"id":2}"#.to_owned();
-        newest.before = Some(AccountingSnapshot {
-            backing_sats: Some(7),
-            ..Default::default()
-        });
-        let mut oldest = event(1, "E1");
-        oldest.detail_json = r#"{"id":1}"#.to_owned();
-        let history = ListChannelLedgerEventsResponse {
-            events: vec![newest.clone(), oldest, newest],
-            next_cursor: None,
-            overview: None,
-        };
-        let jsonl = history_jsonl(&history);
-        let lines = jsonl.lines().collect::<Vec<_>>();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].contains("\"ledger_id\":1"));
-        assert!(lines[1].contains("\"ledger_id\":2"));
-        assert!(lines[1].contains("\"before\":{\"amount_msat\":null"));
-        assert!(lines[1].contains("\"data\":{\"id\":2}"));
-    }
-
-    #[test]
-    fn sats_values_include_approximate_usd_only_with_recorded_price() {
-        assert_eq!(format_sats_with_usd(100_000, None), "100,000 sats");
-        assert_eq!(
-            format_sats_with_usd(100_000, Some(80_000.0)),
-            "100,000 sats · ≈ $80.00"
-        );
-    }
-
-    fn with_detail(mut event: ChannelLedgerEvent, detail: &str) -> ChannelLedgerEvent {
-        event.detail_json = detail.to_owned();
-        event
-    }
-
-    #[test]
-    fn splice_negotiation_rows_read_as_splice_progress() {
-        let negotiated = event(1, "SPLICE_NEGOTIATED");
-        assert_eq!(human_summary(&negotiated), "Splice negotiated");
-        assert!(event_help(&negotiated).contains("waiting for confirmation"));
-        let failed = event(2, "SPLICE_NEGOTIATION_FAILED");
-        assert_eq!(human_summary(&failed), "Splice negotiation failed");
-        assert!(event_help(&failed).contains("Nothing changed on-chain"));
-    }
-
-    #[test]
-    fn shutdown_stage_rows_name_the_new_stage() {
-        let resolving = with_detail(
-            event(1, "CHANNEL_SHUTDOWN_STATE_CHANGED"),
-            r#"{"previous_shutdown_state":"SHUTDOWN_INITIATED","shutdown_state":"RESOLVING_HTLCS"}"#,
-        );
-        assert_eq!(human_summary(&resolving), "Channel shutdown: resolving HTLCs");
-        assert!(event_help(&resolving).contains("cooperative close"));
-        assert!(event_help(&resolving).contains("every 30 seconds"));
-        assert_eq!(
-            human_summary(&event(2, "CHANNEL_SHUTDOWN_STATE_CHANGED")),
-            "Channel shutdown stage changed"
-        );
-    }
-
-    #[test]
-    fn failed_payment_rows_explain_the_ldk_reason() {
-        let route = with_detail(event(1, "PAYMENT_FAILED"), r#"{"reason":"ROUTE_NOT_FOUND"}"#);
-        assert_eq!(human_summary(&route), "Payment failed: route not found");
-        assert!(event_help(&route).contains("wallet was offline"));
-        let exhausted = with_detail(event(5, "PAYMENT_FAILED"), r#"{"reason":"RETRIES_EXHAUSTED"}"#);
-        assert!(event_help(&exhausted).contains("used up its retry attempts"));
-        let rejected = with_detail(event(2, "PAYMENT_FAILED"), r#"{"reason":"RECIPIENT_REJECTED"}"#);
-        assert!(event_help(&rejected).contains("rejected"));
-        let novel = with_detail(event(3, "PAYMENT_FAILED"), r#"{"reason":"UNKNOWN(42)"}"#);
-        assert!(event_help(&novel).contains("unknown(42)"));
-        let legacy = with_detail(event(4, "PAYMENT_FAILED"), r#"{"reason":null}"#);
-        assert_eq!(human_summary(&legacy), "Payment failed");
-        assert_eq!(event_help(&legacy), "The Lightning payment did not complete successfully.");
-    }
-
-    #[test]
-    fn forwarded_rows_mention_a_skimmed_channel_open_fee() {
-        let jit = with_detail(event(1, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":2500000}"#);
-        assert!(event_help(&jit).contains("2,500 sats"));
-        assert!(event_help(&jit).contains("channel-open fee"));
-        let plain = with_detail(event(2, "PAYMENT_FORWARDED"), r#"{"skimmed_fee_msat":null}"#);
-        assert!(!event_help(&plain).contains("channel-open fee"));
-        let backfill = with_detail(
-            event(3, "PAYMENT_FORWARDED_BACKFILL"),
-            r#"{"skimmed_fee_msat":1500}"#,
-        );
-        assert!(event_help(&backfill).contains("not observed on the live event stream"));
-        assert!(event_help(&backfill).contains("1,500 msat"));
-    }
+	#[test]
+	fn a_balance_change_reads_as_before_to_after_without_raw_arrows() {
+		let before = AccountingSnapshot { expected_usd: Some(43.63), backing_sats: Some(52_772), ..Default::default() };
+		let after = AccountingSnapshot { expected_usd: Some(43.63), backing_sats: Some(52_444), ..Default::default() };
+		let html = dioxus_ssr::render_element(rsx! { Accounting { before: Some(before), after: Some(after) } });
+		assert!(!html.contains("-&gt;") && !html.contains("->"), "no text arrows: {html}");
+		assert!(!html.contains("$+"), "no '$+' deltas");
+		assert!(html.contains("unchanged"));
+		assert!(html.contains("\u{2212}328 sats"));
+	}
 }

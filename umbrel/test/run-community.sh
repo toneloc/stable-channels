@@ -47,12 +47,6 @@ build_images() {
         -t sc-lsp-gui-umbrel-test "$REPO_ROOT"
 }
 
-images_exist() {
-    docker image inspect sc-ldk-server-umbrel-test >/dev/null 2>&1 &&
-        docker image inspect sc-lsp-umbrel-test >/dev/null 2>&1 &&
-        docker image inspect sc-lsp-gui-umbrel-test >/dev/null 2>&1
-}
-
 publish_images() {
     require_umbrel_dev
     while read -r source target; do
@@ -85,7 +79,10 @@ serve_store() {
 case "${1:-help}" in
     prepare)
         require_umbrel_dev
-        images_exist || build_images
+        # Always build this source tree's complete image set (using Docker's
+        # layer cache). Reusing named images can pair a stale LDK binary with
+        # the new SC client or omit the image-owned config migration entirely.
+        build_images
         publish_images
         build_store
         ;;
@@ -101,7 +98,7 @@ case "${1:-help}" in
         printf '%s\n' \
             'usage: ./run-community.sh {prepare|rebuild|serve-store}' \
             '' \
-            'prepare      build missing images, publish them to Umbrel Dev, and generate the store' \
+            'prepare      build current images, publish them to Umbrel Dev, and generate the store' \
             'rebuild      rebuild all images before preparing the store' \
             'serve-store  serve the local Git store in the foreground (keep this terminal open)'
         ;;

@@ -505,6 +505,12 @@ class AppState {
                 self?.handleWebSocketTransactionDetected(event: event)
             }
         }
+        mempoolWebSocketService.onFeesUpdated = { [weak self] wsFees in
+            let rec = RecommendedFees(wsFees: wsFees)
+            Task { [weak self] in
+                await self?.feeRateService.updateRecommendedFees(rec)
+            }
+        }
 
         // Set audit log path
         let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
@@ -2314,8 +2320,8 @@ class AppState {
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
         // Clear stable state if this is our channel or no channels remain
-        if stableChannel.userChannelId == userChannelId || nodeService.channels.isEmpty {
-            try? databaseService?.channelRepo.deleteChannel(userChannelId: stableChannel.userChannelId)
+        if stableChannel.userChannelId == userChannelId.description || nodeService.channels.isEmpty {
+            try? databaseService?.channelRepo.deleteChannel(userChannelId: "\(userChannelId)")
             stableChannel.expectedUSD = .zero
             stableChannel.backingSats = 0
             stableChannel.nativeSats = 0
@@ -3689,6 +3695,24 @@ class AppState {
         let rawSpendable = balances.spendableOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
 
+        // Reconcile database channels: LDK is the source of truth for channel existence.
+        // Stale database rows from closed channels can cause incorrect aggregate Stable USD balances.
+        let liveUserChannelIds = nodeService.channels.map(\.userChannelId)
+        let liveChannelIds = nodeService.channels.map(\.channelId)
+        do {
+            try databaseService?.channelRepo.reconcileChannels(
+                liveUserChannelIds: liveUserChannelIds,
+                liveChannelIds: liveChannelIds
+            )
+        } catch {
+            AuditService.log("DB_RECONCILE_FAILED", data: ["error": error.localizedDescription])
+        }
+
+        if nodeService.channels.isEmpty && !stableChannel.userChannelId.isEmpty {
+            stableChannel = .default
+            stableChannel.counterparty = ""
+        }
+
         // Resolve pending outbound deduction against raw wallet observation
         // Wallet-incorporation predicate: once LDK tracks the txid (pending or succeeded),
         // the wallet's raw balance already reflects the spend. Any positive balance delta
@@ -3834,7 +3858,7 @@ class AppState {
 
     /// Update the StableChannel struct from current LDK channel data + price.
     private func updateStableBalances() {
-        let hadChannelId = !stableChannel.userChannelId.isEmpty
+        let oldUserChannelId = stableChannel.userChannelId
         let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
         StabilityService.updateBalances(
             &stableChannel,
@@ -3842,9 +3866,14 @@ class AppState {
             onchainBalanceSats: onchainBalanceSats,
             price: price
         )
-        // If userChannelId was just discovered, reload saved state (expectedUSD etc.) from DB
-        if !hadChannelId && !stableChannel.userChannelId.isEmpty {
-            loadChannelFromDB()
+        // If userChannelId was just discovered or changed, reload saved state (expectedUSD etc.) from DB
+        if !stableChannel.userChannelId.isEmpty && stableChannel.userChannelId != oldUserChannelId {
+            if !loadChannelFromDB() {
+                stableChannel.expectedUSD = .zero
+                stableChannel.backingSats = 0
+                stableChannel.note = ""
+                StabilityService.recomputeNative(&stableChannel)
+            }
         }
     }
 
@@ -3890,8 +3919,9 @@ class AppState {
         }
     }
 
-    private func loadChannelFromDB() {
-        guard let db = databaseService else { return }
+    @discardableResult
+    private func loadChannelFromDB() -> Bool {
+        guard let db = databaseService else { return false }
         do {
             if let record = try db.channelRepo.loadChannel(userChannelId: stableChannel.userChannelId),
                !record.userChannelId.isEmpty {
@@ -3922,10 +3952,12 @@ class AppState {
                 if record.latestPrice > 0 {
                     stableChannel.latestPrice = record.latestPrice
                 }
+                return true
             }
         } catch {
             AuditService.log("DB_LOAD_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }
+        return false
     }
 
     // MARK: - Record Price

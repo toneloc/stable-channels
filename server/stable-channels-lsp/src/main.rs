@@ -4,11 +4,14 @@ mod channel_audit;
 mod channel_close;
 mod config;
 mod event_loop;
+mod geoip;
 mod handlers;
 pub mod messages;
 mod observability;
 mod price_task;
+mod payment_filter;
 mod push;
+mod revenue;
 mod stability_tick;
 mod stable_manager;
 mod state;
@@ -25,6 +28,7 @@ use axum::Router;
 use clap::Parser;
 use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
+use sc_protos::revenue::{GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 use sc_protos::stable::{
     AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
     LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
@@ -106,8 +110,8 @@ async fn main() -> Result<()> {
     let db = Database::open(&data_dir).map_err(|e| anyhow::anyhow!("DB open failed: {}", e))?;
     match db.import_legacy_audit_log(&cfg.audit_log_path()) {
         Ok(import) => info!(
-            "channel ledger legacy import: imported={}, skipped={}, already_imported={}",
-            import.imported, import.skipped, import.already_imported
+            "channel ledger legacy import: imported={}, skipped={}, operational={}, already_imported={}",
+            import.imported, import.skipped, import.operational, import.already_imported
         ),
         Err(error) => warn!(
             "channel ledger legacy import skipped after error; continuing with SQLite ledger: {}",
@@ -115,6 +119,12 @@ async fn main() -> Result<()> {
         ),
     }
     set_audit_ledger(db.clone());
+    // Persist the restart gap before any stream/reconciliation tasks start. Audit traffic is not
+    // evidence of stream health; a failed checkpoint must not silently invent startup coverage.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+    let last_event_before_start_ms = Some(db.begin_event_stream_gap(now_ms)
+        .context("failed to persist event-stream startup gap")?.0);
     let channel_count = db
         .load_all_channels()
         .map_err(|e| anyhow::anyhow!("load_all_channels failed: {}", e))?
@@ -140,7 +150,12 @@ async fn main() -> Result<()> {
         db: db_arc,
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
+        geoip: geoip::load(cfg.geoip.country_db.as_deref()),
+        geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
+        geoip_retention_secs: cfg.geoip.retention_days.unwrap_or(90) as i64 * 86_400,
+        revenue: Arc::new(revenue::RevenueStore::default()),
         ldk_log_file,
+        last_event_before_start_ms,
     };
 
     let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
@@ -183,6 +198,7 @@ async fn main() -> Result<()> {
     stability_tick::spawn(state.clone());
     observability::spawn(state.clone());
     trade_response_retry::spawn(state.clone());
+    revenue::spawn(state.clone());
 
     let router = Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
@@ -253,6 +269,14 @@ async fn main() -> Result<()> {
         .route(
             &format!("/{}", LIST_SETTLEMENT_PAYMENTS_PATH),
             post(handlers::stable_channels::list_settlement_payments),
+        )
+        .route(
+            &format!("/{}", GET_REVENUE_PATH),
+            post(handlers::revenue::get_revenue),
+        )
+        .route(
+            &format!("/{}", REFUND_TRADE_FEE_PATH),
+            post(handlers::revenue::refund_trade_fee),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

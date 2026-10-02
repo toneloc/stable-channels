@@ -1,135 +1,113 @@
-use eframe::egui;
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::ui::layout::{self, card, page_scrolled};
-use crate::ui::widgets;
+use crate::actions;
+use crate::state::{AppCtx, Op};
+use crate::ui::widgets::{Bubble, Card, Field, Gate, Icon, Pill, Spinner, TextArea, TextInput};
 
-pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.heading("Tools");
-	ui.add_space(10.0);
-
-	if app.render_disconnected_gate(ui) {
-		return;
+#[component]
+pub fn Tools() -> Element {
+	let ctx = use_context::<AppCtx>();
+	if !ctx.is_connected() {
+		return rsx! { Gate {} };
 	}
-
-	page_scrolled(ui, |ui| {
-		// Cap the column so form fields don't stretch across the whole window.
-		ui.set_max_width(layout::FORM_WIDTH);
-		card(ui, "Sign Message", |ui| render_sign_body(ui, app));
-		ui.add_space(10.0);
-		card(ui, "Verify Signature", |ui| render_verify_body(ui, app));
-		ui.add_space(10.0);
-		card(ui, "Export Pathfinding Scores", |ui| render_export_body(ui, app));
-	});
-}
-
-fn render_sign_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	let form = &mut app.state.forms.sign_message;
-
-	ui.label("Message:");
-	ui.add(
-		egui::TextEdit::multiline(&mut form.message)
-			.desired_rows(3)
-			.desired_width(f32::INFINITY),
-	);
-
-	ui.add_space(10.0);
-
-	ui.horizontal(|ui| {
-		let is_pending = app.state.tasks.sign_message.is_some();
-		if is_pending {
-			ui.spinner();
-			ui.label("Signing...");
-		} else if ui.button("Sign").clicked() {
-			app.sign_message();
-		}
-	});
-
-	if let Some(signature) = &app.state.sign_result {
-		ui.add_space(10.0);
-		ui.separator();
-		ui.label("Signature:");
-		// Pre-extract to avoid borrow conflict between TextEdit and copy button
-		let sig_clone = signature.clone();
-		ui.add(
-			egui::TextEdit::multiline(&mut sig_clone.as_str())
-				.desired_rows(2)
-				.desired_width(f32::INFINITY)
-				.interactive(false),
-		);
-		if ui.button("Copy Signature").clicked() {
-			ui.output_mut(|o| o.copied_text = sig_clone.clone());
-			app.state.status_message = Some(crate::state::StatusMessage::success("Copied"));
-		}
-	}
-}
-
-fn render_export_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.label("Export the pathfinding scores used by the router.");
-
-	ui.add_space(10.0);
-
-	ui.horizontal(|ui| {
-		let is_pending = app.state.tasks.export_pathfinding_scores.is_some();
-		if is_pending {
-			ui.spinner();
-			ui.label("Exporting...");
-		} else if ui.button("Export Scores").clicked() {
-			app.export_pathfinding_scores();
-		}
-	});
-
-	if let Some(result) = &app.state.export_scores_result {
-		ui.add_space(10.0);
-		ui.separator();
-		let n = result.scores.len();
-		ui.horizontal(|ui| {
-			widgets::status_pill(ui, &format!("Exported {} bytes", n), egui::Color32::GREEN);
-		});
-	}
-}
-
-fn render_verify_body(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	let form = &mut app.state.forms.verify_signature;
-
-	egui::Grid::new("verify_sig_grid").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-		ui.label("Message:");
-		ui.add(
-			egui::TextEdit::multiline(&mut form.message)
-				.desired_rows(2)
-				.desired_width(f32::INFINITY),
-		);
-		ui.end_row();
-
-		ui.label("Signature (zbase32):");
-		ui.text_edit_singleline(&mut form.signature);
-		ui.end_row();
-
-		ui.label("Public Key (hex):");
-		ui.text_edit_singleline(&mut form.public_key);
-		ui.end_row();
-	});
-
-	ui.add_space(10.0);
-
-	ui.horizontal(|ui| {
-		let is_pending = app.state.tasks.verify_signature.is_some();
-		if is_pending {
-			ui.spinner();
-			ui.label("Verifying...");
-		} else if ui.button("Verify").clicked() {
-			app.verify_signature();
-		}
-	});
-
-	if let Some(valid) = &app.state.verify_result {
-		ui.add_space(5.0);
-		ui.horizontal(|ui| {
-			if *valid {
-				widgets::status_pill(ui, "VALID", egui::Color32::GREEN);
-			} else {
-				widgets::status_pill(ui, "INVALID", egui::Color32::RED);
+	rsx! {
+		div { class: "tools",
+			div { class: "tools-pair",
+				SignCard {}
+				VerifyCard {}
 			}
-		});
+			ExportCard {}
+		}
+	}
+}
+
+#[component]
+fn SignCard() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let message = forms.read().sign_message.message.clone();
+	let pending = ctx.busy(Op::SignMessage);
+	let signature = ctx.results.read().sign_result.clone();
+	rsx! {
+		Card { title: "Sign Message", sub: "Sign with the node's key",
+			icon: rsx! { Bubble { icon: "pen", tone: "blue" } },
+			div { class: "tool-body",
+				Field { label: "Message",
+					TextArea { value: message, rows: 3, mono: false, oninput: move |v| forms.write().sign_message.message = v }
+				}
+				div { class: "tool-actions",
+					button { class: "btn primary", disabled: pending, onclick: move |_| actions::sign_message(ctx),
+						if pending { Spinner {} "Signing..." } else { "Sign" }
+					}
+				}
+				if let Some(signature) = signature {
+					div { class: "result",
+						div { class: "row between",
+							span { class: "field-label", "Signature" }
+							button { class: "btn sm", onclick: {
+								let signature = signature.clone();
+								move |_| crate::actions::copy(ctx, &signature)
+							}, Icon { name: "copy", size: 14 } "Copy Signature" }
+						}
+						div { class: "value", "{signature}" }
+					}
+				}
+			}
+		}
+	}
+}
+
+#[component]
+fn VerifyCard() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().verify_signature.clone();
+	let pending = ctx.busy(Op::VerifySignature);
+	let result = ctx.results.read().verify_result;
+	rsx! {
+		Card { title: "Verify Signature", sub: "Check a message against a node public key",
+			icon: rsx! { Bubble { icon: "shield", tone: "green" } },
+			div { class: "tool-body",
+				Field { label: "Message",
+					TextArea { value: form.message.clone(), rows: 2, mono: false, oninput: move |v| forms.write().verify_signature.message = v }
+				}
+				Field { label: "Signature (zbase32)",
+					TextInput { value: form.signature.clone(), mono: true, oninput: move |v| forms.write().verify_signature.signature = v }
+				}
+				Field { label: "Public Key (hex)",
+					TextInput { value: form.public_key.clone(), mono: true, oninput: move |v| forms.write().verify_signature.public_key = v }
+				}
+				div { class: "tool-actions",
+					button { class: "btn primary", disabled: pending, onclick: move |_| actions::verify_signature(ctx),
+						if pending { Spinner {} "Verifying..." } else { "Verify" }
+					}
+					match result {
+						Some(true) => rsx! { Pill { tone: "success", Icon { name: "check", size: 12 } "VALID" } },
+						Some(false) => rsx! { Pill { tone: "danger", Icon { name: "x", size: 12 } "INVALID" } },
+						None => rsx! {},
+					}
+				}
+			}
+		}
+	}
+}
+
+#[component]
+fn ExportCard() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let pending = ctx.busy(Op::ExportPathfindingScores);
+	let size = ctx.results.read().export_scores_result.as_ref().map(|r| r.scores.len());
+	rsx! {
+		Card { title: "Export Pathfinding Scores", sub: "Export the pathfinding scores used by the router.",
+			icon: rsx! { Bubble { icon: "graph", tone: "purple" } },
+			actions: rsx! {
+				if let Some(n) = size {
+					Pill { tone: "success", "Exported {n} bytes" }
+				}
+				button { class: "btn", disabled: pending, onclick: move |_| actions::export_pathfinding_scores(ctx),
+					if pending { Spinner {} "Exporting..." } else { Icon { name: "download", size: 16 } "Export Scores" }
+				}
+			},
+		}
 	}
 }

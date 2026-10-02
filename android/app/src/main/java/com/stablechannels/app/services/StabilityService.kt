@@ -179,14 +179,16 @@ object StabilityService {
         val channel =
             if (updated.userChannelId.isNotEmpty()) {
                 channels.find { it.userChannelId == updated.userChannelId }
+                    ?: channels.find { it.isChannelReady }
+                    ?: channels.firstOrNull()
             } else {
-                channels.firstOrNull()
+                channels.find { it.isChannelReady } ?: channels.firstOrNull()
             }
 
         if (channel == null) return updated
 
-        // Auto-assign IDs if unset
-        if (updated.userChannelId.isEmpty()) {
+        // Auto-assign IDs if unset or changed
+        if (updated.userChannelId.isEmpty() || updated.userChannelId != channel.userChannelId) {
             updated.userChannelId = channel.userChannelId
         }
         if (updated.channelId.isEmpty() || updated.channelId != channel.channelId) {
