@@ -198,5 +198,86 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
         // Tap detection
         XCTAssertTrue(BalanceBarTradeCalculator.isTap(translationX: 3.0, translationY: 2.0, threshold: 5.0))
         XCTAssertFalse(BalanceBarTradeCalculator.isTap(translationX: 6.0, translationY: 0.0, threshold: 5.0))
+        XCTAssertTrue(BalanceBarTradeCalculator.isTap(totalDistance: 4.0, threshold: 5.0))
+        XCTAssertFalse(BalanceBarTradeCalculator.isTap(totalDistance: 6.0, threshold: 5.0))
+    }
+
+    // MARK: - Animation Math Tests
+
+    func testThumbScaleProgressBoundaryAndPeakValues() {
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 0.0), 1.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: -0.1), 1.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 0.6), 1.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 1.0), 1.0, accuracy: 0.001)
+
+        // Peak at 0.22 progress
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 0.22), 1.35, accuracy: 0.001)
+
+        // Mid-way surge (0.11 progress -> 1.0 + 0.5 * 0.35 = 1.175)
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 0.11), 1.175, accuracy: 0.001)
+
+        // Mid-way recovery (0.41 progress -> 1.35 - 0.5 * 0.35 = 1.175)
+        XCTAssertEqual(BalanceBarAnimationMath.thumbScale(progress: 0.41), 1.175, accuracy: 0.001)
+    }
+
+    func testFloodScaleProgressBoundaryAndLinearInterpolation() {
+        XCTAssertEqual(BalanceBarAnimationMath.floodScale(progress: 0.0), 0.01, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodScale(progress: 0.05), 0.01, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodScale(progress: 0.55), 1.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodScale(progress: 1.0), 1.0, accuracy: 0.001)
+
+        // Mid-point expansion (0.30 progress -> 0.01 + 0.5 * 0.99 = 0.505)
+        XCTAssertEqual(BalanceBarAnimationMath.floodScale(progress: 0.30), 0.505, accuracy: 0.001)
+    }
+
+    func testFloodOpacityProgressRampUpAndFadeOut() {
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.0), 0.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.05), 0.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.65), 0.0, accuracy: 0.001)
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 1.0), 0.0, accuracy: 0.001)
+
+        // Peak opacity at 0.28 progress
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.28), 0.55, accuracy: 0.001)
+
+        // Halfway ramp up (0.165 progress -> 0.5 * 0.55 = 0.275)
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.165), 0.275, accuracy: 0.001)
+
+        // Halfway fade out (0.465 progress -> 0.55 * 0.5 = 0.275)
+        XCTAssertEqual(BalanceBarAnimationMath.floodOpacity(progress: 0.465), 0.275, accuracy: 0.001)
+    }
+
+    func testSettleFractionInterpolationPhases() {
+        // Zero progress returns nil
+        XCTAssertNil(BalanceBarAnimationMath.settleFraction(initialFraction: 0.5, targetFraction: 0.8, progress: 0.0))
+
+        // Pre-settle holding phase (< 0.45) holds initial fraction
+        XCTAssertEqual(
+            BalanceBarAnimationMath.settleFraction(initialFraction: 0.5, targetFraction: 0.8, progress: 0.2) ?? 0,
+            0.5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            BalanceBarAnimationMath.settleFraction(initialFraction: 0.5, targetFraction: 0.8, progress: 0.44) ?? 0,
+            0.5,
+            accuracy: 0.001
+        )
+
+        // Mid-point settle (0.725 progress -> phase 0.5 -> 0.5 + (0.8 - 0.5) * 0.5 = 0.65)
+        let midSettle = BalanceBarAnimationMath.settleFraction(
+            initialFraction: 0.5,
+            targetFraction: 0.8,
+            progress: 0.725
+        )
+        XCTAssertNotNil(midSettle)
+        XCTAssertEqual(midSettle ?? 0, 0.65, accuracy: 0.001)
+
+        // Full completion (1.0 progress -> 0.8)
+        let finalSettle = BalanceBarAnimationMath.settleFraction(
+            initialFraction: 0.5,
+            targetFraction: 0.8,
+            progress: 1.0
+        )
+        XCTAssertNotNil(finalSettle)
+        XCTAssertEqual(finalSettle ?? 0, 0.8, accuracy: 0.001)
     }
 }

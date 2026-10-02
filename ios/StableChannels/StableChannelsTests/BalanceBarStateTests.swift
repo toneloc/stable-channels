@@ -219,4 +219,136 @@ final class BalanceBarStateTests: XCTestCase {
         XCTAssertEqual(receivedRequest?.amountUSD ?? 0, 20.0, accuracy: 0.001)
         XCTAssertEqual(spy.impactCount, 1)
     }
+
+    func testNullOnTradeRequestSnapsBackWithoutLeavingThumbStranded() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let fundedAllocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 200_000,
+            btcPrice: 100_000.0
+        )
+
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 30.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        XCTAssertNotNil(state.userSelectedFraction)
+
+        state.handleDragEnd(
+            translationX: 30.0,
+            barWidth: 300.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: nil,
+            onTradeRequest: nil // Trade request handler is nil
+        )
+
+        // When trade request handler is nil, it animates userSelectedFraction to nil and does NOT fire trade haptic
+        XCTAssertNil(state.userSelectedFraction)
+        XCTAssertEqual(spy.impactCount, 0)
+    }
+
+    func testCumulativeDragTravelDistinguishesTapFromBackAndForthDrag() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let emptyAllocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 50000.0
+        )
+        var emptyActionCalled = false
+
+        // Start drag at center (150px)
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 40.0, // Drag right 40px
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        // Drag back to start (translationX = 0, but cumulative travel = 40 + 40 = 80px)
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 0.0,
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        XCTAssertEqual(state.cumulativeDragDistance, 80.0, accuracy: 0.001)
+
+        state.handleDragEnd(
+            translationX: 0.0,
+            barWidth: 300.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: { emptyActionCalled = true },
+            onTradeRequest: nil
+        )
+
+        // Must NOT be treated as a tap because cumulative distance exceeds threshold!
+        XCTAssertFalse(emptyActionCalled)
+        XCTAssertTrue(state.showDepositPrompt)
+    }
+
+    func testSellLimitHapticFiresOnlyOnEdgeTransition() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let fundedAllocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 200_000,
+            btcPrice: 100_000.0
+        )
+        let maxSellUSD = 25.0 // limit at 0.375 (37.5px past 75px base)
+
+        // Overshoot limit
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 60.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: maxSellUSD,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertEqual(spy.warningCount, 1)
+
+        // Drag further beyond limit -> warningCount must remain 1
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 70.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: maxSellUSD,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertEqual(spy.warningCount, 1)
+    }
 }
