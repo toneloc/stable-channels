@@ -36,7 +36,7 @@ fun BalanceBar(
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val totalUSD = stableUSD + nativeUSD
-    val isEmpty = totalUSD <= 0.0 || totalSats <= 0L
+    val isEmpty = totalUSD <= 0.0
 
     val canonicalFraction =
         if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
@@ -95,13 +95,6 @@ fun BalanceBar(
 
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
     val baseXPx = barWidthPx * currentFraction
-    val maxSellOffset =
-        if (totalUSD > 0.0) {
-            minOf(
-                (barWidthPx * maxSellUSD.coerceAtLeast(0.0) / totalUSD).toFloat(),
-                (barWidthPx - baseXPx).coerceAtLeast(0f),
-            )
-        } else 0f
 
     val thumbXPx = (baseXPx + state.currentOffsetPx).coerceIn(0f, barWidthPx)
     val visFrac = if (barWidthPx > 0) (thumbXPx / barWidthPx).coerceIn(0f, 1f) else currentFraction
@@ -164,7 +157,6 @@ fun BalanceBar(
                                             dragAmount = dragAmount,
                                             baseXPx = baseXPx,
                                             barWidthPx = barWidthPx,
-                                            maxSellOffset = maxSellOffset,
                                         )
                                     },
                                     onDragEnd = { state.onDragEnd(barWidthPx) },
@@ -177,8 +169,8 @@ fun BalanceBar(
         ) {
             BalanceBarAwakeningBloom(
                 barWidthPx = barWidthPx,
-                floodScale = animator.radialFloodScale.value,
-                floodAlpha = animator.radialFloodAlpha.value,
+                floodScale = animator.radialFloodScale,
+                floodAlpha = animator.radialFloodAlpha,
                 nativeColor = nativeColor,
                 modifier = Modifier.align(Alignment.Center),
             )
@@ -196,7 +188,7 @@ fun BalanceBar(
                 val thumbOffsetDp = with(density) { thumbXPx.toDp() } - thumbDiameter / 2
                 val currentScale =
                     when {
-                        animator.isAwakening -> animator.thumbAwakenScale.value
+                        animator.isAwakening -> animator.thumbAwakenScale
                         state.isDragging -> 1.15f
                         isEmpty -> 1.0f
                         else -> pulseScale.value

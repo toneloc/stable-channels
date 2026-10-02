@@ -9,7 +9,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerInputChange
 import kotlin.math.abs
-import kotlin.math.min
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -46,6 +45,10 @@ fun rememberBalanceBarState(
     }
 }
 
+/**
+ * UI presentation state for the balance bar component. Coordinates UI flags, delegates interaction
+ * geometry to BalanceBarInteraction, and financial rules to BalanceBarTradeCalculator.
+ */
 @Stable
 class BalanceBarState(
     private val totalUSD: Double,
@@ -77,8 +80,8 @@ class BalanceBarState(
 
     private var hasTriggeredHaptic = false
     private var totalDragDistance = 0f
+    private var accumulatedTranslationX = 0f
     private var depositPromptJob: Job? = null
-    private val minTradeUSD = 1.0
 
     val currentOffsetPx: Float
         get() = if (isSnappingBack) snapBackAnim.value else dragOffsetPx
@@ -92,19 +95,26 @@ class BalanceBarState(
                 animationSpec = spring(dampingRatio = 0.68f, stiffness = 400f),
             )
             dragOffsetPx = 0f
+            accumulatedTranslationX = 0f
             isSnappingBack = false
             onFinished?.invoke()
         }
     }
 
     fun onDragStart(offset: Offset, baseXPx: Float, thumbDiameterPx: Float) {
-        val withinThumb = abs(offset.x - baseXPx) < thumbDiameterPx * 1.5f
+        val withinThumb =
+            BalanceBarInteraction.isWithinThumb(
+                touchX = offset.x,
+                thumbX = baseXPx,
+                thumbDiameter = thumbDiameterPx,
+            )
         if (isEmpty || withinThumb) {
             isDragging = true
             isSnappingBack = false
             hasTriggeredHaptic = false
             atSellLimit = false
             totalDragDistance = 0f
+            accumulatedTranslationX = 0f
             depositPromptJob?.cancel()
             showDepositPrompt = false
             dragOffsetPx = 0f
@@ -118,28 +128,47 @@ class BalanceBarState(
         dragAmount: Offset,
         baseXPx: Float,
         barWidthPx: Float,
-        maxSellOffset: Float,
     ) {
-        if (!isDragging) return
+        if (!isDragging || barWidthPx <= 0f) return
         change.consume()
         totalDragDistance += abs(dragAmount.x)
-        val proposedOffset = dragOffsetPx + dragAmount.x
+        accumulatedTranslationX += dragAmount.x
+
+        val baseFraction = if (isEmpty) 0.5f else baseXPx / barWidthPx
+        val rawFraction =
+            BalanceBarInteraction.calculateTargetFraction(
+                initialFraction = baseFraction,
+                translationX = accumulatedTranslationX,
+                barWidth = barWidthPx,
+            )
 
         if (isEmpty) {
-            val minOffset = -baseXPx
-            val maxOffset = barWidthPx - baseXPx
-            dragOffsetPx = proposedOffset.coerceIn(minOffset, maxOffset)
+            dragOffsetPx = (rawFraction - 0.5f) * barWidthPx
             return
         }
 
-        atSellLimit = proposedOffset > maxSellOffset
-        val newOffset = proposedOffset.coerceIn(-baseXPx, maxSellOffset)
-        dragOffsetPx = newOffset
+        val clampedResult =
+            BalanceBarTradeCalculator.clampFraction(
+                initialFraction = baseFraction,
+                rawFraction = rawFraction,
+                totalUSD = totalUSD,
+                stableUSD = stableUSD,
+                maxSellUSD = maxSellUSD,
+            )
 
-        if (!hasTriggeredHaptic && barWidthPx > 0) {
-            val fraction = abs(newOffset) / barWidthPx
-            val tradeUSD = fraction * totalUSD
-            if (tradeUSD >= minTradeUSD) {
+        dragOffsetPx = (clampedResult.fraction - baseFraction) * barWidthPx
+        atSellLimit = clampedResult.isAtSellLimit
+
+        if (!hasTriggeredHaptic) {
+            val evaluation =
+                BalanceBarTradeCalculator.calculateSelection(
+                    initialFraction = baseFraction,
+                    targetFraction = clampedResult.fraction,
+                    totalUSD = totalUSD,
+                    stableUSD = stableUSD,
+                    maxSellUSD = maxSellUSD,
+                )
+            if (evaluation.isValidTrade) {
                 hasTriggeredHaptic = true
                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
             }
@@ -149,13 +178,15 @@ class BalanceBarState(
     fun onDragEnd(barWidthPx: Float) {
         if (!isDragging) {
             dragOffsetPx = 0f
+            accumulatedTranslationX = 0f
             return
         }
         isDragging = false
 
         if (isEmpty) {
-            if (totalDragDistance < 5f * density) {
+            if (BalanceBarInteraction.isTap(totalDragDistance, threshold = 5f * density)) {
                 dragOffsetPx = 0f
+                accumulatedTranslationX = 0f
                 view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                 onEmptyInteraction?.invoke()
             } else {
@@ -171,22 +202,35 @@ class BalanceBarState(
             return
         }
 
-        val offset = dragOffsetPx
-        val fraction = if (barWidthPx > 0) offset / barWidthPx else 0f
-        val tradeUSD = abs(fraction) * totalUSD
-        if (tradeUSD < minTradeUSD) {
-            triggerSnapBack(offset)
-            return
+        val baseFraction = if (barWidthPx > 0) (baseXPx(barWidthPx) / barWidthPx) else 0.5f
+        val targetFraction =
+            if (barWidthPx > 0) baseFraction + (dragOffsetPx / barWidthPx) else baseFraction
+        val evaluation =
+            BalanceBarTradeCalculator.calculateSelection(
+                initialFraction = baseFraction,
+                targetFraction = targetFraction,
+                totalUSD = totalUSD,
+                stableUSD = stableUSD,
+                maxSellUSD = maxSellUSD,
+            )
+
+        if (evaluation.isValidTrade && evaluation.direction != null) {
+            onTradeRequest?.invoke(evaluation.direction, evaluation.clampedUSD)
+        } else {
+            triggerSnapBack(dragOffsetPx)
         }
-        val direction = if (offset > 0) TradeDirection.SELL else TradeDirection.BUY
-        val clamped =
-            if (direction == TradeDirection.BUY) min(tradeUSD, stableUSD)
-            else min(tradeUSD, maxSellUSD)
-        onTradeRequest?.invoke(direction, clamped)
     }
 
     fun onDragCancel() {
         isDragging = false
         triggerSnapBack(dragOffsetPx)
+    }
+
+    private fun baseXPx(barWidthPx: Float): Float {
+        return if (totalUSD > 0.0) {
+            (barWidthPx * (stableUSD / totalUSD).coerceIn(0.0, 1.0)).toFloat()
+        } else {
+            barWidthPx * 0.5f
+        }
     }
 }

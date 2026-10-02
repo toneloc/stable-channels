@@ -153,6 +153,10 @@ struct BalanceBarView: View {
     // MARK: - Layout Calculations
 
     private func thumbPosition(barWidth: CGFloat, visFrac: CGFloat) -> CGFloat {
-        thumbDiameter / 2 + (barWidth - thumbDiameter) * visFrac
+        BalanceBarInteraction.calculateThumbPosition(
+            fraction: visFrac,
+            barWidth: barWidth,
+            thumbDiameter: thumbDiameter
+        )
     }
 }

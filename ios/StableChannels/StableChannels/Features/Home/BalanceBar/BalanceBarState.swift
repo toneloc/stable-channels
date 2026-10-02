@@ -1,5 +1,8 @@
 import SwiftUI
 
+/// UI presentation state for the balance bar component.
+/// Strictly manages UI visual flags and delegates interaction geometry to BalanceBarInteraction
+/// and financial trade evaluation to BalanceBarTradeCalculator.
 @Observable
 final class BalanceBarState {
     var userSelectedFraction: CGFloat?
@@ -9,7 +12,6 @@ final class BalanceBarState {
 
     private var hasTriggeredHaptic = false
     private var depositPromptTimer: DispatchWorkItem?
-    private let minTradeUSD: Double = 1.0
 
     func effectiveFraction(allocation: ChannelAllocation, settleFraction: CGFloat?) -> CGFloat {
         if let userFraction = userSelectedFraction { return userFraction }
@@ -30,7 +32,11 @@ final class BalanceBarState {
         guard barWidth > 0, !isAwakening else { return }
 
         if !isPressing {
-            let withinThumb = abs(gesture.startLocation.x - currentThumbX) < thumbDiameter * 1.5
+            let withinThumb = BalanceBarInteraction.isWithinThumb(
+                touchX: gesture.startLocation.x,
+                thumbX: currentThumbX,
+                thumbDiameter: thumbDiameter
+            )
             guard allocation.isEmpty || withinThumb else { return }
             isPressing = true
             hasTriggeredHaptic = false
@@ -42,25 +48,29 @@ final class BalanceBarState {
         }
         guard isPressing else { return }
 
-        let rawFraction = min(max(gesture.location.x / barWidth, 0.0), 1.0)
+        let baseFraction = allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction)
+        let rawFraction = BalanceBarInteraction.calculateTargetFraction(
+            initialFraction: baseFraction,
+            translationX: gesture.translation.width,
+            barWidth: barWidth
+        )
 
         if allocation.isEmpty {
             userSelectedFraction = rawFraction
             return
         }
 
-        let baseFraction = CGFloat(allocation.stableFraction)
-        let totalUSD = allocation.totalUSD
-        let maxSellFraction = totalUSD > 0 ? CGFloat(max(0, maxSellUSD) / totalUSD) : 0
-        let maxBuyFraction = totalUSD > 0 ? CGFloat(max(0, allocation.stableUSD) / totalUSD) : 0
+        let clampedResult = BalanceBarTradeCalculator.clampFraction(
+            initialFraction: baseFraction,
+            rawFraction: rawFraction,
+            totalUSD: allocation.totalUSD,
+            stableUSD: allocation.stableUSD,
+            maxSellUSD: maxSellUSD
+        )
 
-        let minAllowedFraction = max(0.0, baseFraction - maxBuyFraction)
-        let maxAllowedFraction = min(1.0, baseFraction + maxSellFraction)
+        userSelectedFraction = clampedResult.fraction
 
-        let clampedFraction = min(max(rawFraction, minAllowedFraction), maxAllowedFraction)
-        userSelectedFraction = clampedFraction
-
-        if rawFraction > maxAllowedFraction {
+        if clampedResult.isAtSellLimit {
             if !atSellLimit {
                 atSellLimit = true
                 triggerSellLimitHaptic()
@@ -85,8 +95,7 @@ final class BalanceBarState {
         atSellLimit = false
 
         if allocation.isEmpty {
-            let dragDistance = abs(gesture.translation.width)
-            if dragDistance < 5 {
+            if BalanceBarInteraction.isTap(translationX: gesture.translation.width) {
                 userSelectedFraction = nil
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 onEmptyInteraction?()
@@ -115,29 +124,17 @@ final class BalanceBarState {
               let selected = userSelectedFraction else { return }
 
         let baseFraction = CGFloat(allocation.stableFraction)
-        let deltaFraction = selected - baseFraction
-        let fractionMoved = abs(deltaFraction)
+        let evaluation = BalanceBarTradeCalculator.calculateSelection(
+            initialFraction: baseFraction,
+            targetFraction: selected,
+            totalUSD: allocation.totalUSD,
+            stableUSD: allocation.stableUSD,
+            maxSellUSD: maxSellUSD
+        )
 
-        guard fractionMoved > 0.02 else {
-            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                userSelectedFraction = nil
-            }
-            return
-        }
-
-        let direction: TradeDirection = deltaFraction > 0 ? .sell : .buy
-        let totalUSD = allocation.totalUSD
-        var requestedUSD = totalUSD * Double(fractionMoved)
-
-        if direction == .sell {
-            requestedUSD = min(requestedUSD, maxSellUSD)
-        } else {
-            requestedUSD = min(requestedUSD, allocation.stableUSD)
-        }
-
-        if requestedUSD >= minTradeUSD {
+        if evaluation.isValidTrade, let request = evaluation.tradeRequest {
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            onTradeRequest?(TradeRequest(direction: direction, amountUSD: requestedUSD))
+            onTradeRequest?(request)
         } else {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                 userSelectedFraction = nil
