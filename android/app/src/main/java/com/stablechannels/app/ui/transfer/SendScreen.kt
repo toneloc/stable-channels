@@ -402,7 +402,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     ) {
         // Header row
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            if (result == null) {
+            if (result == null || result!!.startsWith("Sending")) {
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
@@ -419,7 +419,10 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 ) {
-                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (result == null) "Cancel" else "Close",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
             Text(
@@ -545,9 +548,10 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            // Done stays visible while sending: the outcome is durable and lands in History.
-            Button(onClick = onDismiss) {
-                Text("Done")
+            if (!isSending) {
+                Button(onClick = onDismiss) {
+                    Text("Done")
+                }
             }
         } else {
             // Loading indicator during photo QR extraction
