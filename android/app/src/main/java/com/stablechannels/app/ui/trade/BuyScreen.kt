@@ -75,25 +75,26 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     ) {
         // Top Toolbar (Cancel / Title)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            if (step != TradeStep.DONE) {
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.CenterStart),
-                    colors =
-                        ButtonDefaults.textButtonColors(
-                            containerColor =
-                                if (LocalDarkTheme.current) {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                } else {
-                                    Color(0xFFE5E5EA)
-                                },
-                            contentColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                ) {
-                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
-                }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.CenterStart),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (LocalDarkTheme.current) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    if (step == TradeStep.DONE) "Close" else "Cancel",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
             Text(
                 text = if (step == TradeStep.CONFIRM) "Review USD -> BTC" else "USD → BTC",
@@ -413,7 +414,9 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onDismiss) { Text("Done") }
+                if (outcome != null) {
+                    Button(onClick = onDismiss) { Text("Done") }
+                }
             }
         }
     }
