@@ -47,6 +47,7 @@ pub const REVENUE_MAX_ITEMS: usize = 50_000;
 pub const REVENUE_LOOKBACK_SECS: i64 = 365 * 86_400;
 
 /// Forward fees and funding txids parsed from the ledger, kept across rebuilds so each reads only new rows.
+/// The per-channel maps hold one entry per channel or funding transaction ever seen, so they grow with on-chain opens and splices, not payments.
 #[derive(Default)]
 pub struct LedgerFacts {
     pub after_id: i64,
@@ -56,8 +57,8 @@ pub struct LedgerFacts {
     pub first_funding: HashMap<String, String>,
     /// Recorded "the LSP opened it privately" flag per user_channel_id, kept for channels that later close.
     pub private_outbound: HashMap<String, bool>,
-    /// Forward rows whose twin from the other source has not arrived, per fingerprint: (from history, time in ms).
-    pub unpaired: HashMap<String, Vec<(bool, Option<i64>)>>,
+    /// Forward rows whose twin from the other source has not arrived, per fingerprint: (from history, time in ms, row time in ms).
+    pub unpaired: HashMap<String, Vec<(bool, Option<i64>, i64)>>,
 }
 
 impl LedgerFacts {
@@ -70,12 +71,12 @@ impl LedgerFacts {
             let text = |key: &str| detail.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
             match row.event_type.as_str() {
                 "PAYMENT_FORWARDED" | "PAYMENT_FORWARDED_BACKFILL" => {
+                    let history = row.event_type == "PAYMENT_FORWARDED_BACKFILL";
+                    let at = if history { detail.get("occurred_at_ms").and_then(|v| v.as_i64()) } else { Some(row.occurred_at_ms) };
                     // One forward can leave a live row and a history row; the second one to arrive books nothing.
                     if let Some(key) = forward_detail_fingerprint(&detail) {
-                        let history = row.event_type == "PAYMENT_FORWARDED_BACKFILL";
-                        let at = if history { detail.get("occurred_at_ms").and_then(|v| v.as_i64()) } else { Some(row.occurred_at_ms) };
                         let waiting = self.unpaired.entry(key).or_default();
-                        let twin = waiting.iter().position(|&(other, other_at)| {
+                        let twin = waiting.iter().position(|&(other, other_at, _)| {
                             other != history && if history { twins(at, other_at) } else { twins(other_at, at) }
                         });
                         match twin {
@@ -83,17 +84,18 @@ impl LedgerFacts {
                                 waiting.remove(i);
                                 continue;
                             },
-                            None => waiting.push((history, at)),
+                            None => waiting.push((history, at, row.occurred_at_ms)),
                         }
                     }
                     let fee = number("fee_msat").or_else(|| number("total_fee_msat")).unwrap_or(0);
                     let skim = number("skimmed_fee_msat").unwrap_or(0).min(fee);
                     let base = RevenueItem {
-                        occurred_at: row.occurred_at_ms / 1000,
+                        // A history row LDK gave no time is undated (0): all-time totals count it, no bounded window does.
+                        occurred_at: at.map_or(0, |ms| ms / 1000),
                         direction: "in".into(),
                         node_id: text("prev_node_id"),
                         user_channel_id: text("prev_user_channel_id"),
-                        approximate_time: row.event_type == "PAYMENT_FORWARDED_BACKFILL",
+                        approximate_time: history,
                         ..Default::default()
                     };
                     if skim > 0 {
@@ -362,6 +364,7 @@ struct Cache {
     ledger: LedgerFacts,
     labels: Vec<SettlementLabel>,
     labels_after: i64,
+    /// Wallet payments of funding txids, one per funding transaction like `LedgerFacts::funding_txids`; kept so each is fetched once.
     onchain: HashMap<String, Payment>,
     payments: PaymentBook,
     /// Sticky: the cutoff of the last prune that dropped a forward.
@@ -373,8 +376,8 @@ struct Cache {
 struct PaymentBook {
     /// Everything revenue can use; failed 1-msat protocol attempts are dropped.
     by_id: HashMap<String, Payment>,
-    /// Hashes of every payment id ever listed, dropped ones included.
-    seen: HashSet<u64>,
+    /// Hash and last update time of every payment id listed inside the lookback, dropped ones included.
+    seen: HashMap<u64, u64>,
     /// Set once a scan reached the end of the history.
     complete: bool,
 }
@@ -382,13 +385,21 @@ struct PaymentBook {
 impl PaymentBook {
     /// Keeps the payment's latest state; true when it had not been listed before.
     fn absorb(&mut self, payment: Payment) -> bool {
-        let new = self.seen.insert(id_hash(&payment.payment_id));
+        let new = self.seen.insert(id_hash(&payment.payment_id), payment.latest_update_timestamp).is_none();
         if is_failed_protocol_message(&payment) {
             self.by_id.remove(&payment.payment_id);
         } else {
             self.by_id.insert(payment.payment_id.clone(), payment);
         }
         new
+    }
+
+    /// Drops payments last updated before `cutoff`; true when the book held one.
+    fn prune(&mut self, cutoff: i64) -> bool {
+        let before = self.by_id.len();
+        self.by_id.retain(|_, p| p.latest_update_timestamp as i64 >= cutoff);
+        self.seen.retain(|_, at| *at as i64 >= cutoff);
+        self.by_id.len() < before
     }
 }
 
@@ -400,13 +411,15 @@ fn id_hash(id: &str) -> u64 {
 }
 
 /// Walks ListPayments newest first. After one full walk, a page with nothing new ends it; true when the cap cut it short.
-async fn scan_payments(book: &mut PaymentBook, ldk: &dyn LdkServerCalls) -> Result<bool, String> {
+async fn scan_payments(book: &mut PaymentBook, ldk: &dyn LdkServerCalls, cutoff: i64) -> Result<bool, String> {
     let mut page_token = None;
     for _ in 0..PAYMENT_PAGE_CAP {
         let response = ldk.list_payments(ListPaymentsRequest { page_token }).await.map_err(|e| e.to_string())?;
         let mut unseen = response.payments.is_empty();
         for payment in response.payments {
-            unseen |= book.absorb(payment);
+            // A payment past the lookback was pruned, not new: listing it again must not extend the walk.
+            let recent = payment.latest_update_timestamp as i64 >= cutoff;
+            unseen |= book.absorb(payment) && recent;
         }
         match response.next_page_token {
             Some(_) if book.complete && !unseen => return Ok(false),
@@ -472,10 +485,14 @@ pub fn now_secs() -> i64 {
 /// Rebuilds the snapshot; on any error the previous snapshot stays.
 pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Database>, now: i64) -> Result<(), String> {
     let mut cache = store.cache.lock().await;
-    let partial_scan = scan_payments(&mut cache.payments, ldk).await?;
+    // The cache never prunes on its own; bound it by age here and remember where it now starts.
+    let cutoff = now - REVENUE_LOOKBACK_SECS;
+    let partial_scan = scan_payments(&mut cache.payments, ldk, cutoff).await?;
     refresh_pending(&mut cache.payments, ldk).await;
+    let payments_pruned = cache.payments.prune(cutoff);
     let mut payments: Vec<Payment> = cache.payments.by_id.values().cloned().collect();
     let channels = ldk.list_channels(ListChannelsRequest {}).await.map_err(|e| e.to_string())?.channels;
+    // Coverage is what ListPayments reports, so it is judged before the wallet lookups below add funding payments.
     let listed_onchain = payments.iter().any(|p| onchain_tx(p).is_some());
     // An LDK Server that classifies on-chain payments reports close, bump and sweep fees; an older one never does.
     let typed_onchain = payments.iter().any(|p| onchain_tx(p).is_some_and(|(_, kind)| kind.is_some()));
@@ -498,23 +515,33 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
     .map_err(|e| e.to_string())?;
     cache.ledger.absorb(&rows);
     cache.ledger.after_id = cache.ledger.after_id.max(max_id);
-    // The cache never prunes on its own; bound it by age here and remember where it now starts.
-    let cutoff = now - REVENUE_LOOKBACK_SECS;
     let forwards_before = cache.ledger.forwards.len();
-    cache.ledger.forwards.retain(|f| f.occurred_at >= cutoff);
+    cache.ledger.forwards.retain(|f| f.occurred_at >= cutoff || f.occurred_at == 0);
     cache.ledger.unpaired.retain(|_, rows| {
-        rows.retain(|(_, at)| at.is_none_or(|ms| ms >= cutoff * 1000));
+        // An undated history row can only twin a live row delivered within LIVE_FORWARD_DELAY_MS of its reconstruction.
+        rows.retain(|&(_, at, row_ms)| at.map_or(row_ms >= now * 1000 - LIVE_FORWARD_DELAY_MS, |ms| ms >= cutoff * 1000));
         !rows.is_empty()
     });
-    if cache.ledger.forwards.len() < forwards_before {
-        cache.pruned_before = Some(cutoff);
+    let mut pruned_before = (payments_pruned || cache.ledger.forwards.len() < forwards_before).then_some(cutoff);
+    // Keep the newest forwards under the item cap, so the copy classify takes is bounded too.
+    let forwards_capped = cache.ledger.forwards.len() > REVENUE_MAX_ITEMS;
+    if forwards_capped {
+        let forwards = &mut cache.ledger.forwards;
+        forwards.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
+        pruned_before = pruned_before.max(Some(forwards[REVENUE_MAX_ITEMS].occurred_at + 1));
+        forwards.truncate(REVENUE_MAX_ITEMS);
     }
+    cache.pruned_before = cache.pruned_before.max(pruned_before);
+    // Labels carry no time; keep those whose payment is still in the book, so they age out with it.
+    let Cache { labels, payments: book, .. } = &mut *cache;
+    labels.retain(|l| book.by_id.contains_key(&l.payment_id));
     cache.labels.extend(new_labels.0);
     cache.labels_after = new_labels.1;
     // LDK Server's list can lack on-chain payments; find funding transactions in the wallet instead.
     let listed: HashSet<String> = payments.iter().map(|p| p.payment_id.clone()).collect();
     let mut funding: HashSet<String> = cache.ledger.funding_txids.clone();
     funding.extend(channels.iter().filter_map(|c| c.funding_txo.as_ref().map(|o| o.txid.clone())));
+    let mut lookup_failed = false;
     for txid in funding {
         if cache.onchain.contains_key(&txid) {
             continue;
@@ -530,7 +557,10 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
                     }
                 }
             },
-            Err(error) => warn!("[revenue] wallet lookup for funding tx {} failed: {}", txid, error),
+            Err(error) => {
+                warn!("[revenue] wallet lookup for funding tx {} failed: {}", txid, error);
+                lookup_failed = true;
+            },
         }
     }
     payments.extend(cache.onchain.values().filter(|p| !listed.contains(&p.payment_id)).cloned());
@@ -547,13 +577,14 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
     if partial_scan {
         warn!("[revenue] payment scan stopped after {} pages; totals are partial", PAYMENT_PAGE_CAP);
     }
-    let truncated = items.len() > REVENUE_MAX_ITEMS;
+    let truncated = forwards_capped || items.len() > REVENUE_MAX_ITEMS;
     if truncated {
         warn!("[revenue] {} items classified; keeping the newest {}", items.len(), REVENUE_MAX_ITEMS);
         items.truncate(REVENUE_MAX_ITEMS);
     }
     tracing::debug!("[revenue] snapshot rebuilt: {} items", items.len());
-    let mut untracked = if listed_onchain { Vec::new() } else { vec![ONCHAIN_FEE.to_string()] };
+    // A funding transaction the wallet could not be asked about has an unknown fee.
+    let mut untracked = if listed_onchain && !lookup_failed { Vec::new() } else { vec![ONCHAIN_FEE.to_string()] };
     if !typed_onchain {
         untracked.extend([CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from));
     }
@@ -1002,6 +1033,7 @@ mod tests {
         pub fail_list: AtomicBool,
         pub send_fails: bool,
         pub ambiguous_send: bool,
+        pub details_fail: bool,
         pub sends: StdMutex<Vec<SpontaneousSendRequest>>,
         // Serve `payments` (newest first) in pages of this size, like LDK Server does.
         pub page_size: Option<usize>,
@@ -1045,6 +1077,9 @@ mod tests {
             Ok(ListPaymentsResponse { payments, next_page_token: self.endless.then(|| "t".to_owned()) })
         }
         async fn get_payment_details(&self, req: GetPaymentDetailsRequest) -> Result<GetPaymentDetailsResponse, LdkServerError> {
+            if self.details_fail {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "down".to_string()));
+            }
             let find = |list: &StdMutex<Vec<Payment>>| list.lock().unwrap().iter().find(|p| p.payment_id == req.payment_id).cloned();
             Ok(GetPaymentDetailsResponse { payment: find(&self.payments).or_else(|| find(&self.wallet)) })
         }
@@ -1074,6 +1109,53 @@ mod tests {
         let snap = store.snapshot().unwrap();
         assert!(snap.partial(0), "a later rebuild that prunes nothing still knows all-time totals are bounded");
         assert!(!snap.partial(now - 7 * 86_400), "a week is inside what the cache holds");
+    }
+
+    #[tokio::test]
+    async fn an_undated_history_forward_counts_only_all_time_and_stops_waiting_for_a_twin() {
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), None);
+        let (store, now) = (RevenueStore::default(), now_secs());
+        rebuild(&store, &Fake::default(), &db, now).await.unwrap();
+        let items = store.snapshot().unwrap().items.clone();
+        assert_eq!((items.len(), items[0].occurred_at, items[0].approximate_time), (1, 0, true));
+        assert_eq!(summarize(&items, 0)[0].total_msat, 7);
+        assert!(summarize(&items, now - 7 * 86_400).is_empty(), "an undated forward lands in no bounded window");
+        assert_eq!(store.cache.lock().await.ledger.unpaired.len(), 1, "it waits for a late live twin");
+        rebuild(&store, &Fake::default(), &db, now + LIVE_FORWARD_DELAY_MS / 1000 + 60).await.unwrap();
+        assert!(store.cache.lock().await.ledger.unpaired.is_empty(), "then stops waiting");
+        assert_eq!(store.snapshot().unwrap().items.len(), 1, "and stays in all-time totals");
+    }
+
+    #[tokio::test]
+    async fn payments_older_than_the_lookback_leave_the_book() {
+        let (_dir, db) = temp_db();
+        let now = 2 * REVENUE_LOOKBACK_SECS;
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().extend([
+            pay("new", false, PaymentStatus::Succeeded, Some(1), Some(3), (now - 10) as u64, None),
+            pay("old", false, PaymentStatus::Succeeded, Some(1), Some(7), (now - REVENUE_LOOKBACK_SECS - 10) as u64, None),
+        ]);
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, now).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["new"]);
+        assert!(snap.partial(0) && !snap.partial(now - 86_400));
+        let cache = store.cache.lock().await;
+        assert_eq!((cache.payments.by_id.len(), cache.payments.seen.len()), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn forwards_over_the_item_cap_are_cut_before_classification() {
+        let (_dir, db) = temp_db();
+        let store = RevenueStore::default();
+        store.cache.lock().await.ledger.forwards =
+            (0..=REVENUE_MAX_ITEMS as i64).map(|i| item(&format!("fwd:{i}"), 1_000 + i, ROUTING_FEE, 1)).collect();
+        rebuild(&store, &Fake::default(), &db, 100_000).await.unwrap();
+        assert_eq!(store.cache.lock().await.ledger.forwards.len(), REVENUE_MAX_ITEMS);
+        let snap = store.snapshot().unwrap();
+        assert!(snap.truncated && snap.items.iter().all(|i| i.key != "fwd:0"), "the oldest forward is dropped");
+        assert_eq!(snap.pruned_before, Some(1_001));
     }
 
     #[tokio::test]
@@ -1252,6 +1334,24 @@ mod tests {
             [ONCHAIN_FEE, CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from),
             "other on-chain fees cannot be measured from this list, and nothing in it carries LDK's transaction type"
         );
+    }
+
+    #[tokio::test]
+    async fn a_failed_funding_lookup_leaves_onchain_fees_untracked() {
+        use ldk_server_client::ldk_server_grpc::types::{Funding, OutPoint};
+        let (_dir, db) = temp_db();
+        let fake = Fake {
+            channels: vec![Channel { funding_txo: Some(OutPoint { txid: "aa".repeat(32), vout: 0 }), ..Default::default() }],
+            details_fail: true,
+            ..Default::default()
+        };
+        fake.payments.lock().unwrap().extend([
+            pay("spend", false, PaymentStatus::Succeeded, Some(1_000), Some(100), 5, Some("bb")),
+            typed("open", 100, 6, "cc", transaction_type::Kind::Funding(Funding { channels: vec![] })),
+        ]);
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [ONCHAIN_FEE], "an unknown funding fee is missing from the total");
     }
 
     #[tokio::test]

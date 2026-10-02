@@ -986,6 +986,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     // SYNC publications and their final outcomes (never each retry).
     "SYNC_MESSAGE_SENT",
     "SYNC_RETRY_EXHAUSTED",
+    "SYNC_RETRY_BLOCKED",
     "SYNC_PENDING_ABANDONED",
     "SYNC_V1_APPLIED",
     "SYNC_V1_ALLOCATION_REJECTED",
@@ -998,6 +999,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "TRADE_FAILED",
     "TRADE_FEE_CONFIRMED_AFTER_SYNC",
     "TRADE_FEE_CONFIRMED_AWAITING_SYNC",
+    "TRADE_ID_REUSED",
     // Peer reachability.
     "PEER_CONNECTED",
     "PEER_DISCONNECTED",
@@ -1007,6 +1009,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "EVENT_STREAM_GAP_CLOSED",
     "RECONCILIATION_GAP_DETECTED",
     "RECONCILIATION_RESULT",
+    "RECONCILIATION_SCOPE_FAILED",
     // Operator refunds of rejected trade fees: money left the node, so the record must survive.
     "TRADE_FEE_REFUND_SENT",
     "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
@@ -1016,6 +1019,22 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "STABILITY_PAYMENT_PERSIST_FAILED",
     "TRADE_RESPONSE_PAYMENT_ID_PERSIST_FAILED",
     "DB_WRITE_FAILED",
+    "DB_READ_FAILED",
+    "STABILITY_PAYMENT_REPLAY_IGNORED",
+    "STABILITY_PAYMENT_AMOUNT_MISMATCH",
+    "STABILITY_PAYMENT_CHANNEL_MISMATCH",
+    "SYNC_V1_CHANNEL_MISMATCH",
+    "TRADE_PAYMENT_UNATTRIBUTABLE",
+    "ONCHAIN_DEPOSIT_PERSIST_FAILED",
+    "OUTGOING_RECONCILE_PERSIST_FAILED",
+    "OVERBACKED_REPAIR_PERSIST_FAILED",
+    "PAYMENT_PERSIST_FAILED",
+    "STABILITY_PAYMENT_FAILURE_PERSIST_FAILED",
+    "STABILITY_PAYMENT_SUCCESS_PERSIST_FAILED",
+    "TRADE_FEE_STATUS_PERSIST_FAILED",
+    "TRADE_INTENT_PERSIST_FAILED",
+    "TRADE_PAYMENT_FAILURE_PERSIST_FAILED",
+    "TRADE_PAYMENT_ID_PERSIST_FAILED",
 ];
 
 /// True when an audit event belongs in the channel ledger.
@@ -1643,5 +1662,36 @@ mod tests {
         assert_eq!(draft.before.as_ref().and_then(|state| state.live_receiver_sats), Some(154_516));
         assert_eq!(draft.after.as_ref().and_then(|state| state.live_receiver_sats), Some(164_285));
         assert_eq!(draft.after.as_ref().and_then(|state| state.amount_sats), Some(9_769));
+    }
+
+    #[test]
+    fn every_integrity_alarm_in_the_tree_reaches_the_ledger() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut dirs = vec![root.join("src"), root.join("server/stable-channels-lsp/src")];
+        let mut missing = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for path in std::fs::read_dir(&dir).unwrap().map(|entry| entry.unwrap().path()) {
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    // Every segment between quotes, so an escaped quote cannot hide a literal.
+                    for word in std::fs::read_to_string(&path).unwrap().split('"') {
+                        let alarm = word.ends_with("_PERSIST_FAILED")
+                            || word.ends_with("_UNATTRIBUTABLE")
+                            || (word.starts_with("DB_") && word.ends_with("_FAILED"))
+                            || word.contains("_REPLAY_")
+                            || word.ends_with("_DIVERGENCE")
+                            || word.ends_with("_MISMATCH")
+                            || word == "SYNC_RETRY_BLOCKED";
+                        let identifier = word.starts_with(|c: char| c.is_ascii_uppercase())
+                            && word.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                        if alarm && identifier && !CHANNEL_STATE_EVENTS.contains(&word) && !DIRECT_STATE_EVENTS.contains(&word) {
+                            missing.push(format!("{word} ({})", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "alarms the ledger would drop: {missing:?}");
     }
 }

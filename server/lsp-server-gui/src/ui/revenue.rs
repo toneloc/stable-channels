@@ -9,7 +9,7 @@ use crate::state::{AppCtx, Dialog, Op, RefundTradeFeeForm, RevenueWindow};
 use crate::ui::{close_dialog, open_dialog};
 use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, Modal, Peer, Pill, RefreshBtn, SegBtn, Spinner, Stat, Th};
 
-const HELP_NET: &str = "Earned minus spent. Stability settlements are not included.";
+const HELP_NET: &str = "Earned minus spent. Stability settlements are not included, nor routing fees paid on stability, protocol and refund payments.";
 const HELP_STABILITY: &str = "Sats paid to users when BTC fell and received when it rose. This is the peg working, not income.";
 const HELP_CLOSE_FEES: &str = "On-chain fees LDK reports for close transactions the wallet paid for. What a close itself costs the channel balance is not counted here; that needs the ledger.";
 const HELP_UNTRACKED: &str = "This node's LDK Server does not list or classify these transactions, so the total would read as zero when it is not.";
@@ -38,7 +38,7 @@ pub fn totals(lines: &[RevenueLine]) -> (u64, u64, i128) {
 	(earned, spent, earned as i128 - spent as i128)
 }
 
-/// A spent category the node cannot report makes spent a floor and net a ceiling.
+/// A spent category the node cannot report makes spent a floor and net a ceiling; reads SPENT, the same list totals() sums.
 pub fn spent_untracked(untracked: &[String]) -> bool {
 	SPENT.iter().any(|c| untracked.iter().any(|u| u == c))
 }
@@ -372,8 +372,9 @@ pub fn Revenue() -> Element {
 #[component]
 fn ActivityRow(item: RevenueItem) -> Element {
 	let ctx = use_context::<AppCtx>();
-	let when = crate::ledger::relative_timestamp(item.occurred_at * 1000);
-	let approx = if item.approximate_time { "≈ " } else { "" };
+	// 0 is a forward LDK gave no time: shown undated, never as 1970.
+	let when = if item.occurred_at == 0 { "undated".to_owned() } else { crate::ledger::relative_timestamp(item.occurred_at * 1000) };
+	let approx = if item.approximate_time && item.occurred_at != 0 { "≈ " } else { "" };
 	let sign = if item.direction == "out" { "\u{2212}" } else { "+" };
 	let id = if item.payment_id.is_empty() { item.txid.clone() } else { item.payment_id.clone() };
 	rsx! {

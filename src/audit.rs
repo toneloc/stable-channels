@@ -312,7 +312,6 @@ mod tests {
             )
             .unwrap();
         }
-        record_event("DB_READ_FAILED", serde_json::json!({"user_channel_id": "busy", "error": "locked"})).unwrap();
         record_event("SYNC_RETRY_EXHAUSTED", serde_json::json!({"user_channel_id": "busy", "attempts": 10})).unwrap();
         let types: Vec<String> = database
             .list_ledger_events(&crate::ledger::LedgerQuery {

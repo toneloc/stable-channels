@@ -323,8 +323,8 @@ pub struct StableChannelManager {
     startup_sync_initialized: bool,
     /// Channels whose failure-driven SYNC retries stopped at the cap, audited once each.
     sync_retry_exhausted: std::collections::HashSet<u128>,
-    /// Usable channels whose peer will not take a 1 msat HTLC, so no SYNC can be sent; audited once each.
-    sync_htlc_minimum_reported: std::collections::HashSet<u128>,
+    /// Usable channels that cannot carry a 1 msat SYNC, by block reason; audited once per (channel, reason).
+    sync_retry_blocked_reported: std::collections::HashSet<(u128, &'static str)>,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -723,7 +723,7 @@ impl StableChannelManager {
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
-            sync_htlc_minimum_reported: std::collections::HashSet::new(),
+            sync_retry_blocked_reported: std::collections::HashSet::new(),
         }
     }
 
@@ -1108,24 +1108,32 @@ impl StableChannelManager {
             .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat <= 1 && c.next_outbound_htlc_limit_msat >= 1)
             .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
             .collect();
-        // A peer whose HTLC minimum is above 1 msat silently blocks every SYNC: say so once, not every minute.
-        let htlc_blocked: std::collections::HashMap<u128, (String, u64)> = channels
+        // A usable channel that cannot carry the 1 msat keysend silently blocks every SYNC: say so once per reason, not every minute.
+        let blocked: std::collections::HashMap<u128, (String, &'static str, &'static str, u64)> = channels
             .iter()
-            .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat > 1)
-            .filter_map(|c| parse_user_channel_id(&c.user_channel_id).map(|uid| (uid, (c.channel_id.clone(), c.next_outbound_htlc_minimum_msat))))
+            .filter(|c| c.is_usable)
+            .filter_map(|c| {
+                let (reason, field, value) = if c.next_outbound_htlc_minimum_msat > 1 {
+                    ("htlc_minimum_above_1_msat", "next_outbound_htlc_minimum_msat", c.next_outbound_htlc_minimum_msat)
+                } else if c.next_outbound_htlc_limit_msat < 1 {
+                    ("no_outbound_liquidity", "next_outbound_htlc_limit_msat", c.next_outbound_htlc_limit_msat)
+                } else {
+                    return None;
+                };
+                parse_user_channel_id(&c.user_channel_id).map(|uid| (uid, (c.channel_id.clone(), reason, field, value)))
+            })
             .collect();
-        self.sync_htlc_minimum_reported.retain(|uid| htlc_blocked.contains_key(uid));
-        for (uid, (channel_id, minimum)) in &htlc_blocked {
-            if syncs.iter().any(|(queued, ..)| queued == uid) && self.sync_htlc_minimum_reported.insert(*uid) {
-                stable_channels::audit::audit_event(
-                    "SYNC_RETRY_BLOCKED",
-                    serde_json::json!({
-                        "user_channel_id": uid.to_string(),
-                        "channel_id": channel_id,
-                        "reason": "htlc_minimum_above_1_msat",
-                        "next_outbound_htlc_minimum_msat": minimum,
-                    }),
-                );
+        self.sync_retry_blocked_reported
+            .retain(|(uid, reason)| blocked.get(uid).is_some_and(|b| b.1 == *reason));
+        for (uid, (channel_id, reason, field, value)) in &blocked {
+            if syncs.iter().any(|(queued, ..)| queued == uid) && self.sync_retry_blocked_reported.insert((*uid, *reason)) {
+                let mut detail = serde_json::json!({
+                    "user_channel_id": uid.to_string(),
+                    "channel_id": channel_id,
+                    "reason": reason,
+                });
+                detail[*field] = (*value).into();
+                stable_channels::audit::audit_event("SYNC_RETRY_BLOCKED", detail);
             }
         }
         for (uid, channel_id, live_sats, counterparty) in syncs {
@@ -5707,7 +5715,25 @@ mod tests {
         fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 0;
         mgr.reconcile_if_empty(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "the SYNC goes out once the peer relents");
-        assert!(mgr.sync_htlc_minimum_reported.is_empty(), "a later block is audited again");
+        assert!(mgr.sync_retry_blocked_reported.is_empty(), "a later block is audited again");
+    }
+
+    #[tokio::test]
+    async fn a_channel_without_outbound_liquidity_is_audited_once_as_blocked() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_limit_msat = 0;
+        stable_channels::audit::enable_test_capture();
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
+        assert_eq!(blocked.len(), 1, "audited once, not every tick");
+        assert_eq!(blocked[0].1["reason"], "no_outbound_liquidity");
+        assert_eq!(blocked[0].1["next_outbound_htlc_limit_msat"], 0);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt without liquidity");
     }
 
     #[tokio::test]

@@ -484,6 +484,27 @@ pub fn feed_attention(c: &Ctx, room: Option<&Room>, fmt_sats: &dyn Fn(u64) -> St
 				});
 			}
 		}
+		// The daemon cannot send a balance sync over this channel at all.
+		let blocked = c
+			.events()
+			.filter(|(ch, e)| *ch == uid && e.event_type == "SYNC_RETRY_BLOCKED")
+			.map(|(_, e)| e)
+			.max_by_key(|e| e.occurred_at_ms);
+		if let Some(e) = blocked.filter(|e| last_good_sync.is_none_or(|good| e.occurred_at_ms > good)) {
+			if let Some(entry) = c.entries_of(uid).next() {
+				let why = match detail_str(e, "reason").as_deref() {
+					Some("htlc_minimum_above_1_msat") => "The peer's HTLC minimum is above 1 msat",
+					Some("no_outbound_liquidity") => "No outbound liquidity to send the correction",
+					_ => "The channel cannot carry the sync",
+				};
+				items.push(Attention {
+					severity: Severity::Warning,
+					title: format!("Balance sync with {} blocked", peer_of(entry)),
+					detail: format!("{why}; blocked since {}.", clock(e.occurred_at_ms)),
+					target: c.target(uid),
+				});
+			}
+		}
 		// A splice negotiation failed in the last 24 h.
 		if let Some(f) = c
 			.entries_of(uid)
@@ -753,6 +774,20 @@ mod tests {
 		let feed = self::feed(&recovered);
 		let c = ctx(Some(&channels), Some(&feed), &aliases);
 		assert!(!feed_attention(&c, None, &fmt).iter().any(|i| i.title.contains("gave up")));
+	}
+
+	#[test]
+	fn a_blocked_sync_warns_until_a_sync_goes_through() {
+		let channels = ListChannelsResponse { channels: vec![channel("b", "02bb")] };
+		let mut events = vec![ev(1, "SYNC_RETRY_BLOCKED", "b", 1_000, serde_json::json!({"reason": "no_outbound_liquidity", "next_outbound_htlc_limit_msat": 0}))];
+		let aliases = HashMap::new();
+		let feed = feed(&events);
+		let items = feed_attention(&ctx(Some(&channels), Some(&feed), &aliases), None, &fmt);
+		assert_eq!(items[0].title, "Balance sync with 02bb blocked");
+		assert!(items[0].detail.starts_with("No outbound liquidity to send the correction"));
+		events.push(ev(2, "SYNC_MESSAGE_SENT", "b", 100, serde_json::json!({"expected_usd": 20.0, "payment_id": "s2"})));
+		let feed = self::feed(&events);
+		assert!(!feed_attention(&ctx(Some(&channels), Some(&feed), &aliases), None, &fmt).iter().any(|i| i.title.contains("blocked")));
 	}
 
 	#[test]

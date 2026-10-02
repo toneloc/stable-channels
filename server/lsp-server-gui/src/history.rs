@@ -43,7 +43,7 @@ pub struct HistoryEntry {
 	pub events: Vec<ChannelLedgerEvent>,
 }
 
-const FAILURE_EVENTS: [&str; 8] = [
+const FAILURE_EVENTS: [&str; 9] = [
 	"STABILITY_PAYMENT_FAILED",
 	"PAYMENT_FAILED",
 	"STABILITY_PAYMENT_ROLLED_BACK",
@@ -52,6 +52,7 @@ const FAILURE_EVENTS: [&str; 8] = [
 	"SPLICE_FAILED",
 	"CHANNEL_OPEN_FAILED",
 	"SYNC_RETRY_EXHAUSTED",
+	"SYNC_RETRY_BLOCKED",
 ];
 const SUCCESS_EVENTS: [&str; 6] = [
 	"STABILITY_PAYMENT_SETTLED",
@@ -330,6 +331,7 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		"STABILITY_PUSH_QUEUED" => (EntryKind::Other, "Wallet above peg: push sent to wake it".to_owned()),
 		"STABILITY_CHECK_ONLY" => (EntryKind::Other, "Wallet above peg: waiting for it to pay".to_owned()),
 		"SYNC_RETRY_EXHAUSTED" => (EntryKind::Sync, "Stopped retrying the balance sync".to_owned()),
+		"SYNC_RETRY_BLOCKED" => (EntryKind::Sync, "Balance sync blocked: the channel cannot carry it".to_owned()),
 		"CHANNEL_ACCOUNTING_STATE_COMMITTED"
 		| "STABLE_EDITED"
 		| "BACKSTOP_STABLE_DEDUCTED"
