@@ -151,6 +151,8 @@ async fn main() -> Result<()> {
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         geoip: geoip::load(cfg.geoip.country_db.as_deref()),
+        geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
+        geoip_retention_secs: cfg.geoip.retention_days.unwrap_or(90) as i64 * 86_400,
         revenue: Arc::new(revenue::RevenueStore::default()),
         ldk_log_file,
         last_event_before_start_ms,

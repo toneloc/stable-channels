@@ -1006,6 +1006,16 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "EVENT_STREAM_GAP_STARTED",
     "EVENT_STREAM_GAP_CLOSED",
     "RECONCILIATION_GAP_DETECTED",
+    "RECONCILIATION_RESULT",
+    // Operator refunds of rejected trade fees: money left the node, so the record must survive.
+    "TRADE_FEE_REFUND_SENT",
+    "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
+    // Integrity alarms: a store or replay that went wrong must survive a restart.
+    "STABILITY_PAYMENT_STATE_DIVERGENCE",
+    "STABILITY_PAYMENT_REPLAY_CONFLICT",
+    "STABILITY_PAYMENT_PERSIST_FAILED",
+    "TRADE_RESPONSE_PAYMENT_ID_PERSIST_FAILED",
+    "DB_WRITE_FAILED",
 ];
 
 /// True when an audit event belongs in the channel ledger.
@@ -1054,7 +1064,7 @@ fn category_for(event: &str) -> &'static str {
 }
 
 fn severity_for(event: &str) -> &'static str {
-    if event.contains("FAILED") || event.contains("ERROR") || event.contains("REJECTED") {
+    if event.contains("FAILED") || event.contains("ERROR") || event.contains("REJECTED") || event.contains("CONFLICT") || event.contains("DIVERGENCE") {
         "error"
     } else if event.contains("GAP") || event.contains("CLAMP") || event.contains("DEFERRED") {
         "warning"

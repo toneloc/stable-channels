@@ -31,13 +31,13 @@ impl CountryLookup for DbIp {
     }
 }
 
-/// Opens the configured `.mmdb`; without one, IPs are still recorded with no country.
+/// Opens the configured `.mmdb`; without one, sightings (if `record_ips` is on) carry no country.
 pub fn load(path: Option<&str>) -> Arc<dyn CountryLookup> {
     let Some(path) = path else { return Arc::new(NoCountry) };
     match maxminddb::Reader::open_readfile(path) {
         Ok(reader) => Arc::new(DbIp(reader)),
         Err(error) => {
-            warn!("[geoip] cannot open {}: {}; recording IPs without country", path, error);
+            warn!("[geoip] cannot open {}: {}; countries will be unknown", path, error);
             Arc::new(NoCountry)
         },
     }
@@ -74,6 +74,13 @@ pub fn record_sightings(
         if let Err(error) = db.record_peer_sighting(node, &ip_text, country, now) {
             warn!("[geoip] record_peer_sighting failed: {}", error);
         }
+    }
+}
+
+/// Drops sightings last seen before `cutoff`, or all of them once recording is off so stored IPs do not linger.
+pub fn prune(db: &Database, record_ips: bool, cutoff: i64) {
+    if let Err(error) = db.prune_peer_locations(if record_ips { cutoff } else { i64::MAX }) {
+        warn!("[geoip] prune_peer_locations failed: {}", error);
     }
 }
 
@@ -158,6 +165,18 @@ mod tests {
         let rows = db.recent_peer_locations("wallet", 10).unwrap();
         assert_eq!((rows[0].country_code.as_deref(), rows[0].last_seen_at), (Some("IN"), 160));
         assert_eq!(counting.0.load(std::sync::atomic::Ordering::Relaxed), 1, "looked up once to fill the gap, then skipped");
+    }
+
+    #[test]
+    fn a_poll_prunes_by_age_while_recording_and_drops_everything_once_it_is_off() {
+        let (_dir, db) = temp_db();
+        let stable: HashSet<String> = ["wallet".to_owned()].into();
+        record_sightings(&db, &NoCountry, &[("wallet".to_owned(), "1.2.3.4:5".to_owned(), true)], &stable, 100);
+        record_sightings(&db, &NoCountry, &[("wallet".to_owned(), "5.6.7.8:5".to_owned(), true)], &stable, 300);
+        prune(&db, true, 200);
+        assert_eq!(db.recent_peer_locations("wallet", 10).unwrap().iter().map(|r| r.ip.as_str()).collect::<Vec<_>>(), ["5.6.7.8"]);
+        prune(&db, false, 200);
+        assert!(db.recent_peer_locations("wallet", 10).unwrap().is_empty(), "recording off keeps no IP");
     }
 
     #[test]

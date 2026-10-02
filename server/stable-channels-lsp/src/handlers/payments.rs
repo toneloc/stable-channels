@@ -30,10 +30,7 @@ async fn list_visible_payments(
     request: ListPaymentsRequest,
 ) -> Result<ListPaymentsResponse, ldk_server_client::error::LdkServerError> {
     let mut page_token = request.page_token;
-    let mut seen_cursors = HashSet::new();
-    if let Some(token) = &page_token {
-        seen_cursors.insert(token.clone());
-    }
+    let mut seen_cursors: HashSet<String> = page_token.iter().cloned().collect();
 
     let mut payments = Vec::new();
     let mut target_page_len = None;
@@ -48,8 +45,7 @@ async fn list_visible_payments(
         let upstream_next = response.next_page_token;
         let page_len = response.payments.len();
 
-        // A non-empty first page tells us the upstream page capacity. Use one as a fallback for
-        // an empty page that nevertheless advertises a cursor, so empty filtered pages are walked.
+        // The first page's length is the upstream page size, or 1 when it came back empty with a cursor, so empty filtered pages are walked.
         let target = *target_page_len.get_or_insert(page_len.max(1));
         payments.extend(
             response
@@ -58,12 +54,7 @@ async fn list_visible_payments(
                 .filter(|payment| !crate::payment_filter::is_failed_protocol_message(payment)),
         );
         next_page_token = upstream_next.clone();
-
-        if upstream_next.is_none() || payments.len() >= target {
-            break;
-        }
-
-        let next = upstream_next.expect("checked above");
+        let Some(next) = upstream_next.filter(|_| payments.len() < target) else { break };
         // Preserve the upstream cursor in the response, but stop if a broken upstream repeats it.
         if !seen_cursors.insert(next.clone()) {
             break;

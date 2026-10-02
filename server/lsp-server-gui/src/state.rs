@@ -444,7 +444,6 @@ impl From<&ChannelLedgerForm> for ChannelLedgerRequestKey {
     }
 }
 
-
 /// The rejected trade fee the refund dialog is about to send back.
 #[derive(Default, Clone)]
 pub struct RefundTradeFeeForm {

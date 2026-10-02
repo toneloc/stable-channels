@@ -323,6 +323,8 @@ pub struct StableChannelManager {
     startup_sync_initialized: bool,
     /// Channels whose failure-driven SYNC retries stopped at the cap, audited once each.
     sync_retry_exhausted: std::collections::HashSet<u128>,
+    /// Usable channels whose peer will not take a 1 msat HTLC, so no SYNC can be sent; audited once each.
+    sync_htlc_minimum_reported: std::collections::HashSet<u128>,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -721,6 +723,7 @@ impl StableChannelManager {
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
+            sync_htlc_minimum_reported: std::collections::HashSet::new(),
         }
     }
 
@@ -1093,19 +1096,38 @@ impl StableChannelManager {
             return;
         }
         // An offline peer, or a channel the LSP cannot send 1 msat over, cannot take the keysend: keep it queued, consume no version.
-        let usable: std::collections::HashSet<u128> =
-            match ldk.list_channels(ListChannelsRequest {}).await {
-                Ok(response) => response
-                    .channels
-                    .iter()
-                    .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat <= 1 && c.next_outbound_htlc_limit_msat >= 1)
-                    .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
-                    .collect(),
-                Err(error) => {
-                    tracing::warn!("[stable] SYNC retry skipped, list_channels failed: {}", error);
-                    return;
-                }
-            };
+        let channels = match ldk.list_channels(ListChannelsRequest {}).await {
+            Ok(response) => response.channels,
+            Err(error) => {
+                tracing::warn!("[stable] SYNC retry skipped, list_channels failed: {}", error);
+                return;
+            }
+        };
+        let usable: std::collections::HashSet<u128> = channels
+            .iter()
+            .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat <= 1 && c.next_outbound_htlc_limit_msat >= 1)
+            .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
+            .collect();
+        // A peer whose HTLC minimum is above 1 msat silently blocks every SYNC: say so once, not every minute.
+        let htlc_blocked: std::collections::HashMap<u128, (String, u64)> = channels
+            .iter()
+            .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat > 1)
+            .filter_map(|c| parse_user_channel_id(&c.user_channel_id).map(|uid| (uid, (c.channel_id.clone(), c.next_outbound_htlc_minimum_msat))))
+            .collect();
+        self.sync_htlc_minimum_reported.retain(|uid| htlc_blocked.contains_key(uid));
+        for (uid, (channel_id, minimum)) in &htlc_blocked {
+            if syncs.iter().any(|(queued, ..)| queued == uid) && self.sync_htlc_minimum_reported.insert(*uid) {
+                stable_channels::audit::audit_event(
+                    "SYNC_RETRY_BLOCKED",
+                    serde_json::json!({
+                        "user_channel_id": uid.to_string(),
+                        "channel_id": channel_id,
+                        "reason": "htlc_minimum_above_1_msat",
+                        "next_outbound_htlc_minimum_msat": minimum,
+                    }),
+                );
+            }
+        }
         for (uid, channel_id, live_sats, counterparty) in syncs {
             if !usable.contains(&uid) {
                 continue;
@@ -5663,6 +5685,29 @@ mod tests {
         mgr.reconcile_if_empty(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
         assert_eq!(sent_sync_payload(&fake, 1)["sync_version"], 2);
+    }
+
+    #[tokio::test]
+    async fn a_peer_refusing_1_msat_htlcs_is_audited_once_and_syncs_resume_when_it_relents() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 1_000;
+        stable_channels::audit::enable_test_capture();
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
+        assert_eq!(blocked.len(), 1, "audited once, not every tick");
+        assert_eq!(blocked[0].1["user_channel_id"], "7");
+        assert_eq!(blocked[0].1["next_outbound_htlc_minimum_msat"], 1_000);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt the peer would refuse");
+        assert!(mgr.startup_sync_pending.contains(&7), "the obligation stays queued");
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 0;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2, "the SYNC goes out once the peer relents");
+        assert!(mgr.sync_htlc_minimum_reported.is_empty(), "a later block is audited again");
     }
 
     #[tokio::test]

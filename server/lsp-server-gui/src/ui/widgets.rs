@@ -838,7 +838,6 @@ pub fn When(ts: u64) -> Element {
 	}
 }
 
-
 /// Right-hand side panel with the full record behind a table row; Escape and the backdrop close it.
 #[component]
 pub fn SidePanel(

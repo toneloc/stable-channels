@@ -8,7 +8,7 @@ use crate::format::{format_usd, local_time, relative_short};
 use crate::health::{self, Attention, Severity, Target};
 use crate::state::{ActiveTab, AppCtx, Drawer, Op, RevenueWindow};
 use crate::ui::open_drawer;
-use crate::ui::revenue::{signed, totals};
+use crate::ui::revenue::{bounded, spent_untracked, totals};
 use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, Pill, RefreshBtn, Spinner, Stat};
 
 const HELP_USERS: &str = "Channels with a USD target. Online counts the wallets connected right now; new means the LSP started tracking them in the last 7 days.";
@@ -49,7 +49,7 @@ pub fn Overview() -> Element {
 	};
 	let users = data.stable_channels.as_ref().map(|s| dashboard::stable_users(s, data.peers.as_ref(), now));
 	let peg = data.stable_channels.as_ref().map(|s| dashboard::stabilized(s, price));
-	let week = data.revenue_week.as_ref().map(|r| totals(&r.lines));
+	let week = data.revenue_week.as_ref().map(|r| (totals(&r.lines), spent_untracked(&r.untracked), r.partial));
 	let week_sub_error = data.revenue_week_error.as_ref().map(|_| {
 		if data.revenue_week_unsupported { "Revenue needs the updated daemon" } else { "Revenue unavailable right now" }
 	});
@@ -130,7 +130,18 @@ pub fn Overview() -> Element {
 		Peg::OffTarget(n) => format!("{n} off target"),
 	});
 	let (week_value, week_sub) = match (&week, week_sub_error) {
-		(Some((earned, spent, net)), _) => (signed(ctx, *net), format!("earned {} · spent {}", ctx.fmt_msat(*earned), ctx.fmt_msat(*spent))),
+		// Unknown fee categories make spent a floor and net a ceiling; say so rather than show a number.
+		(Some(((earned, spent, net), spent_unknown, partial)), _) => (
+			bounded(ctx, *net, *spent_unknown),
+			format!(
+				"earned {} · spent {}{}{}{}",
+				ctx.fmt_msat(*earned),
+				if *spent_unknown { "\u{2265} " } else { "" },
+				ctx.fmt_msat(*spent),
+				if *spent_unknown { " · some fees not tracked" } else { "" },
+				if *partial { " · partial history" } else { "" },
+			),
+		),
 		(None, Some(e)) => (dash(), e.to_string()),
 		(None, None) => (dash(), String::new()),
 	};

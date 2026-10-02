@@ -50,7 +50,12 @@ apns_environment         = "sandbox"          # "sandbox" or "production"
 # FCM (Android)
 fcm_service_account_path = "/path/to/firebase-service-account.json"
 
-# Optional: offline IP-to-country database for the Stable tab's Location column.
-# DB-IP "IP to Country Lite" (https://db-ip.com/db/lite.php), CC BY 4.0. Without it, IPs show no country.
+# Optional: where stable users connect from, for the Stable tab's Location column.
+# Recording a user's IP is off unless you set country_db or record_ips = true; recorded
+# sightings are deleted once unseen for retention_days (default 90), and all of them while
+# recording is off. Lookups are offline:
+# DB-IP "IP to Country Lite" (https://db-ip.com/db/lite.php), CC BY 4.0.
 # [geoip]
 # country_db = "/path/to/dbip-country-lite.mmdb"
+# record_ips = true
+# retention_days = 90

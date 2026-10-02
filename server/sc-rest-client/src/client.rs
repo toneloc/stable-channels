@@ -577,6 +577,10 @@ impl LspRestClient {
 				)
 			})?)
 		} else {
+			// An unknown route (daemon or nginx) answers with no body; carry the status, not an empty message.
+			if payload.is_empty() {
+				return Err(LspRestError::new(InternalError, format!("HTTP {}", status)));
+			}
 			let error_response = ErrorResponse::decode(&payload[..]).map_err(|e| {
 				LspRestError::new(
 					InternalError,

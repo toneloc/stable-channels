@@ -25,8 +25,9 @@ pub async fn get_revenue(State(state): State<AppState>, body: Bytes) -> Response
         items,
         next_cursor,
         snapshot_at: snapshot.built_at,
-        partial: snapshot.partial,
+        partial: snapshot.partial(req.since),
         untracked: snapshot.untracked.clone(),
+        item_count: snapshot.items.len() as u64,
     })
 }
 

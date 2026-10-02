@@ -21,8 +21,12 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct GeoIpSection {
-    /// DB-IP "IP to Country Lite" .mmdb; absent means IPs are recorded without country.
+    /// DB-IP "IP to Country Lite" .mmdb used to enrich recorded IPs with a country.
     pub country_db: Option<String>,
+    /// Record stable users' IPs at all; defaults to true only when `country_db` is set.
+    pub record_ips: Option<bool>,
+    /// Drop recorded IPs not seen for this many days (default 90).
+    pub retention_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

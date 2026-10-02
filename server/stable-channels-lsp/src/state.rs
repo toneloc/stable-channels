@@ -28,6 +28,9 @@ pub struct AppState {
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
     /// Offline IP-to-country lookup for stable counterparties' connection history.
     pub geoip: Arc<dyn crate::geoip::CountryLookup>,
+    /// Whether stable users' IPs are recorded at all, and how long a sighting is kept (seconds).
+    pub geoip_record_ips: bool,
+    pub geoip_retention_secs: i64,
     /// Revenue snapshot rebuilt off the request path.
     pub revenue: Arc<crate::revenue::RevenueStore>,
     /// LDK Server's log file path, resolved at daemon startup. None if not configured.

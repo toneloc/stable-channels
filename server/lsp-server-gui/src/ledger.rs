@@ -7,6 +7,8 @@ use sc_rest_client::sc_protos::stable::{
     AccountingSnapshot, ChannelLedgerEvent, ChannelLedgerOverview, ListChannelLedgerEventsResponse,
 };
 
+use crate::format::format_sats;
+
 pub fn merge_ledger_events(existing: &mut Vec<ChannelLedgerEvent>, incoming: Vec<ChannelLedgerEvent>) {
     let mut seen = existing
         .iter()
@@ -118,7 +120,7 @@ pub fn decimal_delta(before: Option<f64>, after: Option<f64>, prefix: &str) -> O
 /// Signed change such as "+1,234 sats" or "−328 sats"; empty when nothing changed.
 pub fn sats_delta(before: Option<u64>, after: Option<u64>) -> Option<(String, i8)> {
     let delta = after? as i128 - before? as i128;
-    let magnitude = format_integer(delta.unsigned_abs() as u64);
+    let magnitude = format_sats(delta.unsigned_abs() as u64);
     let text = match delta.signum() {
         1 => format!("+{magnitude} sats"),
         -1 => format!("\u{2212}{magnitude} sats"),
@@ -242,7 +244,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
         "EVENT_STREAM_CONNECTED" => {
             "The LSP connected to LDK Server's live event stream and resumed listening for activity."
         }
-        "EVENT_STREAM_GAP_OPENED" => {
+        "EVENT_STREAM_GAP_STARTED" => {
             "The LSP lost the live LDK event stream, so activity during this interval may need reconstruction."
         }
         "EVENT_STREAM_GAP_CLOSED" => {
@@ -425,7 +427,7 @@ fn splice_amount_sats(event: &ChannelLedgerEvent) -> Option<u64> {
 
 fn splice_help(event: &ChannelLedgerEvent) -> String {
     let amount = splice_amount_sats(event)
-        .map(|amount| format!("{} sats net", format_integer(amount)))
+        .map(|amount| format!("{} sats net", format_sats(amount)))
         .unwrap_or_else(|| "funds".to_owned());
     match splice_direction(event).as_deref() {
         Some("in") => format!(
@@ -609,7 +611,7 @@ pub fn completeness_tone(completeness: &str) -> &'static str {
 }
 
 pub fn format_sats_with_usd(sats: u64, btc_price: Option<f64>) -> String {
-    let display = format!("{} sats", format_integer(sats));
+    let display = format!("{} sats", format_sats(sats));
     match btc_price.filter(|price| price.is_finite() && *price > 0.0) {
         Some(price) => format!("{display} · ≈ ${:.2}", sats_to_usd(sats, price)),
         None => display,
@@ -620,23 +622,11 @@ fn sats_to_usd(sats: u64, btc_price: f64) -> f64 {
     sats as f64 / 100_000_000.0 * btc_price
 }
 
-fn format_integer(value: u64) -> String {
-    let digits = value.to_string();
-    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index) % 3 == 0 {
-            output.push(',');
-        }
-        output.push(character);
-    }
-    output
-}
-
 fn format_msat(msat: u64) -> String {
     if msat % 1_000 == 0 {
-        format!("{} sats", format_integer(msat / 1_000))
+        format!("{} sats", format_sats(msat / 1_000))
     } else {
-        format!("{} msat", format_integer(msat))
+        format!("{} msat", format_sats(msat))
     }
 }
 

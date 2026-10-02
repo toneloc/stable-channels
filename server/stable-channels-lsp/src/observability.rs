@@ -316,21 +316,22 @@ async fn poll_peers(
             current.insert(p.node_id.clone(), p.is_connected);
         }
     }
-    let stable_nodes: std::collections::HashSet<String> = state
-        .stable_manager
-        .lock()
-        .await
-        .stable_channels
-        .iter()
-        .map(|sc| sc.counterparty.to_string())
-        .collect();
-    let sightings: Vec<(String, String, bool)> =
-        peers.iter().map(|p| (p.node_id.clone(), p.address.clone(), p.is_connected)).collect();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs() as i64)
-        .unwrap_or(0);
-    crate::geoip::record_sightings(&state.db, state.geoip.as_ref(), &sightings, &stable_nodes, now);
+    let now = crate::revenue::now_secs();
+    // Location data is opt-in and time-bounded; see [geoip] in the config.
+    if state.geoip_record_ips {
+        let stable_nodes: std::collections::HashSet<String> = state
+            .stable_manager
+            .lock()
+            .await
+            .stable_channels
+            .iter()
+            .map(|sc| sc.counterparty.to_string())
+            .collect();
+        let sightings: Vec<(String, String, bool)> =
+            peers.iter().map(|p| (p.node_id.clone(), p.address.clone(), p.is_connected)).collect();
+        crate::geoip::record_sightings(&state.db, state.geoip.as_ref(), &sightings, &stable_nodes, now);
+    }
+    crate::geoip::prune(&state.db, state.geoip_record_ips, now - state.geoip_retention_secs);
     for (node, connected) in peer_transitions(prev, &current, *first_run) {
         stable_channels::audit::audit_event(
             if connected { "PEER_CONNECTED" } else { "PEER_DISCONNECTED" },

@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::format::truncate_id;
 use crate::health::{has_stable_position, settlement, stable_drift, Attention, DriftLevel, Settlement, Severity, Target};
-use crate::history::{self, EntryKind, HistoryEntry};
+use crate::history::{self, detail, EntryKind, HistoryEntry};
 use crate::ledger::humanize_enum;
 
 pub const WEEK_SECS: u64 = 7 * 86_400;
@@ -113,10 +113,6 @@ fn channel_key(event: &ChannelLedgerEvent) -> String {
 	String::new()
 }
 
-fn detail(event: &ChannelLedgerEvent) -> Value {
-	serde_json::from_str(&event.detail_json).unwrap_or(Value::Null)
-}
-
 fn detail_str(event: &ChannelLedgerEvent, key: &str) -> Option<String> {
 	detail(event).get(key).and_then(Value::as_str).map(str::to_owned)
 }
@@ -183,7 +179,7 @@ pub struct Ctx<'a> {
 
 /// The daemon (or the nginx in front of it) does not know the request: an older deployment.
 pub fn needs_newer_daemon(error: &str) -> bool {
-	error.contains("identifier is required") || error.contains("404")
+	error.contains("identifier is required") || error.contains("HTTP 404")
 }
 
 impl Ctx<'_> {
@@ -209,7 +205,7 @@ impl Ctx<'_> {
 	pub fn name_for(&self, entry: &FeedEntry) -> String {
 		match self.node_for(&entry.channel).or_else(|| entry.node_id.clone()) {
 			Some(node) => self.name(&node),
-			None if entry.channel.is_empty() => "unknown peer".to_owned(),
+			None if entry.channel.is_empty() => "LSP".to_owned(),
 			None => truncate_id(&entry.channel, 8, 6),
 		}
 	}
@@ -504,8 +500,7 @@ pub fn feed_attention(c: &Ctx, room: Option<&Room>, fmt_sats: &dyn Fn(u64) -> St
 	if let Some(channels) = c.channels {
 		for ch in &channels.channels {
 			let Some(stage) = close_stage(ch.channel_shutdown_state) else { continue };
-			// The stage's age comes from the feed. A close whose stage event is missing from a full page is older
-			// than everything loaded; one missing from a short page simply has not been polled yet (30 s).
+			// Stage age comes from the feed: missing from a full page means older than it, from a short page not yet polled (30 s).
 			let Some(since) = stage_since_ms(c, &ch.user_channel_id).or_else(|| {
 				if !c.feed_has_more {
 					return None;
@@ -787,7 +782,8 @@ mod tests {
 	#[test]
 	fn an_old_daemon_is_recognised_by_its_refusal_or_a_missing_route() {
 		assert!(needs_newer_daemon("Error: [InvalidRequestError]: An exact ledger identifier is required"));
-		assert!(needs_newer_daemon("Failed to decode error response (status 404 Not Found): buffer underflow"));
+		assert!(needs_newer_daemon("Error: [InternalError]: HTTP 404 Not Found"), "an empty 404 body carries its status");
 		assert!(!needs_newer_daemon("HTTP request failed: connection reset"));
+		assert!(!needs_newer_daemon("Error: [InvalidRequestError]: unknown channel 4041"), "a 404 inside other text is not a missing route");
 	}
 }

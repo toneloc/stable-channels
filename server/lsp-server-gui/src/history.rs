@@ -6,6 +6,7 @@ use chrono::{TimeZone, Utc};
 use sc_rest_client::sc_protos::stable::ChannelLedgerEvent;
 use serde_json::Value;
 
+use crate::format::format_usd as usd;
 use crate::ledger::{human_summary, humanize_enum};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,12 +62,21 @@ const SUCCESS_EVENTS: [&str; 6] = [
 	"PAYMENT_SUCCESSFUL",
 ];
 
-/// Routine housekeeping the owner does not need in a cross-channel feed (Channel History still shows it).
+/// Routine housekeeping the owner does not need in a cross-channel feed (the Audit log still shows it).
 pub fn is_routine(entry: &HistoryEntry) -> bool {
+	// Healthy event-stream bookkeeping with no channel ref; a lossy or partial reconciliation stays visible.
+	let channel_less_infrastructure = |e: &ChannelLedgerEvent| {
+		let healthy = match e.event_type.as_str() {
+			"EVENT_STREAM_GAP_STARTED" | "EVENT_STREAM_GAP_CLOSED" => true,
+			"RECONCILIATION_RESULT" => detail(e).get("status").and_then(Value::as_str) == Some("completed"),
+			_ => false,
+		};
+		healthy && !e.refs.iter().any(|r| matches!(r.role.as_str(), "user_channel_id" | "channel_id"))
+	};
 	match entry.kind {
 		EntryKind::Peer => true,
 		EntryKind::Sync => !entry.failed,
-		EntryKind::Other => entry.summary.starts_with("Wallet above peg"),
+		EntryKind::Other => entry.summary.starts_with("Wallet above peg") || entry.events.iter().all(channel_less_infrastructure),
 		_ => false,
 	}
 }
@@ -89,7 +99,7 @@ pub fn failure_detail(events: &[ChannelLedgerEvent]) -> Option<String> {
 
 const LINK_ROLES: [&str; 3] = ["payment_id", "trade_id", "settlement_id"];
 
-fn detail(event: &ChannelLedgerEvent) -> Value {
+pub(crate) fn detail(event: &ChannelLedgerEvent) -> Value {
 	serde_json::from_str(&event.detail_json).unwrap_or(Value::Null)
 }
 
@@ -207,10 +217,6 @@ fn sats(msat: u64) -> String {
 		return format!("{msat} msat");
 	}
 	format!("{} sats", crate::format::format_sats(msat / 1_000))
-}
-
-fn usd(value: f64) -> String {
-	crate::format::format_usd(value)
 }
 
 // " (route not found)" when LDK said why a payment in the flow failed.
@@ -402,6 +408,22 @@ mod tests {
 		let rejected = build_entries(&[ev(1, "TRADE_REJECTION_QUEUED", serde_json::json!({"reason_code": "insufficient_capacity"}), &[("trade_id", "t")])], "uid");
 		assert_eq!(rejected[0].kind, EntryKind::TradeRejected);
 		assert_eq!(rejected[0].summary, "Trade rejected: not enough channel capacity");
+	}
+
+	#[test]
+	fn channel_less_stream_bookkeeping_is_routine() {
+		let routine = |event, status: &str| is_routine(&build_entries(&[ev(1, event, serde_json::json!({"status": status}), &[])], "")[0]);
+		assert!(routine("EVENT_STREAM_GAP_STARTED", ""));
+		assert!(routine("EVENT_STREAM_GAP_CLOSED", ""));
+		assert!(routine("RECONCILIATION_RESULT", "completed"));
+		for status in ["partial", "failed", "completed_with_loss"] {
+			assert!(!routine("RECONCILIATION_RESULT", status), "{status}");
+		}
+		assert!(!routine("RECONCILIATION_GAP_DETECTED", "partial"), "a detected gap is never routine");
+		let attached = build_entries(&[ev(1, "EVENT_STREAM_GAP_CLOSED", serde_json::json!({}), &[("user_channel_id", "7")])], "7");
+		assert!(!is_routine(&attached[0]), "a channel's own recovery stays in the feed");
+		let other = build_entries(&[ev(1, "SOMETHING_NEW_HAPPENED", serde_json::json!({}), &[])], "");
+		assert!(!is_routine(&other[0]), "unknown events are never hidden");
 	}
 
 	#[test]

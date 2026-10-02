@@ -72,11 +72,15 @@ pub struct GetRevenueResponse {
 	pub next_cursor: ::core::option::Option<::prost::alloc::string::String>,
 	#[prost(int64, tag = "4")]
 	pub snapshot_at: i64,
+	/// Totals for this window miss older history: a capped payment scan, dropped items or pruned forwards.
 	#[prost(bool, tag = "5")]
 	pub partial: bool,
 	/// Categories the node cannot report; show them as not tracked rather than zero.
 	#[prost(string, repeated, tag = "6")]
 	pub untracked: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+	/// How many items the snapshot holds in total (the newest `REVENUE_MAX_ITEMS` at most).
+	#[prost(uint64, tag = "7")]
+	pub item_count: u64,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -126,6 +130,7 @@ mod tests {
 			snapshot_at: 1_790_000_060,
 			partial: false,
 			untracked: vec!["onchain_fee".into()],
+			item_count: 1,
 		};
 		assert_eq!(GetRevenueResponse::decode(response.encode_to_vec().as_slice()).unwrap(), response);
 		let refund = RefundTradeFeeResponse { refund_payment_id: "r1".into(), amount_msat: 1_000_000 };

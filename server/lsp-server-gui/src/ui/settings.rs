@@ -144,8 +144,7 @@ fn cert_field(ctx: AppCtx, value: String) -> Element {
 	let mut conn = ctx.conn;
 	let browse = move |_| {
 		with_file_dialog(ctx, async move {
-			// Default cert is tls.crt; include common cert extensions so the
-			// real file isn't greyed out on macOS (NSOpenPanel disables non-matching files).
+			// Default cert is tls.crt; list the common extensions so macOS's NSOpenPanel does not grey out the real file.
 			if let Some(path) = crate::platform::pick_file(&[("Certificate", &["crt", "cert", "pem", "der"])]).await {
 				let mut conn = ctx.conn;
 				conn.write().tls_cert_path = path.display().to_string();

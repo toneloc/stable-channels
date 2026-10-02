@@ -98,8 +98,7 @@ pub fn App() -> Element {
 		}
 	});
 
-	// Web: the serving container publishes the API key at /setup/key.txt
-	// (same origin, behind the deployment's auth) — connect with zero input.
+	// Web: the container publishes the API key at /setup/key.txt (same origin, behind its auth), so connect with zero input.
 	#[cfg(target_arch = "wasm32")]
 	use_future(move || async move {
 		let mut delay_ms = 500;
@@ -558,6 +557,8 @@ mod tests {
 					RevenueLine { category: "trade_fee".into(), direction: "in".into(), count: 3, total_msat: 9_000_000 },
 					RevenueLine { category: "jit_open_fee".into(), direction: "out".into(), count: 1, total_msat: 2_000_000 },
 				],
+				partial: !feed,
+				untracked: if feed { Vec::new() } else { vec!["close_fee".into()] },
 				..Default::default()
 			});
 			if feed {
@@ -609,6 +610,7 @@ mod tests {
 		assert!(html.contains("~2 more channels"), "tiles still render");
 		assert!(html.contains("Channel with 02aa opening"), "In progress still renders from the channel list");
 		assert!(!html.contains("stuck at"), "with no feed the close's age is unknown");
+		assert!(html.contains("spent \u{2265} 2,000 sats · some fees not tracked · partial history"), "the week tile names both gaps");
 	}
 
 	#[component]
@@ -918,6 +920,7 @@ mod tests {
 				snapshot_at: crate::format::now_secs() as i64,
 				partial: false,
 				untracked: vec!["onchain_fee".into(), "close_fee_bump".into()],
+				item_count: 1,
 			});
 		});
 		rsx! { CurrentTab {} }
@@ -939,7 +942,9 @@ mod tests {
 		}
 		assert!(!html.contains("free opening"), "the always-zero JIT fee line is gone");
 		assert!(html.contains("Trade and routing fees") && !html.contains("JIT fees"), "no JIT earnings while opens are free");
-		assert!(html.contains("\u{2212}2,974 sats"), "net is negative: 2,000 earned − 4,974 spent, closes and sweeps included");
+		assert!(html.contains("\u{2264} \u{2212}2,974 sats"), "net is a ceiling: 2,000 earned − 4,974 known spent, on-chain fees untracked");
+		assert!(html.contains("\u{2265} 4,974 sats"), "spent is a floor");
+		assert!(html.contains("At most: some fees are not tracked"));
 		for text in ["Channel closes", "Close fee bumps", "Claims &", ">Channel close</button>", ">Claim or sweep</button>"] {
 			assert!(html.contains(text), "missing {text}");
 		}

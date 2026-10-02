@@ -20,6 +20,8 @@ mod forward_history;
 mod onchain_audit;
 mod stream_checkpoint;
 
+pub use forward_history::fingerprint as forward_detail_fingerprint;
+
 /// Outcome of `record_payment_and_maybe_update_backing`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaymentPersistence {
@@ -886,6 +888,12 @@ impl Database {
             params![node_id, ip],
             |row| row.get(0),
         )
+    }
+
+    /// Forget sightings not seen since `older_than` (unix seconds); returns how many were dropped.
+    pub fn prune_peer_locations(&self, older_than: i64) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM peer_locations WHERE last_seen_at < ?1", params![older_than])
     }
 
     pub fn recent_peer_locations(&self, node_id: &str, limit: usize) -> SqliteResult<Vec<PeerLocationRecord>> {
@@ -4721,6 +4729,8 @@ mod tests {
         assert_eq!(rows[1].country_code.as_deref(), Some("IN"), "a repeat never erases the country");
         assert_eq!(rows[0].country_code, None);
         assert_eq!(db.recent_peer_locations("node", 1).unwrap().len(), 1);
+        assert_eq!(db.prune_peer_locations(250).unwrap(), 1, "the sighting last seen at 200 is dropped");
+        assert_eq!(db.recent_peer_locations("node", 10).unwrap().iter().map(|r| r.ip.as_str()).collect::<Vec<_>>(), ["5.6.7.8"]);
     }
 
     #[test]

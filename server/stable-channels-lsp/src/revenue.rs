@@ -12,7 +12,7 @@ use ldk_server_client::ldk_server_grpc::types::{
     payment_kind, transaction_type, Channel, Payment, PaymentDirection, PaymentStatus,
 };
 use sc_protos::revenue::{RevenueItem, RevenueLine};
-use stable_channels::db::{Database, RevenueLedgerRow, SettlementLabel, TradeDecisionSummary, TradeFeeRefund};
+use stable_channels::db::{forward_detail_fingerprint, Database, RevenueLedgerRow, SettlementLabel, TradeDecisionSummary, TradeFeeRefund};
 use tracing::warn;
 
 use crate::stable_manager::LdkServerCalls;
@@ -41,6 +41,10 @@ pub const STABILITY_OUT: &str = "stability_out";
 
 pub const DEFAULT_PAGE_LIMIT: usize = 50;
 pub const MAX_PAGE_LIMIT: usize = 500;
+/// Newest items kept in a snapshot; older ones are dropped and the snapshot marked partial.
+pub const REVENUE_MAX_ITEMS: usize = 50_000;
+/// Forward fees older than this leave the cache on the next rebuild (the ledger keeps them).
+pub const REVENUE_LOOKBACK_SECS: i64 = 365 * 86_400;
 
 /// Forward fees and funding txids parsed from the ledger, kept across rebuilds so each reads only new rows.
 #[derive(Default)]
@@ -52,6 +56,8 @@ pub struct LedgerFacts {
     pub first_funding: HashMap<String, String>,
     /// Recorded "the LSP opened it privately" flag per user_channel_id, kept for channels that later close.
     pub private_outbound: HashMap<String, bool>,
+    /// Forward rows whose twin from the other source has not arrived, per fingerprint: (from history, time in ms).
+    pub unpaired: HashMap<String, Vec<(bool, Option<i64>)>>,
 }
 
 impl LedgerFacts {
@@ -64,6 +70,22 @@ impl LedgerFacts {
             let text = |key: &str| detail.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
             match row.event_type.as_str() {
                 "PAYMENT_FORWARDED" | "PAYMENT_FORWARDED_BACKFILL" => {
+                    // One forward can leave a live row and a history row; the second one to arrive books nothing.
+                    if let Some(key) = forward_detail_fingerprint(&detail) {
+                        let history = row.event_type == "PAYMENT_FORWARDED_BACKFILL";
+                        let at = if history { detail.get("occurred_at_ms").and_then(|v| v.as_i64()) } else { Some(row.occurred_at_ms) };
+                        let waiting = self.unpaired.entry(key).or_default();
+                        let twin = waiting.iter().position(|&(other, other_at)| {
+                            other != history && if history { twins(at, other_at) } else { twins(other_at, at) }
+                        });
+                        match twin {
+                            Some(i) => {
+                                waiting.remove(i);
+                                continue;
+                            },
+                            None => waiting.push((history, at)),
+                        }
+                    }
                     let fee = number("fee_msat").or_else(|| number("total_fee_msat")).unwrap_or(0);
                     let skim = number("skimmed_fee_msat").unwrap_or(0).min(fee);
                     let base = RevenueItem {
@@ -112,6 +134,18 @@ pub struct Sources<'a> {
     pub ledger: &'a LedgerFacts,
 }
 
+/// A live forward event can trail its history row this long (buffered delivery after a reconnect).
+const LIVE_FORWARD_DELAY_MS: i64 = 86_400_000;
+
+/// Whether a history row at `history_ms` (None: LDK gave no time) and a live row at `live_ms` can be one forward.
+fn twins(history_ms: Option<i64>, live_ms: Option<i64>) -> bool {
+    match (history_ms, live_ms) {
+        (None, _) => true,
+        (Some(h), Some(l)) => (-120_000..=LIVE_FORWARD_DELAY_MS).contains(&(l - h)),
+        (Some(_), None) => false,
+    }
+}
+
 /// Txid and LDK's classification of an on-chain payment (unset on older LDK Servers and plain sends).
 fn onchain_tx(payment: &Payment) -> Option<(&str, Option<&transaction_type::Kind>)> {
     match payment.kind.as_ref()?.kind.as_ref()? {
@@ -120,10 +154,6 @@ fn onchain_tx(payment: &Payment) -> Option<(&str, Option<&transaction_type::Kind
         },
         _ => None,
     }
-}
-
-fn onchain_txid(payment: &Payment) -> Option<&str> {
-    onchain_tx(payment).map(|(txid, _)| txid)
 }
 
 fn refund_status(refund: &TradeFeeRefund, status_of: &HashMap<&str, i32>) -> &'static str {
@@ -137,8 +167,8 @@ fn refund_status(refund: &TradeFeeRefund, status_of: &HashMap<&str, i32>) -> &'s
     }
 }
 
-/// Turns one rebuild's sources into revenue items, newest first.
-pub fn classify(src: &Sources) -> Vec<RevenueItem> {
+/// Turns one rebuild's sources into revenue items, newest first, and the close categories BDK could not price.
+pub fn classify(src: &Sources) -> (Vec<RevenueItem>, HashSet<&'static str>) {
     let labels: HashMap<&str, &SettlementLabel> = src.labels.iter().map(|l| (l.payment_id.as_str(), l)).collect();
     let decisions: HashMap<&str, &TradeDecisionSummary> =
         src.decisions.iter().map(|d| (d.inbound_payment_id.as_str(), d)).collect();
@@ -165,6 +195,7 @@ pub fn classify(src: &Sources) -> Vec<RevenueItem> {
     };
 
     let mut items = src.ledger.forwards.clone();
+    let mut unpriced = HashSet::new();
     for payment in src.payments {
         if payment.status != PaymentStatus::Succeeded as i32 {
             continue;
@@ -186,20 +217,19 @@ pub fn classify(src: &Sources) -> Vec<RevenueItem> {
         };
         use transaction_type::Kind;
         let (category, value) = match (inbound, label.map(|l| l.kind.as_str()), onchain_tx(payment)) {
-            // LDK records closes, claims and sweeps as inbound (the funds come back to the wallet); the fee is what
-            // matters, whichever way the transaction went. BDK reports 0 when it cannot price a transaction whose
-            // inputs it does not own, so a 0 fee is unknown, never free.
+            // Closes, claims and sweeps count their fee whichever way LDK lists them; BDK's 0 means unpriced, never free.
             (_, _, Some((txid, Some(kind @ (Kind::CooperativeClose(_) | Kind::UnilateralClose(_) | Kind::AnchorBump(_) | Kind::Claim(_) | Kind::Sweep(_)))))) => {
-                if fee == 0 {
-                    continue;
-                }
-                item.txid = txid.to_owned();
-                item.direction = "out".into();
                 let category = match kind {
                     Kind::AnchorBump(_) => CLOSE_FEE_BUMP,
                     Kind::Claim(_) | Kind::Sweep(_) => CLAIM_SWEEP_FEE,
                     _ => CLOSE_FEE,
                 };
+                if fee == 0 {
+                    unpriced.insert(category);
+                    continue;
+                }
+                item.txid = txid.to_owned();
+                item.direction = "out".into();
                 (category, fee)
             },
             (true, Some("trade"), _) => {
@@ -244,7 +274,7 @@ pub fn classify(src: &Sources) -> Vec<RevenueItem> {
         items.push(item);
     }
     items.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then_with(|| b.key.cmp(&a.key)));
-    items
+    (items, unpriced)
 }
 
 /// Per-category totals for items at or after `since`, plus the rejected subset of trade fees.
@@ -306,11 +336,24 @@ const LEDGER_CHUNK_IDS: i64 = 5_000;
 
 /// The latest classified items and when they were built.
 pub struct Snapshot {
+    /// Newest first, at most `REVENUE_MAX_ITEMS`.
     pub items: Vec<RevenueItem>,
     pub built_at: i64,
-    pub partial: bool,
+    /// The payment scan hit its page cap, so older payments are missing.
+    pub partial_scan: bool,
+    /// More than `REVENUE_MAX_ITEMS` were classified and the oldest dropped.
+    pub truncated: bool,
+    /// Forwards before this unix time have left the cache; None until a rebuild prunes one.
+    pub pruned_before: Option<i64>,
     /// Categories this node's LDK Server cannot report, so their totals are not facts.
     pub untracked: Vec<String>,
+}
+
+impl Snapshot {
+    /// True when totals from `since` on miss something: a capped scan, dropped items or pruned forwards.
+    pub fn partial(&self, since: i64) -> bool {
+        self.partial_scan || self.truncated || self.pruned_before.is_some_and(|cutoff| since < cutoff)
+    }
 }
 
 /// What rebuilds carry forward: ledger facts, listed payments and funding transactions already found in the wallet.
@@ -321,6 +364,8 @@ struct Cache {
     labels_after: i64,
     onchain: HashMap<String, Payment>,
     payments: PaymentBook,
+    /// Sticky: the cutoff of the last prune that dropped a forward.
+    pruned_before: Option<i64>,
 }
 
 /// Payments read from ListPayments, kept across rebuilds so a warm rebuild only fetches new pages.
@@ -427,11 +472,13 @@ pub fn now_secs() -> i64 {
 /// Rebuilds the snapshot; on any error the previous snapshot stays.
 pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Database>, now: i64) -> Result<(), String> {
     let mut cache = store.cache.lock().await;
-    let partial = scan_payments(&mut cache.payments, ldk).await?;
+    let partial_scan = scan_payments(&mut cache.payments, ldk).await?;
     refresh_pending(&mut cache.payments, ldk).await;
     let mut payments: Vec<Payment> = cache.payments.by_id.values().cloned().collect();
     let channels = ldk.list_channels(ListChannelsRequest {}).await.map_err(|e| e.to_string())?.channels;
-    let listed_onchain = payments.iter().any(|p| onchain_txid(p).is_some());
+    let listed_onchain = payments.iter().any(|p| onchain_tx(p).is_some());
+    // An LDK Server that classifies on-chain payments reports close, bump and sweep fees; an older one never does.
+    let typed_onchain = payments.iter().any(|p| onchain_tx(p).is_some_and(|(_, kind)| kind.is_some()));
     let reader = Arc::clone(db);
     let (after, labels_after) = (cache.ledger.after_id, cache.labels_after);
     let (rows, max_id, new_labels, decisions, refunds) = tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
@@ -451,6 +498,17 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
     .map_err(|e| e.to_string())?;
     cache.ledger.absorb(&rows);
     cache.ledger.after_id = cache.ledger.after_id.max(max_id);
+    // The cache never prunes on its own; bound it by age here and remember where it now starts.
+    let cutoff = now - REVENUE_LOOKBACK_SECS;
+    let forwards_before = cache.ledger.forwards.len();
+    cache.ledger.forwards.retain(|f| f.occurred_at >= cutoff);
+    cache.ledger.unpaired.retain(|_, rows| {
+        rows.retain(|(_, at)| at.is_none_or(|ms| ms >= cutoff * 1000));
+        !rows.is_empty()
+    });
+    if cache.ledger.forwards.len() < forwards_before {
+        cache.pruned_before = Some(cutoff);
+    }
     cache.labels.extend(new_labels.0);
     cache.labels_after = new_labels.1;
     // LDK Server's list can lack on-chain payments; find funding transactions in the wallet instead.
@@ -476,7 +534,7 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
         }
     }
     payments.extend(cache.onchain.values().filter(|p| !listed.contains(&p.payment_id)).cloned());
-    let items = classify(&Sources {
+    let (mut items, unpriced) = classify(&Sources {
         payments: &payments,
         labels: &cache.labels,
         decisions: &decisions,
@@ -484,18 +542,27 @@ pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Da
         channels: &channels,
         ledger: &cache.ledger,
     });
+    let pruned_before = cache.pruned_before;
     drop(cache);
-    if partial {
+    if partial_scan {
         warn!("[revenue] payment scan stopped after {} pages; totals are partial", PAYMENT_PAGE_CAP);
     }
+    let truncated = items.len() > REVENUE_MAX_ITEMS;
+    if truncated {
+        warn!("[revenue] {} items classified; keeping the newest {}", items.len(), REVENUE_MAX_ITEMS);
+        items.truncate(REVENUE_MAX_ITEMS);
+    }
+    tracing::debug!("[revenue] snapshot rebuilt: {} items", items.len());
     let mut untracked = if listed_onchain { Vec::new() } else { vec![ONCHAIN_FEE.to_string()] };
-    // A fee category with no item yet reads as "not tracked" in the GUI, never as a zero cost.
-    for category in [CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE] {
-        if !items.iter().any(|i| i.category == category) {
-            untracked.push(category.to_string());
+    if !typed_onchain {
+        untracked.extend([CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from));
+    }
+    for category in unpriced {
+        if !untracked.iter().any(|c| c == category) {
+            untracked.push(category.into());
         }
     }
-    *store.snapshot.write().unwrap() = Some(Arc::new(Snapshot { items, built_at: now, partial, untracked }));
+    *store.snapshot.write().unwrap() = Some(Arc::new(Snapshot { items, built_at: now, partial_scan, truncated, pruned_before, untracked }));
     Ok(())
 }
 
@@ -687,7 +754,7 @@ mod tests {
         let channels = vec![Channel { user_channel_id: "7".into(), counterparty_node_id: "02aa".into(), ..Default::default() }];
         let mut ledger = LedgerFacts::default();
         ledger.funding_txids.insert("aa".into());
-        let items = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &refunds, channels: &channels, ledger: &ledger });
+        let (items, _) = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &refunds, channels: &channels, ledger: &ledger });
         let cat = |key: &str| (by_key(&items, key).category.as_str(), by_key(&items, key).direction.as_str(), by_key(&items, key).amount_msat);
         assert_eq!(cat("trade-ok"), (TRADE_FEE, "in", 1_000_000));
         assert_eq!(cat("trade-rej"), (TRADE_FEE, "in", 2_000_000));
@@ -737,7 +804,8 @@ mod tests {
         let mut ledger = LedgerFacts::default();
         ledger.first_funding.insert("7".into(), "aa".into());
         ledger.first_funding.insert("8".into(), "bb".into());
-        let items = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
+        let (items, unpriced) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
+        assert_eq!(unpriced, HashSet::from([CLAIM_SWEEP_FEE, CLOSE_FEE_BUMP]));
         let cat = |key: &str| by_key(&items, key).category.as_str();
         assert_eq!(cat("jit"), JIT_OPEN_FEE, "a first private outbound funding stays a JIT open");
         assert_eq!(cat("open"), CHANNEL_FUNDING_FEE);
@@ -765,7 +833,7 @@ mod tests {
             let mut payments = vec![pay("t", true, PaymentStatus::Succeeded, Some(1), None, 1, None)];
             payments.extend(extra);
             let r = refunds(id);
-            let items = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &r, channels: &[], ledger: &ledger });
+            let (items, _) = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &r, channels: &[], ledger: &ledger });
             by_key(&items, "t").refund_status.clone()
         };
         assert_eq!(status(None, None), "unknown");
@@ -778,7 +846,7 @@ mod tests {
     fn unset_amounts_count_as_zero() {
         let payments = vec![pay("spend", false, PaymentStatus::Succeeded, None, None, 5, Some("bb"))];
         let ledger = LedgerFacts::default();
-        let items = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &[], ledger: &ledger });
+        let (items, _) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &[], ledger: &ledger });
         assert_eq!((items[0].category.as_str(), items[0].amount_msat), (ONCHAIN_FEE, 0));
     }
 
@@ -799,6 +867,68 @@ mod tests {
         let backfill = by_key(&ledger.forwards, "fwd:5");
         assert!(backfill.approximate_time && backfill.node_id.is_empty());
         assert!(ledger.forwards.iter().all(|i| i.key != "jit:5"), "no skim, no JIT line");
+    }
+
+    fn forward(db: &stable_channels::db::Database, history_id: Option<&str>, at_ms: Option<i64>) {
+        let mut detail = serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "forwarded_msat": 1_000, "fee_msat": 7});
+        if let Some(at) = at_ms {
+            detail["occurred_at_ms"] = at.into();
+        }
+        let draft = stable_channels::ledger::LedgerEventDraft::from_audit_event(
+            if history_id.is_some() { "PAYMENT_FORWARDED_BACKFILL" } else { "PAYMENT_FORWARDED" }, detail);
+        match history_id {
+            Some(id) => assert!(db.append_forwarded_event_if_unseen(id, &draft).unwrap()),
+            None => assert!(db.append_observed_forward(&draft).unwrap()),
+        }
+    }
+
+    // Absorbs one row per call, as successive rebuilds would, and returns the correlation statuses and fees booked.
+    fn booked(db: &stable_channels::db::Database) -> (Vec<String>, usize) {
+        let rows = db.revenue_ledger_rows_between(0, db.max_ledger_event_id().unwrap()).unwrap();
+        let mut facts = LedgerFacts::default();
+        for row in &rows {
+            facts.absorb(std::slice::from_ref(row));
+        }
+        let status = |r: &RevenueLedgerRow| serde_json::from_str::<serde_json::Value>(&r.detail_json).unwrap()["forward_correlation"]["status"].as_str().unwrap().to_owned();
+        (rows.iter().map(status).collect(), facts.forwards.len())
+    }
+
+    #[test]
+    fn identical_forwards_book_one_fee_each_however_the_ledger_correlated_them() {
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), Some(1_000_000));
+        forward(&db, Some("h2"), Some(1_000_000));
+        forward(&db, None, Some(1_001_000));
+        forward(&db, Some("h3"), Some(1_000_000));
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unmatched".into(), "ambiguous".into(), "possible_match".into()], 3));
+
+        let (_dir, db) = temp_db();
+        for step in [None, None, Some("h1"), Some("h2"), None, Some("h3")] {
+            forward(&db, step, Some(1_000_000));
+        }
+        assert_eq!(booked(&db).1, 3, "three live and three history rows of three forwards");
+    }
+
+    #[test]
+    fn an_undated_or_late_twin_books_no_second_fee() {
+        let (_dir, db) = temp_db();
+        forward(&db, None, Some(1_000_000));
+        forward(&db, Some("undated"), None);
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unavailable".into()], 1));
+        let mut legacy = LedgerFacts::default();
+        legacy.absorb(&[
+            row(1, "PAYMENT_FORWARDED", 1_000_000, serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "forwarded_msat": 1_000, "fee_msat": 7})),
+            row(2, "PAYMENT_FORWARDED_BACKFILL", 9_000_000_000, serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "outbound_amount_msat": 1_000, "total_fee_msat": 7})),
+        ]);
+        assert_eq!(legacy.forwards.len(), 1, "a legacy backfill row is undated, not dated by its reconstruction");
+
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), Some(1_000_000));
+        forward(&db, None, Some(1_600_000));
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unmatched".into()], 1), "a live event delivered ten minutes late");
+        forward(&db, None, Some(1_600_000));
+        forward(&db, Some("h2"), Some(1_000_000 + 2 * LIVE_FORWARD_DELAY_MS));
+        assert_eq!(booked(&db).1, 3, "a second live row and a history row days later are forwards of their own");
     }
 
     #[test]
@@ -928,6 +1058,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forwards_older_than_the_lookback_leave_the_cache_and_mark_the_snapshot_partial() {
+        let (_dir, db) = temp_db();
+        let now = 2 * REVENUE_LOOKBACK_SECS;
+        for (at, fee) in [(now - REVENUE_LOOKBACK_SECS - 10, 7_000u64), (now - 10, 3_000)] {
+            db.append_ledger_event(&stable_channels::ledger::LedgerEventDraft::from_audit_event(
+                "PAYMENT_FORWARDED", serde_json::json!({"fee_msat": fee, "occurred_at_ms": at * 1_000}))).unwrap();
+        }
+        let store = RevenueStore::default();
+        rebuild(&store, &Fake::default(), &db, now).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.items.iter().map(|i| i.amount_msat).collect::<Vec<_>>(), [3_000], "the year-old forward is gone");
+        assert!(snap.partial(0), "the operator is told the totals are bounded");
+        rebuild(&store, &Fake::default(), &db, now + 60).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert!(snap.partial(0), "a later rebuild that prunes nothing still knows all-time totals are bounded");
+        assert!(!snap.partial(now - 7 * 86_400), "a week is inside what the cache holds");
+    }
+
+    #[tokio::test]
     async fn a_rebuild_reads_payments_labels_and_new_ledger_rows_only() {
         let (_dir, db) = temp_db();
         db.record_settlement("trade-1", "trade").unwrap();
@@ -939,7 +1088,7 @@ mod tests {
         assert!(store.snapshot().is_none(), "no snapshot before the first build");
         rebuild(&store, &fake, &db, 100).await.unwrap();
         let snap = store.snapshot().unwrap();
-        assert_eq!((snap.built_at, snap.partial, snap.items.len()), (100, false, 2));
+        assert_eq!((snap.built_at, snap.partial(0), snap.items.len()), (100, false, 2));
         rebuild(&store, &fake, &db, 160).await.unwrap();
         assert_eq!(store.snapshot().unwrap().items.len(), 2, "ledger rows are not read twice");
     }
@@ -961,7 +1110,7 @@ mod tests {
         let fake = Fake { endless: true, ..Default::default() };
         let store = RevenueStore::default();
         rebuild(&store, &fake, &db, 100).await.unwrap();
-        assert!(store.snapshot().unwrap().partial);
+        assert!(store.snapshot().unwrap().partial(0));
     }
 
     fn failed_sync(i: usize) -> Payment {
@@ -976,12 +1125,12 @@ mod tests {
         let store = RevenueStore::default();
         rebuild(&store, &fake, &db, 100).await.unwrap();
         assert_eq!(fake.list_calls.load(Ordering::SeqCst), 3, "a cold start walks the whole history");
-        assert!(!store.snapshot().unwrap().partial);
+        assert!(!store.snapshot().unwrap().partial(0));
         fake.payments.lock().unwrap().insert(0, pay("send-1", false, PaymentStatus::Succeeded, Some(5_000), Some(7), 200, None));
         rebuild(&store, &fake, &db, 160).await.unwrap();
         assert_eq!(fake.list_calls.load(Ordering::SeqCst), 5, "a warm rebuild stops at the first page it has already seen");
         let snap = store.snapshot().unwrap();
-        assert!(!snap.partial, "the rest of the history was read before");
+        assert!(!snap.partial(0), "the rest of the history was read before");
         assert_eq!(by_key(&snap.items, "send-1").category, LIGHTNING_SEND_FEE);
     }
 
@@ -1101,8 +1250,27 @@ mod tests {
         assert_eq!(
             snap.untracked,
             [ONCHAIN_FEE, CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from),
-            "other on-chain fees cannot be measured from this list, and no close, bump or sweep fee is known yet"
+            "other on-chain fees cannot be measured from this list, and nothing in it carries LDK's transaction type"
         );
+    }
+
+    #[tokio::test]
+    async fn close_fees_are_untracked_only_when_no_listed_onchain_payment_carries_a_type() {
+        use ldk_server_client::ldk_server_grpc::types::{Funding, TransactionChannel};
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().push(pay("spend", false, PaymentStatus::Succeeded, Some(1_000), Some(100), 5, Some("aa")));
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from));
+        let funding = transaction_type::Kind::Funding(Funding { channels: vec![TransactionChannel { channel_id: "c".into(), counterparty_node_id: "02aa".into() }] });
+        fake.payments.lock().unwrap().push(typed("open", 100, 6, "bb", funding));
+        rebuild(&store, &fake, &db, 20).await.unwrap();
+        assert!(store.snapshot().unwrap().untracked.is_empty(), "a typed list would carry closes, so none means zero");
+        let close = transaction_type::Kind::CooperativeClose(ldk_server_client::ldk_server_grpc::types::CooperativeClose { channel_id: "c".into(), counterparty_node_id: "02aa".into() });
+        fake.payments.lock().unwrap().push(typed("close", 0, 7, "cc", close));
+        rebuild(&store, &fake, &db, 30).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [CLOSE_FEE], "a close BDK could not price is not a zero");
     }
 
     #[tokio::test]
@@ -1142,7 +1310,7 @@ mod tests {
             pay("open-9", false, PaymentStatus::Succeeded, Some(1), Some(200_000), 12, Some("cc")),
             pay("open-11", false, PaymentStatus::Succeeded, Some(1), Some(150_000), 13, Some("dd")),
         ];
-        let items = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
+        let (items, _) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
         let cat = |key: &str| (by_key(&items, key).category.as_str(), by_key(&items, key).amount_msat);
         assert_eq!(cat("open-7"), (JIT_OPEN_FEE, 287_000));
         assert_eq!((by_key(&items, "open-7").node_id.as_str(), by_key(&items, "open-7").user_channel_id.as_str()), ("02aa", "7"));

@@ -12,7 +12,7 @@ use crate::ui::widgets::{Bubble, Card, Empty, Gate, Icon, IdCopy, InfoTip, Kv, M
 const HELP_NET: &str = "Earned minus spent. Stability settlements are not included.";
 const HELP_STABILITY: &str = "Sats paid to users when BTC fell and received when it rose. This is the peg working, not income.";
 const HELP_CLOSE_FEES: &str = "On-chain fees LDK reports for close transactions the wallet paid for. What a close itself costs the channel balance is not counted here; that needs the ledger.";
-const HELP_UNTRACKED: &str = "This node's LDK Server does not list these transactions, so the total would read as zero when it is not.";
+const HELP_UNTRACKED: &str = "This node's LDK Server does not list or classify these transactions, so the total would read as zero when it is not.";
 const HELP_JIT_OPENS: &str = "On-chain fees the LSP paid to open private channels for users. Opening is free for them, so this is what the free service costs.";
 const HELP_JIT: &str = "Opening fee skimmed from a JIT channel's first payment. Zero while the LSP opens channels for free.";
 
@@ -36,6 +36,17 @@ pub fn totals(lines: &[RevenueLine]) -> (u64, u64, i128) {
 	let sum = |categories: &[&str]| categories.iter().map(|c| line(lines, c).1).sum::<u64>();
 	let (earned, spent) = (sum(&EARNED), sum(&SPENT));
 	(earned, spent, earned as i128 - spent as i128)
+}
+
+/// A spent category the node cannot report makes spent a floor and net a ceiling.
+pub fn spent_untracked(untracked: &[String]) -> bool {
+	SPENT.iter().any(|c| untracked.iter().any(|u| u == c))
+}
+
+/// A net that may only be a ceiling reads "≤ x".
+pub fn bounded(ctx: AppCtx, net: i128, ceiling: bool) -> String {
+	let net = signed(ctx, net);
+	if ceiling { format!("\u{2264} {net}") } else { net }
 }
 
 /// Stability received minus paid, in msat.
@@ -197,6 +208,7 @@ pub fn Revenue() -> Element {
 	drop(data);
 	let lines = resp.lines;
 	let (earned, spent, net) = totals(&lines);
+	let spent_unknown = spent_untracked(&resp.untracked);
 	let stability = stability_net(&lines);
 	let (trade_n, trade_msat) = line(&lines, "trade_fee");
 	let (rejected_n, _) = line(&lines, "trade_fee_rejected");
@@ -265,15 +277,15 @@ pub fn Revenue() -> Element {
 			}
 		}
 		if resp.partial {
-			div { class: "card inner small", style: "margin-bottom: 12px;", "Totals cover the newest payments only; the node has more history than one refresh reads." }
+			div { class: "card inner small", style: "margin-bottom: 12px;", "Totals for this window miss older movements: the daemon keeps a year of routing fees, the newest 50,000 movements and a capped payment scan." }
 		}
 		div { class: "grid-4",
 			Stat { title: "Earned", value: ctx.fmt_msat(earned), sub: if jit_msat > 0 { "Trade, routing and JIT fees" } else { "Trade and routing fees" } }
-			Stat { title: "Spent", value: ctx.fmt_msat(spent), sub: "Fees the LSP paid" }
+			Stat { title: "Spent", value: if spent_unknown { format!("\u{2265} {}", ctx.fmt_msat(spent)) } else { ctx.fmt_msat(spent) }, sub: if spent_unknown { "Fees the LSP paid · some not tracked" } else { "Fees the LSP paid" } }
 			div { class: "card stat",
 				div { class: "stat-title", "Net" InfoTip { text: HELP_NET } }
-				div { class: "stat-value", style: if net > 0 && !reads_as_zero(&signed(ctx, net)) { "color: var(--green-text);" } else { "" }, "{signed(ctx, net)}" }
-				div { class: "stat-sub", "Earned minus spent" }
+				div { class: "stat-value", style: if net > 0 && !spent_unknown && !reads_as_zero(&signed(ctx, net)) { "color: var(--green-text);" } else { "" }, "{bounded(ctx, net, spent_unknown)}" }
+				div { class: "stat-sub", if spent_unknown { "At most: some fees are not tracked" } else { "Earned minus spent" } }
 			}
 			Stat { title: "Stability net", help: HELP_STABILITY, value: signed(ctx, stability), sub: "Peg settlements, not revenue" }
 		}
@@ -459,6 +471,12 @@ mod tests {
 		];
 		assert_eq!(totals(&lines), (3_003_000, 787_010, 2_215_990));
 		assert_eq!(stability_net(&lines), -60_000_000);
+	}
+
+	#[test]
+	fn an_untracked_fee_category_turns_net_into_a_ceiling() {
+		assert!(spent_untracked(&["onchain_fee".to_string()]), "on-chain fees exist but the node cannot report them");
+		assert!(!spent_untracked(&["stability_in".to_string()]), "only spent categories matter");
 	}
 
 	#[test]
