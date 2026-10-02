@@ -95,6 +95,7 @@ fun BalanceBar(
         }
 
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
+    SideEffect { state.updateLayout(barWidthPx, thumbDiameterPx) }
     val baseXPx = barWidthPx * currentFraction
 
     val thumbXPx = (baseXPx + state.currentOffsetPx).coerceIn(0f, barWidthPx)
@@ -144,23 +145,22 @@ fun BalanceBar(
             modifier =
                 Modifier.fillMaxWidth()
                     .height(if (interactive) thumbDiameter else barHeight)
-                    .onSizeChanged { barWidthPx = it.width.toFloat() }
+                    .onSizeChanged {
+                        barWidthPx = it.width.toFloat()
+                        state.updateLayout(it.width.toFloat(), thumbDiameterPx)
+                    }
                     .then(
                         if (interactive && !animator.isAwakening) {
                             Modifier.pointerInput(Unit) {
                                 detectDragGestures(
                                     onDragStart = { offset ->
-                                        state.onDragStart(offset, baseXPx, thumbDiameterPx)
+                                        state.onDragStart(offset)
                                     },
                                     onDrag = { change, dragAmount ->
                                         change.consume()
-                                        state.onDrag(
-                                            dragAmountX = dragAmount.x,
-                                            baseXPx = baseXPx,
-                                            barWidthPx = barWidthPx,
-                                        )
+                                        state.onDrag(dragAmount.x)
                                     },
-                                    onDragEnd = { state.onDragEnd(barWidthPx) },
+                                    onDragEnd = { state.onDragEnd() },
                                     onDragCancel = { state.onDragCancel() },
                                 )
                             }

@@ -43,13 +43,21 @@ enum BalanceBarTradeCalculator {
         return barWidth * clamped
     }
 
+    /// Evaluates if gesture displacement qualifies as a tap rather than a drag based on cumulative distance.
+    static func isTap(
+        totalDistance: CGFloat,
+        threshold: CGFloat = defaultTapThreshold
+    ) -> Bool {
+        totalDistance <= threshold
+    }
+
     /// Evaluates if gesture displacement qualifies as a tap rather than a drag.
     static func isTap(
         translationX: CGFloat,
         translationY: CGFloat = 0.0,
         threshold: CGFloat = defaultTapThreshold
     ) -> Bool {
-        hypot(translationX, translationY) < threshold
+        hypot(translationX, translationY) <= threshold
     }
 
     /// Determines if an initial touch falls within the interactive hit area of the thumb.

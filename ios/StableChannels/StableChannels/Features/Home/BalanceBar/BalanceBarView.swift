@@ -121,7 +121,7 @@ struct BalanceBarView: View {
                 }
             }
             .onChange(of: allocation.stableFraction) { _, _ in
-                guard !isTrading else { return }
+                guard !isTrading, !state.isPressing else { return }
                 state.resetSelection()
             }
             .onDisappear {

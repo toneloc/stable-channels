@@ -49,6 +49,32 @@ class DefaultBalanceBarHaptics(private val view: View) : BalanceBarHaptics {
     }
 }
 
+interface BalanceBarSnapBack {
+    val value: Float
+
+    suspend fun animateToZero(fromOffset: Float)
+}
+
+class DefaultBalanceBarSnapBack(
+    private val anim:
+        androidx.compose.animation.core.Animatable<
+            Float,
+            androidx.compose.animation.core.AnimationVector1D,
+        >
+) : BalanceBarSnapBack {
+    override val value: Float
+        get() = anim.value
+
+    override suspend fun animateToZero(fromOffset: Float) {
+        anim.snapTo(fromOffset)
+        anim.animateTo(
+            targetValue = 0f,
+            animationSpec =
+                androidx.compose.animation.core.spring(dampingRatio = 0.68f, stiffness = 400f),
+        )
+    }
+}
+
 data class SliderConversionMetrics(
     val usdPct: Int,
     val btcPct: Int,

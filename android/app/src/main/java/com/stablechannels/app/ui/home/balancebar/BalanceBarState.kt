@@ -1,8 +1,6 @@
 package com.stablechannels.app.ui.home.balancebar
 
 import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.AnimationVector1D
-import androidx.compose.animation.core.spring
 import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
 import kotlin.math.abs
@@ -25,10 +23,11 @@ fun rememberBalanceBarState(
     onEmptyInteraction: (() -> Unit)? = null,
 ): BalanceBarState {
     val snapBackAnim = remember { Animatable(0f) }
+    val snapBack = remember(snapBackAnim) { DefaultBalanceBarSnapBack(snapBackAnim) }
     val state = remember {
         BalanceBarState(
             scope = scope,
-            snapBackAnim = snapBackAnim,
+            snapBack = snapBack,
             haptics = haptics,
         )
     }
@@ -61,7 +60,7 @@ fun rememberBalanceBarState(
 @Stable
 class BalanceBarState(
     private val scope: CoroutineScope,
-    private val snapBackAnim: Animatable<Float, AnimationVector1D>,
+    private val snapBack: BalanceBarSnapBack,
     private val haptics: BalanceBarHaptics,
 ) {
     var totalUSD by mutableDoubleStateOf(0.0)
@@ -77,6 +76,12 @@ class BalanceBarState(
         private set
 
     var density by mutableFloatStateOf(1f)
+        private set
+
+    var barWidthPx by mutableFloatStateOf(0f)
+        private set
+
+    var thumbDiameterPx by mutableFloatStateOf(0f)
         private set
 
     var isDragging by mutableStateOf(false)
@@ -102,9 +107,20 @@ class BalanceBarState(
     private var totalDragDistance = 0f
     private var accumulatedTranslationX = 0f
     private var depositPromptJob: Job? = null
+    private var snapBackJob: Job? = null
+
+    val baseXPx: Float
+        get() =
+            if (totalUSD > 0.0) (barWidthPx * (stableUSD / totalUSD).coerceIn(0.0, 1.0)).toFloat()
+            else barWidthPx * 0.5f
 
     val currentOffsetPx: Float
-        get() = if (isSnappingBack) snapBackAnim.value else dragOffsetPx
+        get() = if (isSnappingBack) snapBack.value else dragOffsetPx
+
+    fun updateLayout(barWidthPx: Float, thumbDiameterPx: Float) {
+        this.barWidthPx = barWidthPx
+        this.thumbDiameterPx = thumbDiameterPx
+    }
 
     fun updateInputs(
         totalUSD: Double,
@@ -127,21 +143,21 @@ class BalanceBarState(
     }
 
     fun triggerSnapBack(fromOffset: Float, onFinished: (() -> Unit)? = null) {
+        snapBackJob?.cancel()
         isSnappingBack = true
-        scope.launch {
-            snapBackAnim.snapTo(fromOffset)
-            snapBackAnim.animateTo(
-                targetValue = 0f,
-                animationSpec = spring(dampingRatio = 0.68f, stiffness = 400f),
-            )
-            dragOffsetPx = 0f
-            accumulatedTranslationX = 0f
-            isSnappingBack = false
-            onFinished?.invoke()
+        snapBackJob = scope.launch {
+            try {
+                snapBack.animateToZero(fromOffset)
+                dragOffsetPx = 0f
+                accumulatedTranslationX = 0f
+            } finally {
+                isSnappingBack = false
+                onFinished?.invoke()
+            }
         }
     }
 
-    fun onDragStart(offset: Offset, baseXPx: Float, thumbDiameterPx: Float) {
+    fun onDragStart(offset: Offset) {
         val withinThumb =
             BalanceBarTradeCalculator.isWithinThumb(
                 touchX = offset.x,
@@ -149,6 +165,7 @@ class BalanceBarState(
                 thumbDiameter = thumbDiameterPx,
             )
         if (isEmpty || withinThumb) {
+            snapBackJob?.cancel()
             isDragging = true
             isSnappingBack = false
             hasTriggeredHaptic = false
@@ -163,16 +180,12 @@ class BalanceBarState(
         }
     }
 
-    fun onDrag(
-        dragAmountX: Float,
-        baseXPx: Float,
-        barWidthPx: Float,
-    ) {
+    fun onDrag(dragAmountX: Float) {
         if (!isDragging || barWidthPx <= 0f) return
         totalDragDistance += abs(dragAmountX)
         accumulatedTranslationX += dragAmountX
 
-        val baseFraction = if (isEmpty) 0.5f else baseXPx / barWidthPx
+        val baseFraction = if (isEmpty) 0.5f else (baseXPx / barWidthPx).coerceIn(0f, 1f)
         val rawFraction =
             BalanceBarTradeCalculator.calculateTargetFraction(
                 initialFraction = baseFraction,
@@ -195,10 +208,13 @@ class BalanceBarState(
             )
 
         dragOffsetPx = (clampedResult.fraction - baseFraction) * barWidthPx
-        atSellLimit = clampedResult.isAtSellLimit
-
         if (clampedResult.isAtSellLimit) {
-            haptics.warning()
+            if (!atSellLimit) {
+                atSellLimit = true
+                haptics.warning()
+            }
+        } else {
+            atSellLimit = false
         }
 
         if (!hasTriggeredHaptic) {
@@ -217,7 +233,7 @@ class BalanceBarState(
         }
     }
 
-    fun onDragEnd(barWidthPx: Float) {
+    fun onDragEnd() {
         if (!isDragging) {
             dragOffsetPx = 0f
             accumulatedTranslationX = 0f
@@ -244,9 +260,13 @@ class BalanceBarState(
             return
         }
 
-        val baseFraction = if (barWidthPx > 0) (baseXPx(barWidthPx) / barWidthPx) else 0.5f
+        val baseFraction = if (barWidthPx > 0f) (baseXPx / barWidthPx).coerceIn(0f, 1f) else 0.5f
         val targetFraction =
-            if (barWidthPx > 0) baseFraction + (dragOffsetPx / barWidthPx) else baseFraction
+            if (barWidthPx > 0f) {
+                (baseFraction + (dragOffsetPx / barWidthPx)).coerceIn(0f, 1f)
+            } else {
+                baseFraction
+            }
         val evaluation =
             BalanceBarTradeCalculator.calculateSelection(
                 initialFraction = baseFraction,
@@ -256,7 +276,7 @@ class BalanceBarState(
                 maxSellUSD = maxSellUSD,
             )
 
-        if (evaluation.isValidTrade && evaluation.direction != null) {
+        if (evaluation.isValidTrade && evaluation.direction != null && onTradeRequest != null) {
             haptics.impact()
             val request =
                 TradeRequest(direction = evaluation.direction, amountUSD = evaluation.clampedUSD)
@@ -269,13 +289,5 @@ class BalanceBarState(
     fun onDragCancel() {
         isDragging = false
         triggerSnapBack(dragOffsetPx)
-    }
-
-    private fun baseXPx(barWidthPx: Float): Float {
-        return if (totalUSD > 0.0) {
-            (barWidthPx * (stableUSD / totalUSD).coerceIn(0.0, 1.0)).toFloat()
-        } else {
-            barWidthPx * 0.5f
-        }
     }
 }

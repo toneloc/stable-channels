@@ -12,6 +12,8 @@ final class BalanceBarState {
 
     private let haptics: BalanceBarHaptics
     private var hasTriggeredHaptic = false
+    private var lastTranslationX: CGFloat = 0
+    private(set) var cumulativeDragDistance: CGFloat = 0
     private var depositPromptTimer: DispatchWorkItem?
 
     init(haptics: BalanceBarHaptics = SystemBalanceBarHaptics()) {
@@ -47,12 +49,17 @@ final class BalanceBarState {
             isPressing = true
             hasTriggeredHaptic = false
             atSellLimit = false
+            lastTranslationX = 0
+            cumulativeDragDistance = 0
             depositPromptTimer?.cancel()
             showDepositPrompt = false
             onDragStarted?()
             haptics.tick()
         }
         guard isPressing else { return }
+
+        cumulativeDragDistance += abs(translationX - lastTranslationX)
+        lastTranslationX = translationX
 
         let baseFraction = allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction)
         let rawFraction = BalanceBarTradeCalculator.calculateTargetFraction(
@@ -87,7 +94,7 @@ final class BalanceBarState {
     }
 
     func handleDragEnd(
-        translationX: CGFloat,
+        translationX _: CGFloat,
         barWidth: CGFloat,
         allocation: ChannelAllocation,
         maxSellUSD: Double,
@@ -101,7 +108,7 @@ final class BalanceBarState {
         atSellLimit = false
 
         if allocation.isEmpty {
-            if BalanceBarTradeCalculator.isTap(translationX: translationX) {
+            if BalanceBarTradeCalculator.isTap(totalDistance: cumulativeDragDistance) {
                 userSelectedFraction = nil
                 haptics.tick()
                 onEmptyInteraction?()
@@ -138,10 +145,10 @@ final class BalanceBarState {
             maxSellUSD: maxSellUSD
         )
 
-        if evaluation.isValidTrade, let direction = evaluation.direction {
+        if evaluation.isValidTrade, let direction = evaluation.direction, let onTradeRequest {
             haptics.impact()
             let request = TradeRequest(direction: direction, amountUSD: evaluation.clampedUSD)
-            onTradeRequest?(request)
+            onTradeRequest(request)
         } else {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                 userSelectedFraction = nil
