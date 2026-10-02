@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// UI presentation state for the balance bar component.
-/// Strictly manages UI visual flags and delegates interaction geometry to BalanceBarInteraction
-/// and financial trade evaluation to BalanceBarTradeCalculator.
+/// Strictly coordinates UI state transitions, delegates geometry and trade evaluation
+/// to BalanceBarTradeCalculator, and delegates haptic execution to an injected BalanceBarHaptics provider.
 @Observable
 final class BalanceBarState {
     var userSelectedFraction: CGFloat?
@@ -10,8 +10,13 @@ final class BalanceBarState {
     var atSellLimit = false
     var showDepositPrompt = false
 
+    private let haptics: BalanceBarHaptics
     private var hasTriggeredHaptic = false
     private var depositPromptTimer: DispatchWorkItem?
+
+    init(haptics: BalanceBarHaptics = SystemBalanceBarHaptics()) {
+        self.haptics = haptics
+    }
 
     func effectiveFraction(allocation: ChannelAllocation, settleFraction: CGFloat?) -> CGFloat {
         if let userFraction = userSelectedFraction { return userFraction }
@@ -20,7 +25,8 @@ final class BalanceBarState {
     }
 
     func handleDragChange(
-        gesture: DragGesture.Value,
+        touchStartX: CGFloat,
+        translationX: CGFloat,
         barWidth: CGFloat,
         currentThumbX: CGFloat,
         thumbDiameter: CGFloat,
@@ -32,8 +38,8 @@ final class BalanceBarState {
         guard barWidth > 0, !isAwakening else { return }
 
         if !isPressing {
-            let withinThumb = BalanceBarInteraction.isWithinThumb(
-                touchX: gesture.startLocation.x,
+            let withinThumb = BalanceBarTradeCalculator.isWithinThumb(
+                touchX: touchStartX,
                 thumbX: currentThumbX,
                 thumbDiameter: thumbDiameter
             )
@@ -44,14 +50,14 @@ final class BalanceBarState {
             depositPromptTimer?.cancel()
             showDepositPrompt = false
             onDragStarted?()
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            haptics.tick()
         }
         guard isPressing else { return }
 
         let baseFraction = allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction)
-        let rawFraction = BalanceBarInteraction.calculateTargetFraction(
+        let rawFraction = BalanceBarTradeCalculator.calculateTargetFraction(
             initialFraction: baseFraction,
-            translationX: gesture.translation.width,
+            translationX: translationX,
             barWidth: barWidth
         )
 
@@ -81,7 +87,7 @@ final class BalanceBarState {
     }
 
     func handleDragEnd(
-        gesture: DragGesture.Value,
+        translationX: CGFloat,
         barWidth: CGFloat,
         allocation: ChannelAllocation,
         maxSellUSD: Double,
@@ -95,12 +101,12 @@ final class BalanceBarState {
         atSellLimit = false
 
         if allocation.isEmpty {
-            if BalanceBarInteraction.isTap(translationX: gesture.translation.width) {
+            if BalanceBarTradeCalculator.isTap(translationX: translationX) {
                 userSelectedFraction = nil
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                haptics.tick()
                 onEmptyInteraction?()
             } else {
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                haptics.tick()
                 withAnimation(reduceMotion ? .easeInOut(duration: 0.25) : .spring(
                     response: 0.38,
                     dampingFraction: 0.68
@@ -132,8 +138,9 @@ final class BalanceBarState {
             maxSellUSD: maxSellUSD
         )
 
-        if evaluation.isValidTrade, let request = evaluation.tradeRequest {
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if evaluation.isValidTrade, let direction = evaluation.direction {
+            haptics.impact()
+            let request = TradeRequest(direction: direction, amountUSD: evaluation.clampedUSD)
             onTradeRequest?(request)
         } else {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
@@ -155,7 +162,7 @@ final class BalanceBarState {
     private func triggerSellLimitHaptic() {
         guard !hasTriggeredHaptic else { return }
         hasTriggeredHaptic = true
-        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        haptics.warning()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.hasTriggeredHaptic = false
         }

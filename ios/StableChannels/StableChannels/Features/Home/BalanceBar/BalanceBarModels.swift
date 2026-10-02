@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 enum TradeDirection: Equatable, Sendable {
     case buy // drag left: grow BTC
@@ -22,10 +23,29 @@ struct BalanceBarTradeEvaluation: Equatable, Sendable {
     let requestedUSD: Double
     let clampedUSD: Double
     let isValidTrade: Bool
-    let tradeRequest: TradeRequest?
 }
 
 struct ClampedFractionResult: Equatable, Sendable {
     let fraction: CGFloat
     let isAtSellLimit: Bool
+}
+
+protocol BalanceBarHaptics: AnyObject {
+    func tick()
+    func impact()
+    func warning()
+}
+
+final class SystemBalanceBarHaptics: BalanceBarHaptics {
+    func tick() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    func impact() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+    }
+
+    func warning() {
+        UINotificationFeedbackGenerator().notificationOccurred(.warning)
+    }
 }

@@ -204,9 +204,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 onDragStarted = { appState.ensureLSPConnected() },
                 onTradeRequest =
                     if (hasReadyChannel)
-                        { direction, amountUSD ->
-                            prefillTradeAmount = amountUSD
-                            if (direction == TradeDirection.BUY) showBuy = true else showSell = true
+                        { request ->
+                            prefillTradeAmount = request.amountUSD
+                            if (request.direction == TradeDirection.BUY) showBuy = true
+                            else showSell = true
                         }
                     else null,
                 onEmptyInteraction = { showReceive = true },

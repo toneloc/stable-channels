@@ -1,9 +1,11 @@
 import Foundation
 
-/// Pure domain service calculating trade requests, fraction clamping, and financial limits.
+/// Pure domain service calculating trade requests, fraction clamping, and interaction geometry.
 /// Zero UI framework dependencies (Functional Core).
 enum BalanceBarTradeCalculator {
     static let defaultMinTradeUSD: Double = 1.0
+    static let defaultTapThreshold: CGFloat = 5.0
+    static let defaultThumbHitMultiplier: CGFloat = 1.5
 
     /// Determines trade direction from fraction delta.
     static func tradeDirection(
@@ -16,6 +18,48 @@ enum BalanceBarTradeCalculator {
             return .buy
         }
         return nil
+    }
+
+    /// Mathematical formula unifying coordinate translation across platforms:
+    /// fraction = clamp(initialFraction + translation / barWidth, 0.0, 1.0)
+    static func calculateTargetFraction(
+        initialFraction: CGFloat,
+        translationX: CGFloat,
+        barWidth: CGFloat
+    ) -> CGFloat {
+        guard barWidth > 0 else { return initialFraction }
+        let proposed = initialFraction + (translationX / barWidth)
+        return min(max(proposed, 0.0), 1.0)
+    }
+
+    /// Computes horizontal thumb center position along the track.
+    /// Aligns 1:1 with track color split boundary across both iOS and Android.
+    static func calculateThumbPosition(
+        fraction: CGFloat,
+        barWidth: CGFloat
+    ) -> CGFloat {
+        guard barWidth > 0 else { return 0 }
+        let clamped = min(max(fraction, 0.0), 1.0)
+        return barWidth * clamped
+    }
+
+    /// Evaluates if gesture displacement qualifies as a tap rather than a drag.
+    static func isTap(
+        translationX: CGFloat,
+        translationY: CGFloat = 0.0,
+        threshold: CGFloat = defaultTapThreshold
+    ) -> Bool {
+        hypot(translationX, translationY) < threshold
+    }
+
+    /// Determines if an initial touch falls within the interactive hit area of the thumb.
+    static func isWithinThumb(
+        touchX: CGFloat,
+        thumbX: CGFloat,
+        thumbDiameter: CGFloat,
+        multiplier: CGFloat = defaultThumbHitMultiplier
+    ) -> Bool {
+        abs(touchX - thumbX) < thumbDiameter * multiplier
     }
 
     /// Pure function clamping a proposed fraction within physical [0, 1] and financial liquidity bounds.
@@ -44,6 +88,7 @@ enum BalanceBarTradeCalculator {
     }
 
     /// Evaluates financial trade viability from fraction movement.
+    /// 100% pure function: identical inputs always yield identical outputs.
     static func calculateSelection(
         initialFraction: CGFloat,
         targetFraction: CGFloat,
@@ -57,8 +102,7 @@ enum BalanceBarTradeCalculator {
                 direction: nil,
                 requestedUSD: 0.0,
                 clampedUSD: 0.0,
-                isValidTrade: false,
-                tradeRequest: nil
+                isValidTrade: false
             )
         }
 
@@ -72,8 +116,7 @@ enum BalanceBarTradeCalculator {
                 direction: nil,
                 requestedUSD: 0.0,
                 clampedUSD: 0.0,
-                isValidTrade: false,
-                tradeRequest: nil
+                isValidTrade: false
             )
         }
 
@@ -86,14 +129,12 @@ enum BalanceBarTradeCalculator {
         }
 
         let isValid = clampedUSD >= minTradeUSD
-        let request = isValid ? TradeRequest(direction: direction, amountUSD: clampedUSD) : nil
 
         return BalanceBarTradeEvaluation(
             direction: direction,
             requestedUSD: requestedUSD,
             clampedUSD: clampedUSD,
-            isValidTrade: isValid,
-            tradeRequest: request
+            isValidTrade: isValid
         )
     }
 }

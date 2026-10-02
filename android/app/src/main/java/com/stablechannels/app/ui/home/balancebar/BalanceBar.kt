@@ -31,7 +31,7 @@ fun BalanceBar(
     showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
-    onTradeRequest: ((TradeDirection, Double) -> Unit)? = null,
+    onTradeRequest: ((TradeRequest) -> Unit)? = null,
     onEmptyInteraction: (() -> Unit)? = null,
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
@@ -48,6 +48,7 @@ fun BalanceBar(
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current
     val view = LocalView.current
+    val haptics = remember(view) { DefaultBalanceBarHaptics(view) }
 
     val state =
         rememberBalanceBarState(
@@ -56,7 +57,7 @@ fun BalanceBar(
             maxSellUSD = maxSellUSD,
             isEmpty = isEmpty,
             density = density.density,
-            view = view,
+            haptics = haptics,
             onDragStarted = onDragStarted,
             onTradeRequest = onTradeRequest,
             onEmptyInteraction = onEmptyInteraction,
@@ -146,15 +147,15 @@ fun BalanceBar(
                     .onSizeChanged { barWidthPx = it.width.toFloat() }
                     .then(
                         if (interactive && !animator.isAwakening) {
-                            Modifier.pointerInput(currentFraction, maxSellUSD, totalUSD, isEmpty) {
+                            Modifier.pointerInput(Unit) {
                                 detectDragGestures(
                                     onDragStart = { offset ->
                                         state.onDragStart(offset, baseXPx, thumbDiameterPx)
                                     },
                                     onDrag = { change, dragAmount ->
+                                        change.consume()
                                         state.onDrag(
-                                            change = change,
-                                            dragAmount = dragAmount,
+                                            dragAmountX = dragAmount.x,
                                             baseXPx = baseXPx,
                                             barWidthPx = barWidthPx,
                                         )

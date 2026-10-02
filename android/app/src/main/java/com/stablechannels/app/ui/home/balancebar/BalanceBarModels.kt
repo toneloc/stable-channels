@@ -1,5 +1,7 @@
 package com.stablechannels.app.ui.home.balancebar
 
+import android.view.HapticFeedbackConstants
+import android.view.View
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 
@@ -7,6 +9,11 @@ enum class TradeDirection {
     BUY,
     SELL,
 }
+
+data class TradeRequest(
+    val direction: TradeDirection,
+    val amountUSD: Double,
+)
 
 data class BalanceBarTradeEvaluation(
     val direction: TradeDirection?,
@@ -19,6 +26,28 @@ data class ClampedFractionResult(
     val fraction: Float,
     val isAtSellLimit: Boolean,
 )
+
+interface BalanceBarHaptics {
+    fun tick()
+
+    fun impact()
+
+    fun warning()
+}
+
+class DefaultBalanceBarHaptics(private val view: View) : BalanceBarHaptics {
+    override fun tick() {
+        view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    }
+
+    override fun impact() {
+        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    override fun warning() {
+        view.performHapticFeedback(HapticFeedbackConstants.REJECT)
+    }
+}
 
 data class SliderConversionMetrics(
     val usdPct: Int,

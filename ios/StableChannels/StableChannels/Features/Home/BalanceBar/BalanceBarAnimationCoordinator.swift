@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import QuartzCore
 import SwiftUI
 
 /// Pure mathematical transforms deriving visual presentation properties from normalized animation progress (0.0 to
@@ -50,7 +51,7 @@ enum BalanceBarAnimationMath {
     }
 }
 
-/// Declarative coordinator for the Awakening animation sequence.
+/// Declarative coordinator for the Awakening animation sequence synced via CADisplayLink.
 /// Derives all visual properties from a single normalized progress value.
 @Observable
 final class BalanceBarAnimationCoordinator {
@@ -79,36 +80,43 @@ final class BalanceBarAnimationCoordinator {
         )
     }
 
-    private var animationTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var displayLink: CADisplayLink?
+    @ObservationIgnored
+    private var startTimestamp: CFTimeInterval = 0
+    @ObservationIgnored
+    private let duration: CFTimeInterval = 1.2
 
     func triggerAwakening(targetFraction: CGFloat) {
-        animationTask?.cancel()
+        cancel()
         self.targetFraction = targetFraction
         self.isAwakening = true
         self.progress = 0.0
+        self.startTimestamp = CACurrentMediaTime()
 
-        let startTime = Date()
-        let duration: TimeInterval = 1.2
+        let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+        link.add(to: .main, forMode: .common)
+        self.displayLink = link
+    }
 
-        animationTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                let elapsed = Date().timeIntervalSince(startTime)
-                let currentProgress = min(elapsed / duration, 1.0)
-                self?.progress = currentProgress
+    @objc private func handleDisplayLink(_: CADisplayLink) {
+        let elapsed = CACurrentMediaTime() - startTimestamp
+        let currentProgress = min(elapsed / duration, 1.0)
+        self.progress = currentProgress
 
-                if currentProgress >= 1.0 {
-                    self?.isAwakening = false
-                    self?.progress = 0.0
-                    break
-                }
-                try? await Task.sleep(nanoseconds: 16_666_667)
-            }
+        if currentProgress >= 1.0 {
+            cancel()
         }
     }
 
     func cancel() {
-        animationTask?.cancel()
+        displayLink?.invalidate()
+        displayLink = nil
         isAwakening = false
         progress = 0.0
+    }
+
+    deinit {
+        displayLink?.invalidate()
     }
 }

@@ -1,13 +1,10 @@
 package com.stablechannels.app.ui.home.balancebar
 
-import android.view.HapticFeedbackConstants
-import android.view.View
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.*
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.PointerInputChange
 import kotlin.math.abs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -21,48 +18,67 @@ fun rememberBalanceBarState(
     maxSellUSD: Double,
     isEmpty: Boolean,
     density: Float,
-    view: View,
+    haptics: BalanceBarHaptics,
     scope: CoroutineScope = rememberCoroutineScope(),
     onDragStarted: (() -> Unit)? = null,
-    onTradeRequest: ((TradeDirection, Double) -> Unit)? = null,
+    onTradeRequest: ((TradeRequest) -> Unit)? = null,
     onEmptyInteraction: (() -> Unit)? = null,
 ): BalanceBarState {
     val snapBackAnim = remember { Animatable(0f) }
-    return remember(isEmpty, totalUSD, maxSellUSD, stableUSD) {
+    val state = remember {
         BalanceBarState(
+            scope = scope,
+            snapBackAnim = snapBackAnim,
+            haptics = haptics,
+        )
+    }
+
+    val currentOnDragStarted by rememberUpdatedState(onDragStarted)
+    val currentOnTradeRequest by rememberUpdatedState(onTradeRequest)
+    val currentOnEmptyInteraction by rememberUpdatedState(onEmptyInteraction)
+
+    SideEffect {
+        state.updateInputs(
             totalUSD = totalUSD,
             stableUSD = stableUSD,
             maxSellUSD = maxSellUSD,
             isEmpty = isEmpty,
             density = density,
-            view = view,
-            scope = scope,
-            snapBackAnim = snapBackAnim,
-            onDragStarted = onDragStarted,
-            onTradeRequest = onTradeRequest,
-            onEmptyInteraction = onEmptyInteraction,
+            onDragStarted = currentOnDragStarted,
+            onTradeRequest = currentOnTradeRequest,
+            onEmptyInteraction = currentOnEmptyInteraction,
         )
     }
+
+    return state
 }
 
 /**
- * UI presentation state for the balance bar component. Coordinates UI flags, delegates interaction
- * geometry to BalanceBarInteraction, and financial rules to BalanceBarTradeCalculator.
+ * UI presentation state for the balance bar component. Stable across price updates; coordinates UI
+ * flags and delegates geometry and financial rules to BalanceBarTradeCalculator, and haptics to
+ * BalanceBarHaptics.
  */
 @Stable
 class BalanceBarState(
-    private val totalUSD: Double,
-    private val stableUSD: Double,
-    private val maxSellUSD: Double,
-    val isEmpty: Boolean,
-    private val density: Float,
-    private val view: View,
     private val scope: CoroutineScope,
     private val snapBackAnim: Animatable<Float, AnimationVector1D>,
-    private val onDragStarted: (() -> Unit)?,
-    private val onTradeRequest: ((TradeDirection, Double) -> Unit)?,
-    private val onEmptyInteraction: (() -> Unit)?,
+    private val haptics: BalanceBarHaptics,
 ) {
+    var totalUSD by mutableDoubleStateOf(0.0)
+        private set
+
+    var stableUSD by mutableDoubleStateOf(0.0)
+        private set
+
+    var maxSellUSD by mutableDoubleStateOf(0.0)
+        private set
+
+    var isEmpty by mutableStateOf(false)
+        private set
+
+    var density by mutableFloatStateOf(1f)
+        private set
+
     var isDragging by mutableStateOf(false)
         private set
 
@@ -78,6 +94,10 @@ class BalanceBarState(
     var showDepositPrompt by mutableStateOf(false)
         private set
 
+    private var onDragStarted: (() -> Unit)? = null
+    private var onTradeRequest: ((TradeRequest) -> Unit)? = null
+    private var onEmptyInteraction: (() -> Unit)? = null
+
     private var hasTriggeredHaptic = false
     private var totalDragDistance = 0f
     private var accumulatedTranslationX = 0f
@@ -85,6 +105,26 @@ class BalanceBarState(
 
     val currentOffsetPx: Float
         get() = if (isSnappingBack) snapBackAnim.value else dragOffsetPx
+
+    fun updateInputs(
+        totalUSD: Double,
+        stableUSD: Double,
+        maxSellUSD: Double,
+        isEmpty: Boolean,
+        density: Float,
+        onDragStarted: (() -> Unit)?,
+        onTradeRequest: ((TradeRequest) -> Unit)?,
+        onEmptyInteraction: (() -> Unit)?,
+    ) {
+        this.totalUSD = totalUSD
+        this.stableUSD = stableUSD
+        this.maxSellUSD = maxSellUSD
+        this.isEmpty = isEmpty
+        this.density = density
+        this.onDragStarted = onDragStarted
+        this.onTradeRequest = onTradeRequest
+        this.onEmptyInteraction = onEmptyInteraction
+    }
 
     fun triggerSnapBack(fromOffset: Float, onFinished: (() -> Unit)? = null) {
         isSnappingBack = true
@@ -103,7 +143,7 @@ class BalanceBarState(
 
     fun onDragStart(offset: Offset, baseXPx: Float, thumbDiameterPx: Float) {
         val withinThumb =
-            BalanceBarInteraction.isWithinThumb(
+            BalanceBarTradeCalculator.isWithinThumb(
                 touchX = offset.x,
                 thumbX = baseXPx,
                 thumbDiameter = thumbDiameterPx,
@@ -119,24 +159,22 @@ class BalanceBarState(
             showDepositPrompt = false
             dragOffsetPx = 0f
             onDragStarted?.invoke()
-            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            haptics.tick()
         }
     }
 
     fun onDrag(
-        change: PointerInputChange,
-        dragAmount: Offset,
+        dragAmountX: Float,
         baseXPx: Float,
         barWidthPx: Float,
     ) {
         if (!isDragging || barWidthPx <= 0f) return
-        change.consume()
-        totalDragDistance += abs(dragAmount.x)
-        accumulatedTranslationX += dragAmount.x
+        totalDragDistance += abs(dragAmountX)
+        accumulatedTranslationX += dragAmountX
 
         val baseFraction = if (isEmpty) 0.5f else baseXPx / barWidthPx
         val rawFraction =
-            BalanceBarInteraction.calculateTargetFraction(
+            BalanceBarTradeCalculator.calculateTargetFraction(
                 initialFraction = baseFraction,
                 translationX = accumulatedTranslationX,
                 barWidth = barWidthPx,
@@ -159,6 +197,10 @@ class BalanceBarState(
         dragOffsetPx = (clampedResult.fraction - baseFraction) * barWidthPx
         atSellLimit = clampedResult.isAtSellLimit
 
+        if (clampedResult.isAtSellLimit) {
+            haptics.warning()
+        }
+
         if (!hasTriggeredHaptic) {
             val evaluation =
                 BalanceBarTradeCalculator.calculateSelection(
@@ -170,7 +212,7 @@ class BalanceBarState(
                 )
             if (evaluation.isValidTrade) {
                 hasTriggeredHaptic = true
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                haptics.tick()
             }
         }
     }
@@ -184,13 +226,13 @@ class BalanceBarState(
         isDragging = false
 
         if (isEmpty) {
-            if (BalanceBarInteraction.isTap(totalDragDistance, threshold = 5f * density)) {
+            if (BalanceBarTradeCalculator.isTap(totalDragDistance, threshold = 5f * density)) {
                 dragOffsetPx = 0f
                 accumulatedTranslationX = 0f
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                haptics.tick()
                 onEmptyInteraction?.invoke()
             } else {
-                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                haptics.tick()
                 showDepositPrompt = true
                 depositPromptJob?.cancel()
                 depositPromptJob = scope.launch {
@@ -215,7 +257,10 @@ class BalanceBarState(
             )
 
         if (evaluation.isValidTrade && evaluation.direction != null) {
-            onTradeRequest?.invoke(evaluation.direction, evaluation.clampedUSD)
+            haptics.impact()
+            val request =
+                TradeRequest(direction = evaluation.direction, amountUSD = evaluation.clampedUSD)
+            onTradeRequest?.invoke(request)
         } else {
             triggerSnapBack(dragOffsetPx)
         }

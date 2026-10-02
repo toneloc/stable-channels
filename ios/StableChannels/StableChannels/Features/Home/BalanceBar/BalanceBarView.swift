@@ -83,7 +83,8 @@ struct BalanceBarView: View {
                         .onChanged { gesture in
                             guard interactive else { return }
                             state.handleDragChange(
-                                gesture: gesture,
+                                touchStartX: gesture.startLocation.x,
+                                translationX: gesture.translation.width,
                                 barWidth: barWidth,
                                 currentThumbX: thumbX,
                                 thumbDiameter: thumbDiameter,
@@ -96,7 +97,7 @@ struct BalanceBarView: View {
                         .onEnded { gesture in
                             guard interactive else { return }
                             state.handleDragEnd(
-                                gesture: gesture,
+                                translationX: gesture.translation.width,
                                 barWidth: barWidth,
                                 allocation: allocation,
                                 maxSellUSD: maxSellUSD,
@@ -124,6 +125,7 @@ struct BalanceBarView: View {
                 state.resetSelection()
             }
             .onDisappear {
+                animator.cancel()
                 state.cancelTimers()
             }
         }
@@ -153,10 +155,9 @@ struct BalanceBarView: View {
     // MARK: - Layout Calculations
 
     private func thumbPosition(barWidth: CGFloat, visFrac: CGFloat) -> CGFloat {
-        BalanceBarInteraction.calculateThumbPosition(
+        BalanceBarTradeCalculator.calculateThumbPosition(
             fraction: visFrac,
-            barWidth: barWidth,
-            thumbDiameter: thumbDiameter
+            barWidth: barWidth
         )
     }
 }
