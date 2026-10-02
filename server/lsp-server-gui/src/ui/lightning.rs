@@ -1,396 +1,251 @@
-use egui::Ui;
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::state::{LightningTab, StatusMessage};
-use crate::ui::layout::{card, page_scrolled, FORM_WIDTH};
-use crate::ui::widgets;
+use crate::actions;
+use crate::format::{amount_entry_preview, unit_label};
+use crate::state::{AppCtx, LightningTab, Op, SendKind};
+use crate::ui::widgets::{Bubble, Card, Field, Gate, Icon, LastId, Spinner, TextArea, TextInput};
 
 const HELP_BOLT11_INVOICE: &str = "A one-time Lightning invoice that can include amount, description, expiry, routing hints, and payment hash. Enter an amount only when the invoice is zero-amount.";
-const HELP_GENERATED_BOLT11_INVOICE: &str =
-    "A one-time Lightning invoice another payer can settle before it expires.";
+const HELP_GENERATED_BOLT11_INVOICE: &str = "A one-time Lightning invoice another payer can settle before it expires.";
 const HELP_BOLT12_OFFER: &str =
 	"A reusable Lightning offer. The payer requests an invoice from the recipient and can include amount, quantity, or a payer note when the offer allows it.";
 const HELP_GENERATED_BOLT12_OFFER: &str =
-    "A reusable offer that another wallet can use to request an invoice and pay this node.";
+	"A reusable offer that another wallet can use to request an invoice and pay this node.";
 const HELP_AMOUNT: &str =
 	"The payment amount in the selected display unit. Lightning sends are tracked internally in millisatoshis.";
 const HELP_ZERO_AMOUNT: &str = "Use this only when the BOLT11 invoice does not specify an amount.";
-const HELP_DESCRIPTION: &str =
-    "Human-readable payment description included in the invoice or offer.";
+const HELP_DESCRIPTION: &str = "Human-readable payment description included in the invoice or offer.";
 const HELP_EXPIRY: &str = "How long the invoice or offer should remain payable, in seconds.";
 const HELP_QUANTITY: &str =
-    "The number of offered items or units requested when the BOLT12 offer supports quantities.";
+	"The number of offered items or units requested when the BOLT12 offer supports quantities.";
 const HELP_PAYER_NOTE: &str =
-    "Optional note sent with the BOLT12 payment request. Avoid secrets or sensitive information.";
+	"Optional note sent with the BOLT12 payment request. Avoid secrets or sensitive information.";
 const HELP_NODE_ID: &str = "The recipient's Lightning node public key in hex.";
 const HELP_KEYSEND: &str =
 	"A spontaneous Lightning payment that includes the payment secret material needed by the recipient to settle without a prior invoice.";
-const HELP_LAST_PAYMENT_ID: &str =
-    "The local identifier used to look up this payment record later.";
+const HELP_LAST_PAYMENT_ID: &str = "The local identifier used to look up this payment record later.";
 
-pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.heading("Lightning Payments");
-	ui.add_space(10.0);
+const TABS: [(LightningTab, &str, &str, &str); 5] = [
+	(LightningTab::Bolt11Send, "BOLT11 Send", "arrow-up", "blue"),
+	(LightningTab::Bolt11Receive, "BOLT11 Receive", "arrow-down", "green"),
+	(LightningTab::Bolt12Send, "BOLT12 Send", "arrow-up-right", "orange"),
+	(LightningTab::Bolt12Receive, "BOLT12 Receive", "arrow-down-left", "purple"),
+	(LightningTab::SpontaneousSend, "Keysend", "zap", "gray"),
+];
 
-	if app.render_disconnected_gate(ui) {
-		return;
+#[component]
+pub fn Lightning() -> Element {
+	let ctx = use_context::<AppCtx>();
+	if !ctx.is_connected() {
+		return rsx! { Gate {} };
 	}
-
-	ui.horizontal(|ui| {
-		if ui
-            .selectable_label(
-                app.state.lightning_tab == LightningTab::Bolt11Send,
-                "BOLT11 Send",
-            )
-			.clicked()
-		{
-			app.state.lightning_tab = LightningTab::Bolt11Send;
-		}
-		if ui
-			.selectable_label(
-				app.state.lightning_tab == LightningTab::Bolt11Receive,
-				"BOLT11 Receive",
-			)
-			.clicked()
-		{
-			app.state.lightning_tab = LightningTab::Bolt11Receive;
-		}
-		if ui
-            .selectable_label(
-                app.state.lightning_tab == LightningTab::Bolt12Send,
-                "BOLT12 Send",
-            )
-			.clicked()
-		{
-			app.state.lightning_tab = LightningTab::Bolt12Send;
-		}
-		if ui
-			.selectable_label(
-				app.state.lightning_tab == LightningTab::Bolt12Receive,
-				"BOLT12 Receive",
-			)
-			.clicked()
-		{
-			app.state.lightning_tab = LightningTab::Bolt12Receive;
-		}
-		if ui
-            .selectable_label(
-                app.state.lightning_tab == LightningTab::SpontaneousSend,
-                "Keysend",
-            )
-			.clicked()
-		{
-			app.state.lightning_tab = LightningTab::SpontaneousSend;
-		}
-	});
-
-	ui.separator();
-	ui.add_space(10.0);
-
-	// One outer scroll for the selected sub-form, bounded to FORM_WIDTH like the On-chain/Tools tabs.
-	page_scrolled(ui, |ui| {
-		let form_w = ui.available_width().min(FORM_WIDTH);
-		ui.vertical(|ui| {
-			ui.set_width(form_w);
-			match app.state.lightning_tab {
-				LightningTab::Bolt11Send => render_bolt11_send(ui, app),
-				LightningTab::Bolt11Receive => render_bolt11_receive(ui, app),
-				LightningTab::Bolt12Send => render_bolt12_send(ui, app),
-				LightningTab::Bolt12Receive => render_bolt12_receive(ui, app),
-				LightningTab::SpontaneousSend => render_spontaneous_send(ui, app),
-			}
-		});
-	});
-}
-
-fn render_bolt11_send(ui: &mut Ui, app: &mut LspServerApp) {
-	card(ui, "Pay BOLT11 Invoice", |ui| {
-		let unit_label = crate::ui::unit_label(app.state.display_unit);
-		let form = &mut app.state.forms.bolt11_send;
-
-        widgets::label_with_info(ui, "Invoice:", HELP_BOLT11_INVOICE);
-		ui.add(
-			egui::TextEdit::multiline(&mut form.invoice)
-				.desired_rows(3)
-				.desired_width(f32::INFINITY),
-		);
-
-		ui.add_space(5.0);
-
-        egui::Grid::new("bolt11_send_grid")
-            .num_columns(2)
-            .spacing([10.0, 5.0])
-            .show(ui, |ui| {
-                widgets::label_with_info(
-                    ui,
-                    &format!("Amount ({}, for zero-amount invoices):", unit_label),
-                    HELP_ZERO_AMOUNT,
-                );
-			ui.text_edit_singleline(&mut form.amount_msat);
-			ui.end_row();
-		});
-
-		// preview: read field text locally to avoid borrow conflict with the &self method
-		let amt = app.state.forms.bolt11_send.amount_msat.clone();
-		if let Some(preview) = app.amount_entry_preview(&amt) {
-			ui.weak(preview);
-		}
-
-		ui.add_space(10.0);
-
-		let is_pending = app.state.tasks.bolt11_send.is_some();
-		if is_pending {
-            widgets::loading_row(ui, "Sending...");
-		} else if ui.button("Pay Invoice").clicked() {
-			app.send_bolt11();
-		}
-
-		if let Some(payment_id) = &app.state.last_payment_id {
-			ui.add_space(5.0);
-			ui.horizontal(|ui| {
-                widgets::label_with_info(ui, "Last Payment ID:", HELP_LAST_PAYMENT_ID);
-				ui.monospace(crate::ui::truncate_id(payment_id, 8, 8));
-				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = payment_id.clone());
+	let active = ctx.nav.read().lightning_tab;
+	rsx! {
+		div { class: "tiles",
+			for (tab, label, icon, tone) in TABS {
+				button {
+					key: "{label}",
+					class: if tab == active { "tile active" } else { "tile" },
+					"aria-pressed": if tab == active { "true" } else { "false" },
+					onclick: move |_| {
+						let mut nav = ctx.nav;
+						nav.write().lightning_tab = tab;
+					},
+					Bubble { icon, tone }
+					"{label}"
 				}
-			});
-		}
-	});
-}
-
-fn render_bolt11_receive(ui: &mut Ui, app: &mut LspServerApp) {
-	card(ui, "Generate BOLT11 Invoice", |ui| {
-		let unit_label = crate::ui::unit_label(app.state.display_unit);
-		let form = &mut app.state.forms.bolt11_receive;
-
-        egui::Grid::new("bolt11_receive_grid")
-            .num_columns(2)
-            .spacing([10.0, 5.0])
-            .show(ui, |ui| {
-                widgets::label_with_info(
-                    ui,
-                    &format!("Amount ({}, optional):", unit_label),
-                    HELP_AMOUNT,
-                );
-			ui.text_edit_singleline(&mut form.amount_msat);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Description:", HELP_DESCRIPTION);
-			ui.text_edit_singleline(&mut form.description);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Expiry (seconds):", HELP_EXPIRY);
-			ui.text_edit_singleline(&mut form.expiry_secs);
-			ui.end_row();
-		});
-
-		// preview: read field text locally to avoid borrow conflict with fmt_msat
-		let amt = app.state.forms.bolt11_receive.amount_msat.clone();
-		if let Some(preview) = app.amount_entry_preview(&amt) {
-			ui.weak(preview);
-		}
-
-		ui.add_space(10.0);
-
-		let is_pending = app.state.tasks.bolt11_receive.is_some();
-		if is_pending {
-            widgets::loading_row(ui, "Generating...");
-		} else if ui.button("Generate Invoice").clicked() {
-			app.generate_bolt11_invoice();
-		}
-
-		if let Some(invoice) = &app.state.generated_invoice.clone() {
-			ui.add_space(10.0);
-			ui.separator();
-            widgets::label_with_info(ui, "Generated Invoice:", HELP_GENERATED_BOLT11_INVOICE);
-			ui.add(
-				egui::TextEdit::multiline(&mut invoice.as_str())
-					.desired_rows(4)
-					.desired_width(f32::INFINITY)
-					.interactive(false),
-			);
-			if ui.button("Copy Invoice").clicked() {
-				ui.output_mut(|o| o.copied_text = invoice.clone());
-				app.state.status_message = Some(StatusMessage::success("Copied"));
 			}
 		}
-	});
-}
-
-fn render_bolt12_send(ui: &mut Ui, app: &mut LspServerApp) {
-	card(ui, "Pay BOLT12 Offer", |ui| {
-		let unit_label = crate::ui::unit_label(app.state.display_unit);
-		let form = &mut app.state.forms.bolt12_send;
-
-        widgets::label_with_info(ui, "Offer:", HELP_BOLT12_OFFER);
-		ui.add(
-            egui::TextEdit::multiline(&mut form.offer)
-                .desired_rows(3)
-                .desired_width(f32::INFINITY),
-		);
-
-		ui.add_space(5.0);
-
-        egui::Grid::new("bolt12_send_grid")
-            .num_columns(2)
-            .spacing([10.0, 5.0])
-            .show(ui, |ui| {
-                widgets::label_with_info(
-                    ui,
-                    &format!("Amount ({}, optional):", unit_label),
-                    HELP_AMOUNT,
-                );
-			ui.text_edit_singleline(&mut form.amount_msat);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Quantity (optional):", HELP_QUANTITY);
-			ui.text_edit_singleline(&mut form.quantity);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Payer Note (optional):", HELP_PAYER_NOTE);
-			ui.text_edit_singleline(&mut form.payer_note);
-			ui.end_row();
-		});
-
-		// preview: read field text locally to avoid borrow conflict with fmt_msat
-		let amt = app.state.forms.bolt12_send.amount_msat.clone();
-		if let Some(preview) = app.amount_entry_preview(&amt) {
-			ui.weak(preview);
-		}
-
-		ui.add_space(10.0);
-
-		let is_pending = app.state.tasks.bolt12_send.is_some();
-		if is_pending {
-            widgets::loading_row(ui, "Sending...");
-		} else if ui.button("Pay Offer").clicked() {
-			app.send_bolt12();
-		}
-
-		if let Some(payment_id) = &app.state.last_payment_id {
-			ui.add_space(5.0);
-			ui.horizontal(|ui| {
-                widgets::label_with_info(ui, "Last Payment ID:", HELP_LAST_PAYMENT_ID);
-				ui.monospace(crate::ui::truncate_id(payment_id, 8, 8));
-				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = payment_id.clone());
-				}
-			});
-		}
-	});
-}
-
-fn render_bolt12_receive(ui: &mut Ui, app: &mut LspServerApp) {
-	card(ui, "Generate BOLT12 Offer", |ui| {
-		let unit_label = crate::ui::unit_label(app.state.display_unit);
-		let form = &mut app.state.forms.bolt12_receive;
-
-        egui::Grid::new("bolt12_receive_grid")
-            .num_columns(2)
-            .spacing([10.0, 5.0])
-            .show(ui, |ui| {
-                widgets::label_with_info(ui, "Description (required):", HELP_DESCRIPTION);
-			ui.text_edit_singleline(&mut form.description);
-			ui.end_row();
-
-                widgets::label_with_info(
-                    ui,
-                    &format!("Amount ({}, optional):", unit_label),
-                    HELP_AMOUNT,
-                );
-			ui.text_edit_singleline(&mut form.amount_msat);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Expiry (seconds, optional):", HELP_EXPIRY);
-			ui.text_edit_singleline(&mut form.expiry_secs);
-			ui.end_row();
-
-                widgets::label_with_info(ui, "Quantity (optional):", HELP_QUANTITY);
-			ui.text_edit_singleline(&mut form.quantity);
-			ui.end_row();
-		});
-
-		// preview: read field text locally to avoid borrow conflict with fmt_msat
-		let amt = app.state.forms.bolt12_receive.amount_msat.clone();
-		if let Some(preview) = app.amount_entry_preview(&amt) {
-			ui.weak(preview);
-		}
-
-		ui.add_space(10.0);
-
-		let is_pending = app.state.tasks.bolt12_receive.is_some();
-		if is_pending {
-            widgets::loading_row(ui, "Generating...");
-		} else if ui.button("Generate Offer").clicked() {
-			app.generate_bolt12_offer();
-		}
-
-		if let Some(offer) = &app.state.generated_offer.clone() {
-			ui.add_space(10.0);
-			ui.separator();
-            widgets::label_with_info(ui, "Generated Offer:", HELP_GENERATED_BOLT12_OFFER);
-			ui.add(
-				egui::TextEdit::multiline(&mut offer.as_str())
-					.desired_rows(4)
-					.desired_width(f32::INFINITY)
-					.interactive(false),
-			);
-			if ui.button("Copy Offer").clicked() {
-				ui.output_mut(|o| o.copied_text = offer.clone());
-				app.state.status_message = Some(StatusMessage::success("Copied"));
+		div { class: "narrow",
+			match active {
+				LightningTab::Bolt11Send => rsx! { Bolt11Send {} },
+				LightningTab::Bolt11Receive => rsx! { Bolt11Receive {} },
+				LightningTab::Bolt12Send => rsx! { Bolt12Send {} },
+				LightningTab::Bolt12Receive => rsx! { Bolt12Receive {} },
+				LightningTab::SpontaneousSend => rsx! { SpontaneousSend {} },
 			}
 		}
-	});
+	}
 }
 
-fn render_spontaneous_send(ui: &mut Ui, app: &mut LspServerApp) {
-	card(ui, "Spontaneous Payment (Keysend)", |ui| {
-		let unit_label = crate::ui::unit_label(app.state.display_unit);
-		let form = &mut app.state.forms.spontaneous_send;
-
-        ui.horizontal(|ui| {
-            widgets::label_with_info(ui, "Payment type:", HELP_KEYSEND);
-            ui.label("Keysend");
-        });
-        ui.add_space(5.0);
-
-        egui::Grid::new("spontaneous_send_grid")
-            .num_columns(2)
-            .spacing([10.0, 5.0])
-            .show(ui, |ui| {
-                widgets::label_with_info(ui, "Node ID (hex):", HELP_NODE_ID);
-				ui.text_edit_singleline(&mut form.node_id);
-				ui.end_row();
-
-                widgets::label_with_info(ui, &format!("Amount ({}):", unit_label), HELP_AMOUNT);
-				ui.text_edit_singleline(&mut form.amount_msat);
-				ui.end_row();
-            });
-
-		// preview: read field text locally to avoid borrow conflict with fmt_msat
-		let amt = app.state.forms.spontaneous_send.amount_msat.clone();
-		if let Some(preview) = app.amount_entry_preview(&amt) {
-			ui.weak(preview);
+/// Primary submit button that shows a spinner and label while pending.
+#[component]
+fn Submit(pending: bool, label: String, pending_label: String, icon: &'static str, onclick: EventHandler<MouseEvent>) -> Element {
+	rsx! {
+		button { class: "btn lg primary block", disabled: pending, onclick: move |e| onclick.call(e),
+			if pending {
+				Spinner {}
+				"{pending_label}"
+			} else {
+				Icon { name: icon, size: 18 }
+				"{label}"
+			}
 		}
+	}
+}
 
-		ui.add_space(10.0);
-
-		let is_pending = app.state.tasks.spontaneous_send.is_some();
-		if is_pending {
-            widgets::loading_row(ui, "Sending...");
-		} else if ui.button("Send Keysend").clicked() {
-			app.spontaneous_send();
+#[component]
+fn LastPayment() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let last = ctx.results.read().last_payment_id.clone();
+	rsx! {
+		if let Some(payment_id) = last {
+			LastId { label: "Last Payment ID:", help: HELP_LAST_PAYMENT_ID, value: payment_id }
 		}
+	}
+}
 
-		if let Some(payment_id) = &app.state.last_payment_id {
-			ui.add_space(5.0);
-			ui.horizontal(|ui| {
-                widgets::label_with_info(ui, "Last Payment ID:", HELP_LAST_PAYMENT_ID);
-				ui.monospace(crate::ui::truncate_id(payment_id, 8, 8));
-				if ui.small_button("Copy").clicked() {
-					ui.output_mut(|o| o.copied_text = payment_id.clone());
+/// Read-only generated invoice/offer with a copy button.
+#[component]
+fn Generated(label: String, help: String, value: String, copy_label: String) -> Element {
+	let ctx = use_context::<AppCtx>();
+	rsx! {
+		div { class: "result",
+			div { class: "row between",
+				span { class: "field-label", "{label}" crate::ui::widgets::InfoTip { text: help } }
+				button { class: "btn sm", onclick: move |_| crate::actions::copy(ctx, &value), Icon { name: "copy", size: 14 } "{copy_label}" }
+			}
+			div { class: "value", "{value}" }
+		}
+	}
+}
+
+#[component]
+fn Bolt11Send() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().bolt11_send.clone();
+	let unit = unit_label(ctx.unit());
+	let preview = amount_entry_preview(&form.amount_msat, ctx.unit(), ctx.price_value());
+	rsx! {
+		Card { title: "Pay BOLT11 Invoice",
+			div { class: "stack", style: "gap: 16px;",
+				Field { label: "Invoice", help: HELP_BOLT11_INVOICE,
+					TextArea { value: form.invoice.clone(), rows: 3, placeholder: "lnbc…", oninput: move |v| forms.write().bolt11_send.invoice = v }
 				}
-			});
+				Field { label: "Amount ({unit}, for zero-amount invoices)", help: HELP_ZERO_AMOUNT, preview,
+					TextInput { value: form.amount_msat.clone(), oninput: move |v| forms.write().bolt11_send.amount_msat = v }
+				}
+				Submit { pending: ctx.busy(Op::Bolt11Send), label: "Pay Invoice", pending_label: "Sending...", icon: "arrow-up", onclick: move |_| actions::review_send(ctx, SendKind::Bolt11) }
+				LastPayment {}
+			}
 		}
-	});
+	}
+}
+
+#[component]
+fn Bolt11Receive() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().bolt11_receive.clone();
+	let unit = unit_label(ctx.unit());
+	let preview = amount_entry_preview(&form.amount_msat, ctx.unit(), ctx.price_value());
+	let invoice = ctx.results.read().generated_invoice.clone();
+	rsx! {
+		Card { title: "Generate BOLT11 Invoice",
+			div { class: "stack", style: "gap: 16px;",
+				Field { label: "Amount ({unit}, optional)", help: HELP_AMOUNT, preview,
+					TextInput { value: form.amount_msat.clone(), oninput: move |v| forms.write().bolt11_receive.amount_msat = v }
+				}
+				Field { label: "Description", help: HELP_DESCRIPTION,
+					TextInput { value: form.description.clone(), oninput: move |v| forms.write().bolt11_receive.description = v }
+				}
+				Field { label: "Expiry (seconds)", help: HELP_EXPIRY, hint: "Defaults to 86400 (one day)",
+					TextInput { value: form.expiry_secs.clone(), placeholder: "86400", oninput: move |v| forms.write().bolt11_receive.expiry_secs = v }
+				}
+				Submit { pending: ctx.busy(Op::Bolt11Receive), label: "Generate Invoice", pending_label: "Generating...", icon: "arrow-down", onclick: move |_| actions::generate_bolt11_invoice(ctx) }
+				if let Some(invoice) = invoice {
+					Generated { label: "Generated Invoice", help: HELP_GENERATED_BOLT11_INVOICE, value: invoice, copy_label: "Copy Invoice" }
+				}
+			}
+		}
+	}
+}
+
+#[component]
+fn Bolt12Send() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().bolt12_send.clone();
+	let unit = unit_label(ctx.unit());
+	let preview = amount_entry_preview(&form.amount_msat, ctx.unit(), ctx.price_value());
+	rsx! {
+		Card { title: "Pay BOLT12 Offer",
+			div { class: "stack", style: "gap: 16px;",
+				Field { label: "Offer", help: HELP_BOLT12_OFFER,
+					TextArea { value: form.offer.clone(), rows: 3, placeholder: "lno…", oninput: move |v| forms.write().bolt12_send.offer = v }
+				}
+				div { class: "form-grid",
+					Field { label: "Amount ({unit}, optional)", help: HELP_AMOUNT, preview,
+						TextInput { value: form.amount_msat.clone(), oninput: move |v| forms.write().bolt12_send.amount_msat = v }
+					}
+					Field { label: "Quantity (optional)", help: HELP_QUANTITY,
+						TextInput { value: form.quantity.clone(), oninput: move |v| forms.write().bolt12_send.quantity = v }
+					}
+				}
+				Field { label: "Payer Note (optional)", help: HELP_PAYER_NOTE,
+					TextInput { value: form.payer_note.clone(), oninput: move |v| forms.write().bolt12_send.payer_note = v }
+				}
+				Submit { pending: ctx.busy(Op::Bolt12Send), label: "Pay Offer", pending_label: "Sending...", icon: "arrow-up-right", onclick: move |_| actions::review_send(ctx, SendKind::Bolt12) }
+				LastPayment {}
+			}
+		}
+	}
+}
+
+#[component]
+fn Bolt12Receive() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().bolt12_receive.clone();
+	let unit = unit_label(ctx.unit());
+	let preview = amount_entry_preview(&form.amount_msat, ctx.unit(), ctx.price_value());
+	let offer = ctx.results.read().generated_offer.clone();
+	rsx! {
+		Card { title: "Generate BOLT12 Offer",
+			div { class: "stack", style: "gap: 16px;",
+				Field { label: "Description (required)", help: HELP_DESCRIPTION,
+					TextInput { value: form.description.clone(), oninput: move |v| forms.write().bolt12_receive.description = v }
+				}
+				div { class: "form-grid",
+					Field { label: "Amount ({unit}, optional)", help: HELP_AMOUNT, preview,
+						TextInput { value: form.amount_msat.clone(), oninput: move |v| forms.write().bolt12_receive.amount_msat = v }
+					}
+					Field { label: "Expiry (seconds, optional)", help: HELP_EXPIRY,
+						TextInput { value: form.expiry_secs.clone(), oninput: move |v| forms.write().bolt12_receive.expiry_secs = v }
+					}
+					Field { label: "Quantity (optional)", help: HELP_QUANTITY,
+						TextInput { value: form.quantity.clone(), oninput: move |v| forms.write().bolt12_receive.quantity = v }
+					}
+				}
+				Submit { pending: ctx.busy(Op::Bolt12Receive), label: "Generate Offer", pending_label: "Generating...", icon: "arrow-down-left", onclick: move |_| actions::generate_bolt12_offer(ctx) }
+				if let Some(offer) = offer {
+					Generated { label: "Generated Offer", help: HELP_GENERATED_BOLT12_OFFER, value: offer, copy_label: "Copy Offer" }
+				}
+			}
+		}
+	}
+}
+
+#[component]
+fn SpontaneousSend() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().spontaneous_send.clone();
+	let unit = unit_label(ctx.unit());
+	let preview = amount_entry_preview(&form.amount_msat, ctx.unit(), ctx.price_value());
+	rsx! {
+		Card { title: "Spontaneous Payment (Keysend)", sub: "Payment type: Keysend", help: HELP_KEYSEND,
+			div { class: "stack", style: "gap: 16px;",
+				Field { label: "Node ID (hex)", help: HELP_NODE_ID,
+					TextInput { value: form.node_id.clone(), mono: true, oninput: move |v| forms.write().spontaneous_send.node_id = v }
+				}
+				Field { label: "Amount ({unit})", help: HELP_AMOUNT, preview,
+					TextInput { value: form.amount_msat.clone(), oninput: move |v| forms.write().spontaneous_send.amount_msat = v }
+				}
+				Submit { pending: ctx.busy(Op::SpontaneousSend), label: "Send Keysend", pending_label: "Sending...", icon: "zap", onclick: move |_| actions::review_send(ctx, SendKind::Keysend) }
+				LastPayment {}
+			}
+		}
+	}
 }

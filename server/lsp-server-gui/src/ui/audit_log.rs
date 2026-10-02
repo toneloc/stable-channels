@@ -1,7 +1,9 @@
-use eframe::egui;
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::ui::widgets;
+use crate::actions;
+use crate::state::{AppCtx, Op};
+use crate::ui::log_view::{LogKind, LogView};
+use crate::ui::widgets::{Empty, Icon, Spinner, TextInput};
 
 /// Render one audit JSON line (`{ts,event,data}`) as a compact single line. Non-JSON returns unchanged.
 pub fn format_audit_line(line: &str) -> String {
@@ -44,48 +46,40 @@ fn compact_val(v: &serde_json::Value) -> String {
 	}
 }
 
-pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.heading("Audit Log");
-	ui.add_space(5.0);
-
-	ui.horizontal(|ui| {
-		ui.label("Lines:");
-		ui.add(egui::TextEdit::singleline(&mut app.state.forms.audit_log.max_lines).desired_width(80.0));
-		let loading = app.state.tasks.audit_log.is_some();
-		if ui.add_enabled(!loading, egui::Button::new("Refresh")).clicked() {
-			app.fetch_audit_log();
+/// "Lines:" field plus Refresh, shared by both log tabs.
+#[component]
+pub fn LogToolbar(lines: String, loading: bool, oninput: EventHandler<String>, onrefresh: EventHandler<MouseEvent>) -> Element {
+	rsx! {
+		div { class: "row",
+			span { class: "field-label", "Lines" }
+			div { style: "width: 90px;", TextInput { value: lines, small: true, oninput: move |v| oninput.call(v) } }
+			button { class: "btn sm", disabled: loading, onclick: move |e| onrefresh.call(e),
+				if loading { Spinner {} } else { Icon { name: "refresh", size: 14 } }
+				"Refresh"
+			}
 		}
-		if loading {
-			ui.spinner();
+	}
+}
+
+#[component]
+pub fn AuditLog() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let lines = forms.read().audit_log.max_lines.clone();
+	let loading = ctx.busy(Op::AuditLog);
+	let log = ctx.data.read().audit_log.as_ref().map(|r| r.content.clone());
+	rsx! {
+		div { class: "card stack", style: "gap: 14px;",
+			LogToolbar { lines, loading, oninput: move |v| forms.write().audit_log.max_lines = v, onrefresh: move |_| actions::fetch_audit_log(ctx) }
+			match log {
+				Some(content) if content.is_empty() => rsx! { Empty { icon: "file", title: "No audit events yet." } },
+				Some(content) => {
+					let formatted = content.lines().map(format_audit_line).collect::<Vec<_>>().join("\n");
+					rsx! { LogView { kind: LogKind::Audit, text: formatted } }
+				},
+				None => rsx! { Empty { icon: "file", title: "No audit log loaded", hint: "Click Refresh to load" } },
+			}
 		}
-	});
-
-	let formatted: String = app
-		.state
-		.audit_log
-		.as_ref()
-		.map(|r| r.content.lines().map(format_audit_line).collect::<Vec<_>>().join("\n"))
-		.unwrap_or_default();
-
-	let (filter, wrap, follow) = crate::ui::log_view::controls(ui, "audit_log", &formatted);
-
-	ui.add_space(10.0);
-
-	match &app.state.audit_log {
-		Some(resp) if resp.content.is_empty() => {
-			ui.label("No audit events yet.");
-		},
-		Some(_) => {
-			let display: String = if filter.is_empty() {
-				formatted.clone()
-			} else {
-				formatted.lines().filter(|line| line.contains(&filter)).collect::<Vec<_>>().join("\n")
-			};
-			crate::ui::log_view::text_area(ui, &display, wrap, follow);
-		},
-		None => {
-			widgets::empty_state(ui, "📜", "No audit log loaded", "Click Refresh to load");
-		},
 	}
 }
 

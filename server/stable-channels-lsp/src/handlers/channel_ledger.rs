@@ -20,11 +20,9 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
         Ok(req) => req,
         Err(response) => return response,
     };
-    let Some(identifier) = nonempty(req.identifier) else {
-        return error_response(
-            ErrorCode::InvalidRequestError,
-            "An exact ledger identifier is required",
-        );
+    let identifier = match feed_identifier(req.identifier, req.all_channels) {
+        Ok(identifier) => identifier,
+        Err(message) => return error_response(ErrorCode::InvalidRequestError, message),
     };
     let before = if req.cursor.trim().is_empty() {
         None
@@ -40,18 +38,25 @@ pub async fn list_channel_ledger_events(State(state): State<AppState>, body: Byt
         return error_response(ErrorCode::InvalidRequestError, "Invalid completeness filter");
     }
     let query = LedgerQuery {
-        identifier: Some(identifier),
+        identifier: identifier.clone(),
         category: nonempty(req.category),
         status: nonempty(req.status),
         completeness: nonempty(req.completeness),
         before,
         limit: req.page_size as usize,
+        include_linked: req.include_linked && identifier.is_some(),
+        state_changes_only: req.state_changes_only || identifier.is_none(),
     };
-    match state.db.list_ledger_events(&query) {
+    let page = match identifier {
+        Some(_) => state.db.list_ledger_events(&query),
+        None => state.db.list_recent_state_events(&query),
+    };
+    match page {
         Ok(page) => ok_response(ListChannelLedgerEventsResponse {
             events: page.events.into_iter().map(to_proto_event).collect(),
             next_cursor: page.next_cursor.map(format_cursor),
-            overview: Some(to_proto_overview(page.overview)),
+            // The cross-channel feed has no single identifier to summarise.
+            overview: query.identifier.as_ref().map(|_| to_proto_overview(page.overview)),
         }),
         Err(error) => error_response(
             ErrorCode::InternalServerError,
@@ -89,6 +94,15 @@ fn to_proto_overview(overview: LedgerOverview) -> ChannelLedgerOverview {
 
 fn nonempty(value: String) -> Option<String> {
     (!value.trim().is_empty()).then_some(value)
+}
+
+/// `Some(identifier)` for an exact history, `None` for the all-channel feed; either is required, not both.
+fn feed_identifier(identifier: String, all_channels: bool) -> Result<Option<String>, &'static str> {
+    match (nonempty(identifier), all_channels) {
+        (Some(_), true) => Err("all_channels takes no identifier"),
+        (None, false) => Err("An exact ledger identifier is required"),
+        (identifier, _) => Ok(identifier),
+    }
 }
 
 fn to_proto_event(event: LedgerEvent) -> ChannelLedgerEvent {
@@ -133,6 +147,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn old_requests_decode_with_linking_and_filtering_off() {
+        use prost::Message;
+        let old = ListChannelLedgerEventsRequest {
+            identifier: "uid".to_owned(),
+            page_size: 10,
+            ..Default::default()
+        };
+        let decoded = ListChannelLedgerEventsRequest::decode(old.encode_to_vec().as_slice()).unwrap();
+        assert!(!decoded.include_linked && !decoded.state_changes_only);
+        let new = ListChannelLedgerEventsRequest { include_linked: true, state_changes_only: true, ..old };
+        let decoded = ListChannelLedgerEventsRequest::decode(new.encode_to_vec().as_slice()).unwrap();
+        assert!(decoded.include_linked && decoded.state_changes_only);
+    }
+
+    #[test]
     fn timeline_cursor_round_trips_and_rejects_legacy_ids() {
         let cursor = LedgerCursor { occurred_at_ms: 1_234, id: 56 };
         assert_eq!(parse_cursor(&format_cursor(cursor)), Some(cursor));
@@ -148,5 +177,23 @@ mod tests {
             nonempty("channel-1".to_owned()).as_deref(),
             Some("channel-1")
         );
+    }
+
+    #[test]
+    fn the_feed_and_an_exact_history_are_exclusive() {
+        assert_eq!(feed_identifier("uid".to_owned(), false), Ok(Some("uid".to_owned())));
+        assert_eq!(feed_identifier(" ".to_owned(), true), Ok(None));
+        assert!(feed_identifier("uid".to_owned(), true).is_err());
+        assert!(feed_identifier(String::new(), false).is_err());
+    }
+
+    #[test]
+    fn old_requests_decode_without_the_feed_flag() {
+        use prost::Message;
+        let old = ListChannelLedgerEventsRequest { identifier: "uid".to_owned(), ..Default::default() };
+        let decoded = ListChannelLedgerEventsRequest::decode(old.encode_to_vec().as_slice()).unwrap();
+        assert!(!decoded.all_channels);
+        let feed = ListChannelLedgerEventsRequest { all_channels: true, ..Default::default() };
+        assert!(ListChannelLedgerEventsRequest::decode(feed.encode_to_vec().as_slice()).unwrap().all_channels);
     }
 }

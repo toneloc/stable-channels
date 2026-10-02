@@ -1,13 +1,13 @@
-use egui::Ui;
-use egui_extras::{Column, TableBuilder};
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::ui::layout::{card, kv_grid_custom_info, page_scrolled};
-use crate::ui::widgets;
+use crate::actions;
+use crate::format::{format_sats, format_usd};
+use crate::state::{AppCtx, DisplayUnit, Op};
+use crate::ui::widgets::{Card, Empty, Gate, Hover, InfoTip, Kv, RefreshBtn, Stat, Th};
 
 const HELP_ONCHAIN_TOTAL: &str = "The total balance tracked by the node's on-chain wallet.";
 const HELP_ONCHAIN_SPENDABLE: &str =
-    "The on-chain funds that are currently spendable after confirmation requirements and reserves.";
+	"The on-chain funds that are currently spendable after confirmation requirements and reserves.";
 const HELP_SPENDABLE: &str =
 	"Currently spendable on-chain funds. This excludes funds still waiting on confirmations or kept as reserve.";
 const HELP_ANCHOR_RESERVE: &str =
@@ -16,13 +16,13 @@ const HELP_LIGHTNING_TOTAL: &str =
 	"Total balance claimable across Lightning channels. This is not the same as immediately sendable capacity.";
 const HELP_BALANCE_TYPE: &str = "The claim or balance state for this Lightning balance row.";
 const HELP_BALANCE_CHANNEL: &str =
-    "The channel ID associated with this balance or sweep when one is available.";
+	"The channel ID associated with this balance or sweep when one is available.";
 const HELP_BALANCE_AMOUNT: &str =
-    "The funds represented by this row, shown in the selected display unit.";
+	"The funds represented by this row, shown in the selected display unit.";
 const HELP_BALANCE_EXTRA: &str =
 	"Additional block heights, txids, or timing details needed to understand when funds become spendable.";
 const HELP_PENDING_SWEEP_BALANCES: &str =
-    "On-chain outputs the node is sweeping from channel closures or claim transactions.";
+	"On-chain outputs the node is sweeping from channel closures or claim transactions.";
 const HELP_CLAIMABLE_ON_CHANNEL_CLOSE: &str =
 	"Funds that could be claimed if the channel were force-closed now, less on-chain fees. This does not include unconfirmed splice changes.";
 const HELP_AWAITING_CONFIRMATIONS: &str =
@@ -36,246 +36,177 @@ const HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC: &str =
 const HELP_COUNTERPARTY_REVOKED_OUTPUT: &str =
 	"The counterparty broadcast a revoked commitment transaction, allowing this node to claim penalty outputs from it.";
 const HELP_PENDING_BROADCAST: &str =
-    "The sweep transaction has been prepared or queued but is not yet confirmed on-chain.";
+	"The sweep transaction has been prepared or queued but is not yet confirmed on-chain.";
 const HELP_BROADCAST_AWAITING_CONFIRMATION: &str =
-    "The sweep transaction was broadcast and is waiting for its first confirmation.";
+	"The sweep transaction was broadcast and is waiting for its first confirmation.";
 const HELP_AWAITING_THRESHOLD_CONFIRMATIONS: &str =
 	"The sweep transaction is confirmed but needs more confirmations before the balance is considered safe or spendable.";
 
-pub fn render(ui: &mut Ui, app: &mut LspServerApp) {
-	ui.heading("Balances");
-	ui.add_space(10.0);
-
-	if app.render_disconnected_gate(ui) {
-		return;
+/// Split a total into (number, unit, secondary line) for the hero figure.
+fn hero_parts(sats: u64, unit: DisplayUnit, price: Option<f64>) -> (String, &'static str, String) {
+	let btc = sats as f64 / 100_000_000.0;
+	match (unit, price.filter(|p| *p > 0.0)) {
+		(DisplayUnit::Usd, Some(p)) => (format_usd(btc * p), "USD", format!("{:.8} BTC", btc)),
+		(DisplayUnit::Btc, p) => (
+			format!("{:.8}", btc),
+			"BTC",
+			match p {
+				Some(p) => format!("{} sats · ≈ {}", format_sats(sats), format_usd(btc * p)),
+				None => format!("{} sats", format_sats(sats)),
+			},
+		),
+		(_, p) => (
+			format_sats(sats),
+			"sats",
+			match p {
+				Some(p) => format!("≈ {} · {:.8} BTC", format_usd(btc * p), btc),
+				None => format!("{:.8} BTC", btc),
+			},
+		),
 	}
+}
 
-	ui.horizontal(|ui| {
-		if app.state.tasks.balances.is_some() {
-			widgets::loading_row(ui, "Loading balances...");
-		} else if ui.button("Refresh").clicked() {
-			app.fetch_balances();
-		}
-	});
-
-	ui.add_space(10.0);
-
-	if app.state.balances.is_none() {
-		widgets::empty_state(ui, "💰", "No balance data", "Click Refresh to load");
-		return;
+#[component]
+pub fn Balances() -> Element {
+	let ctx = use_context::<AppCtx>();
+	if !ctx.is_connected() {
+		return rsx! { Gate {} };
 	}
-
-	// Extract headline totals into locals before borrowing state for iteration.
-    let total_onchain = app
-        .state
-        .balances
-        .as_ref()
-        .map(|b| b.total_onchain_balance_sats)
-        .unwrap_or(0);
-    let spendable = app
-        .state
-        .balances
-        .as_ref()
-        .map(|b| b.spendable_onchain_balance_sats)
-        .unwrap_or(0);
-    let reserve = app
-        .state
-        .balances
-        .as_ref()
-        .map(|b| b.total_anchor_channels_reserve_sats)
-        .unwrap_or(0);
-    let total_lightning = app
-        .state
-        .balances
-        .as_ref()
-        .map(|b| b.total_lightning_balance_sats)
-        .unwrap_or(0);
-
-	// Build a per-amount formatter once, before we borrow state.
-	let fmt = |sats: u64| app.fmt_sats(sats);
-
-	let onchain_val = fmt(spendable);
-	let onchain_sec = format!("reserve {} | total {}", fmt(reserve), fmt(total_onchain));
-	let ln_val = fmt(total_lightning);
-	let onchain_total_str = fmt(total_onchain);
-	let onchain_spendable_str = fmt(spendable);
-	let onchain_reserve_str = fmt(reserve);
-	let lightning_total_str = fmt(total_lightning);
-
-	// Snapshot lightning-balance rows into owned strings before the scrolled closure.
-	let lightning_rows: Vec<[String; 4]> = app
-		.state
-		.balances
-		.as_ref()
-		.map(|b| {
-			b.lightning_balances
-				.iter()
-                .filter_map(|balance| {
-                    balance
-                        .balance_type
-                        .as_ref()
-                        .map(|bt| lightning_balance_row(bt, &fmt))
-                })
-				.collect()
-		})
-		.unwrap_or_default();
-
-    let pending_sweeps: Vec<(usize, String, &'static str)> = app
-		.state
-		.balances
-		.as_ref()
-		.map(|b| {
-			b.pending_balances_from_channel_closures
-				.iter()
-				.enumerate()
-				.filter_map(|(i, sweep)| {
-                    sweep.balance_type.as_ref().map(|bt| {
-                        let (text, help) = pending_sweep_text(bt, &fmt);
-                        (i, text, help)
-                    })
-				})
-				.collect()
-		})
-		.unwrap_or_default();
-
-	page_scrolled(ui, |ui| {
-		ui.columns(2, |cols| {
-            widgets::stat_card_with_info(
-                &mut cols[0],
-                "On-chain Spendable",
-                HELP_ONCHAIN_SPENDABLE,
-                &onchain_val,
-                &onchain_sec,
-            );
-            widgets::stat_card_with_info(
-                &mut cols[1],
-                "Lightning Total",
-                HELP_LIGHTNING_TOTAL,
-                &ln_val,
-                "",
-            );
-		});
-
-		ui.add_space(10.0);
-
-		card(ui, "On-chain Balance", |ui| {
-            let rows: crate::ui::layout::KvInfoRows = vec![
-				(
-					"Total",
-                    Some(HELP_ONCHAIN_TOTAL),
-					Box::new(|ui: &mut egui::Ui| {
-                        ui.label(&onchain_total_str).on_hover_text(format!(
-                            "{} sats",
-                            crate::ui::format_sats(total_onchain)
-                        ));
-					}),
-				),
-				(
-					"Spendable",
-                    Some(HELP_SPENDABLE),
-					Box::new(|ui: &mut egui::Ui| {
-                        ui.label(&onchain_spendable_str)
-                            .on_hover_text(format!("{} sats", crate::ui::format_sats(spendable)));
-					}),
-				),
-				(
-					"Anchor Reserve",
-                    Some(HELP_ANCHOR_RESERVE),
-					Box::new(|ui: &mut egui::Ui| {
-                        ui.label(&onchain_reserve_str)
-                            .on_hover_text(format!("{} sats", crate::ui::format_sats(reserve)));
-					}),
-				),
-			];
-            kv_grid_custom_info(ui, "onchain_balance", rows);
-		});
-
-		ui.add_space(10.0);
-
-		card(ui, "Lightning Balance", |ui| {
-            let rows: crate::ui::layout::KvInfoRows = vec![(
-				"Total",
-                Some(HELP_LIGHTNING_TOTAL),
-				Box::new(|ui: &mut egui::Ui| {
-                    ui.label(&lightning_total_str)
-                        .on_hover_text(format!("{} sats", crate::ui::format_sats(total_lightning)));
-				}),
-			)];
-            kv_grid_custom_info(ui, "lightning_balance", rows);
-
-			if !lightning_rows.is_empty() {
-				ui.add_space(8.0);
-				ui.label(format!("Details ({} items)", lightning_rows.len()));
-				ui.add_space(4.0);
-				crate::ui::layout::h_scroll(ui, 600.0, |ui| {
-					TableBuilder::new(ui)
-						.striped(true)
-						.resizable(false)
-						.vscroll(false)
-						.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-						.auto_shrink([false, true])
-						.column(Column::remainder().at_least(64.0).clip(true)) // Type
-						.column(Column::remainder().at_least(64.0).clip(true)) // Channel
-						.column(Column::auto()) // Amount
-						.column(Column::remainder().at_least(64.0).clip(true)) // Extra
-						.header(22.0, |mut h| {
-                            h.col(|ui| {
-                                widgets::table_header_with_info(ui, "Type", HELP_BALANCE_TYPE);
-                            });
-                            h.col(|ui| {
-                                widgets::table_header_with_info(
-                                    ui,
-                                    "Channel",
-                                    HELP_BALANCE_CHANNEL,
-                                );
-                            });
-                            h.col(|ui| {
-                                widgets::table_header_with_info(ui, "Amount", HELP_BALANCE_AMOUNT);
-                            });
-                            h.col(|ui| {
-                                widgets::table_header_with_info(ui, "Extra", HELP_BALANCE_EXTRA);
-                            });
-						})
-						.body(|mut body| {
-							for row in &lightning_rows {
-								body.row(24.0, |mut r| {
-                                    r.col(|ui| {
-                                        let label = ui.label(&row[0]);
-                                        if let Some(help) = lightning_balance_help(&row[0]) {
-                                            label.on_hover_text(help);
-                                        }
-                                    });
-                                    r.col(|ui| {
-                                        ui.monospace(&row[1]);
-                                    });
-                                    r.col(|ui| {
-                                        ui.monospace(&row[2]);
-                                    });
-                                    r.col(|ui| {
-                                        ui.label(&row[3]);
-                                    });
-								});
-							}
-						});
-				});
-			}
-		});
-
-		ui.add_space(10.0);
-
-		if !pending_sweeps.is_empty() {
-			card(ui, "Pending Sweep Balances", |ui| {
-                widgets::label_with_info(ui, "Sweep outputs", HELP_PENDING_SWEEP_BALANCES);
-                ui.add_space(4.0);
-                for (i, text, help) in &pending_sweeps {
-					ui.group(|ui| {
-                        widgets::label_with_info(ui, &format!("Sweep #{}", i + 1), help);
-						ui.label(text);
-					});
+	let loading = ctx.busy(Op::Balances);
+	let Some(b) = ctx.data.read().balances.clone() else {
+		return rsx! {
+			Card {
+				if loading {
+					Empty { icon: "wallet", title: "Loading balances...", crate::ui::widgets::Spinner { large: true } }
+				} else {
+					Empty { icon: "wallet", title: "No balance data", hint: "Click Refresh to load",
+						RefreshBtn { busy: loading, onclick: move |_| actions::fetch_balances(ctx) }
+					}
 				}
-			});
+			}
+		};
+	};
+	let fmt = |sats: u64| ctx.fmt_sats(sats);
+	let total_onchain = b.total_onchain_balance_sats;
+	let spendable = b.spendable_onchain_balance_sats;
+	let reserve = b.total_anchor_channels_reserve_sats;
+	let total_lightning = b.total_lightning_balance_sats;
+	let total = total_onchain.saturating_add(total_lightning);
+	let (hero_value, hero_unit, hero_sub) = hero_parts(total, ctx.unit(), ctx.price_value());
+	let onchain_frac = if total == 0 { 0.5 } else { total_onchain as f64 / total as f64 };
+	let onchain_pct = (onchain_frac * 100.0).round();
+	let lightning_pct = 100.0 - onchain_pct;
+	let lightning_rows: Vec<[String; 4]> = b
+		.lightning_balances
+		.iter()
+		.filter_map(|balance| balance.balance_type.as_ref().map(|bt| lightning_balance_row(bt, &fmt)))
+		.collect();
+	let pending_sweeps: Vec<(usize, String, &'static str)> = b
+		.pending_balances_from_channel_closures
+		.iter()
+		.enumerate()
+		.filter_map(|(i, sweep)| {
+			sweep.balance_type.as_ref().map(|bt| {
+				let (text, help) = pending_sweep_text(bt, &fmt);
+				(i, text, help)
+			})
+		})
+		.collect();
+
+	rsx! {
+		Card { class: "hero",
+			span { class: "hero-label", "Total Balance" }
+			div { class: "hero-value", "{hero_value}" span { class: "hero-unit", "{hero_unit}" } }
+			span { class: "hero-sub", "{hero_sub}" }
+			div { class: "split",
+				div { class: "split-bar", "aria-hidden": "true",
+					div { class: "seg-a", style: "width: {onchain_pct}%;" }
+					div { class: "seg-b", style: "width: {lightning_pct}%;" }
+				}
+				div { class: "split-legend",
+					div { class: "stack tight", style: "align-items: flex-start; gap: 2px;",
+						span { class: "label", style: "color: var(--orange-text);", span { class: "coin sm", "₿" } "On-chain" }
+						span { class: "num", "{fmt(total_onchain)}" }
+					}
+					div { class: "stack tight", style: "align-items: flex-end; gap: 2px;",
+						span { class: "label", style: "color: var(--blue-text);", "Lightning" crate::ui::widgets::Icon { name: "zap", size: 14 } }
+						span { class: "num", "{fmt(total_lightning)}" }
+					}
+				}
+			}
 		}
-	});
+		div { class: "row between",
+			span { class: "muted small", "Totals include funds that are not yet spendable." }
+			div { class: "row", RefreshBtn { busy: loading, onclick: move |_| actions::fetch_balances(ctx), op: Op::Balances } }
+		}
+		div { class: "grid-3",
+			Stat { title: "On-chain Spendable", help: HELP_ONCHAIN_SPENDABLE, value: fmt(spendable), sub: format!("reserve {} | total {}", fmt(reserve), fmt(total_onchain)) }
+			Stat { title: "Lightning Total", help: HELP_LIGHTNING_TOTAL, value: fmt(total_lightning) }
+			Stat { title: "Anchor Reserve", help: HELP_ANCHOR_RESERVE, value: fmt(reserve), sub: "Kept for anchor-output fee bumping" }
+		}
+		div { class: "grid-2",
+			Card { title: "On-chain Balance",
+				div { class: "kv",
+					Kv { label: "Total", help: HELP_ONCHAIN_TOTAL, Hover { tip: format!("{} sats", format_sats(total_onchain)), span { class: "num", "{fmt(total_onchain)}" } } }
+					Kv { label: "Spendable", help: HELP_SPENDABLE, Hover { tip: format!("{} sats", format_sats(spendable)), span { class: "num", "{fmt(spendable)}" } } }
+					Kv { label: "Anchor Reserve", help: HELP_ANCHOR_RESERVE, Hover { tip: format!("{} sats", format_sats(reserve)), span { class: "num", "{fmt(reserve)}" } } }
+				}
+			}
+			Card { title: "Lightning Balance", class: "flush",
+				div { style: "padding: 0 20px 6px;",
+					div { class: "kv",
+						Kv { label: "Total", help: HELP_LIGHTNING_TOTAL, Hover { tip: format!("{} sats", format_sats(total_lightning)), span { class: "num", "{fmt(total_lightning)}" } } }
+					}
+				}
+				if !lightning_rows.is_empty() {
+					div { class: "toolbar", style: "border-top: 1px solid var(--border);", span { class: "count", "Details ({lightning_rows.len()} items)" } }
+					div { class: "table-wrap",
+						table { class: "table", style: "min-width: 600px;",
+							thead {
+								tr {
+									Th { label: "Type", help: HELP_BALANCE_TYPE }
+									Th { label: "Channel", help: HELP_BALANCE_CHANNEL }
+									Th { label: "Amount", help: HELP_BALANCE_AMOUNT, class: "right" }
+									Th { label: "Extra", help: HELP_BALANCE_EXTRA }
+								}
+							}
+							tbody {
+								for (i, row) in lightning_rows.into_iter().enumerate() {
+									tr { key: "{i}",
+										td {
+											span { class: "row nowrap", style: "gap: 6px;",
+												"{row[0]}"
+												if let Some(help) = lightning_balance_help(&row[0]) {
+													InfoTip { text: help }
+												}
+											}
+										}
+										td { span { class: "mono", "{row[1]}" } }
+										td { class: "right num", "{row[2]}" }
+										td { class: "muted", "{row[3]}" }
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if !pending_sweeps.is_empty() {
+			Card { title: "Pending Sweep Balances", help: HELP_PENDING_SWEEP_BALANCES, sub: "Sweep outputs",
+				div { class: "grid-3",
+					for (i, text, help) in pending_sweeps {
+						div { key: "{i}", class: "card inner stack tight",
+							div { class: "row nowrap", style: "gap: 6px;", span { class: "strong", "Sweep #{i + 1}" } InfoTip { text: help } }
+							for (j, line) in text.lines().map(str::to_string).enumerate() {
+								span { key: "{j}", class: "small", "{line}" }
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 fn lightning_balance_row(
@@ -287,37 +218,37 @@ fn lightning_balance_row(
 	match balance {
 		BalanceType::ClaimableOnChannelClose(b) => [
 			"Claimable on Channel Close".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			String::new(),
 		],
 		BalanceType::ClaimableAwaitingConfirmations(b) => [
 			"Awaiting Confirmations".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			format!("Confirmation Height: {}", b.confirmation_height),
 		],
 		BalanceType::ContentiousClaimable(b) => [
 			"Contentious Claimable".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			format!("Timeout Height: {}", b.timeout_height),
 		],
 		BalanceType::MaybeTimeoutClaimableHtlc(b) => [
 			"Maybe Timeout Claimable HTLC".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			format!("Claimable Height: {}", b.claimable_height),
 		],
 		BalanceType::MaybePreimageClaimableHtlc(b) => [
 			"Maybe Preimage Claimable HTLC".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			format!("Expiry Height: {}", b.expiry_height),
 		],
 		BalanceType::CounterpartyRevokedOutputClaimable(b) => [
 			"Counterparty Revoked Output".to_string(),
-			crate::ui::truncate_id(&b.channel_id, 8, 8),
+			crate::format::truncate_id(&b.channel_id, 8, 8),
 			fmt(b.amount_satoshis),
 			String::new(),
 		],
@@ -332,63 +263,63 @@ fn pending_sweep_text(
 
 	match balance {
 		BalanceType::PendingBroadcast(b) => {
-            let ch_line = b
-                .channel_id
-                .as_ref()
-                .map(|c| format!("Channel: {}\n", crate::ui::truncate_id(c, 8, 8)))
-                .unwrap_or_default();
-            (
-                format!(
-                    "Type: Pending Broadcast\n{}Amount: {}",
-                    ch_line,
-                    fmt(b.amount_satoshis)
-                ),
-                HELP_PENDING_BROADCAST,
-            )
-        }
+			let ch_line = b
+			    .channel_id
+			    .as_ref()
+			    .map(|c| format!("Channel: {}\n", crate::format::truncate_id(c, 8, 8)))
+			    .unwrap_or_default();
+			(
+			    format!(
+			        "Type: Pending Broadcast\n{}Amount: {}",
+			        ch_line,
+			        fmt(b.amount_satoshis)
+			    ),
+			    HELP_PENDING_BROADCAST,
+			)
+		}
 		BalanceType::BroadcastAwaitingConfirmation(b) => {
-            let ch_line = b
-                .channel_id
-                .as_ref()
-                .map(|c| format!("Channel: {}\n", crate::ui::truncate_id(c, 8, 8)))
-                .unwrap_or_default();
-            (
+			let ch_line = b
+			    .channel_id
+			    .as_ref()
+			    .map(|c| format!("Channel: {}\n", crate::format::truncate_id(c, 8, 8)))
+			    .unwrap_or_default();
+			(
 			format!(
 				"Type: Broadcast Awaiting Confirmation\n{}Amount: {}\nTXID: {}",
 				ch_line,
 				fmt(b.amount_satoshis),
-				crate::ui::truncate_id(&b.latest_spending_txid, 8, 8)
-                ),
-                HELP_BROADCAST_AWAITING_CONFIRMATION,
+				crate::format::truncate_id(&b.latest_spending_txid, 8, 8)
+			    ),
+			    HELP_BROADCAST_AWAITING_CONFIRMATION,
 			)
-        }
+		}
 		BalanceType::AwaitingThresholdConfirmations(b) => {
-            let ch_line = b
-                .channel_id
-                .as_ref()
-                .map(|c| format!("Channel: {}\n", crate::ui::truncate_id(c, 8, 8)))
-                .unwrap_or_default();
-            (
+			let ch_line = b
+			    .channel_id
+			    .as_ref()
+			    .map(|c| format!("Channel: {}\n", crate::format::truncate_id(c, 8, 8)))
+			    .unwrap_or_default();
+			(
 			format!(
 				"Type: Awaiting Threshold Confirmations\n{}Amount: {}\nConfirmed at height: {}",
 				ch_line,
 				fmt(b.amount_satoshis),
 				b.confirmation_height
-                ),
-                HELP_AWAITING_THRESHOLD_CONFIRMATIONS,
+			    ),
+			    HELP_AWAITING_THRESHOLD_CONFIRMATIONS,
 			)
-        }
-    }
+		}
+	}
 }
 
 fn lightning_balance_help(label: &str) -> Option<&'static str> {
-    match label {
-        "Claimable on Channel Close" => Some(HELP_CLAIMABLE_ON_CHANNEL_CLOSE),
-        "Awaiting Confirmations" => Some(HELP_AWAITING_CONFIRMATIONS),
-        "Contentious Claimable" => Some(HELP_CONTENTIOUS_CLAIMABLE),
-        "Maybe Timeout Claimable HTLC" => Some(HELP_MAYBE_TIMEOUT_CLAIMABLE_HTLC),
-        "Maybe Preimage Claimable HTLC" => Some(HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC),
-        "Counterparty Revoked Output" => Some(HELP_COUNTERPARTY_REVOKED_OUTPUT),
-        _ => None,
+	match label {
+		"Claimable on Channel Close" => Some(HELP_CLAIMABLE_ON_CHANNEL_CLOSE),
+		"Awaiting Confirmations" => Some(HELP_AWAITING_CONFIRMATIONS),
+		"Contentious Claimable" => Some(HELP_CONTENTIOUS_CLAIMABLE),
+		"Maybe Timeout Claimable HTLC" => Some(HELP_MAYBE_TIMEOUT_CLAIMABLE_HTLC),
+		"Maybe Preimage Claimable HTLC" => Some(HELP_MAYBE_PREIMAGE_CLAIMABLE_HTLC),
+		"Counterparty Revoked Output" => Some(HELP_COUNTERPARTY_REVOKED_OUTPUT),
+		_ => None,
 	}
 }

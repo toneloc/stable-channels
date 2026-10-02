@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Production lsp-server-gui (web/wasm) image for the Umbrel package.
+# Production lsp-server-gui (Dioxus web/wasm) image for the Umbrel package.
 # Build context = repo root. Serves the wasm bundle and reverse-proxies
 # /api/ to the sc-lsp daemon (the wasm client issues origin-relative
 # /api/<path> requests by design — see server/sc-rest-client build_url).
@@ -7,18 +7,23 @@
 # The proxy upstream is set at runtime via SC_LSP_UPSTREAM (nginx envsubst
 # template), so the same image serves the e2e stack and Umbrel's injected
 # container names.
-FROM rust:1-bookworm AS build
+#
+# The wasm bundle is architecture-independent, so the build stage runs on the
+# native build platform instead of under QEMU for every target architecture.
+FROM --platform=$BUILDPLATFORM rust:1-bookworm AS build
 ARG CARGO_BUILD_JOBS=1
 ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/* \
  && rustup target add wasm32-unknown-unknown
-RUN cargo install --locked trunk --version ^0.21 -j "$CARGO_BUILD_JOBS"
 WORKDIR /src
+# wasm-bindgen-cli must match the wasm-bindgen crate pinned in Cargo.lock.
+COPY Cargo.lock ./
+RUN version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3; exit }' Cargo.lock)" \
+ && cargo install --locked wasm-bindgen-cli --version "$version" -j "$CARGO_BUILD_JOBS"
 COPY . .
-WORKDIR /src/server/lsp-server-gui
-RUN trunk build --release
+RUN server/lsp-server-gui/web/build.sh
 
 FROM nginx:alpine
 COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html

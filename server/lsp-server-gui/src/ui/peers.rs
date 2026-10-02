@@ -1,185 +1,127 @@
-use eframe::egui;
-use egui_extras::{Column, TableBuilder};
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::ui::layout::page_scrolled;
-use crate::ui::widgets;
+use crate::actions;
+use crate::state::{AppCtx, Dialog, Op};
+use crate::ui::widgets::{Bubble, Card, Check, Empty, Field, Gate, Icon, Modal, Peer, Pill, RefreshBtn, Spinner, TextInput, Th};
+use crate::ui::{close_dialog, open_dialog};
 
 const HELP_PEER_NODE_ID: &str = "The node public key identifying the connected or target peer.";
 const HELP_PEER_ADDRESS: &str = "Network address used to reach the peer.";
 const HELP_PEER_STATUS: &str = "Whether the peer is currently connected or disconnected.";
+const HELP_PERSIST: &str = "Reconnect to this peer automatically after restarts.";
 
-// Per-row snapshot extracted from state.peers so the state borrow is released
-// before widgets::id_with_copy (needs &mut app.state.status_message) runs in the table body.
+#[derive(Clone, PartialEq)]
 struct PeerRow {
 	node_id: String,
 	address: String,
 	is_connected: bool,
 }
 
-pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.heading("Peers");
-	ui.add_space(5.0);
-
-	ui.horizontal(|ui| {
-		if ui.button("Refresh").clicked() {
-			app.fetch_peers();
-		}
-		ui.separator();
-		if ui.button("Connect Peer").clicked() {
-			app.state.show_connect_peer_dialog = true;
-		}
-	});
-
-	ui.add_space(10.0);
-
-	let mut disconnect_node_id = None;
-
-	// Pre-extract peer rows so the &app.state.peers borrow ends before the table
-	// body calls widgets::id_with_copy (needs &mut app.state.status_message).
-	let rows: Option<Vec<PeerRow>> = app.state.peers.as_ref().map(|resp| {
+#[component]
+pub fn Peers() -> Element {
+	let ctx = use_context::<AppCtx>();
+	if !ctx.is_connected() {
+		return rsx! { Gate {} };
+	}
+	let loading = ctx.busy(Op::Peers);
+	let disconnecting = ctx.busy(Op::DisconnectPeer);
+	let rows: Option<Vec<PeerRow>> = ctx.data.read().peers.as_ref().map(|resp| {
 		resp.peers
 			.iter()
-			.map(|p| PeerRow {
-				node_id: p.node_id.clone(),
-				address: p.address.clone(),
-				is_connected: p.is_connected,
-			})
+			.map(|p| PeerRow { node_id: p.node_id.clone(), address: p.address.clone(), is_connected: p.is_connected })
 			.collect()
 	});
-
-	match rows {
-		Some(peers) => {
-			if peers.is_empty() {
-				widgets::empty_state(ui, "👥", "No peers connected", "Click Refresh to load");
-			} else {
-				// Summary line: count connected peers
-				let connected_count = peers.iter().filter(|p| p.is_connected).count();
-				ui.label(format!("{} peers connected", connected_count));
-				ui.add_space(5.0);
-
-				page_scrolled(ui, |ui| {
-					TableBuilder::new(ui)
-						.striped(true)
-						.resizable(false)
-						.cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-						.auto_shrink([false, true])
-						.column(Column::remainder().at_least(64.0).clip(true)) // Node ID
-						.column(Column::remainder().at_least(64.0).clip(true)) // Address
-						.column(Column::auto()) // Status
-						.column(Column::auto()) // Actions
-						.header(22.0, |mut header| {
-                            header.col(|ui| {
-                                widgets::table_header_with_info(ui, "Node ID", HELP_PEER_NODE_ID);
-                            });
-                            header.col(|ui| {
-                                widgets::table_header_with_info(ui, "Address", HELP_PEER_ADDRESS);
-                            });
-                            header.col(|ui| {
-                                widgets::table_header_with_info(ui, "Status", HELP_PEER_STATUS);
-                            });
-                            header.col(|ui| {
-                                ui.strong("Actions");
-                            });
-						})
-						.body(|mut body| {
-							for peer in &peers {
-								body.row(24.0, |mut row| {
-                                    row.col(|ui| {
-                                        widgets::id_with_copy(
-                                            ui,
-                                            &peer.node_id,
-                                            &mut app.state.status_message,
-                                        );
-                                    });
-                                    row.col(|ui| {
-                                        ui.monospace(&peer.address);
-                                    });
-									row.col(|ui| {
-										if peer.is_connected {
-                                            widgets::status_pill(
-                                                ui,
-                                                "Connected",
-                                                egui::Color32::GREEN,
-                                            );
-										} else {
-                                            widgets::status_pill(
-                                                ui,
-                                                "Disconnected",
-                                                egui::Color32::GRAY,
-                                            );
-										}
-									});
-									row.col(|ui| {
-										// Destructive disconnect: red outline button
-										if widgets::danger_button(ui, "Disconnect").clicked() {
-											disconnect_node_id = Some(peer.node_id.clone());
-										}
-									});
-								});
+	let connected_count = rows.as_ref().map(|r| r.iter().filter(|p| p.is_connected).count()).unwrap_or(0);
+	rsx! {
+		Card { class: "flush",
+			div { class: "toolbar",
+				span { class: "count", "{connected_count} peers connected" }
+				div { class: "row", style: "margin-left: auto;",
+					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_peers(ctx), op: Op::Peers }
+					button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::ConnectPeer), Icon { name: "plus", size: 14 } "Connect Peer" }
+				}
+			}
+			match rows {
+				Some(peers) if !peers.is_empty() => rsx! {
+					div { class: "table-wrap",
+						table { class: "table", style: "min-width: 720px;",
+							thead {
+								tr {
+									Th { label: "Node ID", help: HELP_PEER_NODE_ID }
+									Th { label: "Address", help: HELP_PEER_ADDRESS }
+									Th { label: "Status", help: HELP_PEER_STATUS }
+									th { class: "right", "Actions" }
+								}
 							}
-						});
-				});
+							tbody {
+								for peer in peers {
+									tr { key: "{peer.node_id}",
+										td { Peer { node_id: peer.node_id.clone(), keep: 8 } }
+										td { span { class: "mono", "{peer.address}" } }
+										td {
+											if peer.is_connected {
+												Pill { tone: "success", "Connected" }
+											} else {
+												Pill { tone: "muted", "Disconnected" }
+											}
+										}
+										td { class: "right",
+											button {
+												class: "btn sm danger",
+												disabled: disconnecting,
+												onclick: {
+													let node_id = peer.node_id.clone();
+													move |_| actions::disconnect_peer(ctx, node_id.clone())
+												},
+												"Disconnect"
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+				_ => rsx! {
+					if loading {
+						Empty { icon: "users", title: "Loading peers...", Spinner { large: true } }
+					} else {
+						Empty { icon: "users", title: "No peers connected", hint: "Click Refresh to load" }
+					}
+				},
 			}
-        }
-		None => {
-			widgets::empty_state(ui, "👥", "No peers connected", "Click Refresh to load");
-        }
-	}
-
-	if let Some(node_id) = disconnect_node_id {
-		app.disconnect_peer(node_id);
+		}
 	}
 }
 
-pub fn render_dialogs(ctx: &egui::Context, app: &mut LspServerApp) {
-	render_connect_peer_dialog(ctx, app);
-}
-
-fn render_connect_peer_dialog(ctx: &egui::Context, app: &mut LspServerApp) {
-	if !app.state.show_connect_peer_dialog {
-		return;
+#[component]
+pub fn ConnectPeerDialog() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().connect_peer.clone();
+	let pending = ctx.busy(Op::ConnectPeer);
+	let mut cancel = move || {
+		forms.write().connect_peer = Default::default();
+		close_dialog(ctx);
+	};
+	rsx! {
+		Modal {
+			title: "Connect Peer",
+			sub: "Connect to a Lightning Network peer",
+			icon: rsx! { Bubble { icon: "users", tone: "blue" } },
+			onclose: move |_| cancel(),
+			footer: rsx! {
+				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
+				button { class: "btn primary", disabled: pending, onclick: move |_| actions::connect_peer(ctx),
+					if pending { Spinner {} }
+					"Connect"
+				}
+			},
+			Field { label: "Node Pubkey", help: HELP_PEER_NODE_ID, TextInput { value: form.node_pubkey.clone(), mono: true, oninput: move |v| forms.write().connect_peer.node_pubkey = v } }
+			Field { label: "Address", help: HELP_PEER_ADDRESS, TextInput { value: form.address.clone(), mono: true, placeholder: "host:port", oninput: move |v| forms.write().connect_peer.address = v } }
+			div { class: "toggle-row",
+				Check { checked: form.persist, label: "Persist Connection", help: HELP_PERSIST, onchange: move |v| forms.write().connect_peer.persist = v }
+			}
+		}
 	}
-
-    egui::Window::new("Connect Peer")
-        .collapsible(false)
-        .resizable(false)
-        .show(ctx, |ui| {
-		let form = &mut app.state.forms.connect_peer;
-
-		ui.label("Connect to a Lightning Network peer");
-		ui.add_space(5.0);
-
-            egui::Grid::new("connect_peer_grid")
-                .num_columns(2)
-                .spacing([10.0, 5.0])
-                .show(ui, |ui| {
-                    widgets::label_with_info(ui, "Node Pubkey:", HELP_PEER_NODE_ID);
-			ui.text_edit_singleline(&mut form.node_pubkey);
-			ui.end_row();
-
-                    widgets::label_with_info(ui, "Address:", HELP_PEER_ADDRESS);
-			ui.text_edit_singleline(&mut form.address);
-			ui.end_row();
-
-			ui.label("Persist Connection:");
-			ui.checkbox(&mut form.persist, "");
-			ui.end_row();
-		});
-
-		ui.add_space(10.0);
-
-		ui.horizontal(|ui| {
-			let is_pending = app.state.tasks.connect_peer.is_some();
-			if is_pending {
-				ui.spinner();
-			} else if ui.button("Connect").clicked() {
-				app.connect_peer();
-			}
-			if ui.button("Cancel").clicked() {
-				app.state.show_connect_peer_dialog = false;
-				app.state.forms.connect_peer = Default::default();
-			}
-		});
-	});
 }

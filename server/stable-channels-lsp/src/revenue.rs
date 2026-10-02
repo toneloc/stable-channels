@@ -1,0 +1,1481 @@
+//! Operator revenue: what the LSP earned, spent and settled, rebuilt off the request path from payments, labels and the ledger.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use ldk_server_client::error::LdkServerErrorCode;
+use ldk_server_client::ldk_server_grpc::api::{
+    GetPaymentDetailsRequest, ListChannelsRequest, ListPaymentsRequest, SpontaneousSendRequest,
+};
+use ldk_server_client::ldk_server_grpc::types::{
+    payment_kind, transaction_type, Channel, Payment, PaymentDirection, PaymentStatus,
+};
+use sc_protos::revenue::{RevenueItem, RevenueLine};
+use stable_channels::db::{forward_detail_fingerprint, Database, RevenueLedgerRow, SettlementLabel, TradeDecisionSummary, TradeFeeRefund};
+use tracing::warn;
+
+use crate::stable_manager::LdkServerCalls;
+use crate::payment_filter::is_failed_protocol_message;
+use crate::state::AppState;
+
+pub const TRADE_FEE: &str = "trade_fee";
+pub const TRADE_FEE_REJECTED: &str = "trade_fee_rejected";
+pub const ROUTING_FEE: &str = "routing_fee";
+pub const JIT_FEE: &str = "jit_fee";
+pub const PROTOCOL_MESSAGE: &str = "protocol_message";
+pub const TRADE_FEE_REFUND: &str = "trade_fee_refund";
+pub const CHANNEL_FUNDING_FEE: &str = "channel_funding_fee";
+/// On-chain fee the LSP paid to open a private channel for a user (JIT opens are free for them).
+pub const JIT_OPEN_FEE: &str = "jit_open_fee";
+pub const ONCHAIN_FEE: &str = "onchain_fee";
+/// On-chain fee of a cooperative or force close transaction.
+pub const CLOSE_FEE: &str = "close_fee";
+/// On-chain fee of an anchor bump that sped up a force close.
+pub const CLOSE_FEE_BUMP: &str = "close_fee_bump";
+/// On-chain fee of a claim or sweep bringing closed-channel funds back to the wallet.
+pub const CLAIM_SWEEP_FEE: &str = "claim_sweep_fee";
+pub const LIGHTNING_SEND_FEE: &str = "lightning_send_fee";
+pub const STABILITY_IN: &str = "stability_in";
+pub const STABILITY_OUT: &str = "stability_out";
+/// Spent categories whose amounts come from the payment list; an incomplete scan makes each unknown.
+const PAYMENT_LIST_SPENT_CATEGORIES: [&str; 9] = [
+    JIT_OPEN_FEE, CHANNEL_FUNDING_FEE, CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE, ONCHAIN_FEE, LIGHTNING_SEND_FEE, PROTOCOL_MESSAGE,
+    TRADE_FEE_REFUND,
+];
+
+pub const DEFAULT_PAGE_LIMIT: usize = 50;
+pub const MAX_PAGE_LIMIT: usize = 500;
+/// Newest items kept in a snapshot; older ones are dropped and the snapshot marked partial.
+pub const REVENUE_MAX_ITEMS: usize = 50_000;
+/// Forward fees older than this leave the cache on the next rebuild (the ledger keeps them).
+pub const REVENUE_LOOKBACK_SECS: i64 = 365 * 86_400;
+
+/// Forward fees and funding txids parsed from the ledger, kept across rebuilds so each reads only new rows.
+/// The per-channel maps hold one entry per channel or funding transaction ever seen, so they grow with on-chain opens and splices, not payments.
+#[derive(Default)]
+pub struct LedgerFacts {
+    pub after_id: i64,
+    pub forwards: Vec<RevenueItem>,
+    pub funding_txids: HashSet<String>,
+    /// First funding txid seen per user_channel_id: the channel's open.
+    pub first_funding: HashMap<String, String>,
+    /// Recorded "the LSP opened it privately" flag per user_channel_id, kept for channels that later close.
+    pub private_outbound: HashMap<String, bool>,
+    /// Forward rows whose twin from the other source has not arrived, per fingerprint: (from history, time in ms, row time in ms).
+    pub unpaired: HashMap<String, Vec<(bool, Option<i64>, i64)>>,
+}
+
+impl LedgerFacts {
+    /// Folds new ledger rows in and advances the high-water id past every row, readable or not.
+    pub fn absorb(&mut self, rows: &[RevenueLedgerRow]) {
+        for row in rows {
+            self.after_id = self.after_id.max(row.id);
+            let Ok(detail) = serde_json::from_str::<serde_json::Value>(&row.detail_json) else { continue };
+            let number = |key: &str| detail.get(key).and_then(|v| v.as_u64());
+            let text = |key: &str| detail.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            match row.event_type.as_str() {
+                "PAYMENT_FORWARDED" | "PAYMENT_FORWARDED_BACKFILL" => {
+                    let history = row.event_type == "PAYMENT_FORWARDED_BACKFILL";
+                    let at = if history { detail.get("occurred_at_ms").and_then(|v| v.as_i64()) } else { Some(row.occurred_at_ms) };
+                    // One forward can leave a live row and a history row; the second one to arrive books nothing.
+                    if let Some(key) = forward_detail_fingerprint(&detail) {
+                        let waiting = self.unpaired.entry(key).or_default();
+                        let twin = waiting.iter().position(|&(other, other_at, _)| {
+                            other != history && if history { twins(at, other_at) } else { twins(other_at, at) }
+                        });
+                        match twin {
+                            Some(i) => {
+                                waiting.remove(i);
+                                continue;
+                            },
+                            None => waiting.push((history, at, row.occurred_at_ms)),
+                        }
+                    }
+                    let fee = number("fee_msat").or_else(|| number("total_fee_msat")).unwrap_or(0);
+                    let skim = number("skimmed_fee_msat").unwrap_or(0).min(fee);
+                    let base = RevenueItem {
+                        // A history row LDK gave no time is undated (0): all-time totals count it, no bounded window does.
+                        occurred_at: at.map_or(0, |ms| ms / 1000),
+                        direction: "in".into(),
+                        node_id: text("prev_node_id"),
+                        user_channel_id: text("prev_user_channel_id"),
+                        approximate_time: history,
+                        ..Default::default()
+                    };
+                    if skim > 0 {
+                        self.forwards.push(RevenueItem { key: format!("jit:{}", row.id), category: JIT_FEE.into(), amount_msat: skim, ..base.clone() });
+                    }
+                    self.forwards.push(RevenueItem { key: format!("fwd:{}", row.id), category: ROUTING_FEE.into(), amount_msat: fee - skim, ..base });
+                },
+                _ => {
+                    let txo = text("funding_txo");
+                    let txid = txo.split(':').next().unwrap_or_default();
+                    if !txid.is_empty() {
+                        self.funding_txids.insert(txid.to_owned());
+                    }
+                    let uid = text("user_channel_id");
+                    if uid.is_empty() {
+                        continue;
+                    }
+                    if !txid.is_empty() {
+                        self.first_funding.entry(uid.clone()).or_insert_with(|| txid.to_owned());
+                    }
+                    let flag = |key: &str| detail.get(key).and_then(|v| v.as_bool());
+                    if let (Some(outbound), Some(announced)) = (flag("is_outbound"), flag("is_announced")) {
+                        self.private_outbound.insert(uid, outbound && !announced);
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Everything one rebuild read; classification is a pure function of it.
+pub struct Sources<'a> {
+    pub payments: &'a [Payment],
+    pub labels: &'a [SettlementLabel],
+    pub decisions: &'a [TradeDecisionSummary],
+    pub refunds: &'a [TradeFeeRefund],
+    pub channels: &'a [Channel],
+    pub ledger: &'a LedgerFacts,
+}
+
+/// A live forward event can trail its history row this long (buffered delivery after a reconnect).
+const LIVE_FORWARD_DELAY_MS: i64 = 86_400_000;
+
+/// Whether a history row at `history_ms` (None: LDK gave no time) and a live row at `live_ms` can be one forward.
+fn twins(history_ms: Option<i64>, live_ms: Option<i64>) -> bool {
+    match (history_ms, live_ms) {
+        (None, _) => true,
+        (Some(h), Some(l)) => (-120_000..=LIVE_FORWARD_DELAY_MS).contains(&(l - h)),
+        (Some(_), None) => false,
+    }
+}
+
+/// Txid and LDK's classification of an on-chain payment (unset on older LDK Servers and plain sends).
+fn onchain_tx(payment: &Payment) -> Option<(&str, Option<&transaction_type::Kind>)> {
+    match payment.kind.as_ref()?.kind.as_ref()? {
+        payment_kind::Kind::Onchain(onchain) => {
+            Some((onchain.txid.as_str(), onchain.tx_type.as_ref().and_then(|t| t.kind.as_ref())))
+        },
+        _ => None,
+    }
+}
+
+fn refund_status(refund: &TradeFeeRefund, status_of: &HashMap<&str, i32>) -> &'static str {
+    match refund.refund_payment_id.as_deref() {
+        None => "unknown",
+        Some(id) => match status_of.get(id).copied() {
+            Some(status) if status == PaymentStatus::Succeeded as i32 => "succeeded",
+            Some(status) if status == PaymentStatus::Failed as i32 => "failed",
+            _ => "pending",
+        },
+    }
+}
+
+/// Turns one rebuild's sources into revenue items, newest first, and the close categories BDK could not price.
+pub fn classify(src: &Sources) -> (Vec<RevenueItem>, HashSet<&'static str>) {
+    let labels: HashMap<&str, &SettlementLabel> = src.labels.iter().map(|l| (l.payment_id.as_str(), l)).collect();
+    let decisions: HashMap<&str, &TradeDecisionSummary> =
+        src.decisions.iter().map(|d| (d.inbound_payment_id.as_str(), d)).collect();
+    let replies: HashSet<&str> = src.decisions.iter().filter_map(|d| d.response_payment_id.as_deref()).collect();
+    let refund_by_trade: HashMap<&str, &TradeFeeRefund> =
+        src.refunds.iter().map(|r| (r.trade_payment_id.as_str(), r)).collect();
+    let refund_by_payment: HashMap<&str, &TradeFeeRefund> =
+        src.refunds.iter().filter_map(|r| r.refund_payment_id.as_deref().map(|id| (id, r))).collect();
+    let node_of: HashMap<&str, &str> =
+        src.channels.iter().map(|c| (c.user_channel_id.as_str(), c.counterparty_node_id.as_str())).collect();
+    let mut funding: HashSet<&str> = src.ledger.funding_txids.iter().map(String::as_str).collect();
+    funding.extend(src.channels.iter().filter_map(|c| c.funding_txo.as_ref().map(|o| o.txid.as_str())));
+    let status_of: HashMap<&str, i32> = src.payments.iter().map(|p| (p.payment_id.as_str(), p.status)).collect();
+    let opened_channel: HashMap<&str, &str> =
+        src.ledger.first_funding.iter().map(|(uid, txid)| (txid.as_str(), uid.as_str())).collect();
+    // LSPS2 opens JIT channels outbound and unannounced; a closed channel falls back to its recorded flags.
+    let private_outbound = |uid: &str| {
+        src.channels
+            .iter()
+            .find(|c| c.user_channel_id == uid)
+            .map(|c| c.is_outbound && !c.is_announced)
+            .or_else(|| src.ledger.private_outbound.get(uid).copied())
+            .unwrap_or(false)
+    };
+
+    let mut items = src.ledger.forwards.clone();
+    let mut unpriced = HashSet::new();
+    for payment in src.payments {
+        if payment.status != PaymentStatus::Succeeded as i32 {
+            continue;
+        }
+        let inbound = payment.direction == PaymentDirection::Inbound as i32;
+        let amount = payment.amount_msat.unwrap_or(0);
+        let fee = payment.fee_paid_msat.unwrap_or(0);
+        let id = payment.payment_id.as_str();
+        let label = labels.get(id);
+        let uid = label.and_then(|l| l.user_channel_id.clone()).unwrap_or_default();
+        let mut item = RevenueItem {
+            key: payment.payment_id.clone(),
+            occurred_at: payment.latest_update_timestamp as i64,
+            direction: if inbound { "in" } else { "out" }.into(),
+            payment_id: payment.payment_id.clone(),
+            node_id: node_of.get(uid.as_str()).map(|n| n.to_string()).unwrap_or_default(),
+            user_channel_id: uid,
+            ..Default::default()
+        };
+        use transaction_type::Kind;
+        let (category, value) = match (inbound, label.map(|l| l.kind.as_str()), onchain_tx(payment)) {
+            // Closes, claims and sweeps count their fee whichever way LDK lists them; BDK's 0 means unpriced, never free.
+            (_, _, Some((txid, Some(kind @ (Kind::CooperativeClose(_) | Kind::UnilateralClose(_) | Kind::AnchorBump(_) | Kind::Claim(_) | Kind::Sweep(_)))))) => {
+                let category = match kind {
+                    Kind::AnchorBump(_) => CLOSE_FEE_BUMP,
+                    Kind::Claim(_) | Kind::Sweep(_) => CLAIM_SWEEP_FEE,
+                    _ => CLOSE_FEE,
+                };
+                if fee == 0 {
+                    unpriced.insert(category);
+                    continue;
+                }
+                item.txid = txid.to_owned();
+                item.direction = "out".into();
+                (category, fee)
+            },
+            (true, Some("trade"), _) => {
+                if let Some(decision) = decisions.get(id) {
+                    item.node_id = decision.counterparty.clone();
+                    item.user_channel_id = decision.user_channel_id.clone();
+                    item.trade_rejected = decision.outcome == "rejected";
+                }
+                if let Some(refund) = refund_by_trade.get(id) {
+                    item.refund_status = refund_status(refund, &status_of).into();
+                }
+                (TRADE_FEE, amount)
+            },
+            (true, Some("stability"), _) => (STABILITY_IN, amount),
+            (false, Some("stability"), _) => (STABILITY_OUT, amount),
+            (false, Some("sync" | "trade"), _) => (PROTOCOL_MESSAGE, amount),
+            (false, _, _) if replies.contains(id) => (PROTOCOL_MESSAGE, amount),
+            (false, _, _) if refund_by_payment.contains_key(id) => {
+                item.node_id = refund_by_payment[id].counterparty.clone();
+                (TRADE_FEE_REFUND, amount)
+            },
+            (false, _, Some((txid, tx_type))) => {
+                item.txid = txid.to_owned();
+                let opened = opened_channel.get(txid).filter(|uid| private_outbound(uid));
+                let category = match (tx_type, opened) {
+                    // A first private outbound funding is a JIT open whatever LDK calls it.
+                    (Some(Kind::Funding(_)) | None, Some(uid)) => {
+                        item.user_channel_id = uid.to_string();
+                        item.node_id = node_of.get(uid).map(|n| n.to_string()).unwrap_or_default();
+                        JIT_OPEN_FEE
+                    },
+                    (Some(_), _) => CHANNEL_FUNDING_FEE,
+                    (None, None) if funding.contains(txid) => CHANNEL_FUNDING_FEE,
+                    (None, None) => ONCHAIN_FEE,
+                };
+                // Same rule as closes: BDK's 0 is a fee it could not price, never a free transaction.
+                if fee == 0 {
+                    unpriced.insert(category);
+                    continue;
+                }
+                (category, fee)
+            },
+            (false, _, None) => (LIGHTNING_SEND_FEE, fee),
+            (true, _, _) => continue,
+        };
+        item.category = category.into();
+        item.amount_msat = value;
+        items.push(item);
+    }
+    items.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at).then_with(|| b.key.cmp(&a.key)));
+    (items, unpriced)
+}
+
+/// Per-category totals for items at or after `since`, plus the rejected subset of trade fees.
+pub fn summarize(items: &[RevenueItem], since: i64) -> Vec<RevenueLine> {
+    let mut lines: Vec<RevenueLine> = Vec::new();
+    let mut add = |category: &str, direction: &str, amount: u64| match lines.iter_mut().find(|l| l.category == category) {
+        Some(line) => {
+            line.count += 1;
+            line.total_msat = line.total_msat.saturating_add(amount);
+        },
+        None => lines.push(RevenueLine { category: category.into(), direction: direction.into(), count: 1, total_msat: amount }),
+    };
+    for item in items.iter().filter(|i| i.occurred_at >= since) {
+        add(&item.category, &item.direction, item.amount_msat);
+        if item.category == TRADE_FEE && item.trade_rejected {
+            add(TRADE_FEE_REJECTED, &item.direction, item.amount_msat);
+        }
+    }
+    lines.sort_by(|a, b| a.category.cmp(&b.category));
+    lines
+}
+
+/// A filter entry is a category, or `trade_fee_rejected` for trade fees whose trade was rejected.
+fn matches_filter(item: &RevenueItem, categories: &[String]) -> bool {
+    categories.iter().any(|c| *c == item.category || (c == TRADE_FEE_REJECTED && item.category == TRADE_FEE && item.trade_rejected))
+}
+
+fn parse_cursor(cursor: &str) -> Option<(i64, String)> {
+    let (at, key) = cursor.split_once(':')?;
+    Some((at.parse().ok()?, key.to_owned()))
+}
+
+/// One page of items, newest first, strictly after the cursor and inside the window and filter.
+pub fn page(
+    items: &[RevenueItem],
+    since: i64,
+    categories: &[String],
+    cursor: Option<&str>,
+    limit: usize,
+) -> (Vec<RevenueItem>, Option<String>) {
+    let cursor = cursor.and_then(parse_cursor);
+    let mut matching = items
+        .iter()
+        .filter(|i| i.occurred_at >= since)
+        .filter(|i| categories.is_empty() || matches_filter(i, categories))
+        .filter(|i| {
+            cursor.as_ref().is_none_or(|(at, key)| i.occurred_at < *at || (i.occurred_at == *at && i.key < *key))
+        });
+    let page: Vec<RevenueItem> = matching.by_ref().take(limit.clamp(1, MAX_PAGE_LIMIT)).cloned().collect();
+    let next = if matching.next().is_some() { page.last().map(|i| format!("{}:{}", i.occurred_at, i.key)) } else { None };
+    (page, next)
+}
+
+const REBUILD_INTERVAL_SECS: u64 = 60;
+// A cold start walks the whole history; this only guards a server whose pages never end.
+const PAYMENT_PAGE_CAP: usize = 20_000;
+// Ledger ids scanned per query, so the shared DB lock is held briefly.
+const LEDGER_CHUNK_IDS: i64 = 5_000;
+
+/// The latest classified items and when they were built.
+pub struct Snapshot {
+    /// Newest first, at most `REVENUE_MAX_ITEMS`.
+    pub items: Vec<RevenueItem>,
+    pub built_at: i64,
+    /// The payment scan hit its page cap, so older payments are missing.
+    pub partial_scan: bool,
+    /// More than `REVENUE_MAX_ITEMS` were classified and the oldest dropped.
+    pub truncated: bool,
+    /// Forwards before this unix time have left the cache; None until a rebuild prunes one.
+    pub pruned_before: Option<i64>,
+    /// Categories this node's LDK Server cannot report, so their totals are not facts.
+    pub untracked: Vec<String>,
+}
+
+impl Snapshot {
+    /// True when totals from `since` on miss something: a capped scan, dropped items or pruned forwards.
+    pub fn partial(&self, since: i64) -> bool {
+        self.partial_scan || self.truncated || self.pruned_before.is_some_and(|cutoff| since < cutoff)
+    }
+}
+
+/// What rebuilds carry forward: ledger facts, listed payments and funding transactions already found in the wallet.
+#[derive(Default)]
+struct Cache {
+    ledger: LedgerFacts,
+    labels: Vec<SettlementLabel>,
+    labels_after: i64,
+    /// Wallet payments of funding txids, one per funding transaction like `LedgerFacts::funding_txids`; kept so each is fetched once.
+    onchain: HashMap<String, Payment>,
+    payments: PaymentBook,
+    /// Sticky: the cutoff of the last prune that dropped a forward.
+    pruned_before: Option<i64>,
+}
+
+/// Payments read from ListPayments, kept across rebuilds so a warm rebuild only fetches new pages.
+#[derive(Default)]
+struct PaymentBook {
+    /// Everything revenue can use; failed 1-msat protocol attempts are dropped.
+    by_id: HashMap<String, Payment>,
+    /// Hash and last update time of every payment id listed inside the lookback, dropped ones included.
+    seen: HashMap<u64, u64>,
+    /// Set once a scan reached the end of the history.
+    complete: bool,
+}
+
+impl PaymentBook {
+    /// Keeps the payment's latest state; true when it had not been listed before.
+    fn absorb(&mut self, payment: Payment) -> bool {
+        let new = self.seen.insert(id_hash(&payment.payment_id), payment.latest_update_timestamp).is_none();
+        if is_failed_protocol_message(&payment) {
+            self.by_id.remove(&payment.payment_id);
+        } else {
+            self.by_id.insert(payment.payment_id.clone(), payment);
+        }
+        new
+    }
+
+    /// Drops payments last updated before `cutoff`; true when the book held one.
+    fn prune(&mut self, cutoff: i64) -> bool {
+        let before = self.by_id.len();
+        self.by_id.retain(|_, p| p.latest_update_timestamp as i64 >= cutoff);
+        self.seen.retain(|_, at| *at as i64 >= cutoff);
+        self.by_id.len() < before
+    }
+}
+
+fn id_hash(id: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Walks ListPayments newest first. After one full walk, a page with nothing new ends it; true when the cap cut it short.
+async fn scan_payments(book: &mut PaymentBook, ldk: &dyn LdkServerCalls, cutoff: i64) -> Result<bool, String> {
+    let mut page_token = None;
+    for _ in 0..PAYMENT_PAGE_CAP {
+        let response = ldk.list_payments(ListPaymentsRequest { page_token }).await.map_err(|e| e.to_string())?;
+        let mut unseen = response.payments.is_empty();
+        for payment in response.payments {
+            // A payment past the lookback was pruned, not new: listing it again must not extend the walk.
+            let recent = payment.latest_update_timestamp as i64 >= cutoff;
+            unseen |= book.absorb(payment) && recent;
+        }
+        match response.next_page_token {
+            Some(_) if book.complete && !unseen => return Ok(false),
+            Some(token) => page_token = Some(token),
+            None => {
+                book.complete = true;
+                return Ok(false);
+            },
+        }
+    }
+    Ok(true)
+}
+
+/// Pages are in creation order, so a pending payment below where the scan stopped is re-read directly.
+async fn refresh_pending(book: &mut PaymentBook, ldk: &dyn LdkServerCalls) {
+    let pending: Vec<String> =
+        book.by_id.values().filter(|p| p.status == PaymentStatus::Pending as i32).map(|p| p.payment_id.clone()).collect();
+    for payment_id in pending {
+        match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.clone() }).await {
+            Ok(response) => {
+                if let Some(payment) = response.payment {
+                    book.absorb(payment);
+                }
+            },
+            Err(error) => warn!("[revenue] pending payment {} lookup failed: {}", payment_id, error),
+        }
+    }
+}
+
+/// Shared by the rebuild task and the routes.
+#[derive(Default)]
+pub struct RevenueStore {
+    snapshot: RwLock<Option<Arc<Snapshot>>>,
+    cache: tokio::sync::Mutex<Cache>,
+    wake: tokio::sync::Notify,
+}
+
+impl RevenueStore {
+    pub fn snapshot(&self) -> Option<Arc<Snapshot>> {
+        self.snapshot.read().unwrap().clone()
+    }
+
+    /// Asks the rebuild task to run now instead of at the next tick.
+    pub fn request_rebuild(&self) {
+        self.wake.notify_one();
+    }
+}
+
+/// ldk-node keys an on-chain payment by the txid's internal byte order, the reverse of its displayed hex.
+pub fn onchain_payment_id(txid: &str) -> Option<String> {
+    let mut bytes = hex::decode(txid).ok().filter(|b| b.len() == 32)?;
+    bytes.reverse();
+    Some(hex::encode(bytes))
+}
+
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Rebuilds the snapshot; on any error the previous snapshot stays.
+pub async fn rebuild(store: &RevenueStore, ldk: &dyn LdkServerCalls, db: &Arc<Database>, now: i64) -> Result<(), String> {
+    let mut cache = store.cache.lock().await;
+    // The cache never prunes on its own; bound it by age here and remember where it now starts.
+    let cutoff = now - REVENUE_LOOKBACK_SECS;
+    let partial_scan = scan_payments(&mut cache.payments, ldk, cutoff).await?;
+    refresh_pending(&mut cache.payments, ldk).await;
+    let payments_pruned = cache.payments.prune(cutoff);
+    let mut payments: Vec<Payment> = cache.payments.by_id.values().cloned().collect();
+    let channels = ldk.list_channels(ListChannelsRequest {}).await.map_err(|e| e.to_string())?.channels;
+    // Coverage is what ListPayments reports, so it is judged before the wallet lookups below add funding payments.
+    let listed_onchain = payments.iter().any(|p| onchain_tx(p).is_some());
+    // An LDK Server that classifies on-chain payments reports close, bump and sweep fees; an older one never does.
+    let typed_onchain = payments.iter().any(|p| onchain_tx(p).is_some_and(|(_, kind)| kind.is_some()));
+    let reader = Arc::clone(db);
+    let (after, labels_after) = (cache.ledger.after_id, cache.labels_after);
+    let (rows, max_id, new_labels, decisions, refunds) = tokio::task::spawn_blocking(move || -> rusqlite::Result<_> {
+        let max_id = reader.max_ledger_event_id()?;
+        let mut rows = Vec::new();
+        let mut cursor = after;
+        while cursor < max_id {
+            let up_to = (cursor + LEDGER_CHUNK_IDS).min(max_id);
+            rows.extend(reader.revenue_ledger_rows_between(cursor, up_to)?);
+            cursor = up_to;
+        }
+        let labels = reader.list_settlement_labels_after(labels_after)?;
+        Ok((rows, max_id, labels, reader.list_trade_decision_summaries()?, reader.list_trade_fee_refunds()?))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    cache.ledger.absorb(&rows);
+    cache.ledger.after_id = cache.ledger.after_id.max(max_id);
+    let forwards_before = cache.ledger.forwards.len();
+    cache.ledger.forwards.retain(|f| f.occurred_at >= cutoff || f.occurred_at == 0);
+    cache.ledger.unpaired.retain(|_, rows| {
+        // An undated history row can only twin a live row delivered within LIVE_FORWARD_DELAY_MS of its reconstruction.
+        rows.retain(|&(_, at, row_ms)| at.map_or(row_ms >= now * 1000 - LIVE_FORWARD_DELAY_MS, |ms| ms >= cutoff * 1000));
+        !rows.is_empty()
+    });
+    let mut pruned_before = (payments_pruned || cache.ledger.forwards.len() < forwards_before).then_some(cutoff);
+    // Keep the newest forwards under the item cap, so the copy classify takes is bounded too.
+    let forwards_capped = cache.ledger.forwards.len() > REVENUE_MAX_ITEMS;
+    if forwards_capped {
+        let forwards = &mut cache.ledger.forwards;
+        forwards.sort_by(|a, b| b.occurred_at.cmp(&a.occurred_at));
+        pruned_before = pruned_before.max(Some(forwards[REVENUE_MAX_ITEMS].occurred_at + 1));
+        forwards.truncate(REVENUE_MAX_ITEMS);
+    }
+    cache.pruned_before = cache.pruned_before.max(pruned_before);
+    // Labels carry no time; keep those whose payment is still in the book, so they age out with it.
+    let Cache { labels, payments: book, .. } = &mut *cache;
+    labels.retain(|l| book.by_id.contains_key(&l.payment_id));
+    cache.labels.extend(new_labels.0);
+    cache.labels_after = new_labels.1;
+    // LDK Server's list can lack on-chain payments; find funding transactions in the wallet instead.
+    let listed: HashSet<String> = payments.iter().map(|p| p.payment_id.clone()).collect();
+    let mut funding: HashSet<String> = cache.ledger.funding_txids.clone();
+    funding.extend(channels.iter().filter_map(|c| c.funding_txo.as_ref().map(|o| o.txid.clone())));
+    let mut lookup_failed = false;
+    for txid in funding {
+        if cache.onchain.contains_key(&txid) {
+            continue;
+        }
+        let Some(payment_id) = onchain_payment_id(&txid).filter(|id| !listed.contains(id)) else { continue };
+        match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id }).await {
+            Ok(response) => {
+                if let Some(payment) = response.payment {
+                    if payment.status == PaymentStatus::Succeeded as i32 {
+                        cache.onchain.insert(txid, payment);
+                    } else {
+                        payments.push(payment);
+                    }
+                }
+            },
+            Err(error) => {
+                warn!("[revenue] wallet lookup for funding tx {} failed: {}", txid, error);
+                lookup_failed = true;
+            },
+        }
+    }
+    payments.extend(cache.onchain.values().filter(|p| !listed.contains(&p.payment_id)).cloned());
+    let (mut items, unpriced) = classify(&Sources {
+        payments: &payments,
+        labels: &cache.labels,
+        decisions: &decisions,
+        refunds: &refunds,
+        channels: &channels,
+        ledger: &cache.ledger,
+    });
+    let pruned_before = cache.pruned_before;
+    drop(cache);
+    if partial_scan {
+        warn!("[revenue] payment scan stopped after {} pages; totals are partial", PAYMENT_PAGE_CAP);
+    }
+    let truncated = forwards_capped || items.len() > REVENUE_MAX_ITEMS;
+    if truncated {
+        warn!("[revenue] {} items classified; keeping the newest {}", items.len(), REVENUE_MAX_ITEMS);
+        items.truncate(REVENUE_MAX_ITEMS);
+    }
+    tracing::debug!("[revenue] snapshot rebuilt: {} items", items.len());
+    // A funding transaction the wallet could not be asked about has an unknown fee.
+    let mut untracked = if listed_onchain && !lookup_failed { Vec::new() } else { vec![ONCHAIN_FEE.to_string()] };
+    if !typed_onchain {
+        untracked.extend([CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from));
+    }
+    for category in unpriced {
+        if !untracked.iter().any(|c| c == category) {
+            untracked.push(category.into());
+        }
+    }
+    // A scan that stopped early cannot vouch for any cost read from the payment list, so every
+    // such category is unknown and the tiles read as a floor, not an exact figure.
+    if partial_scan {
+        for category in PAYMENT_LIST_SPENT_CATEGORIES {
+            if !untracked.iter().any(|c| c == category) {
+                untracked.push(category.to_string());
+            }
+        }
+    }
+    *store.snapshot.write().unwrap() = Some(Arc::new(Snapshot { items, built_at: now, partial_scan, truncated, pruned_before, untracked }));
+    Ok(())
+}
+
+/// Rebuilds every minute, or sooner when a refund asks for it.
+pub fn spawn(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let ldk: &dyn LdkServerCalls = state.ldk_server.as_ref();
+            if let Err(error) = rebuild(&state.revenue, ldk, &state.db, now_secs()).await {
+                warn!("[revenue] rebuild failed; keeping the previous snapshot: {}", error);
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(REBUILD_INTERVAL_SECS)) => {},
+                _ = state.revenue.wake.notified() => {},
+            }
+        }
+    });
+}
+
+/// Why a refund was not sent.
+#[derive(Debug, PartialEq)]
+pub enum RefundError {
+    NotRejectedTradeFee,
+    AlreadyRefunded,
+    RefundPending,
+    OutcomeUnknown,
+    Send(String),
+    Db(String),
+}
+
+impl RefundError {
+    pub fn message(&self) -> String {
+        match self {
+            RefundError::NotRejectedTradeFee => "Only a received fee of a rejected trade can be refunded".into(),
+            RefundError::AlreadyRefunded => "This trade fee was already refunded".into(),
+            RefundError::RefundPending => "A refund for this trade fee is still in flight".into(),
+            RefundError::OutcomeUnknown => "A refund was started but its outcome is unknown; check Payments before retrying".into(),
+            RefundError::Send(error) => format!("Refund keysend failed: {error}"),
+            RefundError::Db(error) => format!("Refund bookkeeping failed: {error}"),
+        }
+    }
+}
+
+/// Refunds a rejected trade fee exactly once: claim, keysend the received amount back, record the payment id.
+pub async fn refund_trade_fee(
+    db: &Arc<Database>,
+    ldk: &dyn LdkServerCalls,
+    trade_payment_id: &str,
+    now: i64,
+) -> Result<(String, u64), RefundError> {
+    let db_error = |e: rusqlite::Error| RefundError::Db(e.to_string());
+    let decision = db.trade_decision_summary(trade_payment_id).map_err(db_error)?;
+    let Some(decision) = decision.filter(|d| d.outcome == "rejected") else {
+        return Err(RefundError::NotRejectedTradeFee);
+    };
+    let details = |payment_id: String| ldk.get_payment_details(GetPaymentDetailsRequest { payment_id });
+    let received = details(trade_payment_id.to_owned()).await.map_err(|e| RefundError::Send(e.to_string()))?.payment;
+    let amount_msat = received
+        .filter(|p| p.direction == PaymentDirection::Inbound as i32 && p.status == PaymentStatus::Succeeded as i32)
+        .and_then(|p| p.amount_msat)
+        .filter(|amount| *amount > 0)
+        .ok_or(RefundError::NotRejectedTradeFee)?;
+    let (preimage, expected_payment_id) = stable_channels::trade::trade_fee_refund_preimage(trade_payment_id);
+    if let Some(existing) =
+        db.claim_trade_fee_refund(trade_payment_id, amount_msat, &decision.counterparty, now, Some(&expected_payment_id)).map_err(db_error)?
+    {
+        let Some(previous) = existing.refund_payment_id else {
+            // A claim written before refunds carried a deterministic id: nothing can say whether it left.
+            return Err(RefundError::OutcomeUnknown);
+        };
+        let status = details(previous.clone()).await.map_err(|e| RefundError::Send(e.to_string()))?.payment.map(|p| p.status);
+        match status {
+            Some(s) if s == PaymentStatus::Failed as i32 => {
+                if !db.retake_failed_trade_fee_refund(trade_payment_id, &previous, now).map_err(db_error)? {
+                    return Err(RefundError::RefundPending);
+                }
+            },
+            Some(s) if s == PaymentStatus::Succeeded as i32 => return Err(RefundError::AlreadyRefunded),
+            Some(_) => return Err(RefundError::RefundPending),
+            // LDK holds no payment under the id this refund always uses: the earlier attempt never
+            // left. Sending the same preimage again can only produce that same payment, never a second refund.
+            None if previous == expected_payment_id => {},
+            None => return Err(RefundError::RefundPending),
+        }
+    }
+    let request = SpontaneousSendRequest {
+        amount_msat,
+        node_id: decision.counterparty.clone(),
+        route_parameters: None,
+        custom_tlvs: Vec::new(),
+        preimage: Some(preimage),
+    };
+    let refund_payment_id = match ldk.spontaneous_send(request).await {
+        Ok(response) => response.payment_id,
+        // Only a server-reported rejection proves nothing left; a transport or internal error may follow a real send.
+        Err(error) if matches!(
+            error.error_code,
+            LdkServerErrorCode::LightningError | LdkServerErrorCode::InvalidRequestError | LdkServerErrorCode::AuthError
+        ) => {
+            let _ = db.release_trade_fee_refund(trade_payment_id, Some(&expected_payment_id));
+            return Err(RefundError::Send(error.to_string()));
+        },
+        // The claim keeps the deterministic id: the next attempt asks LDK for it and either finds
+        // the payment or learns nothing left, so an ambiguous error is a pause, not a lockout.
+        Err(error) => {
+            stable_channels::audit::audit_event(
+                "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
+                serde_json::json!({ "trade_payment_id": trade_payment_id, "counterparty": decision.counterparty, "error": error.to_string() }),
+            );
+            return Err(RefundError::OutcomeUnknown);
+        },
+    };
+    db.record_trade_fee_refund_payment(trade_payment_id, &refund_payment_id).map_err(db_error)?;
+    stable_channels::audit::audit_event(
+        "TRADE_FEE_REFUND_SENT",
+        serde_json::json!({
+            "trade_payment_id": trade_payment_id,
+            "refund_payment_id": refund_payment_id,
+            "amount_msat": amount_msat,
+            "counterparty": decision.counterparty,
+            "user_channel_id": decision.user_channel_id,
+        }),
+    );
+    Ok((refund_payment_id, amount_msat))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ldk_server_client::ldk_server_grpc::types::{Onchain, PaymentKind, Spontaneous};
+
+    pub(crate) fn pay(id: &str, inbound: bool, status: PaymentStatus, amount: Option<u64>, fee: Option<u64>, at: u64, txid: Option<&str>) -> Payment {
+        let kind = match txid {
+            Some(txid) => payment_kind::Kind::Onchain(Onchain { txid: txid.into(), status: None, tx_type: None }),
+            None => payment_kind::Kind::Spontaneous(Spontaneous { hash: "h".into(), preimage: None }),
+        };
+        Payment {
+            payment_id: id.into(),
+            kind: Some(PaymentKind { kind: Some(kind) }),
+            amount_msat: amount,
+            fee_paid_msat: fee,
+            direction: if inbound { PaymentDirection::Inbound as i32 } else { PaymentDirection::Outbound as i32 },
+            status: status as i32,
+            latest_update_timestamp: at,
+        }
+    }
+
+    /// An outbound on-chain payment carrying LDK's transaction classification.
+    fn typed(id: &str, fee: u64, at: u64, txid: &str, kind: transaction_type::Kind) -> Payment {
+        let mut payment = pay(id, false, PaymentStatus::Succeeded, Some(1_000_000), Some(fee), at, Some(txid));
+        if let Some(payment_kind::Kind::Onchain(onchain)) = payment.kind.as_mut().and_then(|k| k.kind.as_mut()) {
+            onchain.tx_type = Some(ldk_server_client::ldk_server_grpc::types::TransactionType { kind: Some(kind) });
+        }
+        payment
+    }
+
+    fn label(id: &str, kind: &str, uid: Option<&str>) -> SettlementLabel {
+        SettlementLabel { payment_id: id.into(), kind: kind.into(), user_channel_id: uid.map(Into::into) }
+    }
+
+    fn row(id: i64, event: &str, at_ms: i64, detail: serde_json::Value) -> RevenueLedgerRow {
+        RevenueLedgerRow { id, event_type: event.into(), occurred_at_ms: at_ms, detail_json: detail.to_string() }
+    }
+
+    fn by_key<'a>(items: &'a [RevenueItem], key: &str) -> &'a RevenueItem {
+        items.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("no item {key}"))
+    }
+
+    #[test]
+    fn every_payment_lands_in_its_category() {
+        let payments = vec![
+            pay("trade-ok", true, PaymentStatus::Succeeded, Some(1_000_000), None, 10, None),
+            pay("trade-rej", true, PaymentStatus::Succeeded, Some(2_000_000), None, 11, None),
+            pay("stab-in", true, PaymentStatus::Succeeded, Some(40_000_000), None, 12, None),
+            pay("stab-out", false, PaymentStatus::Succeeded, Some(90_000_000), Some(0), 13, None),
+            pay("sync", false, PaymentStatus::Succeeded, Some(1), Some(0), 14, None),
+            pay("reply", false, PaymentStatus::Succeeded, Some(1), Some(0), 15, None),
+            pay("refund", false, PaymentStatus::Succeeded, Some(2_000_000), Some(0), 16, None),
+            pay("fund", false, PaymentStatus::Succeeded, Some(500_000_000), Some(300_000), 17, Some("aa")),
+            pay("spend", false, PaymentStatus::Succeeded, Some(10_000_000), Some(200_000), 18, Some("bb")),
+            pay("send", false, PaymentStatus::Succeeded, Some(5_000_000), Some(1_500), 19, None),
+            pay("deposit", true, PaymentStatus::Succeeded, Some(9_000_000), Some(0), 20, Some("cc")),
+            pay("failed", false, PaymentStatus::Failed, Some(5_000_000), Some(1_500), 21, None),
+            pay("pending", true, PaymentStatus::Pending, Some(5_000_000), None, 22, None),
+        ];
+        let labels = vec![
+            label("trade-ok", "trade", None),
+            label("trade-rej", "trade", None),
+            label("stab-in", "stability", Some("7")),
+            label("stab-out", "stability", Some("7")),
+            label("sync", "sync", Some("7")),
+            label("refund", "refund", None),
+        ];
+        let decisions = vec![
+            TradeDecisionSummary { inbound_payment_id: "trade-ok".into(), outcome: "accepted".into(), counterparty: "02aa".into(), user_channel_id: "7".into(), response_payment_id: Some("reply".into()) },
+            TradeDecisionSummary { inbound_payment_id: "trade-rej".into(), outcome: "rejected".into(), counterparty: "02aa".into(), user_channel_id: "7".into(), response_payment_id: None },
+        ];
+        let refunds = vec![TradeFeeRefund { trade_payment_id: "trade-rej".into(), refund_payment_id: Some("refund".into()), amount_msat: 2_000_000, counterparty: "02aa".into(), created_at: 16 }];
+        let channels = vec![Channel { user_channel_id: "7".into(), counterparty_node_id: "02aa".into(), ..Default::default() }];
+        let mut ledger = LedgerFacts::default();
+        ledger.funding_txids.insert("aa".into());
+        let (items, _) = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &refunds, channels: &channels, ledger: &ledger });
+        let cat = |key: &str| (by_key(&items, key).category.as_str(), by_key(&items, key).direction.as_str(), by_key(&items, key).amount_msat);
+        assert_eq!(cat("trade-ok"), (TRADE_FEE, "in", 1_000_000));
+        assert_eq!(cat("trade-rej"), (TRADE_FEE, "in", 2_000_000));
+        assert!(by_key(&items, "trade-rej").trade_rejected && !by_key(&items, "trade-ok").trade_rejected);
+        assert_eq!(by_key(&items, "trade-rej").refund_status, "succeeded", "its refund payment succeeded");
+        assert_eq!(cat("stab-in"), (STABILITY_IN, "in", 40_000_000));
+        assert_eq!(cat("stab-out"), (STABILITY_OUT, "out", 90_000_000));
+        assert_eq!(by_key(&items, "stab-out").node_id, "02aa", "node comes from the channel list");
+        assert_eq!(cat("sync"), (PROTOCOL_MESSAGE, "out", 1));
+        assert_eq!(cat("reply"), (PROTOCOL_MESSAGE, "out", 1));
+        assert_eq!(cat("refund"), (TRADE_FEE_REFUND, "out", 2_000_000));
+        assert_eq!(cat("fund"), (CHANNEL_FUNDING_FEE, "out", 300_000));
+        assert_eq!(by_key(&items, "fund").txid, "aa");
+        assert_eq!(cat("spend"), (ONCHAIN_FEE, "out", 200_000));
+        assert_eq!(cat("send"), (LIGHTNING_SEND_FEE, "out", 1_500));
+        for ignored in ["deposit", "failed", "pending"] {
+            assert!(items.iter().all(|i| i.key != ignored), "{ignored} must not be counted");
+        }
+        assert_eq!(items.first().unwrap().key, "send", "newest first");
+    }
+
+    #[test]
+    fn ldk_transaction_types_pick_the_onchain_fee_category() {
+        use ldk_server_client::ldk_server_grpc::types::{
+            AnchorBump, Claim, CooperativeClose, Funding, InteractiveFunding, Sweep, TransactionChannel, UnilateralClose,
+        };
+        let chan = |id: &str| TransactionChannel { channel_id: id.into(), counterparty_node_id: "02aa".into() };
+        let close = |id: &str| CooperativeClose { channel_id: id.into(), counterparty_node_id: "02aa".into() };
+        let payments = vec![
+            typed("jit", 100, 1, "aa", transaction_type::Kind::Funding(Funding { channels: vec![chan("c7")] })),
+            typed("open", 110, 2, "bb", transaction_type::Kind::Funding(Funding { channels: vec![chan("c8")] })),
+            typed("splice", 120, 3, "cc", transaction_type::Kind::InteractiveFunding(InteractiveFunding { channels: vec![chan("c8")] })),
+            // LDK lists a cooperative close as inbound: the channel balance comes back to the wallet.
+            { let mut p = typed("coop", 130, 4, "dd", transaction_type::Kind::CooperativeClose(close("c8"))); p.direction = PaymentDirection::Inbound as i32; p },
+            { let mut p = typed("sweep0", 0, 4, "55", transaction_type::Kind::Sweep(Sweep { channels: vec![chan("c8")] })); p.direction = PaymentDirection::Inbound as i32; p },
+            typed("bump0", 0, 10, "66", transaction_type::Kind::AnchorBump(AnchorBump { channel_id: "c8".into(), counterparty_node_id: "02aa".into() })),
+            typed("force", 140, 5, "ee", transaction_type::Kind::UnilateralClose(UnilateralClose { channel_id: "c8".into(), counterparty_node_id: "02aa".into() })),
+            typed("bump", 150, 6, "ff", transaction_type::Kind::AnchorBump(AnchorBump { channel_id: "c8".into(), counterparty_node_id: "02aa".into() })),
+            typed("claim", 160, 7, "11", transaction_type::Kind::Claim(Claim { channel_id: "c8".into(), counterparty_node_id: "02aa".into() })),
+            typed("sweep", 170, 8, "22", transaction_type::Kind::Sweep(Sweep { channels: vec![chan("c8")] })),
+            pay("untyped", false, PaymentStatus::Succeeded, Some(1_000_000), Some(180), 9, Some("33")),
+        ];
+        let channels = vec![
+            Channel { user_channel_id: "7".into(), counterparty_node_id: "02aa".into(), is_outbound: true, is_announced: false, ..Default::default() },
+            Channel { user_channel_id: "8".into(), counterparty_node_id: "02aa".into(), is_outbound: true, is_announced: true, ..Default::default() },
+        ];
+        let mut ledger = LedgerFacts::default();
+        ledger.first_funding.insert("7".into(), "aa".into());
+        ledger.first_funding.insert("8".into(), "bb".into());
+        let (items, unpriced) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
+        assert_eq!(unpriced, HashSet::from([CLAIM_SWEEP_FEE, CLOSE_FEE_BUMP]));
+        let cat = |key: &str| by_key(&items, key).category.as_str();
+        assert_eq!(cat("jit"), JIT_OPEN_FEE, "a first private outbound funding stays a JIT open");
+        assert_eq!(cat("open"), CHANNEL_FUNDING_FEE);
+        assert_eq!(cat("splice"), CHANNEL_FUNDING_FEE);
+        assert_eq!(cat("coop"), CLOSE_FEE, "an inbound close still counts its fee");
+        assert_eq!(by_key(&items, "coop").direction, "out", "a fee always leaves");
+        assert_eq!(cat("force"), CLOSE_FEE);
+        for unknown in ["sweep0", "bump0"] {
+            assert!(items.iter().all(|i| i.key != unknown), "{unknown}: a 0 fee is unknown, not a free transaction");
+        }
+        assert_eq!(cat("bump"), CLOSE_FEE_BUMP);
+        assert_eq!(cat("claim"), CLAIM_SWEEP_FEE);
+        assert_eq!(cat("sweep"), CLAIM_SWEEP_FEE);
+        assert_eq!(cat("untyped"), ONCHAIN_FEE, "unset keeps the old behaviour");
+        assert_eq!(by_key(&items, "coop").amount_msat, 130, "the fee is the amount");
+    }
+
+    #[test]
+    fn refund_status_follows_the_refund_payment() {
+        let refunds = |id: Option<&str>| vec![TradeFeeRefund { trade_payment_id: "t".into(), refund_payment_id: id.map(Into::into), amount_msat: 1, counterparty: "02aa".into(), created_at: 1 }];
+        let decisions = vec![TradeDecisionSummary { inbound_payment_id: "t".into(), outcome: "rejected".into(), counterparty: "02aa".into(), user_channel_id: "7".into(), response_payment_id: None }];
+        let labels = vec![label("t", "trade", None)];
+        let ledger = LedgerFacts::default();
+        let status = |extra: Option<Payment>, id: Option<&str>| {
+            let mut payments = vec![pay("t", true, PaymentStatus::Succeeded, Some(1), None, 1, None)];
+            payments.extend(extra);
+            let r = refunds(id);
+            let (items, _) = classify(&Sources { payments: &payments, labels: &labels, decisions: &decisions, refunds: &r, channels: &[], ledger: &ledger });
+            by_key(&items, "t").refund_status.clone()
+        };
+        assert_eq!(status(None, None), "unknown");
+        assert_eq!(status(Some(pay("r", false, PaymentStatus::Failed, Some(1), None, 2, None)), Some("r")), "failed");
+        assert_eq!(status(Some(pay("r", false, PaymentStatus::Succeeded, Some(1), None, 2, None)), Some("r")), "succeeded");
+        assert_eq!(status(Some(pay("r", false, PaymentStatus::Pending, Some(1), None, 2, None)), Some("r")), "pending");
+    }
+
+    #[test]
+    fn an_unpriced_onchain_fee_is_unknown_not_zero() {
+        let payments = vec![pay("spend", false, PaymentStatus::Succeeded, None, None, 5, Some("bb"))];
+        let ledger = LedgerFacts::default();
+        let (items, unpriced) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &[], ledger: &ledger });
+        assert!(items.iter().all(|item| item.category != ONCHAIN_FEE), "a fee BDK could not price books no cost: {items:?}");
+        assert!(unpriced.contains(ONCHAIN_FEE), "the category is reported unknown instead");
+    }
+
+    #[test]
+    fn forwards_split_routing_and_jit_fees_and_mark_backfill_approximate() {
+        let mut ledger = LedgerFacts::default();
+        ledger.absorb(&[
+            row(3, "PAYMENT_FORWARDED", 9_000, serde_json::json!({"fee_msat": 5_000, "skimmed_fee_msat": 4_000, "prev_node_id": "02aa", "prev_user_channel_id": "7"})),
+            row(5, "PAYMENT_FORWARDED_BACKFILL", 12_000, serde_json::json!({"total_fee_msat": 1_000, "prev_node_id": null})),
+            row(8, "CHANNEL_READY_SPLICE", 1, serde_json::json!({"funding_txo": "aa:1"})),
+            row(9, "CHANNEL_RECONSTRUCTED", 1, serde_json::json!({"funding_txo": "bb"})),
+        ]);
+        assert_eq!(ledger.after_id, 9);
+        assert_eq!(ledger.funding_txids, ["aa".to_string(), "bb".to_string()].into_iter().collect());
+        let routing = by_key(&ledger.forwards, "fwd:3");
+        assert_eq!((routing.category.as_str(), routing.amount_msat, routing.occurred_at, routing.node_id.as_str()), (ROUTING_FEE, 1_000, 9, "02aa"));
+        assert_eq!(by_key(&ledger.forwards, "jit:3").amount_msat, 4_000);
+        let backfill = by_key(&ledger.forwards, "fwd:5");
+        assert!(backfill.approximate_time && backfill.node_id.is_empty());
+        assert!(ledger.forwards.iter().all(|i| i.key != "jit:5"), "no skim, no JIT line");
+    }
+
+    fn forward(db: &stable_channels::db::Database, history_id: Option<&str>, at_ms: Option<i64>) {
+        let mut detail = serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "forwarded_msat": 1_000, "fee_msat": 7});
+        if let Some(at) = at_ms {
+            detail["occurred_at_ms"] = at.into();
+        }
+        let draft = stable_channels::ledger::LedgerEventDraft::from_audit_event(
+            if history_id.is_some() { "PAYMENT_FORWARDED_BACKFILL" } else { "PAYMENT_FORWARDED" }, detail);
+        match history_id {
+            Some(id) => assert!(db.append_forwarded_event_if_unseen(id, &draft).unwrap()),
+            None => assert!(db.append_observed_forward(&draft).unwrap()),
+        }
+    }
+
+    // Absorbs one row per call, as successive rebuilds would, and returns the correlation statuses and fees booked.
+    fn booked(db: &stable_channels::db::Database) -> (Vec<String>, usize) {
+        let rows = db.revenue_ledger_rows_between(0, db.max_ledger_event_id().unwrap()).unwrap();
+        let mut facts = LedgerFacts::default();
+        for row in &rows {
+            facts.absorb(std::slice::from_ref(row));
+        }
+        let status = |r: &RevenueLedgerRow| serde_json::from_str::<serde_json::Value>(&r.detail_json).unwrap()["forward_correlation"]["status"].as_str().unwrap().to_owned();
+        (rows.iter().map(status).collect(), facts.forwards.len())
+    }
+
+    #[test]
+    fn identical_forwards_book_one_fee_each_however_the_ledger_correlated_them() {
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), Some(1_000_000));
+        forward(&db, Some("h2"), Some(1_000_000));
+        forward(&db, None, Some(1_001_000));
+        forward(&db, Some("h3"), Some(1_000_000));
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unmatched".into(), "ambiguous".into(), "possible_match".into()], 3));
+
+        let (_dir, db) = temp_db();
+        for step in [None, None, Some("h1"), Some("h2"), None, Some("h3")] {
+            forward(&db, step, Some(1_000_000));
+        }
+        assert_eq!(booked(&db).1, 3, "three live and three history rows of three forwards");
+    }
+
+    #[test]
+    fn an_undated_or_late_twin_books_no_second_fee() {
+        let (_dir, db) = temp_db();
+        forward(&db, None, Some(1_000_000));
+        forward(&db, Some("undated"), None);
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unavailable".into()], 1));
+        let mut legacy = LedgerFacts::default();
+        legacy.absorb(&[
+            row(1, "PAYMENT_FORWARDED", 1_000_000, serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "forwarded_msat": 1_000, "fee_msat": 7})),
+            row(2, "PAYMENT_FORWARDED_BACKFILL", 9_000_000_000, serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "outbound_amount_msat": 1_000, "total_fee_msat": 7})),
+        ]);
+        assert_eq!(legacy.forwards.len(), 1, "a legacy backfill row is undated, not dated by its reconstruction");
+
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), Some(1_000_000));
+        forward(&db, None, Some(1_600_000));
+        assert_eq!(booked(&db), (vec!["unmatched".into(), "unmatched".into()], 1), "a live event delivered ten minutes late");
+        forward(&db, None, Some(1_600_000));
+        forward(&db, Some("h2"), Some(1_000_000 + 2 * LIVE_FORWARD_DELAY_MS));
+        assert_eq!(booked(&db).1, 3, "a second live row and a history row days later are forwards of their own");
+    }
+
+    #[test]
+    fn absorb_skips_malformed_rows_and_still_advances() {
+        let mut ledger = LedgerFacts::default();
+        ledger.absorb(&[
+            RevenueLedgerRow { id: 4, event_type: "PAYMENT_FORWARDED".into(), occurred_at_ms: 1, detail_json: "not json".into() },
+            row(6, "PAYMENT_FORWARDED", 2_000, serde_json::json!({})),
+        ]);
+        assert_eq!(ledger.after_id, 6);
+        assert_eq!(by_key(&ledger.forwards, "fwd:6").amount_msat, 0);
+        assert_eq!(ledger.forwards.len(), 1);
+    }
+
+    fn item(key: &str, at: i64, category: &str, amount: u64) -> RevenueItem {
+        RevenueItem { key: key.into(), occurred_at: at, category: category.into(), direction: "in".into(), amount_msat: amount, ..Default::default() }
+    }
+
+    #[test]
+    fn summaries_cover_the_window_and_count_rejected_trade_fees() {
+        let mut rejected = item("b", 200, TRADE_FEE, 3_000);
+        rejected.trade_rejected = true;
+        let items = vec![item("c", 300, ROUTING_FEE, 7), rejected, item("a", 100, TRADE_FEE, 1_000)];
+        let lines = summarize(&items, 150);
+        let get = |c: &str| lines.iter().find(|l| l.category == c).map(|l| (l.count, l.total_msat));
+        assert_eq!(get(TRADE_FEE), Some((1, 3_000)));
+        assert_eq!(get(TRADE_FEE_REJECTED), Some((1, 3_000)));
+        assert_eq!(get(ROUTING_FEE), Some((1, 7)));
+        assert_eq!(summarize(&items, 0).iter().find(|l| l.category == TRADE_FEE).unwrap().count, 2);
+    }
+
+    #[test]
+    fn pages_filter_by_category_and_follow_the_cursor() {
+        let items = vec![item("d", 400, ROUTING_FEE, 1), item("c", 300, TRADE_FEE, 1), item("b", 300, ROUTING_FEE, 1), item("a", 100, ROUTING_FEE, 1)];
+        let (first, cursor) = page(&items, 0, &[ROUTING_FEE.to_string()], None, 2);
+        assert_eq!(first.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["d", "b"]);
+        let (second, end) = page(&items, 0, &[ROUTING_FEE.to_string()], cursor.as_deref(), 2);
+        assert_eq!(second.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(end, None);
+        let (windowed, _) = page(&items, 250, &[], None, 10);
+        assert_eq!(windowed.len(), 3);
+    }
+
+    #[test]
+    fn cursor_pages_stay_stable_when_new_items_arrive() {
+        let before = vec![item("c", 300, ROUTING_FEE, 1), item("b", 200, ROUTING_FEE, 1), item("a", 100, ROUTING_FEE, 1)];
+        let (first, cursor) = page(&before, 0, &[], None, 2);
+        assert_eq!(first.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["c", "b"]);
+        let mut after = vec![item("e", 500, ROUTING_FEE, 1), item("d", 400, ROUTING_FEE, 1)];
+        after.extend(before);
+        let (second, _) = page(&after, 0, &[], cursor.as_deref(), 2);
+        assert_eq!(second.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["a"]);
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
+    use ldk_server_client::ldk_server_grpc::api::{
+        GetPaymentDetailsRequest, GetPaymentDetailsResponse, ListChannelsRequest, ListChannelsResponse,
+        ListPaymentsRequest, ListPaymentsResponse, SignMessageRequest, SignMessageResponse,
+        SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
+    };
+
+    // LDK Server stand-in: serves payments on the first page, can page forever, fail, or record keysends.
+    #[derive(Default)]
+    pub(crate) struct Fake {
+        pub payments: StdMutex<Vec<Payment>>,
+        pub wallet: StdMutex<Vec<Payment>>,
+        pub channels: Vec<Channel>,
+        pub endless: bool,
+        pub fail_list: AtomicBool,
+        pub send_fails: bool,
+        pub ambiguous_send: bool,
+        pub details_fail: bool,
+        pub sends: StdMutex<Vec<SpontaneousSendRequest>>,
+        // Serve `payments` (newest first) in pages of this size, like LDK Server does.
+        pub page_size: Option<usize>,
+        pub list_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LdkServerCalls for Fake {
+        async fn list_channels(&self, _req: ListChannelsRequest) -> Result<ListChannelsResponse, LdkServerError> {
+            Ok(ListChannelsResponse { channels: self.channels.clone() })
+        }
+        async fn spontaneous_send(&self, req: SpontaneousSendRequest) -> Result<SpontaneousSendResponse, LdkServerError> {
+            if self.send_fails {
+                return Err(LdkServerError::new(LdkServerErrorCode::LightningError, "no route".to_string()));
+            }
+            if self.ambiguous_send {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalError, "connection reset".to_string()));
+            }
+            let mut sends = self.sends.lock().unwrap();
+            sends.push(req);
+            Ok(SpontaneousSendResponse { payment_id: format!("refund-{}", sends.len()) })
+        }
+        async fn sign_message(&self, _req: SignMessageRequest) -> Result<SignMessageResponse, LdkServerError> {
+            unreachable!("revenue never signs")
+        }
+        async fn verify_signature(&self, _req: VerifySignatureRequest) -> Result<VerifySignatureResponse, LdkServerError> {
+            unreachable!("revenue never verifies")
+        }
+        async fn list_payments(&self, req: ListPaymentsRequest) -> Result<ListPaymentsResponse, LdkServerError> {
+            if self.fail_list.load(Ordering::SeqCst) {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "down".to_string()));
+            }
+            self.list_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(size) = self.page_size {
+                let all = self.payments.lock().unwrap().clone();
+                let start: usize = req.page_token.as_deref().map_or(0, |t| t.parse().unwrap());
+                let end = (start + size).min(all.len());
+                return Ok(ListPaymentsResponse { payments: all[start..end].to_vec(), next_page_token: (end < all.len()).then(|| end.to_string()) });
+            }
+            let payments = if req.page_token.is_none() { self.payments.lock().unwrap().clone() } else { Vec::new() };
+            Ok(ListPaymentsResponse { payments, next_page_token: self.endless.then(|| "t".to_owned()) })
+        }
+        async fn get_payment_details(&self, req: GetPaymentDetailsRequest) -> Result<GetPaymentDetailsResponse, LdkServerError> {
+            if self.details_fail {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "down".to_string()));
+            }
+            let find = |list: &StdMutex<Vec<Payment>>| list.lock().unwrap().iter().find(|p| p.payment_id == req.payment_id).cloned();
+            Ok(GetPaymentDetailsResponse { payment: find(&self.payments).or_else(|| find(&self.wallet)) })
+        }
+    }
+
+    // A real on-disk database in a temp dir, like the daemon's other tests.
+    pub(crate) fn temp_db() -> (tempfile::TempDir, std::sync::Arc<stable_channels::db::Database>) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        (dir, std::sync::Arc::new(db))
+    }
+
+    #[tokio::test]
+    async fn forwards_older_than_the_lookback_leave_the_cache_and_mark_the_snapshot_partial() {
+        let (_dir, db) = temp_db();
+        let now = 2 * REVENUE_LOOKBACK_SECS;
+        for (at, fee) in [(now - REVENUE_LOOKBACK_SECS - 10, 7_000u64), (now - 10, 3_000)] {
+            db.append_ledger_event(&stable_channels::ledger::LedgerEventDraft::from_audit_event(
+                "PAYMENT_FORWARDED", serde_json::json!({"fee_msat": fee, "occurred_at_ms": at * 1_000}))).unwrap();
+        }
+        let store = RevenueStore::default();
+        rebuild(&store, &Fake::default(), &db, now).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.items.iter().map(|i| i.amount_msat).collect::<Vec<_>>(), [3_000], "the year-old forward is gone");
+        assert!(snap.partial(0), "the operator is told the totals are bounded");
+        rebuild(&store, &Fake::default(), &db, now + 60).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert!(snap.partial(0), "a later rebuild that prunes nothing still knows all-time totals are bounded");
+        assert!(!snap.partial(now - 7 * 86_400), "a week is inside what the cache holds");
+    }
+
+    #[tokio::test]
+    async fn an_undated_history_forward_counts_only_all_time_and_stops_waiting_for_a_twin() {
+        let (_dir, db) = temp_db();
+        forward(&db, Some("h1"), None);
+        let (store, now) = (RevenueStore::default(), now_secs());
+        rebuild(&store, &Fake::default(), &db, now).await.unwrap();
+        let items = store.snapshot().unwrap().items.clone();
+        assert_eq!((items.len(), items[0].occurred_at, items[0].approximate_time), (1, 0, true));
+        assert_eq!(summarize(&items, 0)[0].total_msat, 7);
+        assert!(summarize(&items, now - 7 * 86_400).is_empty(), "an undated forward lands in no bounded window");
+        assert_eq!(store.cache.lock().await.ledger.unpaired.len(), 1, "it waits for a late live twin");
+        rebuild(&store, &Fake::default(), &db, now + LIVE_FORWARD_DELAY_MS / 1000 + 60).await.unwrap();
+        assert!(store.cache.lock().await.ledger.unpaired.is_empty(), "then stops waiting");
+        assert_eq!(store.snapshot().unwrap().items.len(), 1, "and stays in all-time totals");
+    }
+
+    #[tokio::test]
+    async fn payments_older_than_the_lookback_leave_the_book() {
+        let (_dir, db) = temp_db();
+        let now = 2 * REVENUE_LOOKBACK_SECS;
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().extend([
+            pay("new", false, PaymentStatus::Succeeded, Some(1), Some(3), (now - 10) as u64, None),
+            pay("old", false, PaymentStatus::Succeeded, Some(1), Some(7), (now - REVENUE_LOOKBACK_SECS - 10) as u64, None),
+        ]);
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, now).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["new"]);
+        assert!(snap.partial(0) && !snap.partial(now - 86_400));
+        let cache = store.cache.lock().await;
+        assert_eq!((cache.payments.by_id.len(), cache.payments.seen.len()), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn forwards_over_the_item_cap_are_cut_before_classification() {
+        let (_dir, db) = temp_db();
+        let store = RevenueStore::default();
+        store.cache.lock().await.ledger.forwards =
+            (0..=REVENUE_MAX_ITEMS as i64).map(|i| item(&format!("fwd:{i}"), 1_000 + i, ROUTING_FEE, 1)).collect();
+        rebuild(&store, &Fake::default(), &db, 100_000).await.unwrap();
+        assert_eq!(store.cache.lock().await.ledger.forwards.len(), REVENUE_MAX_ITEMS);
+        let snap = store.snapshot().unwrap();
+        assert!(snap.truncated && snap.items.iter().all(|i| i.key != "fwd:0"), "the oldest forward is dropped");
+        assert_eq!(snap.pruned_before, Some(1_001));
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_reads_payments_labels_and_new_ledger_rows_only() {
+        let (_dir, db) = temp_db();
+        db.record_settlement("trade-1", "trade").unwrap();
+        db.append_ledger_event(&stable_channels::ledger::LedgerEventDraft::from_audit_event(
+            "PAYMENT_FORWARDED", serde_json::json!({"fee_msat": 2_000, "occurred_at_ms": 50_000}))).unwrap();
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().push(pay("trade-1", true, PaymentStatus::Succeeded, Some(1_000_000), None, 60, None));
+        let store = RevenueStore::default();
+        assert!(store.snapshot().is_none(), "no snapshot before the first build");
+        rebuild(&store, &fake, &db, 100).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!((snap.built_at, snap.partial(0), snap.items.len()), (100, false, 2));
+        rebuild(&store, &fake, &db, 160).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().items.len(), 2, "ledger rows are not read twice");
+    }
+
+    #[tokio::test]
+    async fn a_failed_rebuild_keeps_the_previous_snapshot() {
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 100).await.unwrap();
+        fake.fail_list.store(true, Ordering::SeqCst);
+        assert!(rebuild(&store, &fake, &db, 160).await.is_err());
+        assert_eq!(store.snapshot().unwrap().built_at, 100);
+    }
+
+    #[tokio::test]
+    async fn an_endless_payment_list_stops_at_the_cap_and_is_marked_partial() {
+        let (_dir, db) = temp_db();
+        let fake = Fake { endless: true, ..Default::default() };
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 100).await.unwrap();
+        assert!(store.snapshot().unwrap().partial(0));
+    }
+
+    fn failed_sync(i: usize) -> Payment {
+        pay(&format!("sync-{i}"), false, PaymentStatus::Failed, Some(1), None, i as u64, None)
+    }
+
+    #[tokio::test]
+    async fn a_warm_rebuild_reads_only_pages_it_has_not_seen() {
+        let (_dir, db) = temp_db();
+        let fake = Fake { page_size: Some(50), ..Default::default() };
+        *fake.payments.lock().unwrap() = (0..120).rev().map(failed_sync).collect();
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 100).await.unwrap();
+        assert_eq!(fake.list_calls.load(Ordering::SeqCst), 3, "a cold start walks the whole history");
+        assert!(!store.snapshot().unwrap().partial(0));
+        fake.payments.lock().unwrap().insert(0, pay("send-1", false, PaymentStatus::Succeeded, Some(5_000), Some(7), 200, None));
+        rebuild(&store, &fake, &db, 160).await.unwrap();
+        assert_eq!(fake.list_calls.load(Ordering::SeqCst), 5, "a warm rebuild stops at the first page it has already seen");
+        let snap = store.snapshot().unwrap();
+        assert!(!snap.partial(0), "the rest of the history was read before");
+        assert_eq!(by_key(&snap.items, "send-1").category, LIGHTNING_SEND_FEE);
+    }
+
+    #[tokio::test]
+    async fn a_pending_payment_is_rechecked_after_the_scan_stops_above_it() {
+        let (_dir, db) = temp_db();
+        let fake = Fake { page_size: Some(50), ..Default::default() };
+        let mut history: Vec<Payment> = (0..120).rev().map(failed_sync).collect();
+        history.push(pay("slow", false, PaymentStatus::Pending, Some(9_000), Some(11), 1, None));
+        *fake.payments.lock().unwrap() = history;
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 100).await.unwrap();
+        {
+            let mut payments = fake.payments.lock().unwrap();
+            payments.last_mut().unwrap().status = PaymentStatus::Succeeded as i32;
+            payments.insert(0, failed_sync(500));
+        }
+        rebuild(&store, &fake, &db, 160).await.unwrap();
+        assert_eq!(by_key(&store.snapshot().unwrap().items, "slow").category, LIGHTNING_SEND_FEE);
+    }
+
+    fn rejected_trade(db: &stable_channels::db::Database, fake: &Fake, id: &str, amount: u64) {
+        db.record_settlement(id, "trade").unwrap();
+        db.persist_trade_rejection(id, &format!("trade-{id}"), "hash", "chan", "7", "02aa", "quote_expired", 100, "{}").unwrap();
+        fake.payments.lock().unwrap().push(pay(id, true, PaymentStatus::Succeeded, Some(amount), None, 100, None));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_trade_fee_is_refunded_once_with_the_exact_amount() {
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 1_234_000);
+        let (refund_id, amount) = refund_trade_fee(&db, &fake, "t1", 200).await.unwrap();
+        assert_eq!((refund_id.as_str(), amount), ("refund-1", 1_234_000));
+        let sends = fake.sends.lock().unwrap().clone();
+        assert_eq!((sends.len(), sends[0].amount_msat, sends[0].node_id.as_str(), sends[0].custom_tlvs.len()), (1, 1_234_000, "02aa", 0));
+        let (preimage, _) = stable_channels::trade::trade_fee_refund_preimage("t1");
+        assert_eq!(sends[0].preimage.as_deref(), Some(preimage.as_str()), "the refund always uses the same preimage");
+        assert_eq!(db.list_trade_fee_refunds().unwrap()[0].refund_payment_id.as_deref(), Some("refund-1"));
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 201).await, Err(RefundError::RefundPending), "the refund payment is not in LDK's list yet");
+        fake.payments.lock().unwrap().push(pay("refund-1", false, PaymentStatus::Succeeded, Some(1_234_000), Some(0), 202, None));
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 203).await, Err(RefundError::AlreadyRefunded));
+        assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn only_rejected_trade_fees_can_be_refunded() {
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        db.record_settlement("accepted", "trade").unwrap();
+        fake.payments.lock().unwrap().push(pay("accepted", true, PaymentStatus::Succeeded, Some(1_000), None, 1, None));
+        assert_eq!(refund_trade_fee(&db, &fake, "accepted", 2).await, Err(RefundError::NotRejectedTradeFee));
+        assert_eq!(refund_trade_fee(&db, &fake, "missing", 2).await, Err(RefundError::NotRejectedTradeFee));
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_refund_can_be_retried_and_a_send_error_releases_the_claim() {
+        let (_dir, db) = temp_db();
+        let failing = Fake { send_fails: true, ..Default::default() };
+        rejected_trade(&db, &failing, "t1", 5_000);
+        assert!(matches!(refund_trade_fee(&db, &failing, "t1", 10).await, Err(RefundError::Send(_))));
+        assert!(db.list_trade_fee_refunds().unwrap().is_empty(), "the claim is released when nothing left");
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        refund_trade_fee(&db, &fake, "t1", 11).await.unwrap();
+        fake.payments.lock().unwrap().push(pay("refund-1", false, PaymentStatus::Failed, Some(5_000), None, 12, None));
+        let (again, _) = refund_trade_fee(&db, &fake, "t1", 13).await.unwrap();
+        assert_eq!(again, "refund-2");
+        assert_eq!(fake.sends.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_claimed_refund_without_a_payment_id_blocks_another_send() {
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        db.claim_trade_fee_refund("t1", 5_000, "02aa", 10, None).unwrap();
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 11).await, Err(RefundError::OutcomeUnknown), "a pre-deterministic claim stays unknown");
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_ambiguous_send_error_keeps_the_claim_and_a_retry_resolves_it() {
+        let (_dir, db) = temp_db();
+        let (_, expected_id) = stable_channels::trade::trade_fee_refund_preimage("t1");
+        let fake = Fake { ambiguous_send: true, ..Default::default() };
+        rejected_trade(&db, &fake, "t1", 5_000);
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 10).await, Err(RefundError::OutcomeUnknown));
+        let claims = db.list_trade_fee_refunds().unwrap();
+        assert_eq!((claims.len(), claims[0].refund_payment_id.as_deref()), (1, Some(expected_id.as_str())), "the claim survives with its id");
+        // Still ambiguous: no lockout, the same answer again, and nothing was sent.
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 11).await, Err(RefundError::OutcomeUnknown));
+        assert!(fake.sends.lock().unwrap().is_empty());
+        // LDK has no payment under the deterministic id, so the earlier attempt never left: a retry sends it, once.
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        let (sent, amount) = refund_trade_fee(&db, &fake, "t1", 12).await.unwrap();
+        assert_eq!((sent.as_str(), amount, fake.sends.lock().unwrap().len()), ("refund-1", 5_000, 1));
+        // Had the first attempt actually left, LDK would list it and the retry would stop there.
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        rejected_trade(&db, &fake, "t1", 5_000);
+        db.claim_trade_fee_refund("t1", 5_000, "02aa", 20, Some(&expected_id)).unwrap();
+        fake.payments.lock().unwrap().push(pay(&expected_id, false, PaymentStatus::Succeeded, Some(5_000), Some(0), 21, None));
+        assert_eq!(refund_trade_fee(&db, &fake, "t1", 22).await, Err(RefundError::AlreadyRefunded));
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn onchain_payment_ids_are_the_txid_bytes_reversed() {
+        let txid: String = (1..=32u8).map(|b| format!("{b:02x}")).collect();
+        let expected: String = (1..=32u8).rev().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(onchain_payment_id(&txid), Some(expected));
+        assert_eq!(onchain_payment_id("zz"), None);
+    }
+
+    #[tokio::test]
+    async fn funding_fees_come_from_the_wallet_when_the_payment_list_has_no_onchain_payments() {
+        use ldk_server_client::ldk_server_grpc::types::OutPoint;
+        let (_dir, db) = temp_db();
+        let txid = format!("4669d6b4924a{}", "00".repeat(26));
+        let fake = Fake {
+            channels: vec![Channel { funding_txo: Some(OutPoint { txid: txid.clone(), vout: 0 }), ..Default::default() }],
+            ..Default::default()
+        };
+        fake.payments.lock().unwrap().push(pay("keysend", false, PaymentStatus::Succeeded, Some(1), Some(0), 5, None));
+        let wallet_id = onchain_payment_id(&txid).unwrap();
+        fake.wallet.lock().unwrap().push(pay(&wallet_id, false, PaymentStatus::Succeeded, Some(100_000_000), Some(227_000), 7, Some(&txid)));
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        let snap = store.snapshot().unwrap();
+        let fund = snap.items.iter().find(|i| i.category == CHANNEL_FUNDING_FEE).expect("funding fee found through the wallet");
+        assert_eq!((fund.amount_msat, fund.txid.as_str()), (227_000, txid.as_str()));
+        assert_eq!(
+            snap.untracked,
+            [ONCHAIN_FEE, CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from),
+            "other on-chain fees cannot be measured from this list, and nothing in it carries LDK's transaction type"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_funding_lookup_leaves_onchain_fees_untracked() {
+        use ldk_server_client::ldk_server_grpc::types::{Funding, OutPoint};
+        let (_dir, db) = temp_db();
+        let fake = Fake {
+            channels: vec![Channel { funding_txo: Some(OutPoint { txid: "aa".repeat(32), vout: 0 }), ..Default::default() }],
+            details_fail: true,
+            ..Default::default()
+        };
+        fake.payments.lock().unwrap().extend([
+            pay("spend", false, PaymentStatus::Succeeded, Some(1_000), Some(100), 5, Some("bb")),
+            typed("open", 100, 6, "cc", transaction_type::Kind::Funding(Funding { channels: vec![] })),
+        ]);
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [ONCHAIN_FEE], "an unknown funding fee is missing from the total");
+    }
+
+    #[tokio::test]
+    async fn close_fees_are_untracked_only_when_no_listed_onchain_payment_carries_a_type() {
+        use ldk_server_client::ldk_server_grpc::types::{Funding, TransactionChannel};
+        let (_dir, db) = temp_db();
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().push(pay("spend", false, PaymentStatus::Succeeded, Some(1_000), Some(100), 5, Some("aa")));
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [CLOSE_FEE, CLOSE_FEE_BUMP, CLAIM_SWEEP_FEE].map(String::from));
+        let funding = transaction_type::Kind::Funding(Funding { channels: vec![TransactionChannel { channel_id: "c".into(), counterparty_node_id: "02aa".into() }] });
+        fake.payments.lock().unwrap().push(typed("open", 100, 6, "bb", funding));
+        rebuild(&store, &fake, &db, 20).await.unwrap();
+        assert!(store.snapshot().unwrap().untracked.is_empty(), "a typed list would carry closes, so none means zero");
+        let close = transaction_type::Kind::CooperativeClose(ldk_server_client::ldk_server_grpc::types::CooperativeClose { channel_id: "c".into(), counterparty_node_id: "02aa".into() });
+        fake.payments.lock().unwrap().push(typed("close", 0, 7, "cc", close));
+        rebuild(&store, &fake, &db, 30).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().untracked, [CLOSE_FEE], "a close BDK could not price is not a zero");
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_moves_past_ledger_rows_it_does_not_use_and_keeps_new_labels() {
+        let (_dir, db) = temp_db();
+        for _ in 0..3 {
+            db.append_ledger_event(&stable_channels::ledger::LedgerEventDraft::from_audit_event(
+                "TRADE_ACCEPTED", serde_json::json!({"trade_id": "t"}))).unwrap();
+        }
+        let fake = Fake::default();
+        fake.payments.lock().unwrap().push(pay("s1", false, PaymentStatus::Succeeded, Some(1), Some(0), 5, None));
+        let store = RevenueStore::default();
+        rebuild(&store, &fake, &db, 10).await.unwrap();
+        assert_eq!(store.cache.lock().await.ledger.after_id, db.max_ledger_event_id().unwrap(), "unused rows are not rescanned");
+        assert_eq!(store.snapshot().unwrap().items[0].category, LIGHTNING_SEND_FEE);
+        db.record_settlement_with_channel("s1", "sync", "7").unwrap();
+        rebuild(&store, &fake, &db, 20).await.unwrap();
+        assert_eq!(store.snapshot().unwrap().items[0].category, PROTOCOL_MESSAGE, "a label written later is picked up");
+    }
+
+    #[test]
+    fn a_private_channel_the_lsp_opened_counts_its_opening_fee_as_a_jit_open() {
+        let mut ledger = LedgerFacts::default();
+        ledger.absorb(&[
+            row(1, "CHANNEL_READY_TRACKED", 1, serde_json::json!({"user_channel_id": "7", "funding_txo": "aa:0"})),
+            row(2, "CHANNEL_READY_SPLICE", 2, serde_json::json!({"user_channel_id": "7", "funding_txo": "bb:0"})),
+            row(3, "CHANNEL_RECONSTRUCTED", 3, serde_json::json!({"user_channel_id": "9", "funding_txo": "cc", "is_outbound": true, "is_announced": false})),
+            row(4, "CHANNEL_READY_TRACKED", 4, serde_json::json!({"user_channel_id": "11", "funding_txo": "dd:0"})),
+        ]);
+        let channels = vec![
+            Channel { user_channel_id: "7".into(), counterparty_node_id: "02aa".into(), is_outbound: true, is_announced: false, ..Default::default() },
+            Channel { user_channel_id: "11".into(), counterparty_node_id: "03bb".into(), is_outbound: true, is_announced: true, ..Default::default() },
+        ];
+        let payments = vec![
+            pay("open-7", false, PaymentStatus::Succeeded, Some(1), Some(287_000), 10, Some("aa")),
+            pay("splice-7", false, PaymentStatus::Succeeded, Some(1), Some(100_000), 11, Some("bb")),
+            pay("open-9", false, PaymentStatus::Succeeded, Some(1), Some(200_000), 12, Some("cc")),
+            pay("open-11", false, PaymentStatus::Succeeded, Some(1), Some(150_000), 13, Some("dd")),
+        ];
+        let (items, _) = classify(&Sources { payments: &payments, labels: &[], decisions: &[], refunds: &[], channels: &channels, ledger: &ledger });
+        let cat = |key: &str| (by_key(&items, key).category.as_str(), by_key(&items, key).amount_msat);
+        assert_eq!(cat("open-7"), (JIT_OPEN_FEE, 287_000));
+        assert_eq!((by_key(&items, "open-7").node_id.as_str(), by_key(&items, "open-7").user_channel_id.as_str()), ("02aa", "7"));
+        assert_eq!(cat("splice-7"), (CHANNEL_FUNDING_FEE, 100_000), "a later splice is not the free open");
+        assert_eq!(cat("open-9"), (JIT_OPEN_FEE, 200_000), "a closed channel uses its recorded flags");
+        assert_eq!(cat("open-11"), (CHANNEL_FUNDING_FEE, 150_000), "a public channel is one the operator opened");
+    }
+
+    #[test]
+    fn the_rejected_filter_pages_only_rejected_trade_fees() {
+        let mut rejected = item("b", 200, TRADE_FEE, 3_000);
+        rejected.trade_rejected = true;
+        let items = vec![item("c", 300, TRADE_FEE, 1), rejected, item("a", 100, ROUTING_FEE, 1)];
+        let (page_items, _) = page(&items, 0, &[TRADE_FEE_REJECTED.to_string()], None, 10);
+        assert_eq!(page_items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["b"]);
+        let (both, _) = page(&items, 0, &[TRADE_FEE_REJECTED.to_string(), ROUTING_FEE.to_string()], None, 10);
+        assert_eq!(both.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), ["b", "a"]);
+    }
+}

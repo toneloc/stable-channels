@@ -1,7 +1,5 @@
 package com.stablechannels.app.ui.settings
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -16,6 +14,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -102,14 +101,9 @@ fun ChannelView(appState: AppState) {
                             Spacer(Modifier.height(8.dp))
                             TextButton(
                                 onClick = {
-                                    val intent =
-                                        Intent(
-                                            Intent.ACTION_VIEW,
-                                            Uri.parse(
-                                                "https://mempool.space/tx/${txid.substringBefore(":")}"
-                                            ),
-                                        )
-                                    context.startActivity(intent)
+                                    context.openInAppBrowser(
+                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                                    )
                                 },
                                 contentPadding = PaddingValues(0.dp),
                             ) {

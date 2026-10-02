@@ -198,12 +198,7 @@ pub async fn reconcile_event_history(
         Ok(response) => {
             for peer in response.peers {
                 let identity = peer.node_id.clone();
-                let detail = serde_json::json!({
-                    "source": "reconnect_reconciliation",
-                    "node_id": peer.node_id,
-                    "address": peer.address,
-                    "is_connected": peer.is_connected,
-                });
+                let detail = reconstructed_peer_detail(&peer.node_id, peer.is_connected);
                 match append_reconstructed_if_changed(
                     db,
                     "peer",
@@ -308,6 +303,15 @@ async fn reconcile_pending_settlement_outcomes(
         })?;
     }
     Ok(())
+}
+
+// No address: a wallet's IP is location data and stays out of the append-only ledger.
+fn reconstructed_peer_detail(node_id: &str, is_connected: bool) -> serde_json::Value {
+    serde_json::json!({
+        "source": "reconnect_reconciliation",
+        "node_id": node_id,
+        "is_connected": is_connected,
+    })
 }
 
 fn append_reconstructed_if_changed(
@@ -562,5 +566,13 @@ mod tests {
         let (reason, retained_since) = forward_retention_loss(Some(HALF_PAST_TEN - 5_460_000), HALF_PAST_TEN).unwrap();
         assert_eq!(retained_since, HALF_PAST_TEN - 5_400_000);
         assert!(reason.contains("hourly"));
+    }
+
+    #[test]
+    fn reconstructed_peers_keep_the_address_out_of_the_ledger() {
+        let detail = reconstructed_peer_detail("node", true);
+        assert!(detail.get("address").is_none());
+        assert_eq!(detail["node_id"], "node");
+        assert_eq!(detail["is_connected"], true);
     }
 }

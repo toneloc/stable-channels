@@ -13,6 +13,7 @@ pub mod peers;
 pub mod price;
 pub mod proxy;
 pub mod register_push;
+pub mod revenue;
 pub mod stable_channels;
 pub mod tools;
 

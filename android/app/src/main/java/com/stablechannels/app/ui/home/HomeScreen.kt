@@ -1,7 +1,6 @@
 package com.stablechannels.app.ui.home
 
 import android.Manifest
-import android.content.Intent
 import android.os.Build
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -45,6 +44,7 @@ import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -774,14 +774,9 @@ private fun PendingRow(
         if (txid != null) {
             IconButton(
                 onClick = {
-                    val intent =
-                        Intent(
-                            Intent.ACTION_VIEW,
-                            android.net.Uri.parse(
-                                "https://mempool.space/tx/${txid.substringBefore(":")}"
-                            ),
-                        )
-                    context.startActivity(intent)
+                    context.openInAppBrowser(
+                        "https://mempool.space/tx/${txid.substringBefore(":")}"
+                    )
                 },
                 modifier = Modifier.size(28.dp),
             ) {

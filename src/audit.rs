@@ -42,18 +42,30 @@ pub fn set_audit_ledger(database: Database) {
     *AUDIT_LEDGER.lock().unwrap() = Some(database);
 }
 
-/// Record one event and then mirror the committed row to JSONL. A mirror error
-/// never changes the SQLite result.
+/// Record one event: channel state changes go to the SQLite ledger and are then mirrored to
+/// JSONL; operational events go to JSONL only and come back with `event_id` 0, so a caller
+/// that needs a committed record can tell. A mirror error never changes the SQLite result.
 pub fn record_event(event: &str, data: Value) -> rusqlite::Result<AppendOutcome> {
     if CAPTURE_ON.load(Ordering::SeqCst)
         && CAPTURE_OWNER.lock().unwrap().as_ref() == Some(&std::thread::current().id())
     {
         CAPTURE.lock().unwrap().push((event.to_owned(), data.clone()));
     }
+    if !crate::ledger::records_channel_state(event) {
+        mirror_event(event, data, None);
+        return Ok(AppendOutcome { event_id: 0, inserted: true });
+    }
     let draft = LedgerEventDraft::from_audit_event(event, data.clone());
     let database = AUDIT_LEDGER.lock().unwrap().clone();
     let outcome = match database {
-        Some(database) => database.append_ledger_event(&draft)?,
+        Some(database) => match database.append_ledger_event(&draft) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // The uncommitted JSONL line still records it, so an alarm about a failing DB is not lost with the write.
+                mirror_event(event, data, None);
+                return Err(error);
+            },
+        },
         None => AppendOutcome { event_id: 0, inserted: true },
     };
     // Deduplicated replays already have a mirrored first occurrence.
@@ -139,6 +151,9 @@ fn rotate_if_oversize(path: &std::path::Path) {
 mod tests {
     use super::*;
 
+    // Tests that install the process-wide audit ledger must not interleave.
+    static GLOBAL_LEDGER_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn test_audit_event_no_panic_without_path() {
         // When no path is set, audit_event should silently do nothing
@@ -220,6 +235,7 @@ mod tests {
 
     #[test]
     fn generic_audit_events_do_not_infer_an_after_snapshot() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let database = Database::open_in_memory().unwrap();
         database
             .save_channel("physical", "stable", 10.0, 10_000, 5_000, None)
@@ -243,6 +259,72 @@ mod tests {
             .find(|event| event.event_type == "PEER_CONNECTED")
             .unwrap();
         assert!(event.after.is_none());
+
+        *AUDIT_LEDGER.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn callers_can_tell_a_durable_record_from_a_jsonl_mirror() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let database = Database::open_in_memory().unwrap();
+        set_audit_ledger(database.clone());
+        let mirrored = record_event("SYNC_MESSAGE_FAILED", serde_json::json!({"user_channel_id": "u"})).unwrap();
+        assert_eq!(mirrored.event_id, 0, "an operational event never reaches SQLite");
+        let committed = record_event("RECONCILIATION_RESULT", serde_json::json!({"status": "completed"})).unwrap();
+        assert!(committed.event_id > 0, "the health guard relies on this record");
+        let refund = record_event("TRADE_FEE_REFUND_SENT", serde_json::json!({"trade_payment_id": "t"})).unwrap();
+        assert!(refund.event_id > 0);
+        *AUDIT_LEDGER.lock().unwrap() = None;
+        let unrouted = record_event("RECONCILIATION_RESULT", serde_json::json!({})).unwrap();
+        assert_eq!(unrouted.event_id, 0, "no ledger attached: nothing was committed");
+    }
+
+    #[test]
+    fn integrity_alarms_reach_the_ledger_and_jsonl_keeps_them_when_the_write_fails() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir().unwrap().keep();
+        set_audit_log_path(directory.join("audit_log.txt").to_str().unwrap());
+        let database = Database::open(&directory).unwrap();
+        set_audit_ledger(database.clone());
+        for alarm in ["STABILITY_PAYMENT_STATE_DIVERGENCE", "STABILITY_PAYMENT_REPLAY_CONFLICT", "STABILITY_PAYMENT_PERSIST_FAILED", "DB_WRITE_FAILED"] {
+            assert!(record_event(alarm, serde_json::json!({"error": "x"})).unwrap().event_id > 0, "{alarm}");
+        }
+        rusqlite::Connection::open(directory.join(crate::db::DB_FILENAME)).unwrap().execute_batch(
+            "CREATE TRIGGER refuse BEFORE INSERT ON ledger_events BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+        ).unwrap();
+        assert!(record_event("DB_WRITE_FAILED", serde_json::json!({"error": "disk full"})).is_err());
+        let log = std::fs::read_to_string(get_audit_log_path().unwrap()).unwrap();
+        let last: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+        assert_eq!((last["event"].as_str(), last.get("ledger_id")), (Some("DB_WRITE_FAILED"), None), "mirrored without a ledger id");
+        *AUDIT_LEDGER.lock().unwrap() = None;
+    }
+
+    #[test]
+    fn operational_events_stay_out_of_the_channel_ledger() {
+        let _guard = GLOBAL_LEDGER_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let database = Database::open_in_memory().unwrap();
+        set_audit_ledger(database.clone());
+
+        for _ in 0..3 {
+            record_event(
+                "SYNC_MESSAGE_FAILED",
+                serde_json::json!({"user_channel_id": "busy", "stage": "send", "error": "RouteNotFound"}),
+            )
+            .unwrap();
+        }
+        record_event("SYNC_RETRY_EXHAUSTED", serde_json::json!({"user_channel_id": "busy", "attempts": 10})).unwrap();
+        let types: Vec<String> = database
+            .list_ledger_events(&crate::ledger::LedgerQuery {
+                identifier: Some("busy".to_owned()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap()
+            .events
+            .into_iter()
+            .map(|event| event.event_type)
+            .collect();
+        assert_eq!(types, ["SYNC_RETRY_EXHAUSTED"]);
 
         *AUDIT_LEDGER.lock().unwrap() = None;
     }
