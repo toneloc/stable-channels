@@ -53,7 +53,6 @@ class BalanceBarStateTest {
             dragAmount = Offset(4f, 0f),
             baseXPx = 150f,
             barWidthPx = 300f,
-            maxSellOffset = 0f,
         )
 
         state.onDragEnd(barWidthPx = 300f)
@@ -91,7 +90,6 @@ class BalanceBarStateTest {
             dragAmount = Offset(60f, 0f),
             baseXPx = 150f,
             barWidthPx = 300f,
-            maxSellOffset = 0f,
         )
         assertEquals(60f, state.dragOffsetPx, 0.001f)
 
@@ -125,7 +123,6 @@ class BalanceBarStateTest {
 
         // barWidth = 300px, baseXPx = 150px (50%)
         // maxSellOffset = 300 * 20 / 100 = 60px
-        val maxSellOffset = 60f
         state.onDragStart(Offset(150f, 10f), baseXPx = 150f, thumbDiameterPx = 40f)
 
         // Drag 80px (beyond 60px limit)
@@ -134,7 +131,6 @@ class BalanceBarStateTest {
             dragAmount = Offset(80f, 0f),
             baseXPx = 150f,
             barWidthPx = 300f,
-            maxSellOffset = maxSellOffset,
         )
 
         assertTrue(state.atSellLimit)

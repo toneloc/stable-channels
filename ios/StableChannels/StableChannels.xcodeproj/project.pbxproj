@@ -105,6 +105,8 @@
 		49BB080030D6ED7499BFE342 /* SliderConversionMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */; };
 		49BB0A0030B22C3344556677 /* BalanceBarHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */; };
 		49BB0C0030C33D4455667788 /* BalanceBarState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB0B0030B22C3344556677 /* BalanceBarState.swift */; };
+		49BB0E0030B22C3344556677 /* BalanceBarTradeCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB0D0030A11B2233445566 /* BalanceBarTradeCalculator.swift */; };
+		49BB100030D44E5566778899 /* BalanceBarInteraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB0F0030C33D4455667788 /* BalanceBarInteraction.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
 		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
@@ -142,6 +144,7 @@
 		49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */; };
 		49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */; };
 		49DDD0223054000100B5A146 /* BalanceBarStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */; };
+		49DDD0243054000100B5A146 /* BalanceBarTradeCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */; };
 		49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3080E30080B78009B0014 /* TransactionLinkService.swift */; };
 		49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49E3081030080F3C009B0014 /* TxidResolutionService.swift */; };
 		49E4567E2FCA3E8B00B0CA85 /* QRCode in Frameworks */ = {isa = PBXBuildFile; productRef = 49E4567D2FCA3E8B00B0CA85 /* QRCode */; };
@@ -341,6 +344,8 @@
 		49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetrics.swift; sourceTree = "<group>"; };
 		49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarHeaderView.swift; sourceTree = "<group>"; };
 		49BB0B0030B22C3344556677 /* BalanceBarState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarState.swift; sourceTree = "<group>"; };
+		49BB0D0030A11B2233445566 /* BalanceBarTradeCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarTradeCalculator.swift; sourceTree = "<group>"; };
+		49BB0F0030C33D4455667788 /* BalanceBarInteraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarInteraction.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
 		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
@@ -378,6 +383,7 @@
 		49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityStatusAdaptersTests.swift; sourceTree = "<group>"; };
 		49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetricsTests.swift; sourceTree = "<group>"; };
 		49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarStateTests.swift; sourceTree = "<group>"; };
+		49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarTradeCalculatorTests.swift; sourceTree = "<group>"; };
 		49E3080E30080B78009B0014 /* TransactionLinkService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionLinkService.swift; sourceTree = "<group>"; };
 		49E3081030080F3C009B0014 /* TxidResolutionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TxidResolutionService.swift; sourceTree = "<group>"; };
 		49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullscreenQRZoomView.swift; sourceTree = "<group>"; };
@@ -675,6 +681,8 @@
 				49BB090030A11B2233445566 /* BalanceBarHeaderView.swift */,
 				49BB030030E88AA38BA21C43 /* BalanceBarModels.swift */,
 				49BB0B0030B22C3344556677 /* BalanceBarState.swift */,
+				49BB0D0030A11B2233445566 /* BalanceBarTradeCalculator.swift */,
+				49BB0F0030C33D4455667788 /* BalanceBarInteraction.swift */,
 				49BB050030B92528D286D346 /* BalanceBarTrackView.swift */,
 				EA3A67CDEA5F64D92ED8E602 /* BalanceBarView.swift */,
 				49BB07003041A610EDF31A42 /* SliderConversionMetrics.swift */,
@@ -927,6 +935,7 @@
 				49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */,
 				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
 				49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */,
+				49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -1113,6 +1122,7 @@
 				49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */,
 				49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */,
 				49DDD0223054000100B5A146 /* BalanceBarStateTests.swift in Sources */,
+				49DDD0243054000100B5A146 /* BalanceBarTradeCalculatorTests.swift in Sources */,
 				49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */,
 				49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */,
 				49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */,
@@ -1168,6 +1178,8 @@
 				49BB080030D6ED7499BFE342 /* SliderConversionMetrics.swift in Sources */,
 				49BB0A0030B22C3344556677 /* BalanceBarHeaderView.swift in Sources */,
 				49BB0C0030C33D4455667788 /* BalanceBarState.swift in Sources */,
+				49BB0E0030B22C3344556677 /* BalanceBarTradeCalculator.swift in Sources */,
+				49BB100030D44E5566778899 /* BalanceBarInteraction.swift in Sources */,
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
