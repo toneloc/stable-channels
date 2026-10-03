@@ -3,12 +3,14 @@ import Foundation
 /// File-based audit logging — port of src/audit.rs
 enum AuditService {
     private static var logPath: String?
+    static var onLog: ((String, [String: Any]) -> Void)?
 
     static func setLogPath(_ path: String) {
         logPath = path
     }
 
     static func log(_ event: String, data: [String: Any]) {
+        onLog?(event, data)
         guard let path = logPath else { return }
 
         let url = URL(fileURLWithPath: path)

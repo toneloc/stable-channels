@@ -109,6 +109,7 @@ protocol NodeServiceProtocol {
     var node: Node? { get }
     var isRunning: Bool { get }
     var nodeId: String { get }
+    var activeNetwork: Network? { get }
     var channels: [ChannelDetails] { get }
     var savedMnemonic: String? { get }
     func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws
@@ -122,6 +123,7 @@ class NodeService: NodeServiceProtocol {
 
     private(set) var node: Node?
     private(set) var isRunning = false
+    private(set) var activeNetwork: Network?
     /// True while start() is in flight (incl. lock acquisition and build).
     /// Lets background-stop logic distinguish "abandoned before node came up"
     /// (safe to release the wallet-dir lock) from "start owns the lock".
@@ -178,8 +180,18 @@ class NodeService: NodeServiceProtocol {
         // failover retry never opens a window for the NSE to grab the wallet dir.
         var startSucceeded = false
         defer {
-            if !startSucceeded && lease.newlyAcquired {
-                NodeDirLock.shared.release()
+            if !startSucceeded {
+                self.eventTask?.cancel()
+                self.eventTask = nil
+                try? self.node?.stop()
+                self.node = nil
+                self.isRunning = false
+                self.activeNetwork = nil
+                self.nodeId = ""
+                self.channels = []
+                if lease.newlyAcquired {
+                    NodeDirLock.shared.release()
+                }
             }
         }
 
@@ -277,6 +289,7 @@ class NodeService: NodeServiceProtocol {
         self.node = ldkNode
         self.isRunning = true
         self.nodeId = ldkNode.nodeId()
+        self.activeNetwork = network
 
         // Connect to LSP — propagate error if custom LSP fails so switchLSP rolls back
         do {
@@ -307,6 +320,7 @@ class NodeService: NodeServiceProtocol {
         eventTask = nil
         try? node?.stop()
         node = nil
+        activeNetwork = nil
         isRunning = false
         nodeId = ""
         channels = []
@@ -597,14 +611,31 @@ class NodeService: NodeServiceProtocol {
         return try node.onchainPayment().newAddress()
     }
 
-    func sendOnchain(address: String, amountSats: UInt64) throws -> Txid {
-        guard let node else { throw NodeServiceError.notRunning }
-        return try node.onchainPayment().sendToAddress(address: address, amountSats: amountSats, feeRate: nil)
+    private func validateAndBuildFeeRate(_ feeRateSatVb: Double?) throws -> FeeRate? {
+        guard let rate = feeRateSatVb else { return nil }
+        guard rate.isFinite && rate >= Constants.minAllowedFeeRateSatVb && rate <= Constants.maxAllowedFeeRateSatVb
+        else {
+            throw NodeServiceError.invalidFeeRate
+        }
+        return FeeRate.fromSatPerVbU32(satVb: UInt32(round(rate)))
     }
 
-    func sendAllOnchain(address: String) throws -> Txid {
+    func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double? = nil) throws -> Txid {
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: nil)
+        if let rate = feeRateSatVb, amountSats > 0 {
+            let estimatedFee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: rate, isSendAll: false)
+            guard estimatedFee <= amountSats else {
+                throw NodeServiceError.invalidFeeRate
+            }
+        }
+        let ldkFeeRate = try validateAndBuildFeeRate(feeRateSatVb)
+        return try node.onchainPayment().sendToAddress(address: address, amountSats: amountSats, feeRate: ldkFeeRate)
+    }
+
+    func sendAllOnchain(address: String, feeRateSatVb: Double? = nil) throws -> Txid {
+        guard let node else { throw NodeServiceError.notRunning }
+        let ldkFeeRate = try validateAndBuildFeeRate(feeRateSatVb)
+        return try node.onchainPayment().sendAllToAddress(address: address, retainReserves: false, feeRate: ldkFeeRate)
     }
 
     func syncWallets() throws {
@@ -660,6 +691,7 @@ enum NodeServiceError: LocalizedError {
     case alreadyRunning
     case dataDirLocked
     case staleLightningSync
+    case invalidFeeRate
 
     var errorDescription: String? {
         switch self {
@@ -667,6 +699,8 @@ enum NodeServiceError: LocalizedError {
         case .alreadyRunning: return "Node is already running"
         case .dataDirLocked: return "Wallet is busy in another process. Please try again."
         case .staleLightningSync: return "Lightning wallet chain sync is too old to safely pay"
+        case .invalidFeeRate:
+            return "Fee rate must be between \(Int(Constants.minAllowedFeeRateSatVb)) and \(Int(Constants.maxAllowedFeeRateSatVb)) sat/vB"
         }
     }
 }

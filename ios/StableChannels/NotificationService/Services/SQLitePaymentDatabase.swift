@@ -1,6 +1,6 @@
 import Foundation
-import SQLite3
 import LDKNode
+import SQLite3
 
 /// SQLite implementation of PaymentDatabase
 final class SQLitePaymentDatabase: PaymentDatabase {
@@ -27,6 +27,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         self.dbPath = dbPath
     }
 
+    static var didEnsureColumns = false
+
     private func openDB(write: Bool = true) -> OpaquePointer? {
         var db: OpaquePointer?
         let flags = write ? SQLITE_OPEN_READWRITE : SQLITE_OPEN_READONLY
@@ -35,7 +37,72 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             return nil
         }
         sqlite3_busy_timeout(db, 2000)
+        if write && !Self.didEnsureColumns {
+            if ensureColumns(db: db) {
+                Self.didEnsureColumns = true
+            }
+        }
         return db
+    }
+
+    @discardableResult
+    func ensureColumns(db: OpaquePointer?) -> Bool {
+        var existingCols = Set<String>()
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(payments)", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let namePtr = sqlite3_column_text(stmt, 1) {
+                    existingCols.insert(String(cString: namePtr))
+                }
+            }
+            sqlite3_finalize(stmt)
+        } else {
+            return false
+        }
+
+        var success = true
+        for col in ["is_placeholder", "backing_applied"] {
+            if !existingCols.contains(col) {
+                let alterSQL = "ALTER TABLE payments ADD COLUMN \(col) INTEGER NOT NULL DEFAULT 0;"
+                var errMsg: UnsafeMutablePointer<CChar>?
+                let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
+                if rc != SQLITE_OK {
+                    if let errPtr = errMsg {
+                        let errStr = String(cString: errPtr)
+                        sqlite3_free(errMsg)
+                        if !errStr.contains("duplicate column name") {
+                            success = false
+                        }
+                    } else {
+                        success = false
+                    }
+                } else if col == "backing_applied" {
+                    // Backfill legacy completed rows as already applied so existing stability records
+                    // are not debited a second time upon node upgrade, while preserving genuinely
+                    // unapplied placeholder rows for recovery.
+                    var backfillErr: UnsafeMutablePointer<CChar>?
+                    let backfillSQL = "UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0;"
+                    let backfillRc = sqlite3_exec(db, backfillSQL, nil, nil, &backfillErr)
+                    if backfillRc != SQLITE_OK {
+                        if backfillErr != nil {
+                            sqlite3_free(backfillErr)
+                        }
+                        success = false
+                    }
+                }
+            }
+        }
+        return success
+    }
+
+    private func burnSettlement(db: OpaquePointer?, settlementId: String) -> Bool {
+        var seenInsert: OpaquePointer?
+        let seenSQL = "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)"
+        guard sqlite3_prepare_v2(db, seenSQL, -1, &seenInsert, nil) == SQLITE_OK else { return false }
+        bindText(seenInsert, 1, settlementId)
+        let burned = sqlite3_step(seenInsert) == SQLITE_DONE
+        sqlite3_finalize(seenInsert)
+        return burned
     }
 
     func paymentExists(paymentId: String) -> Bool {
@@ -78,26 +145,6 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return .failed }
 
-        // Dedup check
-        if !paymentId.isEmpty {
-            var checkStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT 1 FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) == SQLITE_OK {
-                sqlite3_bind_text(
-                    checkStmt,
-                    1,
-                    (paymentId as NSString).utf8String,
-                    -1,
-                    SQLITE_TRANSIENT
-                )
-                if sqlite3_step(checkStmt) == SQLITE_ROW {
-                    sqlite3_finalize(checkStmt)
-                    sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                    return .duplicate
-                }
-                sqlite3_finalize(checkStmt)
-            }
-        }
-
         // Replay guard inside the transaction that credits backing, so a crash can never leave
         // backing credited with the settlement id still replayable.
         if let sid = settlementId {
@@ -121,9 +168,96 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             }
         }
 
+        // Dedup check
+        if !paymentId.isEmpty {
+            var checkStmt: OpaquePointer?
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT is_placeholder, backing_applied FROM payments WHERE payment_id = ?",
+                -1,
+                &checkStmt,
+                nil
+            ) == SQLITE_OK {
+                sqlite3_bind_text(
+                    checkStmt,
+                    1,
+                    (paymentId as NSString).utf8String,
+                    -1,
+                    SQLITE_TRANSIENT
+                )
+                if sqlite3_step(checkStmt) == SQLITE_ROW {
+                    let isPlaceholder = sqlite3_column_int64(checkStmt, 0) == 1
+                    let backingApplied = sqlite3_column_int64(checkStmt, 1) == 1
+                    sqlite3_finalize(checkStmt)
+
+                    // Non-crediting early return: seen vs burned divergence is intentional,
+                    // matching PaymentRepository semantics so unapplied or duplicate arrivals do not burn settlement
+                    // IDs.
+                    if !isPlaceholder || backingApplied || backingDeltaSats == nil {
+                        sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                        return .duplicate
+                    }
+
+                    // Existing row was a placeholder whose backing was never applied.
+                    // Apply backing delta now.
+                    if let delta = backingDeltaSats {
+                        guard let ucid = userChannelId, !ucid.isEmpty else {
+                            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                            return .missingChannelRow
+                        }
+                        if !updateBacking(db: db, ucid: ucid, delta: delta) {
+                            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                            return .missingChannelRow
+                        }
+                    }
+
+                    // Burn settlement id if present when crediting backing on placeholder heal.
+                    if let sid = settlementId {
+                        guard burnSettlement(db: db, settlementId: sid) else {
+                            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                            return .failed
+                        }
+                    }
+
+                    var updateStmt: OpaquePointer?
+                    let updateSql = """
+                        UPDATE payments
+                        SET payment_type = ?,
+                            direction = ?,
+                            amount_msat = CASE WHEN is_placeholder = 1 OR amount_msat = 0 THEN ? ELSE amount_msat END,
+                            amount_usd = COALESCE(amount_usd, ?),
+                            btc_price = COALESCE(btc_price, ?),
+                            is_placeholder = 0,
+                            backing_applied = 1
+                        WHERE payment_id = ?
+                    """
+                    guard sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK else {
+                        sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                        return .failed
+                    }
+                    bindText(updateStmt, 1, paymentType)
+                    bindText(updateStmt, 2, direction)
+                    sqlite3_bind_int64(updateStmt, 3, Int64(amountMsat))
+                    sqlite3_bind_double(updateStmt, 4, amountUSD)
+                    sqlite3_bind_double(updateStmt, 5, btcPrice)
+                    bindText(updateStmt, 6, paymentId)
+                    let stepResult = sqlite3_step(updateStmt)
+                    sqlite3_finalize(updateStmt)
+                    guard stepResult == SQLITE_DONE else {
+                        sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                        return .failed
+                    }
+
+                    guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else { return .failed }
+                    return .inserted
+                }
+                sqlite3_finalize(checkStmt)
+            }
+        }
+
         // Insert payment
         var stmt: OpaquePointer?
-        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')"
+        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, backing_applied) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?)"
         guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed
@@ -158,6 +292,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         sqlite3_bind_int64(stmt, 4, Int64(amountMsat))
         sqlite3_bind_double(stmt, 5, amountUSD)
         sqlite3_bind_double(stmt, 6, btcPrice)
+        let backingAppliedVal: Int64 = (backingDeltaSats != nil) ? 1 : 0
+        sqlite3_bind_int64(stmt, 7, backingAppliedVal)
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
@@ -166,16 +302,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
         // Burn the settlement id in the same transaction that credits backing.
         if let sid = settlementId {
-            var seenInsert: OpaquePointer?
-            let seenSQL = "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)"
-            guard sqlite3_prepare_v2(db, seenSQL, -1, &seenInsert, nil) == SQLITE_OK else {
-                sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                return .failed
-            }
-            bindText(seenInsert, 1, sid)
-            let burned = sqlite3_step(seenInsert) == SQLITE_DONE
-            sqlite3_finalize(seenInsert)
-            guard burned else {
+            guard burnSettlement(db: db, settlementId: sid) else {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .failed
             }
