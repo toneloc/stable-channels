@@ -6,6 +6,7 @@ struct HistoryView: View {
     @State private var payments: [PaymentRecord] = []
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
+    @State private var refreshError: String?
     @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
 
     var body: some View {
@@ -24,6 +25,16 @@ struct HistoryView: View {
                     }
                 }
 
+                if let refreshError {
+                    Text(refreshError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
+
                 // List
                 List {
                     if selectedSegment == 0 {
@@ -34,25 +45,29 @@ struct HistoryView: View {
                 }
                 .listStyle(.plain)
                 .overlay {
-                    if selectedSegment == 0 && trades.isEmpty {
-                        ContentUnavailableView(
-                            String(localized: "empty_trades_title", defaultValue: "No Trades"),
-                            systemImage: "arrow.left.arrow.right",
-                            description: Text(String(
-                                localized: "empty_trades_desc",
-                                defaultValue: "Convert BTC to see orders here."
-                            ))
-                        )
-                    } else if selectedSegment == 1 && payments.isEmpty {
-                        ContentUnavailableView(
-                            String(localized: "empty_payments_title", defaultValue: "No Payments"),
-                            systemImage: "bolt.fill",
-                            description: Text(String(
-                                localized: "empty_payments_desc",
-                                defaultValue: "Send or receive payments to see history here."
-                            ))
-                        )
+                    Group {
+                        if selectedSegment == 0 && trades.isEmpty {
+                            ContentUnavailableView(
+                                String(localized: "empty_trades_title", defaultValue: "No Trades"),
+                                systemImage: "arrow.left.arrow.right",
+                                description: Text(String(
+                                    localized: "empty_trades_desc",
+                                    defaultValue: "Convert BTC to see orders here."
+                                ))
+                            )
+                        } else if selectedSegment == 1 && payments.isEmpty {
+                            ContentUnavailableView(
+                                String(localized: "empty_payments_title", defaultValue: "No Payments"),
+                                systemImage: "bolt.fill",
+                                description: Text(String(
+                                    localized: "empty_payments_desc",
+                                    defaultValue: "Send or receive payments to see history here."
+                                ))
+                            )
+                        }
                     }
+                    // Let pull-to-refresh drags reach the empty List underneath.
+                    .allowsHitTesting(false)
                 }
             }
             .navigationTitle(String(localized: "title_history", defaultValue: "History"))
@@ -69,8 +84,7 @@ struct HistoryView: View {
                 }
             }
             .refreshable {
-                appState.refreshBalances()
-                loadHistory()
+                await refreshHistory()
             }
             .sheet(item: $selectedTrade) { trade in
                 TradeDetailView(trade: trade)
@@ -102,6 +116,18 @@ struct HistoryView: View {
             }
             .tint(.primary)
         }
+    }
+
+    /// Waits for a fresh confirmation check before reloading, so the spinner stays up until done.
+    private func refreshHistory() async {
+        appState.refreshBalances()
+        do {
+            let result = try await appState.refreshPaymentConfirmations()
+            refreshError = result.errorMessage
+        } catch {
+            return // Only thrown on cancellation (the view went away).
+        }
+        loadHistory()
     }
 
     private func loadHistory() {

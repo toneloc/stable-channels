@@ -1,6 +1,44 @@
 import Foundation
 import os.log
 
+/// Outcome of a manual confirmation refresh (History pull-to-refresh).
+enum ConfirmationRefreshResult: Equatable {
+    case completed(failedLookups: Int)
+    case chainTipUnavailable
+    case databaseUnavailable
+
+    /// User-facing error, or nil when every lookup succeeded.
+    var errorMessage: String? {
+        switch self {
+        case .completed(let failedLookups):
+            switch failedLookups {
+            case 0:
+                return nil
+            case 1:
+                return String(
+                    localized: "history_refresh_failed_one",
+                    defaultValue: "Couldn't check 1 transaction. Pull to try again."
+                )
+            default:
+                return String(
+                    localized: "history_refresh_failed_many",
+                    defaultValue: "Couldn't check \(failedLookups) transactions. Pull to try again."
+                )
+            }
+        case .chainTipUnavailable:
+            return String(
+                localized: "history_refresh_chain_unavailable",
+                defaultValue: "Couldn't reach the block explorer. Pull to try again."
+            )
+        case .databaseUnavailable:
+            return String(
+                localized: "history_refresh_db_unavailable",
+                defaultValue: "Payment history is unavailable right now."
+            )
+        }
+    }
+}
+
 @MainActor
 final class ConfirmationPollingService {
     private let databaseService: DatabaseService
@@ -10,6 +48,8 @@ final class ConfirmationPollingService {
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
     private var isPolling = false
+    /// Manual refreshes waiting for the in-flight cycle to finish.
+    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
 
     /// Fires after each poll cycle. Observers should re-load their
     /// payment list to reflect updated confirmation state.
@@ -30,7 +70,7 @@ final class ConfirmationPollingService {
     func pollOnce() async {
         guard !isPolling else { return }
         isPolling = true
-        defer { isPolling = false }
+        defer { finishPass() }
 
         let currentHeight = blockHeightService.currentHeight
         guard currentHeight > 0 else { return }
@@ -46,7 +86,7 @@ final class ConfirmationPollingService {
         var anyUpdated = false
         for payment in pending {
             guard !Task.isCancelled else { return }
-            if await resolve(payment: payment, currentHeight: currentHeight) {
+            if await resolve(payment: payment, currentHeight: currentHeight) == .updated {
                 anyUpdated = true
             }
         }
@@ -56,12 +96,61 @@ final class ConfirmationPollingService {
         }
     }
 
+    /// Manual refresh: waits for any in-flight cycle (instead of skipping), fetches a fresh
+    /// chain tip and re-resolves pending payments. Reports a failed tip fetch or failed
+    /// transaction lookups rather than treating them as success.
+    func refresh() async throws -> ConfirmationRefreshResult {
+        while isPolling {
+            await withCheckedContinuation { idleWaiters.append($0) }
+        }
+        try Task.checkCancellation()
+        isPolling = true
+        defer { finishPass() }
+
+        guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
+            try Task.checkCancellation()
+            return .chainTipUnavailable
+        }
+
+        let pending: [PaymentRecord]
+        do {
+            pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
+        } catch {
+            logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
+            return .databaseUnavailable
+        }
+
+        var anyUpdated = false
+        var failedLookups = 0
+        for payment in pending {
+            if Task.isCancelled { break }
+            switch await resolve(payment: payment, currentHeight: currentHeight) {
+            case .updated: anyUpdated = true
+            case .failed: failedLookups += 1
+            case .unchanged: break
+            }
+        }
+
+        if anyUpdated {
+            onUpdate?()
+        }
+        try Task.checkCancellation()
+        return .completed(failedLookups: failedLookups)
+    }
+
+    private func finishPass() {
+        isPolling = false
+        let waiters = idleWaiters
+        idleWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
     /// Revalidates both pending payments and recently completed payments (last ~12 blocks)
     /// against Esplora. Triggered during an offline gap or reorg event.
     func revalidateRecentPayments(windowDepth: UInt32 = 12) async {
         guard !isPolling else { return }
         isPolling = true
-        defer { isPolling = false }
+        defer { finishPass() }
 
         // Refresh authoritative chain tip from Esplora first
         await blockHeightService.refresh()
@@ -74,7 +163,7 @@ final class ConfirmationPollingService {
         if let pending = try? databaseService.paymentRepo.paymentsNeedingConfirmation() {
             for payment in pending {
                 guard !Task.isCancelled else { return }
-                if await resolve(payment: payment, currentHeight: currentHeight) {
+                if await resolve(payment: payment, currentHeight: currentHeight) == .updated {
                     anyUpdated = true
                 }
             }
@@ -133,8 +222,13 @@ final class ConfirmationPollingService {
         }
     }
 
-    @discardableResult
-    private func resolve(payment: PaymentRecord, currentHeight: UInt32) async -> Bool {
+    private enum ResolveResult {
+        case updated
+        case unchanged
+        case failed
+    }
+
+    private func resolve(payment: PaymentRecord, currentHeight: UInt32) async -> ResolveResult {
         let outcome = await confirmationService.resolve(
             payment: payment,
             currentBlockHeight: currentHeight
@@ -143,7 +237,7 @@ final class ConfirmationPollingService {
         case .confirmed(let progress, let blockHeight):
             // Skip redundant writes — only update if confirmations actually changed OR if block height changed (reorg)
             guard progress.display != payment.confirmations || blockHeight != payment.txBlockHeight
-            else { return false }
+            else { return .unchanged }
             do {
                 try databaseService.paymentRepo.updateConfirmations(
                     paymentId: payment.id,
@@ -156,19 +250,19 @@ final class ConfirmationPollingService {
                     "confirmations": "\(progress.display)",
                     "block_height": "\(blockHeight)"
                 ])
-                return true
+                return .updated
             } catch {
                 logger.error("Failed to update confirmations: \(error.localizedDescription)")
-                return false
+                return .failed
             }
         case .error(let message):
             AuditService.log("CONFIRMATION_RESOLVE_FAILED", data: [
                 "payment_id": "\(payment.id)",
                 "error": message
             ])
-            return false
+            return .failed
         case .pending, .noTxid:
-            return false
+            return .unchanged
         }
     }
 }

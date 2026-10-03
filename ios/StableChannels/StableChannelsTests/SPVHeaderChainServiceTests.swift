@@ -5,13 +5,33 @@ import XCTest
 final class MockTxConfirmationProvider: TxConfirmationProvider, BlockHeightProvider {
     var heightMap: [String: UInt32] = [:]
     var mockCurrentHeight: UInt32 = 800_000
+    var failingTxids: Set<String> = []
+    var currentHeightFails = false
+    /// When set, every tx lookup suspends until the stream finishes.
+    var lookupGate: AsyncStream<Void>?
+    private let lock = NSLock()
+    private var _lookupCount = 0
+    var lookupCount: Int { lock.withLock { _lookupCount } }
 
     func blockHeight(for txid: String) async throws -> UInt32? {
-        heightMap[txid]
+        // Snapshot the answer before any gate so a blocked lookup returns the state it started with.
+        let height = heightMap[txid]
+        let fails = failingTxids.contains(txid)
+        lock.withLock { _lookupCount += 1 }
+        if let lookupGate {
+            for await _ in lookupGate {}
+        }
+        if fails {
+            throw URLError(.notConnectedToInternet)
+        }
+        return height
     }
 
     func currentHeight() async throws -> UInt32 {
-        mockCurrentHeight
+        if currentHeightFails {
+            throw URLError(.notConnectedToInternet)
+        }
+        return mockCurrentHeight
     }
 }
 
@@ -143,5 +163,130 @@ final class SPVHeaderChainServiceTests: XCTestCase {
         XCTAssertEqual(record?.status, "pending")
         XCTAssertEqual(record?.confirmations, 0)
         XCTAssertNil(record?.txBlockHeight)
+    }
+}
+
+// MARK: - Manual Confirmation Refresh (History pull-to-refresh)
+
+@MainActor
+final class ConfirmationPollingRefreshTests: XCTestCase {
+    var db: DatabaseService!
+    var blockHeightService: BlockHeightService!
+    var pollingService: ConfirmationPollingService!
+    var mockProvider: MockTxConfirmationProvider!
+    var dataDir: URL!
+    var updateCount = 0
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        dataDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test_refresh_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        db = try DatabaseService(dataDir: dataDir)
+        mockProvider = MockTxConfirmationProvider()
+        blockHeightService = BlockHeightService(provider: mockProvider)
+        pollingService = ConfirmationPollingService(
+            databaseService: db,
+            blockHeightService: blockHeightService,
+            confirmationService: ConfirmationService(provider: mockProvider)
+        )
+        updateCount = 0
+        pollingService.onUpdate = { [weak self] in self?.updateCount += 1 }
+    }
+
+    override func tearDownWithError() throws {
+        db = nil
+        try? FileManager.default.removeItem(at: dataDir)
+        try super.tearDownWithError()
+    }
+
+    private func recordPendingPayment(txid: String) throws -> Int64 {
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: txid,
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 100_000_000,
+            amountUSD: 50.0,
+            btcPrice: 50_000,
+            counterparty: nil,
+            status: "pending",
+            txid: txid
+        )
+        return try XCTUnwrap(db.paymentRepo.getRecentPayments(limit: 1).first).id
+    }
+
+    func testRefreshFetchesTipAndUpdatesConfirmations() async throws {
+        let id = try recordPendingPayment(txid: "tx_refresh_ok")
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap["tx_refresh_ok"] = 100
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertNil(result.errorMessage)
+        XCTAssertEqual(blockHeightService.currentHeight, 105)
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 6)
+        XCTAssertEqual(updateCount, 1)
+    }
+
+    func testRefreshReportsChainTipFailure() async throws {
+        _ = try recordPendingPayment(txid: "tx_tip_fail")
+        mockProvider.currentHeightFails = true
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .chainTipUnavailable)
+        XCTAssertNotNil(result.errorMessage)
+        XCTAssertEqual(mockProvider.lookupCount, 0)
+    }
+
+    func testRefreshReportsFailedTransactionLookups() async throws {
+        _ = try recordPendingPayment(txid: "tx_lookup_ok")
+        _ = try recordPendingPayment(txid: "tx_lookup_fail")
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap["tx_lookup_ok"] = 100
+        mockProvider.failingTxids = ["tx_lookup_fail"]
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 1))
+        XCTAssertNotNil(result.errorMessage)
+        XCTAssertEqual(updateCount, 1)
+    }
+
+    func testRefreshWaitsForInFlightPollThenRunsFreshPass() async throws {
+        let id = try recordPendingPayment(txid: "tx_overlap")
+        mockProvider.mockCurrentHeight = 105
+        blockHeightService.setHeightSilently(105)
+        let (gate, release) = AsyncStream<Void>.makeStream()
+        mockProvider.lookupGate = gate
+
+        // Automatic poll starts and blocks inside its tx lookup (tx still unconfirmed).
+        let poll = Task { await pollingService.pollOnce() }
+        while mockProvider.lookupCount == 0 {
+            await Task.yield()
+        }
+
+        var refreshFinished = false
+        let refresh = Task { () -> ConfirmationRefreshResult in
+            let result = try await pollingService.refresh()
+            refreshFinished = true
+            return result
+        }
+        for _ in 0..<20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(refreshFinished, "refresh must wait for the in-flight poll, not skip or overlap")
+        XCTAssertEqual(mockProvider.lookupCount, 1)
+
+        // The tx confirms while the automatic poll is still in flight; only a fresh pass sees it.
+        mockProvider.heightMap["tx_overlap"] = 100
+        release.finish()
+        await poll.value
+        let result = try await refresh.value
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertEqual(mockProvider.lookupCount, 2)
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 6)
     }
 }

@@ -48,13 +48,17 @@ final class BlockHeightService {
         currentHeight = height
     }
 
-    func refresh() async {
+    /// Fetches the chain tip. Returns the new height, or nil when the fetch failed.
+    @discardableResult
+    func refresh() async -> UInt32? {
         do {
             let height = try await provider.currentHeight()
             currentHeight = height
             onHeightUpdated?(height)
+            return height
         } catch {
             os_log("Block height refresh failed: %{public}@", log: .default, type: .error, error.localizedDescription)
+            return nil
         }
     }
 }

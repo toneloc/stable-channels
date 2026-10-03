@@ -3688,6 +3688,12 @@ class AppState {
 
     // MARK: - Balance Refresh
 
+    /// Manual confirmation refresh used by History pull-to-refresh.
+    func refreshPaymentConfirmations() async throws -> ConfirmationRefreshResult {
+        guard let confirmationPollingService else { return .databaseUnavailable }
+        return try await confirmationPollingService.refresh()
+    }
+
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
