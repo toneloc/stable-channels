@@ -123,9 +123,11 @@ final class BalanceBarStateTests: XCTestCase {
         )
         var emptyActionCalled = false
 
+        // barWidth = 300.0, thumbDiameter = 22.0 -> usableWidth = 278.0
+        // translationX = 55.6 -> 55.6 / 278.0 = 0.20 -> 0.50 + 0.20 = 0.70
         state.handleDragChange(
             touchStartX: 150.0,
-            translationX: 60.0,
+            translationX: 55.6,
             barWidth: 300.0,
             currentThumbX: 150.0,
             thumbDiameter: 22.0,
@@ -135,11 +137,11 @@ final class BalanceBarStateTests: XCTestCase {
             onDragStarted: nil
         )
 
-        // 0.5 + 60/300 = 0.70
+        // 0.5 + 55.6/278 = 0.70
         XCTAssertEqual(state.userSelectedFraction ?? 0, 0.70, accuracy: 0.001)
 
         state.handleDragEnd(
-            translationX: 60.0,
+            translationX: 55.6,
             barWidth: 300.0,
             allocation: emptyAllocation,
             maxSellUSD: 0.0,
@@ -166,7 +168,7 @@ final class BalanceBarStateTests: XCTestCase {
 
         state.handleDragChange(
             touchStartX: 75.0,
-            translationX: 60.0, // proposed 0.25 + 60/300 = 0.45 (overshoots 0.375 limit)
+            translationX: 60.0, // proposed 0.25 + 60/278 = 0.466 (overshoots 0.375 limit)
             barWidth: 300.0,
             currentThumbX: 75.0,
             thumbDiameter: 22.0,
@@ -191,9 +193,11 @@ final class BalanceBarStateTests: XCTestCase {
         )
         var receivedRequest: TradeRequest?
 
+        // barWidth = 300.0, thumbDiameter = 22.0 -> usableWidth = 278.0
+        // translationX = 27.8 -> 27.8 / 278.0 = 0.10 -> 0.25 + 0.10 = 0.35 (fractionMoved 0.10 -> $20.0 sell)
         state.handleDragChange(
             touchStartX: 75.0,
-            translationX: 30.0, // proposed 0.25 + 30/300 = 0.35 (fractionMoved 0.10 -> $20 sell)
+            translationX: 27.8,
             barWidth: 300.0,
             currentThumbX: 75.0,
             thumbDiameter: 22.0,
@@ -204,7 +208,7 @@ final class BalanceBarStateTests: XCTestCase {
         )
 
         state.handleDragEnd(
-            translationX: 30.0,
+            translationX: 27.8,
             barWidth: 300.0,
             allocation: fundedAllocation,
             maxSellUSD: 50.0,
