@@ -453,7 +453,9 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         let ids = try (0..<3).map { try recordPendingPayment(txid: "slow_\($0)") }
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [HangingConfirmationURLProtocol.self]
-        HangingConfirmationURLProtocol.reset()
+        let requestStopped = expectation(description: "Deadline cancels the underlying request")
+        requestStopped.assertForOverFulfill = true
+        HangingConfirmationURLProtocol.reset(requestStopped: requestStopped)
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         pollingService = ConfirmationPollingService(
@@ -475,6 +477,8 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(result, .timedOut)
         XCTAssertLessThan(start.duration(to: .now), .seconds(1))
         XCTAssertEqual(HangingConfirmationURLProtocol.startedCount, 1)
+        // URLSession can resume data(for:) before its protocol queue delivers stopLoading.
+        await fulfillment(of: [requestStopped], timeout: 1)
         XCTAssertEqual(HangingConfirmationURLProtocol.stoppedCount, 1)
         for id in ids {
             XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 0)
@@ -488,7 +492,9 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         _ = try recordPendingPayment(txid: "cancel_network")
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [HangingConfirmationURLProtocol.self]
-        HangingConfirmationURLProtocol.reset()
+        let requestStopped = expectation(description: "View cancellation stops the underlying request")
+        requestStopped.assertForOverFulfill = true
+        HangingConfirmationURLProtocol.reset(requestStopped: requestStopped)
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
         pollingService = ConfirmationPollingService(
@@ -517,6 +523,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
             XCTAssertTrue(error is CancellationError)
         }
         XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+        await fulfillment(of: [requestStopped], timeout: 1)
         XCTAssertEqual(HangingConfirmationURLProtocol.stoppedCount, 1)
         await pollingService.pollOnce()
         XCTAssertEqual(mockProvider.lookupCount, 1)
@@ -561,13 +568,16 @@ private final class HangingConfirmationURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var started = 0
     private static var stopped = 0
+    private static var requestStopped: XCTestExpectation?
+    private var cancellationExpectation: XCTestExpectation?
     static var startedCount: Int { lock.withLock { started } }
     static var stoppedCount: Int { lock.withLock { stopped } }
 
-    static func reset() {
+    static func reset(requestStopped: XCTestExpectation) {
         lock.withLock {
             started = 0
             stopped = 0
+            Self.requestStopped = requestStopped
         }
     }
 
@@ -581,13 +591,20 @@ private final class HangingConfirmationURLProtocol: URLProtocol {
             client?.urlProtocol(self, didLoad: Data("105".utf8))
             client?.urlProtocolDidFinishLoading(self)
         } else {
-            Self.lock.withLock { Self.started += 1 }
+            Self.lock.withLock {
+                Self.started += 1
+                cancellationExpectation = Self.requestStopped
+            }
         }
     }
 
     override func stopLoading() {
         if request.url?.path != "/blocks/tip/height" {
-            Self.lock.withLock { Self.stopped += 1 }
+            let requestStopped = Self.lock.withLock {
+                Self.stopped += 1
+                return cancellationExpectation
+            }
+            requestStopped?.fulfill()
         }
     }
 }
