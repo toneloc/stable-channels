@@ -20,27 +20,33 @@ enum BalanceBarTradeCalculator {
         return nil
     }
 
-    /// Mathematical formula unifying coordinate translation across platforms:
-    /// fraction = clamp(initialFraction + translation / barWidth, 0.0, 1.0)
+    /// Mathematical formula unifying coordinate translation across platforms with thumb inset:
+    /// fraction = clamp(initialFraction + translation / usableWidth, 0.0, 1.0)
     static func calculateTargetFraction(
         initialFraction: CGFloat,
         translationX: CGFloat,
-        barWidth: CGFloat
+        barWidth: CGFloat,
+        thumbDiameter: CGFloat = 22.0
     ) -> CGFloat {
-        guard barWidth > 0 else { return initialFraction }
-        let proposed = initialFraction + (translationX / barWidth)
+        let usableWidth = barWidth - thumbDiameter
+        guard usableWidth > 0 else { return initialFraction }
+        let proposed = initialFraction + (translationX / usableWidth)
         return min(max(proposed, 0.0), 1.0)
     }
 
-    /// Computes horizontal thumb center position along the track.
-    /// Aligns 1:1 with track color split boundary across both iOS and Android.
+    /// Computes horizontal thumb center position along the track with thumb radius inset.
+    /// Ensures thumb remains flush within bounds at 0% and 100%, and guarantees remaining
+    /// BTC reserve is visually displayed on the track when clamped at the sell limit.
     static func calculateThumbPosition(
         fraction: CGFloat,
-        barWidth: CGFloat
+        barWidth: CGFloat,
+        thumbDiameter: CGFloat = 22.0
     ) -> CGFloat {
-        guard barWidth > 0 else { return 0 }
+        let usableWidth = barWidth - thumbDiameter
+        guard usableWidth > 0 else { return barWidth / 2 }
+        let radius = thumbDiameter / 2
         let clamped = min(max(fraction, 0.0), 1.0)
-        return barWidth * clamped
+        return radius + (clamped * usableWidth)
     }
 
     /// Evaluates if gesture displacement qualifies as a tap rather than a drag based on cumulative distance.

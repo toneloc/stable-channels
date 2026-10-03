@@ -65,7 +65,8 @@ final class BalanceBarState {
         let rawFraction = BalanceBarTradeCalculator.calculateTargetFraction(
             initialFraction: baseFraction,
             translationX: translationX,
-            barWidth: barWidth
+            barWidth: barWidth,
+            thumbDiameter: thumbDiameter
         )
 
         if allocation.isEmpty {

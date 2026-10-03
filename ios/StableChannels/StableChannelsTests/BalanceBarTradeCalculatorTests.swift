@@ -179,21 +179,47 @@ final class BalanceBarTradeCalculatorTests: XCTestCase {
     }
 
     func testInteractionMathTranslationAndTapDetection() {
-        // Translation math
-        let target = BalanceBarTradeCalculator.calculateTargetFraction(
+        // Translation math (with 0 inset)
+        let linearTarget = BalanceBarTradeCalculator.calculateTargetFraction(
             initialFraction: 0.4,
             translationX: 75.0,
-            barWidth: 300.0
+            barWidth: 300.0,
+            thumbDiameter: 0.0
         )
         // 0.4 + 75/300 = 0.4 + 0.25 = 0.65
-        XCTAssertEqual(target, 0.65, accuracy: 0.001)
+        XCTAssertEqual(linearTarget, 0.65, accuracy: 0.001)
 
-        // Thumb position alignment
-        let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
+        // Thumb position alignment (with 0 inset)
+        let linearThumbX = BalanceBarTradeCalculator.calculateThumbPosition(
             fraction: 0.65,
-            barWidth: 300.0
+            barWidth: 300.0,
+            thumbDiameter: 0.0
         )
-        XCTAssertEqual(thumbX, 195.0, accuracy: 0.001)
+        XCTAssertEqual(linearThumbX, 195.0, accuracy: 0.001)
+
+        // Translation math with 22pt thumb diameter inset
+        // Usable width = 300 - 22 = 278
+        // At 0.0: thumbX = 11.0 (flush with left edge of cylinder)
+        XCTAssertEqual(
+            BalanceBarTradeCalculator.calculateThumbPosition(fraction: 0.0, barWidth: 300.0, thumbDiameter: 22.0),
+            11.0,
+            accuracy: 0.001
+        )
+        // At 1.0: thumbX = 11 + 278 = 289.0 (flush with right edge of cylinder)
+        XCTAssertEqual(
+            BalanceBarTradeCalculator.calculateThumbPosition(fraction: 1.0, barWidth: 300.0, thumbDiameter: 22.0),
+            289.0,
+            accuracy: 0.001
+        )
+        // At 0.95 (5% BTC reserve): thumbX = 11 + 0.95 * 278 = 275.1
+        // Visible orange track to the right = 300 - (275.1 + 11) = 13.9pt!
+        let sellLimitThumbX = BalanceBarTradeCalculator.calculateThumbPosition(
+            fraction: 0.95,
+            barWidth: 300.0,
+            thumbDiameter: 22.0
+        )
+        XCTAssertEqual(sellLimitThumbX, 275.1, accuracy: 0.001)
+        XCTAssertEqual(300.0 - (sellLimitThumbX + 11.0), 13.9, accuracy: 0.001)
 
         // Tap detection
         XCTAssertTrue(BalanceBarTradeCalculator.isTap(translationX: 3.0, translationY: 2.0, threshold: 5.0))

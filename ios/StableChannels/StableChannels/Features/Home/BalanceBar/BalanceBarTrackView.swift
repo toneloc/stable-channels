@@ -40,13 +40,17 @@ struct BalanceBarTrackView: View {
     }
 
     private func emptyTrack(fraction: CGFloat) -> some View {
-        let spacing: CGFloat = 2
-        let availableWidth = max(barWidth - spacing, 0)
-        let greenWidth = availableWidth * fraction
-        let orangeWidth = availableWidth - greenWidth
+        let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
+            fraction: fraction,
+            barWidth: barWidth,
+            thumbDiameter: 22.0
+        )
+        let greenWidth = thumbX
+        let orangeWidth = max(barWidth - greenWidth, 0)
+        let cornerRadius: CGFloat = 5
 
-        return HStack(spacing: spacing) {
-            RoundedRectangle(cornerRadius: 5)
+        return HStack(spacing: 0) {
+            Rectangle()
                 .fill(
                     LinearGradient(
                         colors: [Color.green.opacity(0.16), Color.green.opacity(0.24)],
@@ -56,7 +60,7 @@ struct BalanceBarTrackView: View {
                 )
                 .frame(width: max(greenWidth, 0), height: height)
 
-            RoundedRectangle(cornerRadius: 5)
+            Rectangle()
                 .fill(
                     LinearGradient(
                         colors: [Color.orange.opacity(0.24), Color.orange.opacity(0.16)],
@@ -67,9 +71,9 @@ struct BalanceBarTrackView: View {
                 .frame(width: max(orangeWidth, 0), height: height)
         }
         .frame(width: barWidth, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         .overlay(
-            RoundedRectangle(cornerRadius: 5)
+            RoundedRectangle(cornerRadius: cornerRadius)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
@@ -77,16 +81,20 @@ struct BalanceBarTrackView: View {
     @ViewBuilder
     private func trackBar(fraction: CGFloat) -> some View {
         let alpha = 0.85
-        let hasGreen = fraction > 0.005
-        let hasOrange = (1.0 - fraction) > 0.005
-        let spacing: CGFloat = (hasGreen && hasOrange) ? 2 : 0
-        let availableWidth = max(barWidth - spacing, 0)
-        let greenWidth = hasOrange ? availableWidth * fraction : barWidth
-        let orangeWidth = hasGreen ? (availableWidth - greenWidth) : barWidth
+        let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
+            fraction: fraction,
+            barWidth: barWidth,
+            thumbDiameter: 22.0
+        )
+        let hasGreen = fraction > 0.001
+        let hasOrange = (1.0 - fraction) > 0.001
+        let greenWidth = hasOrange ? thumbX : barWidth
+        let orangeWidth = hasGreen ? max(barWidth - greenWidth, 0) : barWidth
+        let cornerRadius: CGFloat = 5
 
-        HStack(spacing: spacing) {
+        HStack(spacing: 0) {
             if hasGreen {
-                RoundedRectangle(cornerRadius: 5)
+                Rectangle()
                     .fill(LinearGradient(
                         colors: [Color.green.opacity(alpha * 0.8), Color.green.opacity(alpha)],
                         startPoint: .leading,
@@ -95,7 +103,7 @@ struct BalanceBarTrackView: View {
                     .frame(width: max(greenWidth, 0), height: height)
             }
             if hasOrange {
-                RoundedRectangle(cornerRadius: 5)
+                Rectangle()
                     .fill(LinearGradient(
                         colors: [Color.orange.opacity(alpha), Color.orange.opacity(alpha * 0.8)],
                         startPoint: .leading,
@@ -105,6 +113,6 @@ struct BalanceBarTrackView: View {
             }
         }
         .frame(width: barWidth, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 5))
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
     }
 }

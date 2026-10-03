@@ -25,29 +25,36 @@ object BalanceBarTradeCalculator {
     }
 
     /**
-     * Mathematical formula unifying coordinate translation across platforms: fraction =
-     * clamp(initialFraction + translationX / barWidth, 0.0, 1.0)
+     * Mathematical formula unifying coordinate translation across platforms with thumb inset:
+     * fraction = clamp(initialFraction + translationX / usableWidth, 0.0, 1.0)
      */
     fun calculateTargetFraction(
         initialFraction: Float,
         translationX: Float,
         barWidth: Float,
+        thumbDiameter: Float = 0f,
     ): Float {
-        if (barWidth <= 0f) return initialFraction
-        val proposed = initialFraction + (translationX / barWidth)
+        val usableWidth = barWidth - thumbDiameter
+        if (usableWidth <= 0f) return initialFraction
+        val proposed = initialFraction + (translationX / usableWidth)
         return proposed.coerceIn(0f, 1f)
     }
 
     /**
-     * Computes horizontal thumb center position along the track. Aligns 1:1 with track color split
-     * boundary across both iOS and Android.
+     * Computes horizontal thumb center position along the track with thumb radius inset. Ensures
+     * thumb remains flush within bounds at 0% and 100%, and guarantees remaining BTC reserve is
+     * visually displayed on the track when clamped at the sell limit.
      */
     fun calculateThumbPosition(
         fraction: Float,
         barWidth: Float,
+        thumbDiameter: Float = 0f,
     ): Float {
-        if (barWidth <= 0f) return 0f
-        return barWidth * fraction.coerceIn(0f, 1f)
+        val usableWidth = barWidth - thumbDiameter
+        if (usableWidth <= 0f) return barWidth / 2f
+        val radius = thumbDiameter / 2f
+        val clamped = fraction.coerceIn(0f, 1f)
+        return radius + (clamped * usableWidth)
     }
 
     /** Evaluates if gesture displacement qualifies as a tap rather than a drag. */

@@ -194,14 +194,14 @@ class BalanceBarStateTest {
             onEmptyInteraction = null,
         )
 
-        // barWidth = 300px, baseXPx = 150px (50%)
-        // maxSellOffset = 300 * 20 / 100 = 60px
+        // barWidth = 300px, thumbDiameter = 40px -> usableWidth = 260px, baseXPx = 150px (50%)
+        // maxSellOffset = 260 * 20 / 100 = 52px
         state.onDragStart(Offset(150f, 10f))
 
-        // Drag 80px (beyond 60px limit)
+        // Drag 80px (beyond 52px limit)
         state.onDrag(dragAmountX = 80f)
         assertTrue(state.atSellLimit)
-        assertEquals(60f, state.dragOffsetPx, 0.001f)
+        assertEquals(52f, state.dragOffsetPx, 0.001f)
         assertEquals(1, spy.warningCount)
 
         // Subsequent drag while still beyond limit must NOT fire warning again (edge detection)
@@ -234,8 +234,8 @@ class BalanceBarStateTest {
         )
 
         state.onDragStart(Offset(150f, 10f))
-        // Drag 60px right -> 60/300 = 0.20 -> $20.0 SELL
-        state.onDrag(dragAmountX = 60f)
+        // Drag 52px right on 260px usable travel -> 52/260 = 0.20 -> $20.0 SELL
+        state.onDrag(dragAmountX = 52f)
         state.onDragEnd()
 
         assertNotNull(deliveredRequest)
@@ -268,15 +268,15 @@ class BalanceBarStateTest {
         )
 
         state.onDragStart(Offset(150f, 10f))
-        state.onDrag(dragAmountX = 60f)
-        assertEquals(60f, state.dragOffsetPx, 0.001f)
+        state.onDrag(dragAmountX = 52f)
+        assertEquals(52f, state.dragOffsetPx, 0.001f)
 
         state.onDragEnd()
 
         assertFalse(state.isDragging)
         assertEquals(0, spy.impactCount)
         assertEquals(1, snapBack.animateCallCount)
-        assertEquals(60f, snapBack.lastFromOffset ?: 0f, 0.001f)
+        assertEquals(52f, snapBack.lastFromOffset ?: 0f, 0.001f)
     }
 
     @Test

@@ -157,7 +157,8 @@ struct BalanceBarView: View {
     private func thumbPosition(barWidth: CGFloat, visFrac: CGFloat) -> CGFloat {
         BalanceBarTradeCalculator.calculateThumbPosition(
             fraction: visFrac,
-            barWidth: barWidth
+            barWidth: barWidth,
+            thumbDiameter: thumbDiameter
         )
     }
 }

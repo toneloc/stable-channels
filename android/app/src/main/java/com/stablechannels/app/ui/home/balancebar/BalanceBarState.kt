@@ -24,13 +24,7 @@ fun rememberBalanceBarState(
 ): BalanceBarState {
     val snapBackAnim = remember { Animatable(0f) }
     val snapBack = remember(snapBackAnim) { DefaultBalanceBarSnapBack(snapBackAnim) }
-    val state = remember {
-        BalanceBarState(
-            scope = scope,
-            snapBack = snapBack,
-            haptics = haptics,
-        )
-    }
+    val state = remember { BalanceBarState(scope = scope, snapBack = snapBack, haptics = haptics) }
 
     val currentOnDragStarted by rememberUpdatedState(onDragStarted)
     val currentOnTradeRequest by rememberUpdatedState(onTradeRequest)
@@ -109,10 +103,20 @@ class BalanceBarState(
     private var depositPromptJob: Job? = null
     private var snapBackJob: Job? = null
 
-    val baseXPx: Float
+    private val baseFraction: Float
         get() =
-            if (totalUSD > 0.0) (barWidthPx * (stableUSD / totalUSD).coerceIn(0.0, 1.0)).toFloat()
-            else barWidthPx * 0.5f
+            if (isEmpty) 0.5f
+            else if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
+
+    val baseXPx: Float
+        get() {
+            if (barWidthPx <= 0f) return 0f
+            return BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = baseFraction,
+                barWidth = barWidthPx,
+                thumbDiameter = thumbDiameterPx,
+            )
+        }
 
     val currentOffsetPx: Float
         get() = if (isSnappingBack) snapBack.value else dragOffsetPx
@@ -185,16 +189,17 @@ class BalanceBarState(
         totalDragDistance += abs(dragAmountX)
         accumulatedTranslationX += dragAmountX
 
-        val baseFraction = if (isEmpty) 0.5f else (baseXPx / barWidthPx).coerceIn(0f, 1f)
         val rawFraction =
             BalanceBarTradeCalculator.calculateTargetFraction(
                 initialFraction = baseFraction,
                 translationX = accumulatedTranslationX,
                 barWidth = barWidthPx,
+                thumbDiameter = thumbDiameterPx,
             )
 
+        val usableWidth = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
         if (isEmpty) {
-            dragOffsetPx = (rawFraction - 0.5f) * barWidthPx
+            dragOffsetPx = (rawFraction - 0.5f) * usableWidth
             return
         }
 
@@ -207,7 +212,7 @@ class BalanceBarState(
                 maxSellUSD = maxSellUSD,
             )
 
-        dragOffsetPx = (clampedResult.fraction - baseFraction) * barWidthPx
+        dragOffsetPx = (clampedResult.fraction - baseFraction) * usableWidth
         if (clampedResult.isAtSellLimit) {
             if (!atSellLimit) {
                 atSellLimit = true
@@ -260,10 +265,10 @@ class BalanceBarState(
             return
         }
 
-        val baseFraction = if (barWidthPx > 0f) (baseXPx / barWidthPx).coerceIn(0f, 1f) else 0.5f
+        val usableWidth = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
         val targetFraction =
-            if (barWidthPx > 0f) {
-                (baseFraction + (dragOffsetPx / barWidthPx)).coerceIn(0f, 1f)
+            if (usableWidth > 0f) {
+                (baseFraction + (dragOffsetPx / usableWidth)).coerceIn(0f, 1f)
             } else {
                 baseFraction
             }

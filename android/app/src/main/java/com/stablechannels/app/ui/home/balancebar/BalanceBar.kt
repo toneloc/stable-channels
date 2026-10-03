@@ -95,12 +95,25 @@ fun BalanceBar(
         }
 
     val thumbDiameterPx = with(density) { thumbDiameter.toPx() }
+    val thumbRadiusPx = thumbDiameterPx / 2f
     SideEffect { state.updateLayout(barWidthPx, thumbDiameterPx) }
-    val baseXPx = barWidthPx * currentFraction
 
-    val thumbXPx = (baseXPx + state.currentOffsetPx).coerceIn(0f, barWidthPx)
-    val visFrac = if (barWidthPx > 0) (thumbXPx / barWidthPx).coerceIn(0f, 1f) else currentFraction
-    val usdPct = (visFrac * 100).roundToInt()
+    val baseXPx =
+        BalanceBarTradeCalculator.calculateThumbPosition(
+            fraction = currentFraction,
+            barWidth = barWidthPx,
+            thumbDiameter = thumbDiameterPx,
+        )
+
+    val minThumbX = thumbRadiusPx
+    val maxThumbX = (barWidthPx - thumbRadiusPx).coerceAtLeast(thumbRadiusPx)
+    val thumbXPx = (baseXPx + state.currentOffsetPx).coerceIn(minThumbX, maxThumbX)
+
+    val usableWidthPx = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
+    val activeFraction =
+        if (usableWidthPx > 0f) ((thumbXPx - thumbRadiusPx) / usableWidthPx).coerceIn(0f, 1f)
+        else currentFraction
+    val usdPct = (activeFraction * 100).roundToInt()
     val btcPct = 100 - usdPct
 
     val stableColor = Color(0xFF10B981)
@@ -177,7 +190,9 @@ fun BalanceBar(
             )
 
             BalanceBarTrack(
-                visFrac = visFrac,
+                fraction = activeFraction,
+                thumbXPx = thumbXPx,
+                barWidthPx = barWidthPx,
                 barHeight = barHeight,
                 isEmpty = isEmpty,
                 isAwakening = animator.isAwakening,

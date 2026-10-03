@@ -17,62 +17,67 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import kotlin.math.max
 
 @Composable
 fun BalanceBarEmptyTrack(
-    visFrac: Float,
+    thumbXPx: Float,
+    barWidthPx: Float,
     height: Dp,
     modifier: Modifier = Modifier,
 ) {
     val stableFaded = Color(0xFF10B981).copy(alpha = 0.22f)
     val nativeFaded = Color(0xFFF59E0B).copy(alpha = 0.22f)
-    val clampedFrac = visFrac.coerceIn(0.01f, 0.99f)
+    val density = LocalDensity.current
+    val greenWidth = if (barWidthPx > 0f) thumbXPx.coerceIn(0f, barWidthPx) else 0f
+    val orangeWidth = (barWidthPx - greenWidth).coerceAtLeast(0f)
+    val greenWidthDp = with(density) { greenWidth.toDp() }
+    val orangeWidthDp = with(density) { orangeWidth.toDp() }
+    val cornerRadius = 6.dp
 
     Row(
         modifier =
             modifier
                 .fillMaxWidth()
                 .height(height)
-                .clip(RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(cornerRadius))
                 .border(
                     width = 1.dp,
                     color = MaterialTheme.colorScheme.outline.copy(alpha = 0.12f),
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(cornerRadius),
                 )
     ) {
-        Box(
-            modifier =
-                Modifier.weight(clampedFrac)
-                    .fillMaxHeight()
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(stableFaded.copy(alpha = 0.16f), stableFaded)
+        if (greenWidth > 0f) {
+            Box(
+                modifier =
+                    Modifier.width(greenWidthDp)
+                        .fillMaxHeight()
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(stableFaded.copy(alpha = 0.16f), stableFaded)
+                            )
                         )
-                    )
-        )
-        Spacer(
-            modifier =
-                Modifier.width(2.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.background.copy(alpha = 0.5f))
-        )
-        Box(
-            modifier =
-                Modifier.weight(1f - clampedFrac)
-                    .fillMaxHeight()
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(nativeFaded, nativeFaded.copy(alpha = 0.16f))
+            )
+        }
+        if (orangeWidth > 0f) {
+            Box(
+                modifier =
+                    Modifier.width(orangeWidthDp)
+                        .fillMaxHeight()
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(nativeFaded, nativeFaded.copy(alpha = 0.16f))
+                            )
                         )
-                    )
-        )
+            )
+        }
     }
 }
 
 @Composable
 fun BalanceBarTrack(
-    visFrac: Float,
+    fraction: Float,
+    thumbXPx: Float,
+    barWidthPx: Float,
     barHeight: Dp,
     isEmpty: Boolean,
     isAwakening: Boolean,
@@ -81,29 +86,48 @@ fun BalanceBarTrack(
     modifier: Modifier = Modifier,
 ) {
     if (isEmpty && !isAwakening) {
-        BalanceBarEmptyTrack(visFrac = visFrac, height = barHeight, modifier = modifier)
+        BalanceBarEmptyTrack(
+            thumbXPx = thumbXPx,
+            barWidthPx = barWidthPx,
+            height = barHeight,
+            modifier = modifier,
+        )
     } else {
-        Row(modifier = modifier.fillMaxWidth().height(barHeight).clip(RoundedCornerShape(6.dp))) {
-            if (visFrac > 0.005f) {
+        val density = LocalDensity.current
+        val hasGreen = fraction > 0.001f
+        val hasOrange = (1f - fraction) > 0.001f
+        val greenWidth = if (hasOrange) thumbXPx.coerceIn(0f, barWidthPx) else barWidthPx
+        val orangeWidth = if (hasGreen) (barWidthPx - greenWidth).coerceAtLeast(0f) else barWidthPx
+        val greenWidthDp = with(density) { greenWidth.toDp() }
+        val orangeWidthDp = with(density) { orangeWidth.toDp() }
+        val cornerRadius = 6.dp
+
+        Row(
+            modifier =
+                modifier.fillMaxWidth().height(barHeight).clip(RoundedCornerShape(cornerRadius))
+        ) {
+            if (hasGreen && greenWidth > 0f) {
                 Box(
-                    Modifier.weight(max(visFrac, 0.01f))
-                        .fillMaxHeight()
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(stableColor.copy(alpha = 0.8f), stableColor)
+                    modifier =
+                        Modifier.width(greenWidthDp)
+                            .fillMaxHeight()
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(stableColor.copy(alpha = 0.8f), stableColor)
+                                )
                             )
-                        )
                 )
             }
-            if ((1f - visFrac) > 0.005f) {
+            if (hasOrange && orangeWidth > 0f) {
                 Box(
-                    Modifier.weight(max(1f - visFrac, 0.01f))
-                        .fillMaxHeight()
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(nativeColor, nativeColor.copy(alpha = 0.8f))
+                    modifier =
+                        Modifier.width(orangeWidthDp)
+                            .fillMaxHeight()
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(nativeColor, nativeColor.copy(alpha = 0.8f))
+                                )
                             )
-                        )
                 )
             }
         }

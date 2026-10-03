@@ -189,22 +189,58 @@ class BalanceBarTradeCalculatorTest {
 
     @Test
     fun interactionMathTranslationAndTapDetection() {
-        val target =
+        // Translation math (with 0 inset)
+        val linearTarget =
             BalanceBarTradeCalculator.calculateTargetFraction(
                 initialFraction = 0.4f,
                 translationX = 75.0f,
                 barWidth = 300.0f,
+                thumbDiameter = 0.0f,
             )
         // 0.4 + 75/300 = 0.4 + 0.25 = 0.65
-        assertEquals(0.65f, target, 0.001f)
+        assertEquals(0.65f, linearTarget, 0.001f)
 
-        // Thumb position alignment
-        val thumbX =
+        // Thumb position alignment (with 0 inset)
+        val linearThumbX =
             BalanceBarTradeCalculator.calculateThumbPosition(
                 fraction = 0.65f,
                 barWidth = 300.0f,
+                thumbDiameter = 0.0f,
             )
-        assertEquals(195.0f, thumbX, 0.001f)
+        assertEquals(195.0f, linearThumbX, 0.001f)
+
+        // Translation math with 22dp thumb diameter inset
+        // Usable width = 300 - 22 = 278
+        // At 0.0: thumbX = 11.0 (flush with left edge of cylinder)
+        assertEquals(
+            11.0f,
+            BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = 0.0f,
+                barWidth = 300.0f,
+                thumbDiameter = 22.0f,
+            ),
+            0.001f,
+        )
+        // At 1.0: thumbX = 11 + 278 = 289.0 (flush with right edge of cylinder)
+        assertEquals(
+            289.0f,
+            BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = 1.0f,
+                barWidth = 300.0f,
+                thumbDiameter = 22.0f,
+            ),
+            0.001f,
+        )
+        // At 0.95 (5% BTC reserve): thumbX = 11 + 0.95 * 278 = 275.1
+        // Visible orange track to the right = 300 - (275.1 + 11) = 13.9dp!
+        val sellLimitThumbX =
+            BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = 0.95f,
+                barWidth = 300.0f,
+                thumbDiameter = 22.0f,
+            )
+        assertEquals(275.1f, sellLimitThumbX, 0.001f)
+        assertEquals(13.9f, 300.0f - (sellLimitThumbX + 11.0f), 0.001f)
 
         assertTrue(
             BalanceBarTradeCalculator.isTap(
