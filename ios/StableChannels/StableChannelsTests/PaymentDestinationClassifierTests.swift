@@ -325,7 +325,7 @@ final class PaymentDestinationClassifierTests: XCTestCase {
         }
     }
 
-    func testClassifyBIP21SubSatoshiAndOverCapRejections() {
+    func testClassifyBIP21SubSatoshiAndOverCapAmountDrop() {
         // Sub-satoshi: 9 decimal places
         let subSat = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.000000015"
         guard case .valid(let destSub) = PaymentDestinationClassifier.classify(subSat),
@@ -380,7 +380,7 @@ final class PaymentDestinationClassifierTests: XCTestCase {
         XCTAssertFalse(offer.description.isEmpty)
     }
 
-    func testClassifyBIP21ExponentAmountRejection() {
+    func testClassifyBIP21ExponentAmountDrop() {
         let expBip21 = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=1e3"
         guard case .valid(let dest) = PaymentDestinationClassifier.classify(expBip21),
               case .onchain(_, let amountSats) = dest else {

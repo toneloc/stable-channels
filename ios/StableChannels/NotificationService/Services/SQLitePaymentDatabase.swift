@@ -1,6 +1,6 @@
 import Foundation
-import SQLite3
 import LDKNode
+import SQLite3
 
 /// SQLite implementation of PaymentDatabase
 final class SQLitePaymentDatabase: PaymentDatabase {
@@ -38,23 +38,48 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
         sqlite3_busy_timeout(db, 2000)
         if write && !Self.didEnsureColumns {
-            sqlite3_exec(
-                db,
-                "ALTER TABLE payments ADD COLUMN is_placeholder INTEGER NOT NULL DEFAULT 0;",
-                nil,
-                nil,
-                nil
-            )
-            sqlite3_exec(
-                db,
-                "ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0;",
-                nil,
-                nil,
-                nil
-            )
-            Self.didEnsureColumns = true
+            if ensureColumns(db: db) {
+                Self.didEnsureColumns = true
+            }
         }
         return db
+    }
+
+    @discardableResult
+    func ensureColumns(db: OpaquePointer?) -> Bool {
+        var existingCols = Set<String>()
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, "PRAGMA table_info(payments)", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let namePtr = sqlite3_column_text(stmt, 1) {
+                    existingCols.insert(String(cString: namePtr))
+                }
+            }
+            sqlite3_finalize(stmt)
+        } else {
+            return false
+        }
+
+        var success = true
+        for col in ["is_placeholder", "backing_applied"] {
+            if !existingCols.contains(col) {
+                let alterSQL = "ALTER TABLE payments ADD COLUMN \(col) INTEGER NOT NULL DEFAULT 0;"
+                var errMsg: UnsafeMutablePointer<CChar>?
+                let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
+                if rc != SQLITE_OK {
+                    if let errPtr = errMsg {
+                        let errStr = String(cString: errPtr)
+                        sqlite3_free(errMsg)
+                        if !errStr.contains("duplicate column name") {
+                            success = false
+                        }
+                    } else {
+                        success = false
+                    }
+                }
+            }
+        }
+        return success
     }
 
     private func burnSettlement(db: OpaquePointer?, settlementId: String) -> Bool {

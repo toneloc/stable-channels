@@ -57,7 +57,7 @@ final class PaymentRepository {
                         counterparty: counterparty,
                         address: address,
                         txid: txid,
-                        clearPlaceholder: false
+                        clearPlaceholder: true
                     )
                     return false
                 }
@@ -89,7 +89,7 @@ final class PaymentRepository {
                     counterparty: counterparty,
                     address: address,
                     txid: txid,
-                    clearPlaceholder: false
+                    clearPlaceholder: true
                 )
             }
             return inserted > 0
@@ -484,15 +484,17 @@ final class PaymentRepository {
 
             if let pid = paymentId, !pid.isEmpty {
                 let existing = try rawSQL.query(
-                    "SELECT id, is_placeholder, backing_applied FROM payments WHERE payment_id = ?",
+                    "SELECT id, is_placeholder, backing_applied, payment_type FROM payments WHERE payment_id = ?",
                     params: [.text(pid)]
                 )
                 if let firstRow = existing.first {
                     let isPlaceholder = (firstRow.int64(1)) == 1
                     let alreadyApplied = (firstRow.int64(2)) != 0
+                    let existingType = firstRow.string(3) ?? ""
 
                     var resultingBacking: UInt64?
-                    if isPlaceholder, let delta = backingDeltaSats, !alreadyApplied {
+                    let isOwedDebit = (isPlaceholder || existingType == "stability") && !alreadyApplied
+                    if let delta = backingDeltaSats, isOwedDebit {
                         guard let ucid = userChannelId, !ucid.isEmpty else {
                             throw DatabaseError.executeFailed("userChannelId required for backing update")
                         }
