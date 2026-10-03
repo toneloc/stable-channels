@@ -2,6 +2,7 @@ package com.stablechannels.app.services
 
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** Outcome of one payment-confirmation pass. */
 sealed interface ConfirmationPollResult {
@@ -13,6 +14,9 @@ sealed interface ConfirmationPollResult {
 
     /** Payment history is not open yet. */
     data object DatabaseUnavailable : ConfirmationPollResult
+
+    /** A manual refresh hit its deadline (waiting for another pass included) and was cancelled. */
+    data object TimedOut : ConfirmationPollResult
 }
 
 /** User-facing message for a manual refresh, or null when the refresh fully succeeded. */
@@ -27,6 +31,8 @@ fun ConfirmationPollResult.refreshErrorMessage(): String? =
         ConfirmationPollResult.ChainTipUnavailable ->
             "Couldn't reach the block explorer. Pull to try again."
         ConfirmationPollResult.DatabaseUnavailable -> "Payment history is unavailable right now."
+        ConfirmationPollResult.TimedOut ->
+            "Checking confirmations took too long. Pull to try again."
     }
 
 /**
@@ -37,7 +43,8 @@ fun ConfirmationPollResult.refreshErrorMessage(): String? =
 class ConfirmationRefreshCoordinator(
     private val minIntervalMs: Long = DEFAULT_MIN_INTERVAL_MS,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
-    private val pass: suspend () -> ConfirmationPollResult,
+    /** Runs one pass; `manual` is true for [refresh], false for [pollIfIdle]. */
+    private val pass: suspend (manual: Boolean) -> ConfirmationPollResult,
 ) {
     private val mutex = Mutex()
     @Volatile private var lastCompletedPassStartedAtMs = 0L
@@ -48,17 +55,24 @@ class ConfirmationRefreshCoordinator(
         if (!force && (now - lastCompletedPassStartedAtMs) < minIntervalMs) return null
         if (!mutex.tryLock()) return null
         return try {
-            runPass(now)
+            runPass(now, manual = false)
         } finally {
             mutex.unlock()
         }
     }
 
-    /** Manual refresh. Suspends until a pass started after this call has completed. */
-    suspend fun refresh(): ConfirmationPollResult = mutex.withLock { runPass(nowMs()) }
+    /**
+     * Manual refresh. Suspends until a pass started after this call has completed, or returns
+     * [ConfirmationPollResult.TimedOut] once [deadlineMs] has elapsed. The deadline covers waiting
+     * for an in-flight pass as well as running our own; on expiry the pass is cancelled (its
+     * requests with it) and the lock is released.
+     */
+    suspend fun refresh(deadlineMs: Long = MANUAL_REFRESH_DEADLINE_MS): ConfirmationPollResult =
+        withTimeoutOrNull(deadlineMs) { mutex.withLock { runPass(nowMs(), manual = true) } }
+            ?: ConfirmationPollResult.TimedOut
 
-    private suspend fun runPass(startedAtMs: Long): ConfirmationPollResult {
-        val result = pass()
+    private suspend fun runPass(startedAtMs: Long, manual: Boolean): ConfirmationPollResult {
+        val result = pass(manual)
         // Same as before: only a pass that reached the chain tip advances the throttle.
         if (result is ConfirmationPollResult.Completed) {
             lastCompletedPassStartedAtMs = startedAtMs
@@ -68,5 +82,6 @@ class ConfirmationRefreshCoordinator(
 
     companion object {
         const val DEFAULT_MIN_INTERVAL_MS = 15_000L
+        const val MANUAL_REFRESH_DEADLINE_MS = 20_000L
     }
 }

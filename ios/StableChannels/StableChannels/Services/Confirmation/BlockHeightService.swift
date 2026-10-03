@@ -48,6 +48,11 @@ final class BlockHeightService {
         currentHeight = height
     }
 
+    /// Fetches without publishing, so manual refresh can reject a stale response.
+    func fetchHeight() async throws -> UInt32 {
+        try await provider.currentHeight()
+    }
+
     /// Fetches the chain tip. Returns the new height, or nil when the fetch failed.
     @discardableResult
     func refresh() async -> UInt32? {

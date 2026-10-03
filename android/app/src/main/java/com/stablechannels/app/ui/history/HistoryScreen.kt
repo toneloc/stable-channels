@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.refreshErrorMessage
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.relativeString
@@ -41,6 +42,30 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+
+/** Result of reading History rows from the database. */
+internal sealed interface HistoryLoad {
+    data class Loaded(val trades: List<TradeRecord>, val payments: List<PaymentRecord>) :
+        HistoryLoad
+
+    data class Failed(val message: String) : HistoryLoad
+}
+
+internal const val HISTORY_UNAVAILABLE_MESSAGE = "Payment history is unavailable right now."
+internal const val HISTORY_LOAD_FAILED_MESSAGE = "Couldn't load history. Pull to try again."
+
+/**
+ * Reads History rows, reporting a missing database or a failed read as [HistoryLoad.Failed] so the
+ * caller can keep the last good rows instead of blanking the list or crashing.
+ */
+internal fun readHistory(db: DatabaseService?): HistoryLoad {
+    if (db == null) return HistoryLoad.Failed(HISTORY_UNAVAILABLE_MESSAGE)
+    return try {
+        HistoryLoad.Loaded(trades = db.getRecentTrades(), payments = db.getRecentPayments())
+    } catch (_: Exception) {
+        HistoryLoad.Failed(HISTORY_LOAD_FAILED_MESSAGE)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,21 +80,28 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isFlashing by appState.paymentFlash.collectAsState()
 
     var isRefreshing by remember { mutableStateOf(false) }
+    // Network (manual refresh) and database (load) errors are tracked separately so a successful
+    // database reload never hides a failed confirmation check.
     var refreshError by remember { mutableStateOf<String?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val pullRefreshState = rememberPullToRefreshState()
     val loadMutex = remember { Mutex() }
 
     // Database reads run on IO; Compose state is assigned back on Main. Loads are serialized so an
-    // older read can never overwrite a newer one.
+    // older read can never overwrite a newer one. A failed read keeps the last good rows.
     suspend fun loadHistory() = loadMutex.withLock {
-        val (loadedTrades, loadedPayments) =
-            withContext(Dispatchers.IO) {
-                val db = appState.databaseService
-                (db?.getRecentTrades() ?: emptyList()) to (db?.getRecentPayments() ?: emptyList())
+        when (val result = withContext(Dispatchers.IO) { readHistory(appState.databaseService) }) {
+            is HistoryLoad.Failed -> {
+                loadError = result.message
+                return@withLock
             }
-        trades = loadedTrades
-        payments = loadedPayments
+            is HistoryLoad.Loaded -> {
+                loadError = null
+                trades = result.trades
+                payments = result.payments
+            }
+        }
         selectedTrade = selectedTrade?.let { selected ->
             trades.firstOrNull { it.id == selected.id } ?: selected
         }
@@ -162,9 +194,10 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
 
         Spacer(Modifier.height(16.dp))
 
-        refreshError?.let {
+        val visibleError = listOfNotNull(refreshError, loadError).distinct()
+        if (visibleError.isNotEmpty()) {
             Text(
-                it,
+                visibleError.joinToString("\n"),
                 color = MaterialTheme.colorScheme.error,
                 style = MaterialTheme.typography.bodySmall,
                 textAlign = TextAlign.Center,
@@ -180,8 +213,8 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                 scope.launch {
                     try {
                         val result = appState.refreshPaymentConfirmations()
-                        loadHistory()
                         refreshError = result.refreshErrorMessage()
+                        loadHistory()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {

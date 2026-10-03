@@ -2,11 +2,10 @@ import SwiftUI
 
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
-    @State private var trades: [TradeRecord] = []
-    @State private var payments: [PaymentRecord] = []
+    @State private var history = HistoryContent()
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
-    @State private var refreshError: String?
+    @State private var refreshTask: Task<Void, Never>?
     @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
 
     var body: some View {
@@ -25,7 +24,7 @@ struct HistoryView: View {
                     }
                 }
 
-                if let refreshError {
+                if let refreshError = history.errorMessage {
                     Text(refreshError)
                         .font(.caption)
                         .foregroundStyle(.red)
@@ -75,7 +74,14 @@ struct HistoryView: View {
             .onAppear {
                 loadHistory()
             }
+            .onDisappear {
+                refreshTask?.cancel()
+            }
             .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
+                loadHistory()
+            }
+            .onChange(of: selectedSegment) { _, _ in
+                history.clearErrors()
                 loadHistory()
             }
             .onChange(of: appState.paymentFlash) { _, isFlashing in
@@ -95,6 +101,9 @@ struct HistoryView: View {
     private var historyDisplayPrice: Double {
         appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
     }
+
+    private var trades: [TradeRecord] { history.trades }
+    private var payments: [PaymentRecord] { history.payments }
 
     // MARK: - Trades List
 
@@ -120,19 +129,72 @@ struct HistoryView: View {
 
     /// Waits for a fresh confirmation check before reloading, so the spinner stays up until done.
     private func refreshHistory() async {
+        guard refreshTask == nil else { return }
+        let task = Task { await performRefreshHistory() }
+        refreshTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        refreshTask = nil
+    }
+
+    private func performRefreshHistory() async {
         appState.refreshBalances()
         do {
             let result = try await appState.refreshPaymentConfirmations()
-            refreshError = result.errorMessage
-        } catch {
+            history.networkError = result.errorMessage
+        } catch is CancellationError {
             return // Only thrown on cancellation (the view went away).
+        } catch {
+            history.networkError = error.localizedDescription
         }
         loadHistory()
     }
 
     private func loadHistory() {
-        trades = (try? appState.databaseService?.channelRepo.getRecentTrades(limit: 50)) ?? []
-        payments = (try? appState.databaseService?.paymentRepo.getRecentPayments(limit: 50)) ?? []
+        history.reload(database: appState.databaseService)
+    }
+}
+
+/// Keeps the last good snapshot and independent network/database errors.
+struct HistoryContent {
+    private(set) var trades: [TradeRecord] = []
+    private(set) var payments: [PaymentRecord] = []
+    var networkError: String?
+    private(set) var loadError: String?
+    var errorMessage: String? { loadError ?? networkError }
+
+    mutating func clearErrors() {
+        networkError = nil
+        loadError = nil
+    }
+
+    mutating func reload(database: DatabaseService?) {
+        guard let database else {
+            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
+            return
+        }
+        reload(
+            loadTrades: { try database.channelRepo.getRecentTrades(limit: 50) },
+            loadPayments: { try database.paymentRepo.getRecentPayments(limit: 50) }
+        )
+    }
+
+    mutating func reload(
+        loadTrades: () throws -> [TradeRecord],
+        loadPayments: () throws -> [PaymentRecord]
+    ) {
+        do {
+            let newTrades = try loadTrades()
+            let newPayments = try loadPayments()
+            trades = newTrades
+            payments = newPayments
+            loadError = nil
+        } catch {
+            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
+        }
     }
 }
 

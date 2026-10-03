@@ -6,6 +6,7 @@ enum ConfirmationRefreshResult: Equatable {
     case completed(failedLookups: Int)
     case chainTipUnavailable
     case databaseUnavailable
+    case timedOut
 
     /// User-facing error, or nil when every lookup succeeded.
     var errorMessage: String? {
@@ -35,6 +36,11 @@ enum ConfirmationRefreshResult: Equatable {
                 localized: "history_refresh_db_unavailable",
                 defaultValue: "Payment history is unavailable right now."
             )
+        case .timedOut:
+            return String(
+                localized: "history_refresh_timed_out",
+                defaultValue: "Checking confirmations took too long. Pull to try again."
+            )
         }
     }
 }
@@ -48,12 +54,13 @@ final class ConfirmationPollingService {
     /// sitting through the automatic poller's retry backoff (which can take minutes offline).
     private let manualTipProvider: BlockHeightProvider?
     private let manualConfirmationService: ConfirmationService?
+    private let manualRefreshTimeout: Duration
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
     private var isPolling = false
     /// Manual refreshes waiting for the in-flight cycle to finish.
-    private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    private var idleWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     /// Fires after each poll cycle. Observers should re-load their
     /// payment list to reflect updated confirmation state.
@@ -64,13 +71,15 @@ final class ConfirmationPollingService {
         blockHeightService: BlockHeightService,
         confirmationService: ConfirmationService,
         manualTipProvider: BlockHeightProvider? = nil,
-        manualConfirmationService: ConfirmationService? = nil
+        manualConfirmationService: ConfirmationService? = nil,
+        manualRefreshTimeout: Duration = .seconds(20)
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
         self.confirmationService = confirmationService
         self.manualTipProvider = manualTipProvider
         self.manualConfirmationService = manualConfirmationService
+        self.manualRefreshTimeout = manualRefreshTimeout
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.
@@ -108,28 +117,68 @@ final class ConfirmationPollingService {
     /// chain tip and re-resolves pending payments. Reports a failed tip fetch or failed
     /// transaction lookups rather than treating them as success.
     func refresh() async throws -> ConfirmationRefreshResult {
+        let deadline = ContinuousClock.now + manualRefreshTimeout
+        let result = try await withThrowingTaskGroup(of: ConfirmationRefreshResult.self) { group in
+            defer { group.cancelAll() }
+            group.addTask { @MainActor in
+                try await self.refreshPass()
+            }
+            group.addTask {
+                try await ContinuousClock().sleep(until: deadline)
+                return .timedOut
+            }
+            let result = try await group.next()!
+            try Task.checkCancellation()
+            return result
+        }
+        try Task.checkCancellation()
+        return result
+    }
+
+    private func waitUntilIdle() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    idleWaiters[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.idleWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func refreshPass() async throws -> ConfirmationRefreshResult {
+        try Task.checkCancellation()
         while isPolling {
-            await withCheckedContinuation { idleWaiters.append($0) }
+            try await waitUntilIdle()
         }
         try Task.checkCancellation()
         isPolling = true
         defer { finishPass() }
 
         let currentHeight: UInt32
-        if let manualTipProvider {
-            guard let height = try? await manualTipProvider.currentHeight(), height > 0 else {
-                try Task.checkCancellation()
+        do {
+            let height: UInt32
+            if let manualTipProvider {
+                height = try await manualTipProvider.currentHeight()
+            } else {
+                height = try await blockHeightService.fetchHeight()
+            }
+            try Task.checkCancellation()
+            guard height > 0, height >= blockHeightService.currentHeight else {
                 return .chainTipUnavailable
             }
-            // This pass resolves pending payments itself; don't trigger a second automatic poll.
+            // Reject stale responses before either the tip or payment records can change.
             blockHeightService.setHeightSilently(height)
             currentHeight = height
-        } else {
-            guard let height = await blockHeightService.refresh(), height > 0 else {
-                try Task.checkCancellation()
-                return .chainTipUnavailable
-            }
-            currentHeight = height
+        } catch {
+            try Task.checkCancellation()
+            return .chainTipUnavailable
         }
 
         let pending: [PaymentRecord]
@@ -141,9 +190,12 @@ final class ConfirmationPollingService {
         }
 
         var anyUpdated = false
+        defer {
+            if anyUpdated { onUpdate?() }
+        }
         var failedLookups = 0
         for payment in pending {
-            if Task.isCancelled { break }
+            try Task.checkCancellation()
             switch await resolve(
                 payment: payment,
                 currentHeight: currentHeight,
@@ -155,9 +207,6 @@ final class ConfirmationPollingService {
             }
         }
 
-        if anyUpdated {
-            onUpdate?()
-        }
         try Task.checkCancellation()
         return .completed(failedLookups: failedLookups)
     }
@@ -166,7 +215,7 @@ final class ConfirmationPollingService {
         isPolling = false
         let waiters = idleWaiters
         idleWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        waiters.values.forEach { $0.resume() }
     }
 
     /// Revalidates both pending payments and recently completed payments (last ~12 blocks)
@@ -261,6 +310,7 @@ final class ConfirmationPollingService {
             payment: payment,
             currentBlockHeight: currentHeight
         )
+        guard !Task.isCancelled else { return .unchanged }
         switch outcome {
         case .confirmed(let progress, let blockHeight):
             // Skip redundant writes — only update if confirmations actually changed OR if block height changed (reorg)
