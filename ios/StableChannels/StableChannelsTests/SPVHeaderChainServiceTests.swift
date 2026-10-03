@@ -189,7 +189,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         dataDir = try FileManager.default.url(
             for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true
         )
-            .appendingPathComponent("test_refresh_\(UUID().uuidString)")
+        .appendingPathComponent("test_refresh_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
         db = try DatabaseService(dataDir: dataDir)
         mockProvider = MockTxConfirmationProvider()
@@ -370,7 +370,9 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         let (gate, release) = AsyncStream<Void>.makeStream()
         mockProvider.lookupGate = gate
         let poll = Task { await pollingService.pollOnce() }
-        while mockProvider.lookupCount == 0 { await Task.yield() }
+        while mockProvider.lookupCount == 0 {
+            await Task.yield()
+        }
         let refresh = Task { try await pollingService.refresh() }
         let survivingRefresh = Task { try await pollingService.refresh() }
         try await Task.sleep(for: .milliseconds(20))
@@ -411,7 +413,9 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
             manualRefreshTimeout: .seconds(1)
         )
         let poll = Task { await pollingService.pollOnce() }
-        while automaticProvider.lookupCount == 0 { await Task.yield() }
+        while automaticProvider.lookupCount == 0 {
+            await Task.yield()
+        }
         let start = ContinuousClock.now
         let refresh = Task { try await pollingService.refresh() }
         try await Task.sleep(for: .milliseconds(600))
@@ -434,7 +438,9 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         let (gate, release) = AsyncStream<Void>.makeStream()
         mockProvider.lookupGate = gate
         let poll = Task { await pollingService.pollOnce() }
-        while mockProvider.lookupCount == 0 { await Task.yield() }
+        while mockProvider.lookupCount == 0 {
+            await Task.yield()
+        }
         let result = try await pollingService.refresh()
         XCTAssertEqual(result, .timedOut)
         await pollingService.pollOnce()
@@ -454,7 +460,11 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
             databaseService: db,
             blockHeightService: blockHeightService,
             confirmationService: ConfirmationService(provider: mockProvider),
-            manualTipProvider: BlockHeightResolver(chainURLs: ["https://slow.local"], urlSession: session, maxAttempts: 1),
+            manualTipProvider: BlockHeightResolver(
+                chainURLs: ["https://slow.local"],
+                urlSession: session,
+                maxAttempts: 1
+            ),
             manualConfirmationService: ConfirmationService(provider: TxConfirmationResolver(
                 chainURLs: ["https://slow.local"], urlSession: session, maxAttempts: 1
             )),
@@ -485,13 +495,19 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
             databaseService: db,
             blockHeightService: blockHeightService,
             confirmationService: ConfirmationService(provider: mockProvider),
-            manualTipProvider: BlockHeightResolver(chainURLs: ["https://slow.local"], urlSession: session, maxAttempts: 1),
+            manualTipProvider: BlockHeightResolver(
+                chainURLs: ["https://slow.local"],
+                urlSession: session,
+                maxAttempts: 1
+            ),
             manualConfirmationService: ConfirmationService(provider: TxConfirmationResolver(
                 chainURLs: ["https://slow.local"], urlSession: session, maxAttempts: 1
             ))
         )
         let refresh = Task { try await pollingService.refresh() }
-        while HangingConfirmationURLProtocol.startedCount == 0 { await Task.yield() }
+        while HangingConfirmationURLProtocol.startedCount == 0 {
+            await Task.yield()
+        }
         let start = ContinuousClock.now
         refresh.cancel()
         do {
@@ -555,7 +571,7 @@ private final class HangingConfirmationURLProtocol: URLProtocol {
         }
     }
 
-    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canInit(with _: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
