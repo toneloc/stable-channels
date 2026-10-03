@@ -38,6 +38,8 @@ import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
+import com.stablechannels.app.ui.home.balancebar.BalanceBar
+import com.stablechannels.app.ui.home.balancebar.TradeDirection
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
@@ -68,6 +70,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isFlashing by appState.paymentFlash.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
+    val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -185,31 +188,31 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(8.dp))
 
             // Balance bar
-            if (lightningSats > 0) {
-                BalanceBar(
-                    stableUSD = sc.expectedUSD.amount,
-                    nativeSats = nativeSatsCached,
-                    totalSats = lightningSats,
-                    btcPrice = btcPrice,
-                    maxSellUSD =
-                        (appState.tradeService?.maxSellCents(
-                            sc,
-                            appState.priceService.accountingPrice.value,
-                        ) ?: 0L) / 100.0,
-                    showBtcFormat = showBTC,
-                    modifier = Modifier.padding(horizontal = 18.dp),
-                    onDragStarted = { appState.ensureLSPConnected() },
-                    onTradeRequest =
-                        if (hasReadyChannel)
-                            { direction, amountUSD ->
-                                prefillTradeAmount = amountUSD
-                                if (direction == TradeDirection.BUY) showBuy = true
-                                else showSell = true
-                            }
-                        else null,
-                )
-                Spacer(Modifier.height(12.dp))
-            }
+            BalanceBar(
+                stableUSD = sc.expectedUSD.amount,
+                nativeSats = nativeSatsCached,
+                totalSats = lightningSats,
+                btcPrice = btcPrice,
+                maxSellUSD =
+                    (appState.tradeService?.maxSellCents(
+                        sc,
+                        appState.priceService.accountingPrice.value,
+                    ) ?: 0L) / 100.0,
+                isTrading = showBuy || showSell,
+                showBtcFormat = showBTC,
+                modifier = Modifier.padding(horizontal = 18.dp),
+                onDragStarted = { appState.ensureLSPConnected() },
+                onTradeRequest =
+                    if (hasReadyChannel)
+                        { request ->
+                            prefillTradeAmount = request.amountUSD
+                            if (request.direction == TradeDirection.BUY) showBuy = true
+                            else showSell = true
+                        }
+                    else null,
+                onEmptyInteraction = { showReceive = true },
+            )
+            Spacer(Modifier.height(12.dp))
 
             // Syncing indicator
             if (isSyncing) {
@@ -573,8 +576,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             Spacer(Modifier.height(16.dp))
 
-            // Hint text when no channel
-            if (!hasReadyChannel) {
+            // Hint text when no channel and no funds
+            if (!hasReadyChannel && totalSats == 0L && !isOpeningChannel) {
                 Text(
                     "Receive BTC to get started",
                     style = MaterialTheme.typography.bodySmall,
@@ -586,6 +589,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Action buttons
             HomeActionButtons(
                 hasReadyChannel = hasReadyChannel,
+                pulseReceive = !hasReadyChannel && totalSats == 0L && !isOpeningChannel,
                 onSend = { showSend = true },
                 onReceive = { showReceive = true },
                 onBuy = { showBuy = true },
