@@ -289,4 +289,53 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(mockProvider.lookupCount, 2)
         XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 6)
     }
+
+    func testRefreshUsesManualProvidersWhenConfigured() async throws {
+        let id = try recordPendingPayment(txid: "tx_manual")
+        // The automatic providers are offline; the manual (fast-fail) ones answer.
+        mockProvider.currentHeightFails = true
+        mockProvider.failingTxids = ["tx_manual"]
+        let manualProvider = MockTxConfirmationProvider()
+        manualProvider.mockCurrentHeight = 105
+        manualProvider.heightMap["tx_manual"] = 100
+        pollingService = ConfirmationPollingService(
+            databaseService: db,
+            blockHeightService: blockHeightService,
+            confirmationService: ConfirmationService(provider: mockProvider),
+            manualTipProvider: manualProvider,
+            manualConfirmationService: ConfirmationService(provider: manualProvider)
+        )
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertEqual(blockHeightService.currentHeight, 105)
+        XCTAssertEqual(mockProvider.lookupCount, 0)
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 6)
+    }
+
+    /// Offline: a real single-attempt resolver must give up promptly rather than retrying with backoff.
+    func testRefreshFailsFastWhenOffline() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockURLProtocol.self]
+        // A nil handler makes every request fail with a URLError, like having no network.
+        MockURLProtocol.requestHandler = nil
+        let session = URLSession(configuration: config)
+        pollingService = ConfirmationPollingService(
+            databaseService: db,
+            blockHeightService: blockHeightService,
+            confirmationService: ConfirmationService(provider: mockProvider),
+            manualTipProvider: BlockHeightResolver(
+                chainURLs: ["https://primary.local", "https://fallback.local"],
+                urlSession: session,
+                maxAttempts: 1
+            )
+        )
+
+        let start = Date()
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .chainTipUnavailable)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
 }

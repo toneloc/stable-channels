@@ -44,6 +44,10 @@ final class ConfirmationPollingService {
     private let databaseService: DatabaseService
     private let blockHeightService: BlockHeightService
     private let confirmationService: ConfirmationService
+    /// Single-attempt lookups for manual refresh, so a user-initiated pull fails fast instead of
+    /// sitting through the automatic poller's retry backoff (which can take minutes offline).
+    private let manualTipProvider: BlockHeightProvider?
+    private let manualConfirmationService: ConfirmationService?
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
@@ -58,11 +62,15 @@ final class ConfirmationPollingService {
     init(
         databaseService: DatabaseService,
         blockHeightService: BlockHeightService,
-        confirmationService: ConfirmationService
+        confirmationService: ConfirmationService,
+        manualTipProvider: BlockHeightProvider? = nil,
+        manualConfirmationService: ConfirmationService? = nil
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
         self.confirmationService = confirmationService
+        self.manualTipProvider = manualTipProvider
+        self.manualConfirmationService = manualConfirmationService
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.
@@ -107,9 +115,21 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
-        guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
-            try Task.checkCancellation()
-            return .chainTipUnavailable
+        let currentHeight: UInt32
+        if let manualTipProvider {
+            guard let height = try? await manualTipProvider.currentHeight(), height > 0 else {
+                try Task.checkCancellation()
+                return .chainTipUnavailable
+            }
+            // This pass resolves pending payments itself; don't trigger a second automatic poll.
+            blockHeightService.setHeightSilently(height)
+            currentHeight = height
+        } else {
+            guard let height = await blockHeightService.refresh(), height > 0 else {
+                try Task.checkCancellation()
+                return .chainTipUnavailable
+            }
+            currentHeight = height
         }
 
         let pending: [PaymentRecord]
@@ -124,7 +144,11 @@ final class ConfirmationPollingService {
         var failedLookups = 0
         for payment in pending {
             if Task.isCancelled { break }
-            switch await resolve(payment: payment, currentHeight: currentHeight) {
+            switch await resolve(
+                payment: payment,
+                currentHeight: currentHeight,
+                using: manualConfirmationService ?? confirmationService
+            ) {
             case .updated: anyUpdated = true
             case .failed: failedLookups += 1
             case .unchanged: break
@@ -228,8 +252,12 @@ final class ConfirmationPollingService {
         case failed
     }
 
-    private func resolve(payment: PaymentRecord, currentHeight: UInt32) async -> ResolveResult {
-        let outcome = await confirmationService.resolve(
+    private func resolve(
+        payment: PaymentRecord,
+        currentHeight: UInt32,
+        using service: ConfirmationService? = nil
+    ) async -> ResolveResult {
+        let outcome = await (service ?? confirmationService).resolve(
             payment: payment,
             currentBlockHeight: currentHeight
         )

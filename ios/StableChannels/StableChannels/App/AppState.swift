@@ -454,7 +454,11 @@ class AppState {
             ConfirmationPollingService(
                 databaseService: db,
                 blockHeightService: blockHeightService,
-                confirmationService: confirmationService
+                confirmationService: confirmationService,
+                manualTipProvider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1),
+                manualConfirmationService: ConfirmationService(
+                    provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1)
+                )
             )
         }
         confirmationPollingService = pollingService
