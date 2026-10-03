@@ -1,6 +1,7 @@
 package com.stablechannels.app.ui.home.balancebar
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -320,5 +321,19 @@ class BalanceBarStateTest {
         assertTrue(state.isDragging)
         assertFalse(state.isSnappingBack)
         assertEquals(0f, state.dragOffsetPx, 0.001f)
+    }
+
+    @Test
+    fun balanceBarDefaultsAndEmptyPredicateMatchInvariants() {
+        assertEquals(22.dp, BalanceBarDefaults.THUMB_DIAMETER)
+
+        // Zero balances are empty
+        assertTrue(BalanceBarDefaults.isChannelEmpty(totalSats = 0L, stableUSD = 0.0))
+        assertTrue(BalanceBarDefaults.isChannelEmpty(totalSats = -1L, stableUSD = 0.0))
+
+        // Funded stable or satoshi balance is not empty
+        assertFalse(BalanceBarDefaults.isChannelEmpty(totalSats = 100_000L, stableUSD = 0.0))
+        assertFalse(BalanceBarDefaults.isChannelEmpty(totalSats = 0L, stableUSD = 10.0))
+        assertFalse(BalanceBarDefaults.isChannelEmpty(totalSats = 50_000L, stableUSD = 25.0))
     }
 }

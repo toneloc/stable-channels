@@ -21,6 +21,13 @@ import com.stablechannels.app.util.Constants
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
+object BalanceBarDefaults {
+    val THUMB_DIAMETER = 22.dp
+
+    fun isChannelEmpty(totalSats: Long, stableUSD: Double): Boolean =
+        totalSats <= 0L && stableUSD <= 0.0
+}
+
 @Composable
 fun BalanceBar(
     stableUSD: Double,
@@ -37,7 +44,7 @@ fun BalanceBar(
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val totalUSD = stableUSD + nativeUSD
-    val isEmpty = totalSats <= 0L && stableUSD <= 0.0
+    val isEmpty = BalanceBarDefaults.isChannelEmpty(totalSats = totalSats, stableUSD = stableUSD)
 
     val canonicalFraction =
         if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
@@ -47,7 +54,7 @@ fun BalanceBar(
         (isEmpty && onEmptyInteraction != null) ||
             (!isEmpty && isPriceReady && onTradeRequest != null)
     val barHeight = if (interactive) 12.dp else 8.dp
-    val thumbDiameter = 22.dp
+    val thumbDiameter = BalanceBarDefaults.THUMB_DIAMETER
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     val density = LocalDensity.current

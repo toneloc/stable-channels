@@ -388,6 +388,19 @@ final class BalanceBarStateTests: XCTestCase {
             btcPrice: 80_000.0
         )
 
+        // Drag change continues after the price tick: handleDragChange must read the captured base fraction
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 27.8,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: tickedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
         // Drag ends after the price tick
         state.handleDragEnd(
             translationX: 27.8,
