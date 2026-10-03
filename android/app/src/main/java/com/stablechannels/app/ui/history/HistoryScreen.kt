@@ -15,6 +15,9 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TrendingDown
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,10 +30,42 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.services.refreshErrorMessage
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+
+/** Result of reading History rows from the database. */
+internal sealed interface HistoryLoad {
+    data class Loaded(val trades: List<TradeRecord>, val payments: List<PaymentRecord>) :
+        HistoryLoad
+
+    data class Failed(val message: String) : HistoryLoad
+}
+
+internal const val HISTORY_UNAVAILABLE_MESSAGE = "Payment history is unavailable right now."
+internal const val HISTORY_LOAD_FAILED_MESSAGE = "Couldn't load history. Pull to try again."
+
+/**
+ * Reads History rows, reporting a missing database or a failed read as [HistoryLoad.Failed] so the
+ * caller can keep the last good rows instead of blanking the list or crashing.
+ */
+internal fun readHistory(db: DatabaseService?): HistoryLoad {
+    if (db == null) return HistoryLoad.Failed(HISTORY_UNAVAILABLE_MESSAGE)
+    return try {
+        HistoryLoad.Loaded(trades = db.getRecentTrades(), payments = db.getRecentPayments())
+    } catch (_: Exception) {
+        HistoryLoad.Failed(HISTORY_LOAD_FAILED_MESSAGE)
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,11 +77,32 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
     val currentPrice by appState.priceService.currentPrice.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
+    val confirmationPollUpdate by appState.confirmationPollUpdate.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
 
-    fun loadHistory() {
-        trades = appState.databaseService?.getRecentTrades() ?: emptyList()
-        payments = appState.databaseService?.getRecentPayments() ?: emptyList()
+    var isRefreshing by remember { mutableStateOf(false) }
+    // Network (manual refresh) and database (load) errors are tracked separately so a successful
+    // database reload never hides a failed confirmation check.
+    var refreshError by remember { mutableStateOf<String?>(null) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val pullRefreshState = rememberPullToRefreshState()
+    val loadMutex = remember { Mutex() }
+
+    // Database reads run on IO; Compose state is assigned back on Main. Loads are serialized so an
+    // older read can never overwrite a newer one. A failed read keeps the last good rows.
+    suspend fun loadHistory() = loadMutex.withLock {
+        when (val result = withContext(Dispatchers.IO) { readHistory(appState.databaseService) }) {
+            is HistoryLoad.Failed -> {
+                loadError = result.message
+                return@withLock
+            }
+            is HistoryLoad.Loaded -> {
+                loadError = null
+                trades = result.trades
+                payments = result.payments
+            }
+        }
         selectedTrade = selectedTrade?.let { selected ->
             trades.firstOrNull { it.id == selected.id } ?: selected
         }
@@ -60,6 +116,13 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         appState.triggerConfirmationRefresh()
     }
     LaunchedEffect(confirmationUpdateEpoch) { loadHistory() }
+    LaunchedEffect(confirmationPollUpdate?.sequence) {
+        confirmationPollUpdate?.let { refreshError = it.result.refreshErrorMessage() }
+    }
+    LaunchedEffect(selectedSegment) {
+        refreshError = null
+        loadError = null
+    }
     LaunchedEffect(isFlashing) {
         if (isFlashing) {
             loadHistory()
@@ -139,21 +202,68 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
 
         Spacer(Modifier.height(16.dp))
 
-        if (selectedSegment == 0 && trades.isEmpty()) {
-            EmptyStateView(
-                icon = Icons.Default.SwapHoriz,
-                title = "No Orders",
-                description = "Convert BTC to see orders here.",
+        val visibleError = listOfNotNull(refreshError, loadError).distinct()
+        if (visibleError.isNotEmpty()) {
+            Text(
+                visibleError.joinToString("\n"),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
             )
-        } else if (selectedSegment == 1 && payments.isEmpty()) {
-            EmptyStateView(
-                icon = Icons.Default.ElectricBolt,
-                title = "No Payments",
-                description = "Send or receive payments to see history here.",
-            )
-        } else {
-            LazyColumn(state = listState) {
-                if (selectedSegment == 0) {
+        }
+
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                if (isRefreshing) return@PullToRefreshBox
+                isRefreshing = true
+                scope.launch {
+                    try {
+                        val result = appState.refreshPaymentConfirmations()
+                        refreshError = result.refreshErrorMessage()
+                        loadHistory()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        refreshError = "Couldn't refresh history. Pull to try again."
+                    } finally {
+                        isRefreshing = false
+                    }
+                }
+            },
+            state = pullRefreshState,
+            indicator = {
+                PullToRefreshDefaults.Indicator(
+                    modifier = Modifier.align(Alignment.TopCenter),
+                    isRefreshing = isRefreshing,
+                    state = pullRefreshState,
+                    color = MaterialTheme.colorScheme.primary,
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                )
+            },
+            modifier = Modifier.fillMaxSize(),
+        ) {
+            // A single scrollable list (empty states included) so the pull gesture works on both
+            // tabs even when there is nothing to show.
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                if (selectedSegment == 0 && trades.isEmpty()) {
+                    item {
+                        EmptyStateView(
+                            icon = Icons.Default.SwapHoriz,
+                            title = "No Orders",
+                            description = "Convert BTC to see orders here.",
+                        )
+                    }
+                } else if (selectedSegment == 1 && payments.isEmpty()) {
+                    item {
+                        EmptyStateView(
+                            icon = Icons.Default.ElectricBolt,
+                            title = "No Payments",
+                            description = "Send or receive payments to see history here.",
+                        )
+                    }
+                } else if (selectedSegment == 0) {
                     itemsIndexed(trades, key = { _, trade -> trade.id }) { index, trade ->
                         TradeRow(trade) { selectedTrade = trade }
                         if (index < trades.lastIndex) {

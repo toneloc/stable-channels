@@ -101,6 +101,8 @@ class AppState {
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
+    var confirmationRefreshResult: ConfirmationRefreshResult?
+    var confirmationRefreshResultVersion = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
@@ -454,10 +456,19 @@ class AppState {
             ConfirmationPollingService(
                 databaseService: db,
                 blockHeightService: blockHeightService,
-                confirmationService: confirmationService
+                confirmationService: confirmationService,
+                manualTipProvider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1),
+                manualConfirmationService: ConfirmationService(
+                    provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1)
+                )
             )
         }
         confirmationPollingService = pollingService
+        pollingService?.onRefreshResult = { [weak self] result in
+            guard let self else { return }
+            self.confirmationRefreshResult = result
+            self.confirmationRefreshResultVersion += 1
+        }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
             self.confirmationUpdateEpoch += 1
@@ -3687,6 +3698,12 @@ class AppState {
     }
 
     // MARK: - Balance Refresh
+
+    /// Manual confirmation refresh used by History pull-to-refresh.
+    func refreshPaymentConfirmations() async throws -> ConfirmationRefreshResult {
+        guard let confirmationPollingService else { return .databaseUnavailable }
+        return try await confirmationPollingService.refresh()
+    }
 
     func refreshBalances() {
         nodeService.refreshChannels()

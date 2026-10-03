@@ -34,6 +34,7 @@ struct TxConfirmationResolver: TxConfirmationProvider {
     }
 
     func blockHeight(for txid: String) async throws -> UInt32? {
+        try Task.checkCancellation()
         let result = await client.fetch(
             endpointBuilder: { base in
                 ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"]
@@ -47,6 +48,7 @@ struct TxConfirmationResolver: TxConfirmationProvider {
                 return UInt32(height)
             }
         )
+        try Task.checkCancellation()
         // Convert the 0 sentinel back to nil for the caller (meaning "pending").
         guard let height = result, height > 0 else { return nil }
         return height
