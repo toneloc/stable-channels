@@ -80,6 +80,9 @@ struct HistoryView: View {
             .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
                 loadHistory()
             }
+            .onChange(of: appState.confirmationRefreshResultVersion) { _, _ in
+                history.networkError = appState.confirmationRefreshResult?.errorMessage
+            }
             .onChange(of: selectedSegment) { _, _ in
                 history.clearErrors()
                 loadHistory()

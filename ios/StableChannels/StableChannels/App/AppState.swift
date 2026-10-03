@@ -101,6 +101,8 @@ class AppState {
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
+    var confirmationRefreshResult: ConfirmationRefreshResult?
+    var confirmationRefreshResultVersion = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
@@ -462,6 +464,11 @@ class AppState {
             )
         }
         confirmationPollingService = pollingService
+        pollingService?.onRefreshResult = { [weak self] result in
+            guard let self else { return }
+            self.confirmationRefreshResult = result
+            self.confirmationRefreshResultVersion += 1
+        }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
             self.confirmationUpdateEpoch += 1

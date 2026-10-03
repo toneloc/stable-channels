@@ -19,6 +19,11 @@ sealed interface ConfirmationPollResult {
     data object TimedOut : ConfirmationPollResult
 }
 
+data class ConfirmationPollUpdate(
+    val sequence: Long,
+    val result: ConfirmationPollResult,
+)
+
 /** User-facing message for a manual refresh, or null when the refresh fully succeeded. */
 fun ConfirmationPollResult.refreshErrorMessage(): String? =
     when (this) {
@@ -43,6 +48,7 @@ fun ConfirmationPollResult.refreshErrorMessage(): String? =
 class ConfirmationRefreshCoordinator(
     private val minIntervalMs: Long = DEFAULT_MIN_INTERVAL_MS,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
+    private val onResult: (ConfirmationPollResult) -> Unit = {},
     /** Runs one pass; `manual` is true for [refresh], false for [pollIfIdle]. */
     private val pass: suspend (manual: Boolean) -> ConfirmationPollResult,
 ) {
@@ -67,9 +73,13 @@ class ConfirmationRefreshCoordinator(
      * for an in-flight pass as well as running our own; on expiry the pass is cancelled (its
      * requests with it) and the lock is released.
      */
-    suspend fun refresh(deadlineMs: Long = MANUAL_REFRESH_DEADLINE_MS): ConfirmationPollResult =
-        withTimeoutOrNull(deadlineMs) { mutex.withLock { runPass(nowMs(), manual = true) } }
-            ?: ConfirmationPollResult.TimedOut
+    suspend fun refresh(deadlineMs: Long = MANUAL_REFRESH_DEADLINE_MS): ConfirmationPollResult {
+        val result =
+            withTimeoutOrNull(deadlineMs) { mutex.withLock { runPass(nowMs(), manual = true) } }
+                ?: ConfirmationPollResult.TimedOut
+        if (result == ConfirmationPollResult.TimedOut) onResult(result)
+        return result
+    }
 
     private suspend fun runPass(startedAtMs: Long, manual: Boolean): ConfirmationPollResult {
         val result = pass(manual)
@@ -77,6 +87,7 @@ class ConfirmationRefreshCoordinator(
         if (result is ConfirmationPollResult.Completed) {
             lastCompletedPassStartedAtMs = startedAtMs
         }
+        onResult(result)
         return result
     }
 

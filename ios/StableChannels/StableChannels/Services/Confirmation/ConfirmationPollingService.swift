@@ -65,6 +65,7 @@ final class ConfirmationPollingService {
     /// Fires after each poll cycle. Observers should re-load their
     /// payment list to reflect updated confirmation state.
     var onUpdate: (@MainActor () -> Void)?
+    var onRefreshResult: (@MainActor (ConfirmationRefreshResult) -> Void)?
 
     init(
         databaseService: DatabaseService,
@@ -97,20 +98,28 @@ final class ConfirmationPollingService {
             pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
         } catch {
             logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
+            onRefreshResult?(.databaseUnavailable)
             return
         }
 
         var anyUpdated = false
+        var failedLookups = 0
         for payment in pending {
             guard !Task.isCancelled else { return }
-            if await resolve(payment: payment, currentHeight: currentHeight) == .updated {
+            switch await resolve(payment: payment, currentHeight: currentHeight) {
+            case .updated:
                 anyUpdated = true
+            case .failed:
+                failedLookups += 1
+            case .unchanged:
+                break
             }
         }
 
         if anyUpdated {
             onUpdate?()
         }
+        onRefreshResult?(.completed(failedLookups: failedLookups))
     }
 
     /// Manual refresh: waits for any in-flight cycle (instead of skipping), fetches a fresh
@@ -132,6 +141,7 @@ final class ConfirmationPollingService {
             return result
         }
         try Task.checkCancellation()
+        onRefreshResult?(result)
         return result
     }
 
@@ -225,27 +235,39 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
-        // Refresh authoritative chain tip from Esplora first
-        await blockHeightService.refresh()
-        let currentHeight = blockHeightService.currentHeight
-        guard currentHeight > 0 else { return }
+        // Refresh authoritative chain tip from Esplora first.
+        guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
+            onRefreshResult?(.chainTipUnavailable)
+            return
+        }
 
         var anyUpdated = false
+        var failedLookups = 0
 
         // 1. Process pending payments
-        if let pending = try? databaseService.paymentRepo.paymentsNeedingConfirmation() {
+        do {
+            let pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
             for payment in pending {
                 guard !Task.isCancelled else { return }
-                if await resolve(payment: payment, currentHeight: currentHeight) == .updated {
+                switch await resolve(payment: payment, currentHeight: currentHeight) {
+                case .updated:
                     anyUpdated = true
+                case .failed:
+                    failedLookups += 1
+                case .unchanged:
+                    break
                 }
             }
+        } catch {
+            failedLookups += 1
+            logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
         }
 
         // 2. Revalidate recently confirmed payments (last ~12 blocks)
-        let windowStart = currentHeight >= windowDepth ? currentHeight - windowDepth : 0
-        if let recentConfirmed = try? databaseService.paymentRepo
-            .recentConfirmedPayments(confirmedAfterHeight: windowStart) {
+        do {
+            let windowStart = currentHeight >= windowDepth ? currentHeight - windowDepth : 0
+            let recentConfirmed = try databaseService.paymentRepo
+                .recentConfirmedPayments(confirmedAfterHeight: windowStart)
             for payment in recentConfirmed {
                 guard !Task.isCancelled else { return }
                 let outcome = await confirmationService.resolve(
@@ -268,6 +290,7 @@ final class ConfirmationPollingService {
                             "txid": payment.txid ?? ""
                         ])
                     } catch {
+                        failedLookups += 1
                         logger.error("Failed to downgrade payment: \(error.localizedDescription)")
                     }
                 case .confirmed(let progress, let blockHeight):
@@ -281,18 +304,26 @@ final class ConfirmationPollingService {
                             )
                             anyUpdated = true
                         } catch {
+                            failedLookups += 1
                             logger.error("Failed to update confirmations: \(error.localizedDescription)")
                         }
                     }
-                case .error, .noTxid:
+                case .error:
+                    failedLookups += 1
+                case .noTxid:
                     break
                 }
             }
+        } catch {
+            failedLookups += 1
+            logger.error("Failed to load recently confirmed payments: \(error.localizedDescription)")
         }
 
+        guard !Task.isCancelled else { return }
         if anyUpdated {
             onUpdate?()
         }
+        onRefreshResult?(.completed(failedLookups: failedLookups))
     }
 
     private enum ResolveResult {

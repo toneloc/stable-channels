@@ -77,6 +77,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
     val currentPrice by appState.priceService.currentPrice.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
+    val confirmationPollUpdate by appState.confirmationPollUpdate.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
 
     var isRefreshing by remember { mutableStateOf(false) }
@@ -115,6 +116,13 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
         appState.triggerConfirmationRefresh()
     }
     LaunchedEffect(confirmationUpdateEpoch) { loadHistory() }
+    LaunchedEffect(confirmationPollUpdate?.sequence) {
+        confirmationPollUpdate?.let { refreshError = it.result.refreshErrorMessage() }
+    }
+    LaunchedEffect(selectedSegment) {
+        refreshError = null
+        loadError = null
+    }
     LaunchedEffect(isFlashing) {
         if (isFlashing) {
             loadHistory()

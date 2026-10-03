@@ -552,6 +552,32 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(history.payments.map(\.id), [id])
     }
 
+    func testAutomaticPollPublishesPartialFailureAndLaterSuccess() async throws {
+        _ = try recordPendingPayment(txid: "poll_result")
+        blockHeightService.setHeightSilently(105)
+        mockProvider.failingTxids = ["poll_result"]
+        var results: [ConfirmationRefreshResult] = []
+        pollingService.onRefreshResult = { results.append($0) }
+
+        await pollingService.pollOnce()
+        mockProvider.failingTxids = []
+        mockProvider.heightMap["poll_result"] = 100
+        await pollingService.pollOnce()
+
+        XCTAssertEqual(results, [.completed(failedLookups: 1), .completed(failedLookups: 0)])
+    }
+
+    func testRevalidationDoesNotReportSuccessWhenTipRefreshFails() async {
+        blockHeightService.setHeightSilently(105)
+        mockProvider.currentHeightFails = true
+        var results: [ConfirmationRefreshResult] = []
+        pollingService.onRefreshResult = { results.append($0) }
+
+        await pollingService.revalidateRecentPayments()
+
+        XCTAssertEqual(results, [.chainTipUnavailable])
+    }
+
     private func makePollingService(timeout: Duration, manual: Bool = false) -> ConfirmationPollingService {
         ConfirmationPollingService(
             databaseService: db,

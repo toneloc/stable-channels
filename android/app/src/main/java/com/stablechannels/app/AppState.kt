@@ -965,6 +965,8 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _confirmationUpdateEpoch = MutableStateFlow(0)
     val confirmationUpdateEpoch: StateFlow<Int> = _confirmationUpdateEpoch
+    private val _confirmationPollUpdate = MutableStateFlow<ConfirmationPollUpdate?>(null)
+    val confirmationPollUpdate: StateFlow<ConfirmationPollUpdate?> = _confirmationPollUpdate
 
     private val _isSpliceInFlight = MutableStateFlow(false)
     val isSpliceInFlightFlow: StateFlow<Boolean>
@@ -993,9 +995,15 @@ class AppState(private val context: Context) : ViewModel() {
     private var nodeStartRetryAttempts: Int = 0
     private var spliceConfirmationJob: Job? = null
     private var monitoredSpliceTxid: String? = null
-    private val confirmationRefreshCoordinator = ConfirmationRefreshCoordinator { manual ->
-        paymentConfirmationPass.run(manual)
-    }
+    private val confirmationRefreshCoordinator =
+        ConfirmationRefreshCoordinator(
+            onResult = { result ->
+                val sequence = (_confirmationPollUpdate.value?.sequence ?: 0L) + 1
+                _confirmationPollUpdate.value = ConfirmationPollUpdate(sequence, result)
+            }
+        ) { manual ->
+            paymentConfirmationPass.run(manual)
+        }
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set

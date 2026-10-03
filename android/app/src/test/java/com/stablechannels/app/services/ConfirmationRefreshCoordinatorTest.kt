@@ -126,6 +126,30 @@ class ConfirmationRefreshCoordinatorTest {
     }
 
     @Test
+    fun `every completed automatic and manual pass publishes its latest result`() = runTest {
+        val results = mutableListOf<ConfirmationPollResult>()
+        val coordinator =
+            ConfirmationRefreshCoordinator(
+                nowMs = { 0L },
+                onResult = results::add,
+            ) {
+                if (results.isEmpty()) {
+                    ConfirmationPollResult.Completed(failedLookups = 1)
+                } else {
+                    ConfirmationPollResult.Completed()
+                }
+            }
+
+        coordinator.pollIfIdle(force = true)
+        coordinator.refresh()
+
+        assertEquals(
+            listOf(ConfirmationPollResult.Completed(1), ConfirmationPollResult.Completed()),
+            results,
+        )
+    }
+
+    @Test
     fun `a pass that throws releases the lock for the next refresh`() = runTest {
         var shouldThrow = true
         val coordinator =
