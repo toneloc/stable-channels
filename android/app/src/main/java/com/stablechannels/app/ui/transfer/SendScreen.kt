@@ -46,6 +46,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
@@ -156,6 +157,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         pendingPaymentId
             ?.let { paymentOutcomes[it] }
             ?.takeIf { it.belongsToAttempt(attemptStartedAtNanos) }
+    val isPaymentPending =
+        PaymentResultControls.isLightningPending(
+            pendingPaymentId,
+            paymentOutcome,
+            attemptStartedAtNanos,
+        )
 
     LaunchedEffect(pendingPaymentId, attemptStartedAtNanos) {
         val pid = pendingPaymentId ?: return@LaunchedEffect
@@ -402,7 +409,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     ) {
         // Header row
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            if (result == null || result!!.startsWith("Sending")) {
+            if (result == null || isPaymentPending) {
                 TextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
@@ -504,8 +511,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
         if (result != null) {
             Spacer(Modifier.height(40.dp))
-            val isSending = result!!.startsWith("Sending")
-            if (isSending) {
+            if (isPaymentPending) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(64.dp),
                     color = Color(0xFFF59E0B),
@@ -521,7 +527,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             Text(
-                text = if (isSending) "Sending..." else "Sent!",
+                text = if (isPaymentPending) "Sending..." else "Sent!",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
             )
@@ -548,7 +554,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            if (!isSending) {
+            if (!isPaymentPending) {
                 Button(onClick = onDismiss) {
                     Text("Done")
                 }

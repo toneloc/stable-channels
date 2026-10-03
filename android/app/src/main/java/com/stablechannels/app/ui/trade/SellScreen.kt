@@ -25,6 +25,7 @@ import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
+import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.usdFormatted
@@ -401,12 +402,12 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                         if (isDelayed)
                             "The provider's result has not arrived. Keep the wallet connected. Do not place this order again while its result is unknown."
                         else
-                            "Your order is being processed. Balance will update when the provider confirms the order.",
+                            "Your order is being processed. Balance will update when the provider confirms the order. Do not place this order again while its result is unknown.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                if (outcome != null) {
+                if (PaymentResultControls.showsTradeDone(outcome)) {
                     Button(onClick = onDismiss) { Text("Done") }
                 }
             }
