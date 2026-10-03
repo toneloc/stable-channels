@@ -1685,6 +1685,142 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(populated.amountUSD, 6.0)
         XCTAssertEqual(populated.feeMsat, 500)
     }
+
+    func testRawSQLConcurrentTransactionsDoNotCollide() throws {
+        let paymentId = "concurrent-tx-test-1"
+        try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 50_000,
+            amountUSD: 5.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "pending"
+        )
+
+        let expBackgroundStarted = expectation(description: "Background tx started")
+        let expBackgroundFinish = expectation(description: "Background tx finished")
+        let expMainFinish = expectation(description: "Main update finished")
+
+        let rawSQL = service.rawSQL
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try rawSQL.inTransaction(mode: "DEFERRED") {
+                    expBackgroundStarted.fulfill()
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                expBackgroundFinish.fulfill()
+            } catch {
+                XCTFail("Background transaction failed: \(error)")
+            }
+        }
+
+        wait(for: [expBackgroundStarted], timeout: 5.0)
+
+        // Concurrent update on caller thread while background transaction was running
+        XCTAssertNoThrow(try service.paymentRepo.updatePaymentStatus(
+            paymentId: paymentId,
+            status: "completed",
+            feeMsat: 1000
+        ))
+        expMainFinish.fulfill()
+
+        wait(for: [expBackgroundFinish, expMainFinish], timeout: 5.0)
+
+        let record = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(record.status, "completed")
+        XCTAssertEqual(record.feeMsat, 1000)
+    }
+
+    func testRecordPaymentAndMaybeUpdateBacking_placeholderRow_appliesBackingDebitExactlyOnce() throws {
+        let ucid = "ucid-placeholder-backing-test"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+            VALUES (?, ?, 50000)
+            """,
+            params: [.text("chan-placeholder-test"), .text(ucid)]
+        )
+
+        let paymentId = "race-stability-placeholder-backing"
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 500)
+
+        let placeholder = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(placeholder.status, "completed")
+        XCTAssertEqual(placeholder.amountMsat, 0)
+
+        // First call: heal placeholder and apply backing debit
+        let result1 = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 20_000_000,
+            amountUSD: 20.0,
+            btcPrice: 100_000,
+            status: "pending",
+            userChannelId: ucid,
+            backingDeltaSats: -20_000
+        )
+        XCTAssertFalse(result1.isNewPayment)
+        XCTAssertEqual(result1.backingSats, 30_000)
+
+        let rowsAfterFirst = try service.rawSQL.query(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        XCTAssertEqual(rowsAfterFirst.first?.int64(0), 30_000)
+
+        let paymentRow = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(paymentRow.amountMsat, 20_000_000)
+        XCTAssertEqual(paymentRow.status, "completed")
+
+        let backingAppliedRows = try service.rawSQL.query(
+            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = ?",
+            params: [.text(paymentId)]
+        )
+        XCTAssertEqual(backingAppliedRows.first?.int64(0), 1)
+        XCTAssertEqual(backingAppliedRows.first?.int64(1), 0)
+
+        // Second call: must not apply debit twice
+        let result2 = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 20_000_000,
+            amountUSD: 20.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -20_000
+        )
+        XCTAssertFalse(result2.isNewPayment)
+        XCTAssertEqual(result2.backingSats, 30_000)
+
+        let rowsAfterSecond = try service.rawSQL.query(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        XCTAssertEqual(rowsAfterSecond.first?.int64(0), 30_000)
+    }
+
+    @MainActor
+    func testPaymentLookupWithExcludePlaceholdersAndStatusMessage() throws {
+        let paymentId = "placeholder-display-test"
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 0)
+
+        let rowWithPlaceholder = service.paymentRepo.payment(paymentId: paymentId, excludePlaceholders: false)
+        XCTAssertNotNil(rowWithPlaceholder)
+        XCTAssertEqual(rowWithPlaceholder?.amountMsat, 0)
+
+        let rowExcludingPlaceholder = service.paymentRepo.payment(paymentId: paymentId, excludePlaceholders: true)
+        XCTAssertNil(rowExcludingPlaceholder)
+
+        let appState = AppState()
+        let msg = appState.sentPaymentStatusMessage(paymentId: paymentId)
+        XCTAssertEqual(msg, "Payment sent")
+    }
 }
 
 @MainActor

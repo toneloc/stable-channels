@@ -252,7 +252,10 @@ enum PaymentDestinationClassifier {
             let classified = classify(lightning, network: network)
             if case .valid(let dest) = classified {
                 switch dest {
-                case .bolt11, .bolt12:
+                case .bolt11(let invoice, let raw, let msat):
+                    let finalMsat = msat ?? (amountSats.map { $0 * 1000 })
+                    return .valid(.bolt11(invoice: invoice, raw: raw, amountMsat: finalMsat))
+                case .bolt12:
                     return .valid(dest)
                 default:
                     break

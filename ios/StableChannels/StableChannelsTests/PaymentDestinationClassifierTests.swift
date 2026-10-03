@@ -136,10 +136,11 @@ final class PaymentDestinationClassifierTests: XCTestCase {
             XCTFail("Expected valid destination from BIP21")
             return
         }
-        guard case .bolt11 = dest else {
+        guard case .bolt11(_, _, let amountMsat) = dest else {
             XCTFail("Expected .bolt11 to take priority over onchain fallback in BIP21")
             return
         }
+        XCTAssertEqual(amountMsat, 100_000_000)
     }
 
     func testClassifyBIP21WithInvalidLightningFallbackFallsBackToOnchain() {

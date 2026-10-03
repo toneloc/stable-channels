@@ -81,7 +81,13 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         // Dedup check
         if !paymentId.isEmpty {
             var checkStmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT 1 FROM payments WHERE payment_id = ?", -1, &checkStmt, nil) == SQLITE_OK {
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT is_placeholder, backing_applied FROM payments WHERE payment_id = ?",
+                -1,
+                &checkStmt,
+                nil
+            ) == SQLITE_OK {
                 sqlite3_bind_text(
                     checkStmt,
                     1,
@@ -90,9 +96,49 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                     SQLITE_TRANSIENT
                 )
                 if sqlite3_step(checkStmt) == SQLITE_ROW {
+                    let isPlaceholder = sqlite3_column_int64(checkStmt, 0) == 1
+                    let backingApplied = sqlite3_column_int64(checkStmt, 1) == 1
                     sqlite3_finalize(checkStmt)
-                    sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
-                    return .duplicate
+
+                    if !isPlaceholder || backingApplied || backingDeltaSats == nil {
+                        sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                        return .duplicate
+                    }
+
+                    // Existing row was a placeholder whose backing was never applied.
+                    // Apply backing delta now.
+                    if let delta = backingDeltaSats {
+                        guard let ucid = userChannelId, !ucid.isEmpty else {
+                            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                            return .missingChannelRow
+                        }
+                        if !updateBacking(db: db, ucid: ucid, delta: delta) {
+                            sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+                            return .missingChannelRow
+                        }
+                    }
+
+                    var updateStmt: OpaquePointer?
+                    let updateSql = """
+                        UPDATE payments
+                        SET amount_msat = CASE WHEN is_placeholder = 1 OR amount_msat = 0 THEN ? ELSE amount_msat END,
+                            amount_usd = COALESCE(amount_usd, ?),
+                            btc_price = COALESCE(btc_price, ?),
+                            is_placeholder = 0,
+                            backing_applied = 1
+                        WHERE payment_id = ?
+                    """
+                    if sqlite3_prepare_v2(db, updateSql, -1, &updateStmt, nil) == SQLITE_OK {
+                        sqlite3_bind_int64(updateStmt, 1, Int64(amountMsat))
+                        sqlite3_bind_double(updateStmt, 2, amountUSD)
+                        sqlite3_bind_double(updateStmt, 3, btcPrice)
+                        bindText(updateStmt, 4, paymentId)
+                        _ = sqlite3_step(updateStmt)
+                        sqlite3_finalize(updateStmt)
+                    }
+
+                    guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else { return .failed }
+                    return .inserted
                 }
                 sqlite3_finalize(checkStmt)
             }
@@ -123,7 +169,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
         // Insert payment
         var stmt: OpaquePointer?
-        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, 'completed')"
+        let insertSql = "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, backing_applied) VALUES (?, ?, ?, ?, ?, ?, 'completed', ?)"
         guard sqlite3_prepare_v2(db, insertSql, -1, &stmt, nil) == SQLITE_OK else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
             return .failed
@@ -158,6 +204,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         sqlite3_bind_int64(stmt, 4, Int64(amountMsat))
         sqlite3_bind_double(stmt, 5, amountUSD)
         sqlite3_bind_double(stmt, 6, btcPrice)
+        let backingAppliedVal: Int64 = (backingDeltaSats != nil) ? 1 : 0
+        sqlite3_bind_int64(stmt, 7, backingAppliedVal)
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)

@@ -90,13 +90,20 @@ extension [Any?] {
 
 final class RawSQL {
     var getDB: () -> OpaquePointer?
-    private let queue = DispatchQueue(label: "com.stablechannels.rawsql", qos: .userInitiated)
+    private let lock = NSRecursiveLock()
 
     init(getDB: @escaping () -> OpaquePointer?) {
         self.getDB = getDB
     }
 
     private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    @discardableResult
+    private func synchronized<T>(_ block: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try block()
+    }
 
     func bindParams(_ stmt: OpaquePointer?, params: [SQLValue]) {
         for (i, param) in params.enumerated() {
@@ -114,7 +121,7 @@ final class RawSQL {
     }
 
     func execute(_ sql: String, params: [SQLValue] = []) throws {
-        try queue.sync {
+        try synchronized {
             guard let db = getDB() else {
                 throw DatabaseError.executeFailed("Database handle is nil")
             }
@@ -137,7 +144,7 @@ final class RawSQL {
     /// the statement itself (sqlite3_changes is per-connection, so reading it in a
     /// separate call could observe another statement's count).
     func executeReturningChanges(_ sql: String, params: [SQLValue] = []) throws -> Int {
-        try queue.sync {
+        try synchronized {
             guard let db = getDB() else {
                 throw DatabaseError.executeFailed("Database handle is nil")
             }
@@ -158,7 +165,7 @@ final class RawSQL {
     }
 
     func query(_ sql: String, params: [SQLValue] = []) throws -> [[Any?]] {
-        try queue.sync {
+        try synchronized {
             guard let db = getDB() else {
                 throw DatabaseError.executeFailed("Database handle is nil")
             }
@@ -192,26 +199,28 @@ final class RawSQL {
     /// Execute a block within a database transaction.
     /// Rolls back automatically if the block throws an error.
     func inTransaction<T>(mode: String = "IMMEDIATE", _ body: () throws -> T) throws -> T {
-        try execute("BEGIN \(mode)")
-        do {
-            let result = try body()
-            try execute("COMMIT")
-            return result
-        } catch {
-            try? execute("ROLLBACK")
-            throw error
+        try synchronized {
+            try execute("BEGIN \(mode)")
+            do {
+                let result = try body()
+                try execute("COMMIT")
+                return result
+            } catch {
+                try? execute("ROLLBACK")
+                throw error
+            }
         }
     }
 
     var changes: Int32 {
-        queue.sync {
+        synchronized {
             guard let db = getDB() else { return 0 }
             return sqlite3_changes(db)
         }
     }
 
     var lastInsertRowId: Int64 {
-        queue.sync {
+        synchronized {
             guard let db = getDB() else { return 0 }
             return Int64(sqlite3_last_insert_rowid(db))
         }
