@@ -94,12 +94,13 @@ final class BalanceBarAnimationCoordinator {
         self.progress = 0.0
         self.startTimestamp = CACurrentMediaTime()
 
-        let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink(_:)))
+        let proxy = DisplayLinkProxy(target: self)
+        let link = CADisplayLink(target: proxy, selector: #selector(DisplayLinkProxy.handleDisplayLink(_:)))
         link.add(to: .main, forMode: .common)
         self.displayLink = link
     }
 
-    @objc private func handleDisplayLink(_: CADisplayLink) {
+    fileprivate func handleDisplayLink(_: CADisplayLink) {
         let elapsed = CACurrentMediaTime() - startTimestamp
         let currentProgress = min(elapsed / duration, 1.0)
         self.progress = currentProgress
@@ -118,5 +119,22 @@ final class BalanceBarAnimationCoordinator {
 
     deinit {
         displayLink?.invalidate()
+    }
+}
+
+private final class DisplayLinkProxy: NSObject {
+    private weak var target: BalanceBarAnimationCoordinator?
+
+    init(target: BalanceBarAnimationCoordinator) {
+        self.target = target
+        super.init()
+    }
+
+    @objc func handleDisplayLink(_ link: CADisplayLink) {
+        if let target {
+            target.handleDisplayLink(link)
+        } else {
+            link.invalidate()
+        }
     }
 }

@@ -120,9 +120,9 @@ struct HomeView: View {
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
                 onDragStarted: { appState.ensureLSPConnected() },
-                onTradeRequest: { request in
+                onTradeRequest: appState.hasReadyChannel ? { request in
                     tradeRequest = request
-                },
+                } : nil,
                 onEmptyInteraction: {
                     showReceiveSheet = true
                 }

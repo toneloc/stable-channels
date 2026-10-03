@@ -11,6 +11,7 @@ import kotlin.math.round
  * of UI and Android framework dependencies (Functional Core).
  */
 object BalanceBarTradeCalculator {
+    const val DEFAULT_THUMB_DIAMETER: Float = 22.0f
     const val DEFAULT_MIN_TRADE_USD: Double = 1.0
     const val DEFAULT_TAP_THRESHOLD: Float = 5.0f
     const val DEFAULT_THUMB_HIT_MULTIPLIER: Float = 1.5f
@@ -32,7 +33,7 @@ object BalanceBarTradeCalculator {
         initialFraction: Float,
         translationX: Float,
         barWidth: Float,
-        thumbDiameter: Float = 0f,
+        thumbDiameter: Float = DEFAULT_THUMB_DIAMETER,
     ): Float {
         val usableWidth = barWidth - thumbDiameter
         if (usableWidth <= 0f) return initialFraction
@@ -48,7 +49,7 @@ object BalanceBarTradeCalculator {
     fun calculateThumbPosition(
         fraction: Float,
         barWidth: Float,
-        thumbDiameter: Float = 0f,
+        thumbDiameter: Float = DEFAULT_THUMB_DIAMETER,
     ): Float {
         val usableWidth = barWidth - thumbDiameter
         if (usableWidth <= 0f) return barWidth / 2f
@@ -63,7 +64,7 @@ object BalanceBarTradeCalculator {
         translationY: Float = 0.0f,
         threshold: Float = DEFAULT_TAP_THRESHOLD,
     ): Boolean {
-        return hypot(translationX.toDouble(), translationY.toDouble()).toFloat() < threshold
+        return hypot(translationX.toDouble(), translationY.toDouble()).toFloat() <= threshold
     }
 
     /** Determines if an initial touch falls within the interactive hit area of the thumb. */

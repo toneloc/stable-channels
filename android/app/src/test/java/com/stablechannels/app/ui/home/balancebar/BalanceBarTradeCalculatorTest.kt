@@ -249,6 +249,14 @@ class BalanceBarTradeCalculatorTest {
                 threshold = 5.0f,
             )
         )
+        // Exact threshold boundary <= 5.0f
+        assertTrue(
+            BalanceBarTradeCalculator.isTap(
+                translationX = 3.0f,
+                translationY = 4.0f,
+                threshold = 5.0f,
+            )
+        )
         assertFalse(
             BalanceBarTradeCalculator.isTap(
                 translationX = 6.0f,
@@ -256,5 +264,27 @@ class BalanceBarTradeCalculatorTest {
                 threshold = 5.0f,
             )
         )
+    }
+
+    @Test
+    fun defaultThumbDiameterMatchesCrossPlatformConstant() {
+        assertEquals(22.0f, BalanceBarTradeCalculator.DEFAULT_THUMB_DIAMETER, 0.001f)
+
+        // Verifies default argument uses DEFAULT_THUMB_DIAMETER (22f -> usableWidth = 278f)
+        val defaultThumbX =
+            BalanceBarTradeCalculator.calculateThumbPosition(
+                fraction = 0.0f,
+                barWidth = 300.0f,
+            )
+        assertEquals(11.0f, defaultThumbX, 0.001f)
+
+        val defaultTargetFraction =
+            BalanceBarTradeCalculator.calculateTargetFraction(
+                initialFraction = 0.5f,
+                translationX = 55.6f,
+                barWidth = 300.0f,
+            )
+        // 0.5 + 55.6 / 278 = 0.70
+        assertEquals(0.70f, defaultTargetFraction, 0.001f)
     }
 }

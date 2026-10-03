@@ -238,6 +238,13 @@ class BalanceBarState(
         }
     }
 
+    fun onTap(offset: Offset) {
+        if (isEmpty) {
+            haptics.tick()
+            onEmptyInteraction?.invoke()
+        }
+    }
+
     fun onDragEnd() {
         if (!isDragging) {
             dragOffsetPx = 0f
@@ -247,21 +254,14 @@ class BalanceBarState(
         isDragging = false
 
         if (isEmpty) {
-            if (BalanceBarTradeCalculator.isTap(totalDragDistance, threshold = 5f * density)) {
-                dragOffsetPx = 0f
-                accumulatedTranslationX = 0f
-                haptics.tick()
-                onEmptyInteraction?.invoke()
-            } else {
-                haptics.tick()
-                showDepositPrompt = true
-                depositPromptJob?.cancel()
-                depositPromptJob = scope.launch {
-                    delay(2500)
-                    showDepositPrompt = false
-                }
-                triggerSnapBack(dragOffsetPx)
+            haptics.tick()
+            showDepositPrompt = true
+            depositPromptJob?.cancel()
+            depositPromptJob = scope.launch {
+                delay(2500)
+                showDepositPrompt = false
             }
+            triggerSnapBack(dragOffsetPx)
             return
         }
 

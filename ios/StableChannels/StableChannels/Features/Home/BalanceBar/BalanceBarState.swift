@@ -15,6 +15,8 @@ final class BalanceBarState {
     private var lastTranslationX: CGFloat = 0
     private(set) var cumulativeDragDistance: CGFloat = 0
     private var depositPromptTimer: DispatchWorkItem?
+    private var dragStartBaseFraction: CGFloat?
+    private var startedEmpty = false
 
     init(haptics: BalanceBarHaptics = SystemBalanceBarHaptics()) {
         self.haptics = haptics
@@ -51,6 +53,8 @@ final class BalanceBarState {
             atSellLimit = false
             lastTranslationX = 0
             cumulativeDragDistance = 0
+            dragStartBaseFraction = allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction)
+            startedEmpty = allocation.isEmpty
             depositPromptTimer?.cancel()
             showDepositPrompt = false
             onDragStarted?()
@@ -61,7 +65,7 @@ final class BalanceBarState {
         cumulativeDragDistance += abs(translationX - lastTranslationX)
         lastTranslationX = translationX
 
-        let baseFraction = allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction)
+        let baseFraction = dragStartBaseFraction ?? (allocation.isEmpty ? 0.5 : CGFloat(allocation.stableFraction))
         let rawFraction = BalanceBarTradeCalculator.calculateTargetFraction(
             initialFraction: baseFraction,
             translationX: translationX,
@@ -69,7 +73,7 @@ final class BalanceBarState {
             thumbDiameter: thumbDiameter
         )
 
-        if allocation.isEmpty {
+        if allocation.isEmpty || startedEmpty {
             userSelectedFraction = rawFraction
             return
         }
@@ -108,7 +112,12 @@ final class BalanceBarState {
         isPressing = false
         atSellLimit = false
 
-        if allocation.isEmpty {
+        let wasStartedEmpty = startedEmpty
+        let startBaseFraction = dragStartBaseFraction
+        dragStartBaseFraction = nil
+        startedEmpty = false
+
+        if allocation.isEmpty || wasStartedEmpty {
             if BalanceBarTradeCalculator.isTap(totalDistance: cumulativeDragDistance) {
                 userSelectedFraction = nil
                 haptics.tick()
@@ -137,7 +146,7 @@ final class BalanceBarState {
         guard barWidth > 0, !isAwakening,
               let selected = userSelectedFraction else { return }
 
-        let baseFraction = CGFloat(allocation.stableFraction)
+        let baseFraction = startBaseFraction ?? CGFloat(allocation.stableFraction)
         let evaluation = BalanceBarTradeCalculator.calculateSelection(
             initialFraction: baseFraction,
             targetFraction: selected,
@@ -158,6 +167,8 @@ final class BalanceBarState {
     }
 
     func resetSelection() {
+        dragStartBaseFraction = nil
+        startedEmpty = false
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             userSelectedFraction = nil
         }

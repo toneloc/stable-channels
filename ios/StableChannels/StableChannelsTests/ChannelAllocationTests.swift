@@ -75,6 +75,17 @@ final class ChannelAllocationTests: XCTestCase {
         XCTAssertFalse(allocation.isEmpty)
     }
 
+    func testFundedSatsWithZeroPriceIsNotEmpty() {
+        let allocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 50_000,
+            btcPrice: 0.0
+        )
+
+        XCTAssertFalse(allocation.isEmpty)
+        XCTAssertEqual(allocation.lightningBalanceSats, 50_000)
+    }
+
     func testBackingSatsOverrideTakesPrecedence() {
         let allocation = ChannelAllocation(
             stableUSD: 50.0,

@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.home.balancebar
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -51,12 +50,7 @@ fun BalanceBarHeader(
             label = "conversionAlpha",
         )
 
-    val headerHeight by
-        animateDpAsState(
-            targetValue = if (atSellLimit) 34.dp else 24.dp,
-            animationSpec = tween(150),
-            label = "headerHeight",
-        )
+    val headerHeight = 34.dp
 
     val pillTextStyle =
         MaterialTheme.typography.labelSmall.copy(

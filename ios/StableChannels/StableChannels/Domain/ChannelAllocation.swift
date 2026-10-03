@@ -57,6 +57,6 @@ struct ChannelAllocation: Equatable, Sendable {
 
     /// Indicates whether the channel has no active balance (empty state).
     var isEmpty: Bool {
-        totalUSD <= 0
+        lightningBalanceSats == 0 && stableUSD <= 0
     }
 }

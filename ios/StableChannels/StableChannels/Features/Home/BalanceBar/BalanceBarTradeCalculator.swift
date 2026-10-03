@@ -3,6 +3,7 @@ import Foundation
 /// Pure domain service calculating trade requests, fraction clamping, and interaction geometry.
 /// Zero UI framework dependencies (Functional Core).
 enum BalanceBarTradeCalculator {
+    static let defaultThumbDiameter: CGFloat = 22.0
     static let defaultMinTradeUSD: Double = 1.0
     static let defaultTapThreshold: CGFloat = 5.0
     static let defaultThumbHitMultiplier: CGFloat = 1.5
@@ -26,7 +27,7 @@ enum BalanceBarTradeCalculator {
         initialFraction: CGFloat,
         translationX: CGFloat,
         barWidth: CGFloat,
-        thumbDiameter: CGFloat = 22.0
+        thumbDiameter: CGFloat = defaultThumbDiameter
     ) -> CGFloat {
         let usableWidth = barWidth - thumbDiameter
         guard usableWidth > 0 else { return initialFraction }
@@ -40,7 +41,7 @@ enum BalanceBarTradeCalculator {
     static func calculateThumbPosition(
         fraction: CGFloat,
         barWidth: CGFloat,
-        thumbDiameter: CGFloat = 22.0
+        thumbDiameter: CGFloat = defaultThumbDiameter
     ) -> CGFloat {
         let usableWidth = barWidth - thumbDiameter
         guard usableWidth > 0 else { return barWidth / 2 }

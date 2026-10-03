@@ -6,6 +6,7 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -36,12 +37,15 @@ fun BalanceBar(
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val totalUSD = stableUSD + nativeUSD
-    val isEmpty = totalUSD <= 0.0
+    val isEmpty = totalSats <= 0L && stableUSD <= 0.0
 
     val canonicalFraction =
         if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
 
-    val interactive = onTradeRequest != null || onEmptyInteraction != null
+    val isPriceReady = btcPrice > 0.0
+    val interactive =
+        (isEmpty && onEmptyInteraction != null) ||
+            (!isEmpty && isPriceReady && onTradeRequest != null)
     val barHeight = if (interactive) 12.dp else 8.dp
     val thumbDiameter = 22.dp
 
@@ -165,18 +169,25 @@ fun BalanceBar(
                     .then(
                         if (interactive && !animator.isAwakening) {
                             Modifier.pointerInput(Unit) {
-                                detectDragGestures(
-                                    onDragStart = { offset ->
-                                        state.onDragStart(offset)
-                                    },
-                                    onDrag = { change, dragAmount ->
-                                        change.consume()
-                                        state.onDrag(dragAmount.x)
-                                    },
-                                    onDragEnd = { state.onDragEnd() },
-                                    onDragCancel = { state.onDragCancel() },
-                                )
-                            }
+                                    detectTapGestures(
+                                        onTap = { offset ->
+                                            state.onTap(offset)
+                                        }
+                                    )
+                                }
+                                .pointerInput(Unit) {
+                                    detectDragGestures(
+                                        onDragStart = { offset ->
+                                            state.onDragStart(offset)
+                                        },
+                                        onDrag = { change, dragAmount ->
+                                            change.consume()
+                                            state.onDrag(dragAmount.x)
+                                        },
+                                        onDragEnd = { state.onDragEnd() },
+                                        onDragCancel = { state.onDragCancel() },
+                                    )
+                                }
                         } else Modifier
                     ),
             contentAlignment = Alignment.CenterStart,

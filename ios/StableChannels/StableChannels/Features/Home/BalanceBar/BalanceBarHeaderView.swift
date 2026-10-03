@@ -28,6 +28,7 @@ struct BalanceBarHeaderView: View {
             pillContent
                 .opacity(showConversion ? 1 : 0)
                 .animation(.easeInOut(duration: 0.15), value: showConversion)
+                .animation(.easeInOut(duration: 0.15), value: atSellLimit)
             Spacer()
         }
     }

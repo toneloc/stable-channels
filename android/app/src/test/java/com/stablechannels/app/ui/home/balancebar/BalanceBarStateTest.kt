@@ -49,7 +49,7 @@ class BalanceBarStateTest {
     private val testScope = TestScope(testDispatcher)
 
     @Test
-    fun emptyStateSmallDragActsAsTapAndTriggersEmptyInteraction() {
+    fun emptyStateTapTriggersEmptyInteraction() {
         var emptyInteractionCalled = false
         val snapBack = FakeBalanceBarSnapBack()
         val spy = SpyBalanceBarHaptics()
@@ -71,19 +71,10 @@ class BalanceBarStateTest {
             onEmptyInteraction = { emptyInteractionCalled = true },
         )
 
-        // Base 50% on 300px bar is 150px
-        state.onDragStart(Offset(150f, 10f))
-        assertTrue(state.isDragging)
-        assertEquals(1, spy.tickCount)
+        state.onTap(Offset(150f, 10f))
 
-        // Move by only 4px (threshold is 5 * 2 = 10px)
-        state.onDrag(dragAmountX = 4f)
-        state.onDragEnd()
-
-        assertFalse(state.isDragging)
         assertTrue(emptyInteractionCalled)
-        assertEquals(0f, state.dragOffsetPx, 0.001f)
-        assertEquals(2, spy.tickCount)
+        assertEquals(1, spy.tickCount)
     }
 
     @Test
@@ -170,6 +161,27 @@ class BalanceBarStateTest {
         assertTrue(state.isDragging)
         assertEquals(30f, state.dragOffsetPx, 0.001f)
         assertEquals(110.0, state.totalUSD, 0.001)
+
+        // Verify delivered trade on release matches the dragged delta and direction after price
+        // tick
+        var deliveredRequest: TradeRequest? = null
+        state.updateInputs(
+            totalUSD = 110.0,
+            stableUSD = 50.0,
+            maxSellUSD = 55.0,
+            isEmpty = false,
+            density = 2f,
+            onDragStarted = null,
+            onTradeRequest = { deliveredRequest = it },
+            onEmptyInteraction = null,
+        )
+
+        state.onDragEnd()
+
+        assertNotNull(deliveredRequest)
+        assertEquals(TradeDirection.SELL, deliveredRequest?.direction)
+        // delta fraction = 30 / 260 = 0.1153846 -> amountUSD = 0.1153846 * 110.0 = 12.69
+        assertEquals(12.69, deliveredRequest?.amountUSD ?: 0.0, 0.01)
     }
 
     @Test

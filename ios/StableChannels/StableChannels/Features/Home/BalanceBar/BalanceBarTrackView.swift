@@ -4,6 +4,7 @@ struct BalanceBarTrackView: View {
     let barWidth: CGFloat
     let height: CGFloat
     let fraction: CGFloat
+    var thumbDiameter: CGFloat = BalanceBarTradeCalculator.defaultThumbDiameter
     var isEmpty: Bool = false
     let isAwakening: Bool
     let floodScale: CGFloat
@@ -43,11 +44,11 @@ struct BalanceBarTrackView: View {
         let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
             fraction: fraction,
             barWidth: barWidth,
-            thumbDiameter: 22.0
+            thumbDiameter: thumbDiameter
         )
         let greenWidth = thumbX
         let orangeWidth = max(barWidth - greenWidth, 0)
-        let cornerRadius: CGFloat = 5
+        let cornerRadius: CGFloat = 6
 
         return HStack(spacing: 0) {
             Rectangle()
@@ -84,13 +85,13 @@ struct BalanceBarTrackView: View {
         let thumbX = BalanceBarTradeCalculator.calculateThumbPosition(
             fraction: fraction,
             barWidth: barWidth,
-            thumbDiameter: 22.0
+            thumbDiameter: thumbDiameter
         )
         let hasGreen = fraction > 0.001
         let hasOrange = (1.0 - fraction) > 0.001
         let greenWidth = hasOrange ? thumbX : barWidth
         let orangeWidth = hasGreen ? max(barWidth - greenWidth, 0) : barWidth
-        let cornerRadius: CGFloat = 5
+        let cornerRadius: CGFloat = 6
 
         HStack(spacing: 0) {
             if hasGreen {

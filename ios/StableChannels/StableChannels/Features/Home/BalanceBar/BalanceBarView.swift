@@ -14,21 +14,26 @@ struct BalanceBarView: View {
     @State private var animator = BalanceBarAnimationCoordinator()
     @State private var pulseScale: CGFloat = 1.0
 
-    private let thumbDiameter: CGFloat = 28
+    static let defaultThumbDiameter: CGFloat = 22.0
+    private let thumbDiameter: CGFloat = Self.defaultThumbDiameter
     private let barHeight: CGFloat = 20
-    private let baseHeaderHeight: CGFloat = 24
+    private let headerHeight: CGFloat = 34
     private let verticalSpacing: CGFloat = 6
 
-    private var interactive: Bool {
-        onTradeRequest != nil || onEmptyInteraction != nil
+    private var isPriceReady: Bool {
+        allocation.btcPrice > 0
     }
 
-    private var currentHeaderHeight: CGFloat {
-        state.atSellLimit ? 34 : baseHeaderHeight
+    private var interactive: Bool {
+        if allocation.isEmpty {
+            return onEmptyInteraction != nil
+        } else {
+            return isPriceReady && onTradeRequest != nil
+        }
     }
 
     private var totalHeight: CGFloat {
-        interactive ? (currentHeaderHeight + verticalSpacing + thumbDiameter) : 10
+        interactive ? (headerHeight + verticalSpacing + thumbDiameter) : 10
     }
 
     private var currentBarHeight: CGFloat {
@@ -57,8 +62,7 @@ struct BalanceBarView: View {
                         showDepositPrompt: state.showDepositPrompt,
                         onEmptyInteraction: onEmptyInteraction
                     )
-                    .frame(height: currentHeaderHeight)
-                    .animation(.easeInOut(duration: 0.15), value: state.atSellLimit)
+                    .frame(height: headerHeight)
                 }
 
                 ZStack {
@@ -66,6 +70,7 @@ struct BalanceBarView: View {
                         barWidth: barWidth,
                         height: currentBarHeight,
                         fraction: visFrac,
+                        thumbDiameter: thumbDiameter,
                         isEmpty: allocation.isEmpty,
                         isAwakening: animator.isAwakening,
                         floodScale: animator.radialFloodScale,

@@ -355,4 +355,108 @@ final class BalanceBarStateTests: XCTestCase {
         )
         XCTAssertEqual(spy.warningCount, 1)
     }
+
+    func testPriceTickMidGesturePreservesDeliveredTradeAmountAndDirection() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let initialAllocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 150_000,
+            btcPrice: 100_000.0 // totalUSD = $200.0, stableFraction = 0.25
+        )
+        var receivedRequest: TradeRequest?
+
+        // Drag right 27.8pt (27.8 / 278 = +0.10 fraction delta -> 0.35)
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 27.8,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: initialAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        // Mid-gesture price tick arrives: BTC drops from $100k to $80k
+        // stableSats = 62,500, nativeSats = 87,500 -> nativeUSD = $70.0
+        // totalUSD = $120.0, stableFraction = 50 / 120 = 0.4167
+        let tickedAllocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 150_000,
+            btcPrice: 80_000.0
+        )
+
+        // Drag ends after the price tick
+        state.handleDragEnd(
+            translationX: 27.8,
+            barWidth: 300.0,
+            allocation: tickedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: nil,
+            onTradeRequest: { request in receivedRequest = request }
+        )
+
+        // Direction must remain SELL (not flip to BUY due to the base shift)
+        XCTAssertNotNil(receivedRequest)
+        XCTAssertEqual(receivedRequest?.direction, .sell)
+        // Amount is delta fraction (0.10) * new totalUSD ($120.0) = $12.00
+        XCTAssertEqual(receivedRequest?.amountUSD ?? 0, 12.0, accuracy: 0.01)
+    }
+
+    func testGestureStartedEmptySnapsBackEvenIfFundsArriveMidGestureUnderReduceMotion() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let emptyAllocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 100_000.0
+        )
+        var receivedRequest: TradeRequest?
+        var emptyActionCalled = false
+
+        // Begin drag on empty playground
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 55.6,
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        // Funds land mid-gesture
+        let fundedAllocation = ChannelAllocation(
+            stableUSD: 100.0,
+            lightningBalanceSats: 100_000,
+            btcPrice: 100_000.0
+        )
+
+        // Under Reduce Motion, awakening animation is skipped (isAwakening stays false)
+        state.handleDragEnd(
+            translationX: 55.6,
+            barWidth: 300.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            reduceMotion: true,
+            onEmptyInteraction: { emptyActionCalled = true },
+            onTradeRequest: { request in receivedRequest = request }
+        )
+
+        // Must refuse to deliver funded trade because gesture started empty
+        XCTAssertNil(receivedRequest)
+        XCTAssertFalse(emptyActionCalled)
+        XCTAssertNil(state.userSelectedFraction)
+    }
+
+    func testLiveThumbDiameterConstantMatchesAndroid() {
+        XCTAssertEqual(BalanceBarView.defaultThumbDiameter, 22.0)
+    }
 }
