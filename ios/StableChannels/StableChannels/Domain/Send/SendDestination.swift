@@ -145,8 +145,7 @@ enum PaymentDestinationClassifier {
             lower.hasPrefix("1") || lower.hasPrefix("3") ||
             lower.hasPrefix("m") || lower.hasPrefix("n") || lower.hasPrefix("2") {
             if isValidOnchainAddress(normalized, network: network) {
-                let finalAddress = (lower.hasPrefix("bc1") || lower.hasPrefix("tb1") || lower.hasPrefix("bcrt1")) ?
-                    normalized.lowercased() : normalized
+                let finalAddress = normalizeOnchainAddress(normalized)
                 return .valid(.onchain(address: finalAddress, amountSats: nil))
             }
             if network != nil && isValidOnchainAddress(normalized, network: nil) {
@@ -203,52 +202,19 @@ enum PaymentDestinationClassifier {
 
         let address = addressPart.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        var amountSats: UInt64?
-        var lightningParam: String?
-        var bolt12Param: String?
-        var seenKeys = Set<String>()
-        var duplicateDetected = false
-        var unhandledRequiredParam: String?
+        let queryParams = queryPart.map { parseBIP21QueryParams($0) } ?? BIP21QueryParams()
 
-        if let query = queryPart {
-            var dummyComponents = URLComponents()
-            dummyComponents.query = query
-            if let queryItems = dummyComponents.queryItems {
-                for item in queryItems {
-                    let name = item.name.lowercased()
-                    if name.hasPrefix("req-") {
-                        unhandledRequiredParam = name
-                    } else if name == "pop" {
-                        unhandledRequiredParam = "pop"
-                    }
-
-                    if ["amount", "lightning", "lno"].contains(name) {
-                        if seenKeys.contains(name) {
-                            duplicateDetected = true
-                        }
-                        seenKeys.insert(name)
-                    }
-
-                    if name == "amount", let val = item.value {
-                        amountSats = parseBTCAmountToSats(val)
-                    } else if name == "lightning", let val = item.value, !val.isEmpty {
-                        lightningParam = val
-                    } else if name == "lno", let val = item.value, !val.isEmpty {
-                        bolt12Param = val
-                    }
-                }
-            }
-        }
-
-        if let unhandled = unhandledRequiredParam {
+        if let unhandled = queryParams.unhandledRequiredParam {
             return .invalid(reason: "Unhandled required BIP21 parameter: \(unhandled)")
         }
-        if duplicateDetected {
+        if queryParams.duplicateDetected {
             return .invalid(reason: "Duplicate BIP21 parameter detected.")
         }
 
+        let amountSats = queryParams.amountSats
+
         // Explicit precedence: If lightning fallback invoice or offer is valid, prefer Lightning
-        if let lightning = lightningParam {
+        if let lightning = queryParams.lightningParam {
             let classified = classify(lightning, network: network)
             if case .valid(let dest) = classified {
                 switch dest {
@@ -263,7 +229,7 @@ enum PaymentDestinationClassifier {
             }
         }
 
-        if let lno = bolt12Param {
+        if let lno = queryParams.bolt12Param {
             let classified = classify(lno, network: network)
             if case .valid(let dest) = classified {
                 switch dest {
@@ -281,9 +247,7 @@ enum PaymentDestinationClassifier {
         }
 
         if isValidOnchainAddress(address, network: network) {
-            let lowerAddr = address.lowercased()
-            let finalAddr = (lowerAddr.hasPrefix("bc1") || lowerAddr.hasPrefix("tb1") || lowerAddr.hasPrefix("bcrt1")) ?
-                address.lowercased() : address
+            let finalAddr = normalizeOnchainAddress(address)
             return .valid(.onchain(address: finalAddr, amountSats: amountSats))
         }
 
@@ -292,6 +256,53 @@ enum PaymentDestinationClassifier {
         }
 
         return nil
+    }
+
+    private struct BIP21QueryParams {
+        var amountSats: UInt64?
+        var lightningParam: String?
+        var bolt12Param: String?
+        var duplicateDetected = false
+        var unhandledRequiredParam: String?
+    }
+
+    private static func parseBIP21QueryParams(_ query: String) -> BIP21QueryParams {
+        var params = BIP21QueryParams()
+        var dummyComponents = URLComponents()
+        dummyComponents.query = query
+        guard let queryItems = dummyComponents.queryItems else { return params }
+
+        var seenKeys = Set<String>()
+        for item in queryItems {
+            let name = item.name.lowercased()
+            if name.hasPrefix("req-") || name == "pop" {
+                params.unhandledRequiredParam = name
+            }
+
+            if ["amount", "lightning", "lno"].contains(name) {
+                if seenKeys.contains(name) {
+                    params.duplicateDetected = true
+                }
+                seenKeys.insert(name)
+            }
+
+            if name == "amount", let val = item.value {
+                params.amountSats = parseBTCAmountToSats(val)
+            } else if name == "lightning", let val = item.value, !val.isEmpty {
+                params.lightningParam = val
+            } else if name == "lno", let val = item.value, !val.isEmpty {
+                params.bolt12Param = val
+            }
+        }
+        return params
+    }
+
+    private static func normalizeOnchainAddress(_ address: String) -> String {
+        let lower = address.lowercased()
+        if lower.hasPrefix("bc1") || lower.hasPrefix("tb1") || lower.hasPrefix("bcrt1") {
+            return lower
+        }
+        return address
     }
 
     private static func parseBTCAmountToSats(_ btcString: String) -> UInt64? {

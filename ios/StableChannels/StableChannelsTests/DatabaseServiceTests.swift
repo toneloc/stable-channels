@@ -1805,6 +1805,113 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(rowsAfterSecond.first?.int64(0), 30_000)
     }
 
+    func testRecordPaymentAndMaybeUpdateBacking_alreadyAppliedPlaceholder_doesNotApplyBackingDebitAgain() throws {
+        let ucid = "ucid-already-applied-test"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+            VALUES (?, ?, 50000)
+            """,
+            params: [.text("chan-already-applied"), .text(ucid)]
+        )
+
+        let paymentId = "placeholder-already-applied"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, is_placeholder, backing_applied)
+            VALUES (?, 'stability', 'sent', 0, 'completed', 1, 1)
+            """,
+            params: [.text(paymentId)]
+        )
+
+        let result = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -10_000
+        )
+        XCTAssertFalse(result.isNewPayment)
+        XCTAssertEqual(result.backingSats, 50_000)
+
+        let rows = try service.rawSQL.query(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        XCTAssertEqual(rows.first?.int64(0), 50_000)
+    }
+
+    func testRecordPaymentAndMaybeUpdateBacking_placeholderHealBurnsSettlementIdAndEnforcesReplayGuard() throws {
+        let ucid = "ucid-settlement-heal-test"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+            VALUES (?, ?, 50000)
+            """,
+            params: [.text("chan-settlement-test"), .text(ucid)]
+        )
+
+        let paymentId = "placeholder-settlement-burn-test"
+        let settlementId = "settlement-burn-key-1"
+        try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 0)
+
+        // Heal placeholder with settlementId: should debit backing and burn settlementId
+        let result = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 15_000_000,
+            amountUSD: 15.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -15_000,
+            settlementId: settlementId
+        )
+        XCTAssertFalse(result.isNewPayment)
+        XCTAssertEqual(result.backingSats, 35_000)
+        XCTAssertTrue(service.paymentRepo.isSettlementSeen(settlementId: settlementId))
+
+        // Replay attempt with same settlementId under different paymentId: must hit replay guard
+        let replayResult = try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: "replay-payment-id",
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 15_000_000,
+            amountUSD: 15.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -15_000,
+            settlementId: settlementId
+        )
+        XCTAssertFalse(replayResult.isNewPayment)
+        XCTAssertEqual(replayResult.backingSats, 35_000)
+
+        let rows = try service.rawSQL.query(
+            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        XCTAssertEqual(rows.first?.int64(0), 35_000)
+    }
+
+    func testNestedInTransactionReentrantNoOp() throws {
+        var outerEntered = false
+        var innerEntered = false
+        try service.rawSQL.inTransaction(mode: "IMMEDIATE") {
+            outerEntered = true
+            try service.rawSQL.inTransaction(mode: "IMMEDIATE") {
+                innerEntered = true
+            }
+        }
+        XCTAssertTrue(outerEntered)
+        XCTAssertTrue(innerEntered)
+    }
+
     @MainActor
     func testPaymentLookupWithExcludePlaceholdersAndStatusMessage() throws {
         let paymentId = "placeholder-display-test"
@@ -1818,8 +1925,23 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertNil(rowExcludingPlaceholder)
 
         let appState = AppState()
+        appState.databaseService = service
         let msg = appState.sentPaymentStatusMessage(paymentId: paymentId)
         XCTAssertEqual(msg, "Payment sent")
+
+        let realPaymentId = "real-display-test"
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: realPaymentId,
+            paymentType: "lightning",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: 50.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "completed"
+        )
+        let realMsg = appState.sentPaymentStatusMessage(paymentId: realPaymentId)
+        XCTAssertEqual(realMsg, "Payment sent: $50.00")
     }
 }
 

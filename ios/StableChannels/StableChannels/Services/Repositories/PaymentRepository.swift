@@ -40,12 +40,45 @@ final class PaymentRepository {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        if let pid = paymentId, !pid.isEmpty {
-            let existing = try rawSQL.query(
-                "SELECT id FROM payments WHERE payment_id = ?",
-                params: [.text(pid)]
-            )
-            if !existing.isEmpty {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try rawSQL.query(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    params: [.text(pid)]
+                )
+                if !existing.isEmpty {
+                    try backfillPaymentDetails(
+                        paymentId: pid,
+                        paymentType: paymentType,
+                        direction: direction,
+                        amountMsat: amountMsat,
+                        amountUSD: amountUSD,
+                        btcPrice: btcPrice,
+                        counterparty: counterparty,
+                        address: address,
+                        txid: txid,
+                        clearPlaceholder: false
+                    )
+                    return false
+                }
+            }
+
+            // Wrapped in inTransaction to ensure existence check, insert, and backfill are atomic.
+            let sql = """
+                INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            let inserted = try rawSQL.executeReturningChanges(sql, params: [
+                paymentId.map { .text($0) } ?? .null,
+                .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
+                amountUSD.map { .real($0) } ?? .null,
+                btcPrice.map { .real($0) } ?? .null,
+                counterparty.map { .text($0) } ?? .null,
+                .text(status),
+                txid.map { .text($0) } ?? .null,
+                address.map { .text($0) } ?? .null
+            ])
+            if inserted == 0, let pid = paymentId, !pid.isEmpty {
                 try backfillPaymentDetails(
                     paymentId: pid,
                     paymentType: paymentType,
@@ -55,43 +88,12 @@ final class PaymentRepository {
                     btcPrice: btcPrice,
                     counterparty: counterparty,
                     address: address,
-                    txid: txid
+                    txid: txid,
+                    clearPlaceholder: false
                 )
-                return false
             }
+            return inserted > 0
         }
-
-        // OR IGNORE: this path is not transactional, so the existence check above
-        // can race the NSE. The unique payment_id index turns the losing insert
-        // into a no-op instead of a duplicate row (or, without it, an error).
-        let sql = """
-            INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        let inserted = try rawSQL.executeReturningChanges(sql, params: [
-            paymentId.map { .text($0) } ?? .null,
-            .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
-            amountUSD.map { .real($0) } ?? .null,
-            btcPrice.map { .real($0) } ?? .null,
-            counterparty.map { .text($0) } ?? .null,
-            .text(status),
-            txid.map { .text($0) } ?? .null,
-            address.map { .text($0) } ?? .null
-        ])
-        if inserted == 0, let pid = paymentId, !pid.isEmpty {
-            try backfillPaymentDetails(
-                paymentId: pid,
-                paymentType: paymentType,
-                direction: direction,
-                amountMsat: amountMsat,
-                amountUSD: amountUSD,
-                btcPrice: btcPrice,
-                counterparty: counterparty,
-                address: address,
-                txid: txid
-            )
-        }
-        return inserted > 0
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
@@ -444,6 +446,13 @@ final class PaymentRepository {
         }
     }
 
+    private func burnSettlement(settlementId: String) throws {
+        try rawSQL.execute(
+            "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)",
+            params: [.text(settlementId)]
+        )
+    }
+
     func recordPaymentAndMaybeUpdateBacking(
         paymentId: String?,
         paymentType: String,
@@ -457,6 +466,22 @@ final class PaymentRepository {
         settlementId: String? = nil
     ) throws -> PaymentPersistenceResult {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            // Replay guard inside the transaction that credits backing, so a crash can never leave
+            // backing credited with the settlement id still replayable.
+            if let sid = settlementId {
+                let seen = try rawSQL.query(
+                    "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ? LIMIT 1",
+                    params: [.text(sid)]
+                )
+                if !seen.isEmpty {
+                    let backing = try authoritativeBacking(
+                        userChannelId: userChannelId,
+                        required: backingDeltaSats != nil
+                    )
+                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
+                }
+            }
+
             if let pid = paymentId, !pid.isEmpty {
                 let existing = try rawSQL.query(
                     "SELECT id, is_placeholder, backing_applied FROM payments WHERE payment_id = ?",
@@ -500,6 +525,9 @@ final class PaymentRepository {
                             "UPDATE payments SET backing_applied = 1 WHERE payment_id = ?",
                             params: [.text(pid)]
                         )
+                        if let sid = settlementId {
+                            try burnSettlement(settlementId: sid)
+                        }
                         resultingBacking = UInt64(newBacking)
                     } else if backingDeltaSats != nil {
                         resultingBacking = try authoritativeBacking(
@@ -507,10 +535,6 @@ final class PaymentRepository {
                             required: true
                         )
                     }
-
-                    // Only clear is_placeholder if this row does not have an unapplied backing requirement
-                    let shouldClearPlaceholder = (backingDeltaSats == nil) || alreadyApplied ||
-                        (resultingBacking != nil)
 
                     try backfillPaymentDetails(
                         paymentId: pid,
@@ -522,24 +546,9 @@ final class PaymentRepository {
                         counterparty: nil,
                         address: nil,
                         txid: nil,
-                        clearPlaceholder: shouldClearPlaceholder
+                        clearPlaceholder: true
                     )
                     return PaymentPersistenceResult(isNewPayment: false, backingSats: resultingBacking)
-                }
-            }
-            // Replay guard inside the transaction that credits backing, so a crash can never leave
-            // backing credited with the settlement id still replayable.
-            if let sid = settlementId {
-                let seen = try rawSQL.query(
-                    "SELECT 1 FROM seen_stability_settlements WHERE settlement_id = ? LIMIT 1",
-                    params: [.text(sid)]
-                )
-                if !seen.isEmpty {
-                    let backing = try authoritativeBacking(
-                        userChannelId: userChannelId,
-                        required: backingDeltaSats != nil
-                    )
-                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
                 }
             }
 
@@ -556,10 +565,7 @@ final class PaymentRepository {
                 ]
             )
             if let sid = settlementId {
-                try rawSQL.execute(
-                    "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)",
-                    params: [.text(sid)]
-                )
+                try burnSettlement(settlementId: sid)
             }
             var resultingBacking: UInt64?
             if let delta = backingDeltaSats {
