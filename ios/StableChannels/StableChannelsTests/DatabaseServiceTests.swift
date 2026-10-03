@@ -1917,9 +1917,15 @@ final class DatabaseServiceTests: XCTestCase {
         let paymentId = "placeholder-display-test"
         try service.paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "completed", feeMsat: 0)
 
+        // Give the placeholder non-zero amount so that excludePlaceholders is load-bearing
+        // (if excludePlaceholders: false was passed at AppState:1163, payment.amountMsat > 0 would pass and change the
+        // message)
+        try service.rawSQL
+            .execute("UPDATE payments SET amount_msat = 50000000, amount_usd = 50.0 WHERE payment_id = '\(paymentId)'")
+
         let rowWithPlaceholder = service.paymentRepo.payment(paymentId: paymentId, excludePlaceholders: false)
         XCTAssertNotNil(rowWithPlaceholder)
-        XCTAssertEqual(rowWithPlaceholder?.amountMsat, 0)
+        XCTAssertEqual(rowWithPlaceholder?.amountMsat, 50_000_000)
 
         let rowExcludingPlaceholder = service.paymentRepo.payment(paymentId: paymentId, excludePlaceholders: true)
         XCTAssertNil(rowExcludingPlaceholder)
@@ -2081,6 +2087,117 @@ final class DatabaseServiceTests: XCTestCase {
             params: [.text(paymentId)]
         )
         XCTAssertEqual(paymentRows.first?.int64(0), 0)
+    }
+
+    func testUpdatePaymentStatus_failureLogsAudit() throws {
+        var loggedEvent: String?
+        var loggedData: [String: Any]?
+        AuditService.onLog = { event, data in
+            loggedEvent = event
+            loggedData = data
+        }
+        defer { AuditService.onLog = nil }
+
+        try service.rawSQL.execute(
+            """
+            CREATE TRIGGER fail_payments_insert BEFORE INSERT ON payments
+            BEGIN
+                SELECT RAISE(ABORT, 'forced audit test failure');
+            END;
+            """
+        )
+
+        XCTAssertThrowsError(
+            try service.paymentRepo.updatePaymentStatus(paymentId: "audit-fail-id", status: "completed", feeMsat: 0)
+        )
+
+        XCTAssertEqual(loggedEvent, "UPDATE_PAYMENT_STATUS_FAILED")
+        XCTAssertEqual(loggedData?["payment_id"] as? String, "audit-fail-id")
+        XCTAssertEqual(loggedData?["status"] as? String, "completed")
+    }
+
+    func testMigration_backfillBackingApplied_preservesPlaceholderDebitsAndPreventsDoubleDebit() throws {
+        let ucid = "ucid-migration-backfill-test"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+            VALUES (?, ?, 40000)
+            """,
+            params: [.text("chan-migration-test"), .text(ucid)]
+        )
+
+        // Legacy completed payment (is_placeholder = 0)
+        let legacyCompletedPaymentId = "legacy-completed-stability"
+        try service.paymentRepo.recordPayment(
+            paymentId: legacyCompletedPaymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Legacy placeholder payment (is_placeholder = 1)
+        let legacyPlaceholderPaymentId = "legacy-owed-placeholder"
+        try service.paymentRepo.updatePaymentStatus(
+            paymentId: legacyPlaceholderPaymentId,
+            status: "completed",
+            feeMsat: 0
+        )
+
+        // Drop backing_applied column to simulate pre-migration database
+        try service.rawSQL.execute("ALTER TABLE payments DROP COLUMN backing_applied")
+
+        // Re-open DatabaseService on the same dataDir so migration runs
+        let migratedService = try DatabaseService(dataDir: dataDir)
+
+        // Probe M: completed row got backing_applied = 1
+        let completedRows = try migratedService.rawSQL.query(
+            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = ?",
+            params: [.text(legacyCompletedPaymentId)]
+        )
+        XCTAssertEqual(completedRows.first?.int64(0), 1)
+        XCTAssertEqual(completedRows.first?.int64(1), 0)
+
+        // Probe N: placeholder row kept backing_applied = 0
+        let placeholderRows = try migratedService.rawSQL.query(
+            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = ?",
+            params: [.text(legacyPlaceholderPaymentId)]
+        )
+        XCTAssertEqual(placeholderRows.first?.int64(0), 0)
+        XCTAssertEqual(placeholderRows.first?.int64(1), 1)
+
+        // Probe M execution: Reconciling legacy completed stability payment does NOT double debit (stays 40_000)
+        let reconcileResult = try migratedService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: legacyCompletedPaymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -10_000
+        )
+        XCTAssertFalse(reconcileResult.isNewPayment)
+        XCTAssertEqual(reconcileResult.backingSats, 40_000)
+
+        // Probe N execution: Healing legacy placeholder applies the owed debit (40_000 -> 30_000)
+        let healResult = try migratedService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: legacyPlaceholderPaymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -10_000
+        )
+        XCTAssertFalse(healResult.isNewPayment)
+        XCTAssertEqual(healResult.backingSats, 30_000)
     }
 }
 

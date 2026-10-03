@@ -318,6 +318,10 @@ final class DatabaseService {
         // Migrate: add backing_applied to payments if missing (accounting confirmation for stability backing deltas)
         if !paymentsColNames.contains("backing_applied") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0")
+            // Backfill legacy completed rows as already applied so existing stability records
+            // are not debited a second time upon node upgrade, while preserving genuinely
+            // unapplied placeholder rows for recovery.
+            try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
         }
 
         // Must come after the resolution_id ALTER above — on legacy DBs the column

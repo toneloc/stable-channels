@@ -184,6 +184,7 @@ final class RawSQL {
 
     /// Execute a block within a database transaction.
     /// Rolls back automatically if the block throws an error.
+    /// Note: Re-entrant calls join the existing transaction; the 'mode' argument is ignored on re-entry.
     func inTransaction<T>(mode: String = "IMMEDIATE", _ body: () throws -> T) throws -> T {
         try synchronized {
             if transactionDepth > 0 {

@@ -27,7 +27,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         self.dbPath = dbPath
     }
 
-    private static var didEnsureColumns = false
+    static var didEnsureColumns = false
 
     private func openDB(write: Bool = true) -> OpaquePointer? {
         var db: OpaquePointer?
@@ -74,6 +74,19 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                             success = false
                         }
                     } else {
+                        success = false
+                    }
+                } else if col == "backing_applied" {
+                    // Backfill legacy completed rows as already applied so existing stability records
+                    // are not debited a second time upon node upgrade, while preserving genuinely
+                    // unapplied placeholder rows for recovery.
+                    var backfillErr: UnsafeMutablePointer<CChar>?
+                    let backfillSQL = "UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0;"
+                    let backfillRc = sqlite3_exec(db, backfillSQL, nil, nil, &backfillErr)
+                    if backfillRc != SQLITE_OK {
+                        if backfillErr != nil {
+                            sqlite3_free(backfillErr)
+                        }
                         success = false
                     }
                 }
@@ -177,6 +190,9 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                     let backingApplied = sqlite3_column_int64(checkStmt, 1) == 1
                     sqlite3_finalize(checkStmt)
 
+                    // Non-crediting early return: seen vs burned divergence is intentional,
+                    // matching PaymentRepository semantics so unapplied or duplicate arrivals do not burn settlement
+                    // IDs.
                     if !isPlaceholder || backingApplied || backingDeltaSats == nil {
                         sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                         return .duplicate
