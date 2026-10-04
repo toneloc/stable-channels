@@ -1862,7 +1862,14 @@ class DatabaseService(context: Context) :
      * (old stuck ones can't starve out a new deposit); outer query re-sorts them oldest-first for
      * display.
      */
-    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> {
+    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> =
+        getPendingOnchainRows("received", limit)
+
+    /** Onchain sends still confirming, oldest-first. Home shows them as "-" rows. */
+    fun getPendingOnchainSends(limit: Int = 10): List<PaymentRecord> =
+        getPendingOnchainRows("sent", limit)
+
+    private fun getPendingOnchainRows(direction: String, limit: Int): List<PaymentRecord> {
         val cursor =
             readableDatabase.rawQuery(
                 """
@@ -1870,14 +1877,14 @@ class DatabaseService(context: Context) :
                     SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
                     FROM payments
                     WHERE payment_type = 'onchain'
-                      AND direction = 'received'
+                      AND direction = ?
                       AND status = 'pending'
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                 ) ORDER BY created_at ASC, id ASC
                 """
                     .trimIndent(),
-                arrayOf(limit.toString()),
+                arrayOf(direction, limit.toString()),
             )
         return cursor.use { c ->
             buildList {

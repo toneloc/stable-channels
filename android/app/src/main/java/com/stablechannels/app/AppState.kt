@@ -4464,6 +4464,11 @@ class AppState(private val context: Context) : ViewModel() {
         editor.apply()
     }
 
+    /** Wakes screens that list pending rows (Home, History) right after a payment row is saved. */
+    fun notifyPaymentRecorded() {
+        _confirmationUpdateEpoch.update { it + 1 }
+    }
+
     fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean, txid: String? = null) {
         val currentOnchain = _onchainBalanceSats.value
         val currentSpendable = _spendableOnchainSats.value

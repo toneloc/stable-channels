@@ -10,11 +10,12 @@ import com.stablechannels.app.util.usdFormatted
  * the price feed is momentarily unavailable.
  */
 object PendingAmountFormatter {
-    fun amountText(amountSats: Long?, btcPrice: Double): String? {
+    /** [sign] is "+" for incoming and "-" for outgoing amounts; empty for neutral moves. */
+    fun amountText(amountSats: Long?, btcPrice: Double, sign: String = ""): String? {
         if (amountSats == null) return null
         val amountUSD =
             if (btcPrice > 0) (amountSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice else null
-        return amountUSD?.usdFormatted() ?: "${amountSats.btcSpacedFormatted()} BTC"
+        return sign + (amountUSD?.usdFormatted() ?: "${amountSats.btcSpacedFormatted()} BTC")
     }
 
     fun moveToLightningLabel(spendableSats: Long, btcPrice: Double): String {

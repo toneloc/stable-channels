@@ -379,9 +379,11 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                     price
                                             else null,
                                         btcPrice = if (price > 0) price else null,
+                                        status = "pending",
                                         txid = txid,
                                         address = addr,
                                     )
+                                    appState.notifyPaymentRecorded()
                                     result = "All funds sent successfully."
                                     successTxid = txid
                                 } else {
@@ -431,9 +433,11 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 (sats.toDouble() / Constants.SATS_IN_BTC) *
                                                     accountingPrice,
                                             btcPrice = accountingPrice,
+                                            status = "pending",
                                             txid = txid,
                                             address = addr,
                                         )
+                                        appState.notifyPaymentRecorded()
                                         result = "Sent successfully."
                                         successTxid = txid
                                     }
