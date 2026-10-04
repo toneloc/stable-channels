@@ -7,7 +7,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Result as SqliteResult};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -15,6 +15,12 @@ use crate::ledger::{
     self, AccountingSnapshot, AppendOutcome, LedgerCompleteness, LedgerEventDraft, LedgerPage,
     LedgerQuery, LedgerRef, LegacyImportReport,
 };
+
+mod forward_history;
+mod onchain_audit;
+mod stream_checkpoint;
+
+pub use forward_history::fingerprint as forward_detail_fingerprint;
 
 /// Outcome of `record_payment_and_maybe_update_backing`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,26 +200,93 @@ fn init_trade_decisions_schema(conn: &mut Connection) -> SqliteResult<()> {
     tx.commit()
 }
 
+/// One IP a peer has connected from, with its country when the offline database knew it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerLocationRecord {
+    pub ip: String,
+    pub country_code: Option<String>,
+    pub country_name: Option<String>,
+    pub first_seen_at: i64,
+    pub last_seen_at: i64,
+}
+
+/// A settlement_payments label: which protocol flow a payment belongs to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettlementLabel {
+    pub payment_id: String,
+    pub kind: String,
+    pub user_channel_id: Option<String>,
+}
+
+/// What revenue needs from a trade decision: its outcome, the user, and the reply keysend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeDecisionSummary {
+    pub inbound_payment_id: String,
+    pub outcome: String,
+    pub counterparty: String,
+    pub user_channel_id: String,
+    pub response_payment_id: Option<String>,
+}
+
+/// A refund of a rejected trade fee; `refund_payment_id` is None while claimed but not yet recorded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TradeFeeRefund {
+    pub trade_payment_id: String,
+    pub refund_payment_id: Option<String>,
+    pub amount_msat: u64,
+    pub counterparty: String,
+    pub created_at: i64,
+}
+
+/// A ledger row the revenue snapshot reads: forward fees and channel funding events.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevenueLedgerRow {
+    pub id: i64,
+    pub event_type: String,
+    pub occurred_at_ms: i64,
+    pub detail_json: String,
+}
+
+fn trade_decision_summary_row(row: &rusqlite::Row<'_>) -> SqliteResult<TradeDecisionSummary> {
+    Ok(TradeDecisionSummary {
+        inbound_payment_id: row.get(0)?,
+        outcome: row.get(1)?,
+        counterparty: row.get(2)?,
+        user_channel_id: row.get(3)?,
+        response_payment_id: row.get(4)?,
+    })
+}
+
+fn trade_fee_refund_row(row: &rusqlite::Row<'_>) -> SqliteResult<TradeFeeRefund> {
+    Ok(TradeFeeRefund {
+        trade_payment_id: row.get(0)?,
+        refund_payment_id: row.get(1)?,
+        amount_msat: row.get::<_, i64>(2)? as u64,
+        counterparty: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
 /// Thread-safe database handle
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
-/// Stable dedup key for a forwarded payment (the proto gives forwards no unique id).
+/// Correlation attributes only, NEVER a forwarded-payment identity. Identical
+/// routes and amounts can represent arbitrarily many distinct payments.
 pub fn forward_fingerprint(
     prev_channel_id: &str,
     next_channel_id: &str,
     outbound_amount_msat: Option<u64>,
     total_fee_msat: Option<u64>,
 ) -> String {
-    format!(
-        "{}|{}|{}|{}",
+    serde_json::json!([
         prev_channel_id,
         next_channel_id,
-        outbound_amount_msat.unwrap_or(0),
-        total_fee_msat.unwrap_or(0)
-    )
+        outbound_amount_msat,
+        total_fee_msat,
+    ]).to_string()
 }
 
 /// An unresolved or historically resolved trade addressable by protocol correlation fields.
@@ -633,6 +706,17 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
             [],
         );
+        // Ordinary SYNC attempts are ordered by the signed version, so an older payment's
+        // terminal event cannot supersede the delivery status of a newer correction.
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN sync_version INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_settlement_sync_version
+             ON settlement_payments(user_channel_id, sync_version) WHERE kind = 'sync'",
+            [],
+        );
 
         // Authenticated stability-payment inbox. The settlement id prevents the same signed
         // authorization being reused with another keysend, while payment_id makes LDK event
@@ -660,10 +744,35 @@ impl Database {
 
         init_trade_decisions_schema(&mut conn)?;
 
-        // Forwarded-payment dedup: tracks fingerprints of forwards already audited (live or backfilled)
+        // Retained for old installations; fingerprints are no longer read as identities.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS forwarded_seen (fingerprint TEXT PRIMARY KEY)",
             [],
+        )?;
+
+        // Where each stable counterparty has connected from; kept outside the append-only ledger so it can be deleted.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS peer_locations (
+                node_id TEXT NOT NULL,
+                ip TEXT NOT NULL,
+                country_code TEXT,
+                country_name TEXT,
+                first_seen_at INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                PRIMARY KEY (node_id, ip)
+            );
+            CREATE INDEX IF NOT EXISTS idx_peer_locations_recent ON peer_locations(node_id, last_seen_at DESC);",
+        )?;
+
+        // Operator refunds of rejected trade fees; claimed before the keysend so a fee is never refunded twice.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS trade_fee_refunds (
+                trade_payment_id TEXT PRIMARY KEY,
+                refund_payment_id TEXT,
+                amount_msat INTEGER NOT NULL,
+                counterparty TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );",
         )?;
 
         // Append-only operator history. There is intentionally no pruning path.
@@ -728,6 +837,216 @@ impl Database {
     pub fn list_ledger_events(&self, query: &LedgerQuery) -> SqliteResult<LedgerPage> {
         let conn = self.conn.lock().unwrap();
         ledger::list_on_connection(&conn, query)
+    }
+
+    /// Newest channel-state events across every channel; see `ledger::list_recent_state_events`.
+    pub fn list_recent_state_events(&self, query: &LedgerQuery) -> SqliteResult<LedgerPage> {
+        let conn = self.conn.lock().unwrap();
+        ledger::list_recent_state_events(&conn, query)
+    }
+
+    /// When each channel row was first written, by user_channel_id (unix seconds).
+    pub fn channel_created_at(&self) -> SqliteResult<HashMap<String, i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT user_channel_id, created_at FROM channels WHERE user_channel_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?;
+        rows.collect()
+    }
+
+    /// One row per (node, ip): a new pair is inserted, a repeat moves last_seen_at and fills a missing country. Returns true for a new pair.
+    pub fn record_peer_sighting(
+        &self,
+        node_id: &str,
+        ip: &str,
+        country: Option<(&str, &str)>,
+        seen_at: i64,
+    ) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let inserted = conn.execute(
+            "INSERT INTO peer_locations (node_id, ip, country_code, country_name, first_seen_at, last_seen_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+             ON CONFLICT(node_id, ip) DO NOTHING",
+            params![node_id, ip, country.map(|c| c.0), country.map(|c| c.1), seen_at],
+        )?;
+        if inserted == 0 {
+            conn.execute(
+                "UPDATE peer_locations SET last_seen_at = MAX(last_seen_at, ?3),
+                 country_code = COALESCE(country_code, ?4), country_name = COALESCE(country_name, ?5)
+                 WHERE node_id = ?1 AND ip = ?2",
+                params![node_id, ip, seen_at, country.map(|c| c.0), country.map(|c| c.1)],
+            )?;
+        }
+        Ok(inserted == 1)
+    }
+
+    pub fn peer_ip_has_country(&self, node_id: &str, ip: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM peer_locations WHERE node_id = ?1 AND ip = ?2 AND country_code IS NOT NULL)",
+            params![node_id, ip],
+            |row| row.get(0),
+        )
+    }
+
+    /// Forget sightings not seen since `older_than` (unix seconds); returns how many were dropped.
+    pub fn prune_peer_locations(&self, older_than: i64) -> SqliteResult<usize> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM peer_locations WHERE last_seen_at < ?1", params![older_than])
+    }
+
+    pub fn recent_peer_locations(&self, node_id: &str, limit: usize) -> SqliteResult<Vec<PeerLocationRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ip, country_code, country_name, first_seen_at, last_seen_at FROM peer_locations
+             WHERE node_id = ?1 ORDER BY last_seen_at DESC, ip LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![node_id, limit as i64], |row| {
+            Ok(PeerLocationRecord {
+                ip: row.get(0)?,
+                country_code: row.get(1)?,
+                country_name: row.get(2)?,
+                first_seen_at: row.get(3)?,
+                last_seen_at: row.get(4)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Labels written after `after_rowid`, with the new high-water rowid (labels never change once written).
+    pub fn list_settlement_labels_after(&self, after_rowid: i64) -> SqliteResult<(Vec<SettlementLabel>, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT rowid, payment_id, kind, user_channel_id FROM settlement_payments WHERE rowid > ?1 ORDER BY rowid",
+        )?;
+        let mut last = after_rowid;
+        let mut labels = Vec::new();
+        let rows = stmt.query_map(params![after_rowid], |row| {
+            Ok((row.get::<_, i64>(0)?, SettlementLabel { payment_id: row.get(1)?, kind: row.get(2)?, user_channel_id: row.get(3)? }))
+        })?;
+        for row in rows {
+            let (rowid, label) = row?;
+            last = last.max(rowid);
+            labels.push(label);
+        }
+        Ok((labels, last))
+    }
+
+    pub fn list_trade_decision_summaries(&self) -> SqliteResult<Vec<TradeDecisionSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT inbound_payment_id, outcome, counterparty, user_channel_id, response_payment_id FROM trade_decisions",
+        )?;
+        let rows = stmt.query_map([], trade_decision_summary_row)?;
+        rows.collect()
+    }
+
+    pub fn trade_decision_summary(&self, inbound_payment_id: &str) -> SqliteResult<Option<TradeDecisionSummary>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT inbound_payment_id, outcome, counterparty, user_channel_id, response_payment_id
+             FROM trade_decisions WHERE inbound_payment_id = ?1",
+            params![inbound_payment_id],
+            trade_decision_summary_row,
+        )
+        .optional()
+    }
+
+    /// Claims a refund for a trade fee; returns the existing row instead when one is already there.
+    pub fn claim_trade_fee_refund(
+        &self,
+        trade_payment_id: &str,
+        amount_msat: u64,
+        counterparty: &str,
+        now: i64,
+        refund_payment_id: Option<&str>,
+    ) -> SqliteResult<Option<TradeFeeRefund>> {
+        let conn = self.conn.lock().unwrap();
+        // The deterministic payment id is written with the claim, before anything is sent, so a
+        // crash or ambiguous error afterwards leaves a row that a lookup by that id can resolve.
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO trade_fee_refunds (trade_payment_id, amount_msat, counterparty, created_at, refund_payment_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![trade_payment_id, amount_msat as i64, counterparty, now, refund_payment_id],
+        )?;
+        if inserted == 1 {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT trade_payment_id, refund_payment_id, amount_msat, counterparty, created_at
+             FROM trade_fee_refunds WHERE trade_payment_id = ?1",
+            params![trade_payment_id],
+            trade_fee_refund_row,
+        )
+        .map(Some)
+    }
+
+    /// Takes over a refund whose keysend failed, only if no one else already did.
+    pub fn retake_failed_trade_fee_refund(&self, trade_payment_id: &str, failed_payment_id: &str, now: i64) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE trade_fee_refunds SET refund_payment_id = NULL, created_at = ?3
+             WHERE trade_payment_id = ?1 AND refund_payment_id = ?2",
+            params![trade_payment_id, failed_payment_id, now],
+        )?;
+        Ok(updated == 1)
+    }
+
+    /// Records the refund keysend's payment id and labels that payment `refund`.
+    pub fn record_trade_fee_refund_payment(&self, trade_payment_id: &str, refund_payment_id: &str) -> SqliteResult<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "UPDATE trade_fee_refunds SET refund_payment_id = ?2 WHERE trade_payment_id = ?1",
+            params![trade_payment_id, refund_payment_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO settlement_payments (payment_id, kind) VALUES (?1, 'refund')",
+            params![refund_payment_id],
+        )?;
+        tx.commit()
+    }
+
+    /// Drops a claim whose keysend never left, so the operator can try again. Only a claim still
+    /// carrying no id or the id this attempt would have used is dropped, never a recorded send.
+    pub fn release_trade_fee_refund(&self, trade_payment_id: &str, attempted_payment_id: Option<&str>) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM trade_fee_refunds
+             WHERE trade_payment_id = ?1 AND (refund_payment_id IS NULL OR refund_payment_id = ?2)",
+            params![trade_payment_id, attempted_payment_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_trade_fee_refunds(&self) -> SqliteResult<Vec<TradeFeeRefund>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT trade_payment_id, refund_payment_id, amount_msat, counterparty, created_at FROM trade_fee_refunds",
+        )?;
+        let rows = stmt.query_map([], trade_fee_refund_row)?;
+        rows.collect()
+    }
+
+    pub fn max_ledger_event_id(&self) -> SqliteResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row("SELECT COALESCE(MAX(id), 0) FROM ledger_events", [], |row| row.get(0))
+    }
+
+    /// Forward and channel-funding ledger rows with ids in (after_id, up_to_id], oldest first.
+    pub fn revenue_ledger_rows_between(&self, after_id: i64, up_to_id: i64) -> SqliteResult<Vec<RevenueLedgerRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, event_type, occurred_at_ms, detail_json FROM ledger_events
+             WHERE id > ?1 AND id <= ?2 AND event_type IN ('PAYMENT_FORWARDED', 'PAYMENT_FORWARDED_BACKFILL',
+                 'CHANNEL_READY_TRACKED', 'CHANNEL_READY_SPLICE', 'CHANNEL_RECONSTRUCTED')
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map(params![after_id, up_to_id], |row| {
+            Ok(RevenueLedgerRow { id: row.get(0)?, event_type: row.get(1)?, occurred_at_ms: row.get(2)?, detail_json: row.get(3)? })
+        })?;
+        rows.collect()
     }
 
     /// Import valid historical JSONL once. Malformed source lines remain in the
@@ -3585,6 +3904,101 @@ impl Database {
         Ok(())
     }
 
+    /// Track an accepted ordinary SYNC send until its terminal delivery outcome is known.
+    pub fn record_sync_payment(
+        &self,
+        payment_id: &str,
+        user_channel_id: &str,
+        sync_version: u64,
+    ) -> SqliteResult<()> {
+        if payment_id.is_empty() || user_channel_id.is_empty()
+            || sync_version == 0 || sync_version > i64::MAX as u64
+        {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "invalid SYNC attempt".into(),
+            ));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settlement_payments (payment_id, kind, user_channel_id, sync_version)
+             VALUES (?1, 'sync', ?2, ?3)",
+            params![payment_id, user_channel_id, sync_version as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Record a SYNC that LDK refused before creating a payment as a failed attempt, so retries back off and cap.
+    pub fn record_refused_sync_attempt(&self, user_channel_id: &str, sync_version: u64) -> SqliteResult<()> {
+        if user_channel_id.is_empty() || sync_version == 0 || sync_version > i64::MAX as u64 {
+            return Err(rusqlite::Error::InvalidParameterName("invalid SYNC attempt".into()));
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settlement_payments (payment_id, kind, user_channel_id, sync_version, outcome)
+             VALUES (?1, 'sync', ?2, ?3, 'failed')",
+            params![format!("refused:{user_channel_id}:{sync_version}"), user_channel_id, sync_version as i64],
+        )?;
+        Ok(())
+    }
+
+    /// A failed ordinary SYNC remains a durable retry obligation. Other protocol payments and
+    /// already consumed outcomes are untouched; successful delivery cannot be downgraded.
+    pub fn mark_sync_payment_failed(&self, payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE settlement_payments SET outcome = 'failed'
+             WHERE payment_id = ?1 AND kind = 'sync' AND outcome = 'pending'",
+            params![payment_id],
+        )? == 1)
+    }
+
+    /// Accepted ordinary SYNC attempts still awaiting a terminal outcome, with their unix
+    /// `recorded_at` so a long-stuck attempt can be aged out.
+    pub fn list_pending_sync_payments(&self) -> SqliteResult<Vec<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, recorded_at FROM settlement_payments
+             WHERE kind = 'sync' AND outcome = 'pending'",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Ordinary SYNC attempts since the last delivered one, and the newest attempt's unix
+    /// `recorded_at`, so retries can back off and stop instead of repeating every tick.
+    pub fn sync_retry_attempts(&self, user_channel_id: &str) -> SqliteResult<(u64, i64)> {
+        let conn = self.conn.lock().unwrap();
+        let (attempts, last_attempt_at): (i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(MAX(recorded_at), 0) FROM settlement_payments
+             WHERE kind = 'sync' AND user_channel_id = ?1
+               AND COALESCE(sync_version, 0) > COALESCE((
+                 SELECT MAX(COALESCE(sync_version, 0)) FROM settlement_payments
+                 WHERE kind = 'sync' AND user_channel_id = ?1 AND outcome = 'succeeded'), -1)",
+            params![user_channel_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((attempts.max(0) as u64, last_attempt_at))
+    }
+
+    /// Only the newest ordinary SYNC attempt can require a retry. A newer pending or delivered
+    /// correction supersedes older failures. Pre-migration sends are superseded by any versioned
+    /// attempt; startup reconciliation sends a fresh version after an upgrade or restart.
+    pub fn list_failed_sync_channels(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT s.user_channel_id FROM settlement_payments s
+             JOIN channels c ON c.user_channel_id = s.user_channel_id AND c.closed_at IS NULL
+             WHERE s.kind = 'sync' AND s.outcome = 'failed'
+               AND NOT EXISTS (
+                 SELECT 1 FROM settlement_payments newer
+                 WHERE newer.kind = 'sync' AND newer.user_channel_id = s.user_channel_id
+                   AND COALESCE(newer.sync_version, 0) > COALESCE(s.sync_version, 0)
+               )",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
     /// Durably register signed stability metadata before changing channel accounting.
     /// Replays must match the original payment and complete signed envelope exactly.
     #[allow(clippy::too_many_arguments)]
@@ -4164,31 +4578,6 @@ impl Database {
         }))
     }
 
-    /// Record a forward and its ledger row in one transaction. The fingerprint marker cannot
-    /// survive without the event, so a transient ledger failure remains retryable on reconnect.
-    pub fn append_forwarded_event_if_unseen(
-        &self,
-        fingerprint: &str,
-        draft: &LedgerEventDraft,
-    ) -> SqliteResult<bool> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO forwarded_seen (fingerprint) VALUES (?1)",
-            params![fingerprint],
-        )?;
-        if inserted == 0 {
-            tx.commit()?;
-            return Ok(false);
-        }
-        let outcome = ledger::append_on_connection(&tx, draft)?;
-        tx.commit()?;
-        if outcome.inserted {
-            crate::audit::mirror_committed_ledger_event(draft, outcome.event_id);
-        }
-        Ok(outcome.inserted)
-    }
-
     pub fn settlement_exists(&self, payment_id: &str) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
@@ -4318,6 +4707,122 @@ pub struct DailyPriceRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_created_at_is_read_for_every_tracked_channel() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("chan-1", "7", 50.0, 60_000, 0, None).unwrap();
+        db.save_channel("chan-2", "8", 0.0, 0, 0, None).unwrap();
+        let created = db.channel_created_at().unwrap();
+        assert_eq!(created.len(), 2);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+        assert!((now - created["7"]).abs() < 5, "created_at is the insert time");
+        assert!(created.contains_key("8"));
+    }
+
+    #[test]
+    fn peer_sightings_keep_one_row_per_ip_newest_first() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.record_peer_sighting("node", "1.2.3.4", Some(("IN", "India")), 100).unwrap());
+        assert!(!db.record_peer_sighting("node", "1.2.3.4", None, 200).unwrap(), "a repeat only bumps last_seen_at");
+        assert!(db.record_peer_sighting("node", "5.6.7.8", None, 300).unwrap());
+        assert!(db.peer_ip_has_country("node", "1.2.3.4").unwrap());
+        assert!(!db.peer_ip_has_country("node", "5.6.7.8").unwrap());
+        let rows = db.recent_peer_locations("node", 10).unwrap();
+        assert_eq!(rows.iter().map(|r| r.ip.as_str()).collect::<Vec<_>>(), ["5.6.7.8", "1.2.3.4"]);
+        assert_eq!((rows[1].first_seen_at, rows[1].last_seen_at), (100, 200));
+        assert_eq!(rows[1].country_code.as_deref(), Some("IN"), "a repeat never erases the country");
+        assert_eq!(rows[0].country_code, None);
+        assert_eq!(db.recent_peer_locations("node", 1).unwrap().len(), 1);
+        assert_eq!(db.prune_peer_locations(250).unwrap(), 1, "the sighting last seen at 200 is dropped");
+        assert_eq!(db.recent_peer_locations("node", 10).unwrap().iter().map(|r| r.ip.as_str()).collect::<Vec<_>>(), ["5.6.7.8"]);
+    }
+
+    #[test]
+    fn a_trade_fee_refund_is_claimed_once_and_retaken_only_after_its_payment_failed() {
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 100, None).unwrap(), None, "first claim wins");
+        let existing = db.claim_trade_fee_refund("trade-1", 1_000_000, "02ab", 101, Some("ignored")).unwrap().expect("second claim sees the row");
+        assert_eq!(existing.refund_payment_id, None);
+        db.record_trade_fee_refund_payment("trade-1", "refund-1").unwrap();
+        assert!(!db.retake_failed_trade_fee_refund("trade-1", "other", 102).unwrap(), "only the recorded payment can be retaken");
+        assert!(db.retake_failed_trade_fee_refund("trade-1", "refund-1", 103).unwrap());
+        assert!(!db.retake_failed_trade_fee_refund("trade-1", "refund-1", 104).unwrap(), "a retake happens once");
+        db.release_trade_fee_refund("trade-1", None).unwrap();
+        assert!(db.list_trade_fee_refunds().unwrap().is_empty(), "an unsent claim can be released");
+        db.claim_trade_fee_refund("trade-2", 5_000, "02cd", 200, Some("expected-2")).unwrap();
+        db.release_trade_fee_refund("trade-2", Some("other")).unwrap();
+        assert_eq!(db.list_trade_fee_refunds().unwrap().len(), 1, "a claim with a different id is not released");
+        db.record_trade_fee_refund_payment("trade-2", "refund-2").unwrap();
+        db.release_trade_fee_refund("trade-2", Some("expected-2")).unwrap();
+        let rows = db.list_trade_fee_refunds().unwrap();
+        assert_eq!(rows.len(), 1, "a sent refund is never released");
+        assert_eq!((rows[0].amount_msat, rows[0].counterparty.as_str(), rows[0].refund_payment_id.as_deref()), (5_000, "02cd", Some("refund-2")));
+        let (labels, _) = db.list_settlement_labels_after(0).unwrap();
+        assert!(labels.iter().any(|l| l.payment_id == "refund-2" && l.kind == "refund"));
+    }
+
+    #[test]
+    fn revenue_reads_labels_and_trade_decisions() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_settlement_with_channel("pay-sync", "sync", "7").unwrap();
+        db.record_settlement("pay-trade", "trade").unwrap();
+        assert!(db.persist_trade_rejection("pay-trade", "trade-1", "hash", "chan", "7", "02ab", "quote_expired", 100, "{}").unwrap());
+        let (labels, _) = db.list_settlement_labels_after(0).unwrap();
+        assert!(labels.contains(&SettlementLabel { payment_id: "pay-sync".into(), kind: "sync".into(), user_channel_id: Some("7".into()) }));
+        let decision = db.trade_decision_summary("pay-trade").unwrap().unwrap();
+        assert_eq!((decision.outcome.as_str(), decision.counterparty.as_str(), decision.user_channel_id.as_str()), ("rejected", "02ab", "7"));
+        assert_eq!(db.list_trade_decision_summaries().unwrap(), vec![decision]);
+        assert!(db.trade_decision_summary("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn revenue_ledger_rows_read_a_bounded_id_range_and_skip_other_events() {
+        use crate::ledger::LedgerEventDraft;
+        let db = Database::open_in_memory().unwrap();
+        assert_eq!(db.max_ledger_event_id().unwrap(), 0);
+        for (event, detail) in [
+            ("PAYMENT_FORWARDED", serde_json::json!({"fee_msat": 1000, "occurred_at_ms": 5_000})),
+            ("TRADE_ACCEPTED", serde_json::json!({"trade_id": "t"})),
+            ("CHANNEL_READY_SPLICE", serde_json::json!({"funding_txo": "aa:0"})),
+            ("PAYMENT_FORWARDED_BACKFILL", serde_json::json!({"total_fee_msat": 2000})),
+        ] {
+            db.append_ledger_event(&LedgerEventDraft::from_audit_event(event, detail)).unwrap();
+        }
+        let max = db.max_ledger_event_id().unwrap();
+        let all = db.revenue_ledger_rows_between(0, max).unwrap();
+        assert_eq!(all.iter().map(|r| r.event_type.as_str()).collect::<Vec<_>>(), ["PAYMENT_FORWARDED", "CHANNEL_READY_SPLICE", "PAYMENT_FORWARDED_BACKFILL"]);
+        assert_eq!(all[0].occurred_at_ms, 5_000);
+        let middle = db.revenue_ledger_rows_between(all[0].id, all[1].id).unwrap();
+        assert_eq!(middle.iter().map(|r| r.event_type.as_str()).collect::<Vec<_>>(), ["CHANNEL_READY_SPLICE"], "the range is (after, up_to]");
+    }
+
+    #[test]
+    fn settlement_labels_are_read_after_a_rowid() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_settlement("a", "sync").unwrap();
+        let (first, after) = db.list_settlement_labels_after(0).unwrap();
+        assert_eq!(first.len(), 1);
+        db.record_settlement("b", "trade").unwrap();
+        let (next, later) = db.list_settlement_labels_after(after).unwrap();
+        assert_eq!(next.iter().map(|l| l.payment_id.as_str()).collect::<Vec<_>>(), ["b"]);
+        assert!(later > after);
+        assert_eq!(db.list_settlement_labels_after(later).unwrap(), (Vec::new(), later), "nothing new keeps the mark");
+    }
+
+    #[test]
+    fn a_repeat_sighting_fills_a_missing_country_but_never_replaces_one() {
+        let db = Database::open_in_memory().unwrap();
+        db.record_peer_sighting("node", "1.2.3.4", None, 100).unwrap();
+        assert!(!db.peer_ip_has_country("node", "1.2.3.4").unwrap());
+        db.record_peer_sighting("node", "1.2.3.4", Some(("IN", "India")), 200).unwrap();
+        assert!(db.peer_ip_has_country("node", "1.2.3.4").unwrap());
+        db.record_peer_sighting("node", "1.2.3.4", Some(("DE", "Germany")), 300).unwrap();
+        let row = &db.recent_peer_locations("node", 10).unwrap()[0];
+        assert_eq!((row.country_code.as_deref(), row.country_name.as_deref()), (Some("IN"), Some("India")));
+        assert_eq!((row.first_seen_at, row.last_seen_at), (100, 300));
+        assert!(!db.peer_ip_has_country("other", "1.2.3.4").unwrap());
+    }
 
     #[test]
     fn inbound_stability_registration_detects_replays_and_conflicts() {
@@ -4706,6 +5211,78 @@ mod tests {
     }
 
     #[test]
+    fn sync_delivery_migration_preserves_history_and_isolates_channels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DB_FILENAME);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settlement_payments (
+                payment_id TEXT PRIMARY KEY, kind TEXT NOT NULL,
+                recorded_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                user_channel_id TEXT, outcome TEXT NOT NULL DEFAULT 'pending'
+             );
+             INSERT INTO settlement_payments (payment_id, kind, user_channel_id)
+             VALUES ('legacy-sync', 'sync', '7');",
+        ).unwrap();
+        drop(conn);
+
+        let db = Database::open(dir.path()).unwrap();
+        db.save_channel("channel-seven", "7", 25.0, 31_250, 0, None).unwrap();
+        db.save_channel("channel-eight", "8", 25.0, 31_250, 0, None).unwrap();
+        let pending = db.list_pending_sync_payments().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0, "legacy-sync");
+        assert!(pending[0].1 > 0, "recorded_at is exposed for age-out");
+        assert!(db.mark_sync_payment_failed("legacy-sync").unwrap());
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"]);
+
+        db.record_sync_payment("new-sync", "7", 1).unwrap();
+        assert!(db.list_failed_sync_channels().unwrap().is_empty());
+        db.record_sync_payment("other-channel-sync", "8", 9).unwrap();
+        db.mark_sync_payment_failed("new-sync").unwrap();
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"],
+            "higher versions on another channel must not suppress this retry");
+        assert!(db.record_sync_payment("", "7", 2).is_err());
+        assert!(db.record_sync_payment("duplicate", "7", 0).is_err());
+        assert!(db.record_sync_payment("new-sync", "7", 2).is_err());
+        drop(db);
+
+        let db = Database::open(dir.path()).unwrap();
+        assert_eq!(db.list_failed_sync_channels().unwrap(), vec!["7"]);
+        assert_eq!(db.list_settlements().unwrap().len(), 3);
+        db.record_sync_payment("retry", "7", 3).unwrap();
+        db.mark_settlement_succeeded("retry", Some(1), None, Some("outbound")).unwrap();
+        assert!(!db.mark_sync_payment_failed("retry").unwrap());
+        assert!(db.list_failed_sync_channels().unwrap().is_empty());
+    }
+
+    #[test]
+    fn sync_retry_attempts_count_since_the_last_delivered_sync() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("chan-seven", "7", 25.0, 31_250, 0, None).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap(), (0, 0));
+
+        db.record_sync_payment("a", "7", 1).unwrap();
+        db.mark_sync_payment_failed("a").unwrap();
+        let (attempts, last_attempt_at) = db.sync_retry_attempts("7").unwrap();
+        assert_eq!(attempts, 1);
+        assert!(last_attempt_at > 0, "the newest attempt's recorded_at drives the backoff");
+
+        db.record_sync_payment("b", "7", 2).unwrap();
+        db.mark_settlement_succeeded("b", Some(1), None, Some("outbound")).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 0, "a delivered SYNC resets the count");
+
+        db.record_sync_payment("c", "7", 3).unwrap();
+        db.mark_sync_payment_failed("c").unwrap();
+        db.record_sync_payment("d", "7", 4).unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 2, "pending attempts count too");
+
+        db.record_sync_payment("other", "8", 9).unwrap();
+        db.mark_sync_payment_failed("other").unwrap();
+        assert_eq!(db.sync_retry_attempts("7").unwrap().0, 2, "channels are isolated");
+    }
+
+    #[test]
     fn failed_stability_settlement_rolls_back_only_its_optimistic_state() {
         let db = Database::open_in_memory().unwrap();
         db.save_channel("channel", "user-channel", 50.0, 50_000, 50_000, None)
@@ -4894,23 +5471,27 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_seen_dedups_and_fingerprint_is_stable() {
+    fn forward_history_ids_dedup_without_collapsing_equal_payments() {
         let db = Database::open_in_memory().unwrap();
         let fp = forward_fingerprint("aa", "bb", Some(1000), Some(7));
         assert_eq!(fp, forward_fingerprint("aa", "bb", Some(1000), Some(7)));
         assert_ne!(fp, forward_fingerprint("aa", "bb", Some(1001), Some(7)));
+        assert_ne!(forward_fingerprint("aa", "bb", None, None), forward_fingerprint("aa", "bb", Some(0), Some(0)));
         let draft = LedgerEventDraft::from_audit_event(
-            "PAYMENT_FORWARDED",
-            serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb"}),
+            "PAYMENT_FORWARDED_BACKFILL",
+            serde_json::json!({"prev_channel_id": "aa", "next_channel_id": "bb", "outbound_amount_msat": 1000, "total_fee_msat": 7}),
         );
-        assert!(db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
-        assert!(!db.append_forwarded_event_if_unseen(&fp, &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("history-1", &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("history-2", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-1", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-2", &draft).unwrap());
+        assert!(db.append_forwarded_event_if_unseen("", &draft).is_err());
+        assert_eq!(db.list_ledger_events(&LedgerQuery::default()).unwrap().events.len(), 2);
     }
 
     #[test]
     fn forwarded_marker_rolls_back_when_ledger_append_fails() {
         let db = Database::open_in_memory().unwrap();
-        let fingerprint = forward_fingerprint("aa", "bb", Some(1_000), Some(7));
         let draft = LedgerEventDraft::from_audit_event(
             "PAYMENT_FORWARDED_BACKFILL",
             serde_json::json!({
@@ -4931,17 +5512,21 @@ mod tests {
             .unwrap();
 
         assert!(db
-            .append_forwarded_event_if_unseen(&fingerprint, &draft)
+            .append_forwarded_event_if_unseen("history-retry", &draft)
             .is_err());
+        {
+            let conn = db.conn.lock().unwrap();
+            let event_count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(event_count, 0);
+            conn.execute_batch("DROP TRIGGER inject_forward_ledger_failure").unwrap();
+        }
+        assert!(db.append_forwarded_event_if_unseen("history-retry", &draft).unwrap());
+        assert!(!db.append_forwarded_event_if_unseen("history-retry", &draft).unwrap());
         let conn = db.conn.lock().unwrap();
-        let marker_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM forwarded_seen", [], |row| row.get(0))
-            .unwrap();
-        let event_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(marker_count, 0);
-        assert_eq!(event_count, 0);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM forward_audit_occurrences", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM ledger_events", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

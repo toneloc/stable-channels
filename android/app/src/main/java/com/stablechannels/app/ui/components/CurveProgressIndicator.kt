@@ -27,7 +27,7 @@ import kotlin.math.sin
 
 enum class CurvePattern {
     SIX_PETAL_SPIRAL,
-    SPIRAL_SEARCH
+    SPIRAL_SEARCH,
 }
 
 @Composable
@@ -38,28 +38,32 @@ fun CurveProgressIndicator(
     primaryColor: Color = Color(0xFF38BDF8),
     glowColor: Color = Color(0xFF818CF8),
     trackColor: Color = Color(0xFF38BDF8).copy(alpha = 0.12f),
-    durationMillis: Int = 4600
+    durationMillis: Int = 4600,
 ) {
     val infiniteTransition = rememberInfiniteTransition(label = "CurveProgressIndicatorTransition")
-    val progress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = durationMillis, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "CurveProgressIndicatorProgress"
-    )
+    val progress by
+        infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec =
+                infiniteRepeatable(
+                    animation = tween(durationMillis = durationMillis, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+            label = "CurveProgressIndicatorProgress",
+        )
 
-    val pulseProgress by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 4200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "CurveProgressIndicatorPulse"
-    )
+    val pulseProgress by
+        infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec =
+                infiniteRepeatable(
+                    animation = tween(durationMillis = 4200, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+            label = "CurveProgressIndicatorPulse",
+        )
 
     Canvas(modifier = modifier.size(size)) {
         val width = this.size.width
@@ -71,22 +75,25 @@ fun CurveProgressIndicator(
         val detailScale = 0.52f + ((sin(pulseAngle + 0.55f) + 1f) / 2f) * 0.48f
 
         val trackSteps = 120
-        val trackPath = Path().apply {
-            for (step in 0..trackSteps) {
-                val u = step.toFloat() / trackSteps.toFloat()
-                val pt = calculateCurvePoint(pattern, u, detailScale, center, scale)
-                if (step == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+        val trackPath =
+            Path().apply {
+                for (step in 0..trackSteps) {
+                    val u = step.toFloat() / trackSteps.toFloat()
+                    val pt = calculateCurvePoint(pattern, u, detailScale, center, scale)
+                    if (step == 0) moveTo(pt.x, pt.y) else lineTo(pt.x, pt.y)
+                }
+                close()
             }
-            close()
-        }
 
         drawPath(
             path = trackPath,
             color = trackColor,
-            style = Stroke(
-                width = 1.2f * scale,
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(3f * scale, 3f * scale), 0f)
-            )
+            style =
+                Stroke(
+                    width = 1.2f * scale,
+                    pathEffect =
+                        PathEffect.dashPathEffect(floatArrayOf(3f * scale, 3f * scale), 0f),
+                ),
         )
 
         val trailCount = 36
@@ -105,7 +112,7 @@ fun CurveProgressIndicator(
             drawCircle(
                 color = particleColor.copy(alpha = intensity * 0.85f),
                 radius = particleRadius,
-                center = pt
+                center = pt,
             )
         }
 
@@ -114,17 +121,17 @@ fun CurveProgressIndicator(
         drawCircle(
             color = primaryColor.copy(alpha = 0.22f),
             radius = 6.5f * scale,
-            center = headPt
+            center = headPt,
         )
         drawCircle(
             color = glowColor.copy(alpha = 0.55f),
             radius = 4.0f * scale,
-            center = headPt
+            center = headPt,
         )
         drawCircle(
             color = Color.White,
             radius = 2.2f * scale,
-            center = headPt
+            center = headPt,
         )
     }
 }
@@ -137,7 +144,7 @@ fun MathCurveLoader(
     primaryColor: Color = Color(0xFF38BDF8),
     glowColor: Color = Color(0xFF818CF8),
     trackColor: Color = Color(0xFF38BDF8).copy(alpha = 0.12f),
-    durationMillis: Int = 4600
+    durationMillis: Int = 4600,
 ) {
     CurveProgressIndicator(
         modifier = modifier,
@@ -146,7 +153,7 @@ fun MathCurveLoader(
         primaryColor = primaryColor,
         glowColor = glowColor,
         trackColor = trackColor,
-        durationMillis = durationMillis
+        durationMillis = durationMillis,
     )
 }
 
@@ -155,7 +162,7 @@ private fun calculateCurvePoint(
     progress: Float,
     detailScale: Float,
     center: Offset,
-    viewportScale: Float
+    viewportScale: Float,
 ): Offset {
     val t = progress * 2f * PI.toFloat()
     return when (pattern) {

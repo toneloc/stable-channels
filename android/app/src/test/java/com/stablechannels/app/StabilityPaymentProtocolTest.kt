@@ -21,22 +21,34 @@ class StabilityPaymentProtocolTest {
 
     private fun envelopeFor(
         payload: String,
-        signature: String = "valid"
-    ): ByteArray = JSONObject().apply {
-        put("payload", payload)
-        put("signature", signature)
-    }.toString().toByteArray()
+        signature: String = "valid",
+    ): ByteArray =
+        JSONObject()
+            .apply {
+                put("payload", payload)
+                put("signature", signature)
+            }
+            .toString()
+            .toByteArray()
 
     private fun validate(
         data: ByteArray,
         amountMsat: Long = 25_000L,
         channelId: String = identifier,
-        at: Long = now
-    ) = StabilityPaymentProtocol.validateInbound(data, "lsp", channelId, amountMsat, at) { bytes, sig, pk ->
-        pk == "lsp" && sig == "valid" && bytes.contentEquals(
-            JSONObject(String(data, Charsets.UTF_8)).getString("payload").toByteArray(Charsets.UTF_8)
-        )
-    }
+        at: Long = now,
+    ) =
+        StabilityPaymentProtocol.validateInbound(data, "lsp", channelId, amountMsat, at) {
+            bytes,
+            sig,
+            pk ->
+            pk == "lsp" &&
+                sig == "valid" &&
+                bytes.contentEquals(
+                    JSONObject(String(data, Charsets.UTF_8))
+                        .getString("payload")
+                        .toByteArray(Charsets.UTF_8)
+                )
+        }
 
     private fun inboundPayload(
         amountMsat: Long = 25_000L,
@@ -44,28 +56,32 @@ class StabilityPaymentProtocolTest {
         settlementId: String = identifier,
         channelId: String = identifier,
         createdAt: Long = now,
-        expiresAt: Long = now + Constants.STABILITY_PAYMENT_TTL_SECS
-    ): String = JSONObject().apply {
-        put("type", "STABILITY_PAYMENT_V1")
-        put("settlement_id", settlementId)
-        put("channel_id", channelId)
-        put("amount_msat", amountMsat)
-        put("direction", direction)
-        put("expected_usd", 50.0)
-        put("created_at", createdAt)
-        put("expires_at", expiresAt)
-    }.toString()
+        expiresAt: Long = now + Constants.STABILITY_PAYMENT_TTL_SECS,
+    ): String =
+        JSONObject()
+            .apply {
+                put("type", "STABILITY_PAYMENT_V1")
+                put("settlement_id", settlementId)
+                put("channel_id", channelId)
+                put("amount_msat", amountMsat)
+                put("direction", direction)
+                put("expected_usd", 50.0)
+                put("created_at", createdAt)
+                put("expires_at", expiresAt)
+            }
+            .toString()
 
     @Test
     fun signedSettlementRoundTrips() {
-        val envelope = StabilityPaymentProtocol.buildSignedEnvelope(
-            channelId = identifier,
-            amountMsat = 25_000L,
-            expectedUsd = 50.0,
-            sign = { "valid" },
-            now = now,
-            settlementId = identifier
-        )
+        val envelope =
+            StabilityPaymentProtocol.buildSignedEnvelope(
+                channelId = identifier,
+                amountMsat = 25_000L,
+                expectedUsd = 50.0,
+                sign = { "valid" },
+                now = now,
+                settlementId = identifier,
+            )
         assertNotNull(envelope)
         val parsed = JSONObject(envelope!!)
         val payload = JSONObject(parsed.getString("payload"))
@@ -79,9 +95,12 @@ class StabilityPaymentProtocolTest {
         assertEquals(now + Constants.STABILITY_PAYMENT_TTL_SECS, payload.getLong("expires_at"))
 
         // The same payload signed by the LSP in the opposite direction validates inbound.
-        val inbound = JSONObject(payload.toString()).apply {
-            put("direction", "lsp_to_user")
-        }.toString()
+        val inbound =
+            JSONObject(payload.toString())
+                .apply {
+                    put("direction", "lsp_to_user")
+                }
+                .toString()
         val result = validate(envelopeFor(inbound))
         assertTrue(result is SignedSettlementValidation.Valid)
         assertEquals(identifier, (result as SignedSettlementValidation.Valid).payment.settlementId)
@@ -110,38 +129,79 @@ class StabilityPaymentProtocolTest {
 
     @Test
     fun buildRejectsNonWholeSatAmounts() {
-        assertNull(StabilityPaymentProtocol.buildPayload(
-            identifier, identifier, 1_500L, "user_to_lsp", 50.0, now, now + 100
-        ))
-        assertNull(StabilityPaymentProtocol.buildPayload(
-            identifier, identifier, 0L, "user_to_lsp", 50.0, now, now + 100
-        ))
-        assertNull(StabilityPaymentProtocol.buildSignedEnvelope(
-            identifier, 25_001L, 50.0, { "valid" }, now, identifier
-        ))
+        assertNull(
+            StabilityPaymentProtocol.buildPayload(
+                identifier,
+                identifier,
+                1_500L,
+                "user_to_lsp",
+                50.0,
+                now,
+                now + 100,
+            )
+        )
+        assertNull(
+            StabilityPaymentProtocol.buildPayload(
+                identifier,
+                identifier,
+                0L,
+                "user_to_lsp",
+                50.0,
+                now,
+                now + 100,
+            )
+        )
+        assertNull(
+            StabilityPaymentProtocol.buildSignedEnvelope(
+                identifier,
+                25_001L,
+                50.0,
+                { "valid" },
+                now,
+                identifier,
+            )
+        )
     }
 
     @Test
     fun invalidWireShapesAreRejected() {
         // Envelope shape
         assertInvalid("envelope", "not json".toByteArray())
-        assertInvalid("envelope", envelopeFor("{}", signature = "").let {
-            JSONObject(String(it, Charsets.UTF_8)).apply { remove("signature") }.toString().toByteArray()
-        })
+        assertInvalid(
+            "envelope",
+            envelopeFor("{}", signature = "").let {
+                JSONObject(String(it, Charsets.UTF_8))
+                    .apply { remove("signature") }
+                    .toString()
+                    .toByteArray()
+            },
+        )
         // Field validation
         assertInvalid("fields", envelopeFor("{\"type\":\"WRONG\"}"))
         assertInvalid("fields", envelopeFor(inboundPayload(settlementId = "AB".repeat(32))))
         assertInvalid("fields", envelopeFor(inboundPayload(channelId = "ab".repeat(31))))
-        assertInvalid("fields", envelopeFor(
-            JSONObject(inboundPayload()).apply { put("amount_msat", 25_001L) }.toString()
-        ))
-        assertInvalid("fields", envelopeFor(
-            JSONObject(inboundPayload()).apply { put("expected_usd", -1.0) }.toString()
-        ))
+        assertInvalid(
+            "fields",
+            envelopeFor(
+                JSONObject(inboundPayload()).apply { put("amount_msat", 25_001L) }.toString()
+            ),
+        )
+        assertInvalid(
+            "fields",
+            envelopeFor(
+                JSONObject(inboundPayload()).apply { put("expected_usd", -1.0) }.toString()
+            ),
+        )
         // TTL exceeded
-        assertInvalid("fields", envelopeFor(inboundPayload(
-            createdAt = now, expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS + 1
-        )))
+        assertInvalid(
+            "fields",
+            envelopeFor(
+                inboundPayload(
+                    createdAt = now,
+                    expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS + 1,
+                )
+            ),
+        )
     }
 
     @Test
@@ -154,29 +214,55 @@ class StabilityPaymentProtocolTest {
     @Test
     fun freshnessWindowHonorsClockSkew() {
         // Expired beyond the 60s skew
-        assertInvalid("expired", envelopeFor(inboundPayload(
-            createdAt = now - 2_000L, expiresAt = now - 120L
-        )))
+        assertInvalid(
+            "expired",
+            envelopeFor(
+                inboundPayload(
+                    createdAt = now - 2_000L,
+                    expiresAt = now - 120L,
+                )
+            ),
+        )
         // Not yet valid beyond the 60s skew
-        assertInvalid("expired", envelopeFor(inboundPayload(
-            createdAt = now + 120L, expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS
-        )))
+        assertInvalid(
+            "expired",
+            envelopeFor(
+                inboundPayload(
+                    createdAt = now + 120L,
+                    expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS,
+                )
+            ),
+        )
         // Within skew on both edges
-        assertValid(envelopeFor(inboundPayload(
-            createdAt = now - 2_000L, expiresAt = now - 30L
-        )))
-        assertValid(envelopeFor(inboundPayload(
-            createdAt = now + 30L, expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS
-        )))
+        assertValid(
+            envelopeFor(
+                inboundPayload(
+                    createdAt = now - 2_000L,
+                    expiresAt = now - 30L,
+                )
+            )
+        )
+        assertValid(
+            envelopeFor(
+                inboundPayload(
+                    createdAt = now + 30L,
+                    expiresAt = now + Constants.STABILITY_PAYMENT_TTL_SECS,
+                )
+            )
+        )
     }
 
     @Test
     fun signatureAndOversizeAreRejected() {
         val payload = inboundPayload()
-        val badSig = JSONObject().apply {
-            put("payload", payload)
-            put("signature", "forged")
-        }.toString().toByteArray()
+        val badSig =
+            JSONObject()
+                .apply {
+                    put("payload", payload)
+                    put("signature", "forged")
+                }
+                .toString()
+                .toByteArray()
         assertInvalid("signature", badSig)
         assertInvalid("oversize", ByteArray(Constants.MAX_SIGNED_STABILITY_TLV_VALUE_BYTES + 1))
         assertInvalid("utf8", byteArrayOf(0xC3.toByte(), 0x28))
@@ -201,7 +287,7 @@ class StabilityPaymentProtocolTest {
     private fun assertInvalid(
         reason: String,
         data: ByteArray,
-        channelId: String = identifier
+        channelId: String = identifier,
     ) {
         val result = validate(data, channelId = channelId)
         assertTrue(result is SignedSettlementValidation.Invalid)

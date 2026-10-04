@@ -13,16 +13,19 @@ import org.junit.Test
 
 class PriceOracleTest {
     private fun named(values: List<Double>, prefix: String = "feed") =
-        values.mapIndexed { index, value -> NamedPrice("$prefix-$index", value) }
+        values.mapIndexed { index, value ->
+            NamedPrice("$prefix-$index", value)
+        }
 
     @Test
     fun `direct USD consensus is preferred`() {
-        val result = PriceOracle.resolve(
-            named(listOf(64_000.0, 64_050.0, 63_950.0)),
-            named(listOf(80_000.0, 80_100.0, 79_900.0), "usdt"),
-            named(listOf(1.0, 1.0, 1.0), "peg"),
-            64_000.0
-        )
+        val result =
+            PriceOracle.resolve(
+                named(listOf(64_000.0, 64_050.0, 63_950.0)),
+                named(listOf(80_000.0, 80_100.0, 79_900.0), "usdt"),
+                named(listOf(1.0, 1.0, 1.0), "peg"),
+                64_000.0,
+            )
 
         assertEquals(PriceOracleSource.DIRECT_USD, result.source)
         assertEquals(64_000.0, result.price, 0.001)
@@ -31,12 +34,13 @@ class PriceOracleTest {
 
     @Test
     fun `USDT fallback uses measured peg`() {
-        val result = PriceOracle.resolve(
-            named(listOf(64_000.0, 64_050.0)),
-            named(listOf(64_064.0, 64_074.0, 64_054.0), "usdt"),
-            named(listOf(0.999, 0.9991, 0.9989), "peg"),
-            64_000.0
-        )
+        val result =
+            PriceOracle.resolve(
+                named(listOf(64_000.0, 64_050.0)),
+                named(listOf(64_064.0, 64_074.0, 64_054.0), "usdt"),
+                named(listOf(0.999, 0.9991, 0.9989), "peg"),
+                64_000.0,
+            )
 
         assertEquals(PriceOracleSource.NORMALIZED_USDT, result.source)
         assertEquals(0.999, result.usdtUsd!!, 0.000001)
@@ -50,18 +54,19 @@ class PriceOracleTest {
                 named(listOf(64_000.0)),
                 named(listOf(64_500.0, 64_520.0, 64_480.0), "usdt"),
                 named(listOf(0.98, 0.981, 0.979), "peg"),
-                64_000.0
+                64_000.0,
             )
         }
     }
 
     @Test
     fun `USDT fallback rejects aggregator-only peg consensus`() {
-        val aggregators = listOf(
-            NamedPrice("CoinGecko USDT/USD", 1.0000),
-            NamedPrice("CoinPaprika USDT/USD", 1.0001),
-            NamedPrice("Coinlore USDT/USD", 0.9999)
-        )
+        val aggregators =
+            listOf(
+                NamedPrice("CoinGecko USDT/USD", 1.0000),
+                NamedPrice("CoinPaprika USDT/USD", 1.0001),
+                NamedPrice("Coinlore USDT/USD", 0.9999),
+            )
 
         assertThrows(PriceOracleException::class.java) {
             PriceOracle.validateUsdtPeg(aggregators)
@@ -70,17 +75,18 @@ class PriceOracleTest {
 
     @Test
     fun `USDT fallback rejects stale aggregators during exchange depeg`() {
-        val prices = listOf(
-            NamedPrice("Coinbase USDT/USD", 0.9800),
-            NamedPrice("Kraken USDT/USD", 0.9801),
-            NamedPrice("Bitstamp USDT/USD", 0.9799),
-            NamedPrice("Bitfinex USDT/USD", 0.9800),
-            NamedPrice("Crypto.com USDT/USD", 0.9802),
-            NamedPrice("OKX USDT/USD", 0.9798),
-            NamedPrice("CoinGecko USDT/USD", 1.0000),
-            NamedPrice("CoinPaprika USDT/USD", 1.0001),
-            NamedPrice("Coinlore USDT/USD", 0.9999)
-        )
+        val prices =
+            listOf(
+                NamedPrice("Coinbase USDT/USD", 0.9800),
+                NamedPrice("Kraken USDT/USD", 0.9801),
+                NamedPrice("Bitstamp USDT/USD", 0.9799),
+                NamedPrice("Bitfinex USDT/USD", 0.9800),
+                NamedPrice("Crypto.com USDT/USD", 0.9802),
+                NamedPrice("OKX USDT/USD", 0.9798),
+                NamedPrice("CoinGecko USDT/USD", 1.0000),
+                NamedPrice("CoinPaprika USDT/USD", 1.0001),
+                NamedPrice("Coinlore USDT/USD", 0.9999),
+            )
 
         assertThrows(PriceOracleException::class.java) {
             PriceOracle.validateUsdtPeg(prices)
@@ -89,16 +95,17 @@ class PriceOracleTest {
 
     @Test
     fun `aggregators cannot outvote exchange peg consensus`() {
-        val prices = listOf(
-            NamedPrice("Coinbase USDT/USD", 0.9800),
-            NamedPrice("Kraken USDT/USD", 0.9801),
-            NamedPrice("Bitstamp USDT/USD", 0.9799),
-            NamedPrice("Bitfinex USDT/USD", 1.0000),
-            NamedPrice("Crypto.com USDT/USD", 1.0001),
-            NamedPrice("CoinGecko USDT/USD", 1.0000),
-            NamedPrice("CoinPaprika USDT/USD", 1.0001),
-            NamedPrice("Coinlore USDT/USD", 0.9999)
-        )
+        val prices =
+            listOf(
+                NamedPrice("Coinbase USDT/USD", 0.9800),
+                NamedPrice("Kraken USDT/USD", 0.9801),
+                NamedPrice("Bitstamp USDT/USD", 0.9799),
+                NamedPrice("Bitfinex USDT/USD", 1.0000),
+                NamedPrice("Crypto.com USDT/USD", 1.0001),
+                NamedPrice("CoinGecko USDT/USD", 1.0000),
+                NamedPrice("CoinPaprika USDT/USD", 1.0001),
+                NamedPrice("Coinlore USDT/USD", 0.9999),
+            )
 
         assertThrows(PriceOracleException::class.java) {
             PriceOracle.validateUsdtPeg(prices)
@@ -107,11 +114,12 @@ class PriceOracleTest {
 
     @Test
     fun `USDT fallback accepts two exchanges with aggregator confirmation`() {
-        val prices = listOf(
-            NamedPrice("Crypto.com USDT/USD", 0.9990),
-            NamedPrice("OKX USDT/USD", 0.9991),
-            NamedPrice("CoinGecko USDT/USD", 0.9989)
-        )
+        val prices =
+            listOf(
+                NamedPrice("Crypto.com USDT/USD", 0.9990),
+                NamedPrice("OKX USDT/USD", 0.9991),
+                NamedPrice("CoinGecko USDT/USD", 0.9989),
+            )
 
         val result = PriceOracle.validateUsdtPeg(prices)
         assertEquals(0.99905, result.first, 0.000001)
@@ -125,12 +133,13 @@ class PriceOracleTest {
 
     @Test
     fun `large move quarantines prior price`() {
-        val error = assertThrows(PriceOracleException::class.java) {
-            PriceOracle.validateBitcoinConsensus(
-                named(listOf(80_000.0, 80_100.0, 79_900.0)),
-                64_000.0
-            )
-        }
+        val error =
+            assertThrows(PriceOracleException::class.java) {
+                PriceOracle.validateBitcoinConsensus(
+                    named(listOf(80_000.0, 80_100.0, 79_900.0)),
+                    64_000.0,
+                )
+            }
         assertTrue(error.quarantinesPrice)
     }
 
@@ -152,9 +161,9 @@ class PriceOracleTest {
                 "Gate.io BTC/USDT",
                 "MEXC BTC/USDT",
                 "CoinDCX BTC/USDT",
-                "BTCTurk BTC/USDT"
+                "BTCTurk BTC/USDT",
             ),
-            PriceOracle.BITCOIN_USDT_FEEDS.map { it.name }
+            PriceOracle.BITCOIN_USDT_FEEDS.map { it.name },
         )
     }
 
@@ -177,7 +186,7 @@ class PriceOracleTest {
         assertEquals(
             64_000.0,
             PriceOracleAnchorStore.freshPrice(64_000.0, nowMs - 60_000, nowMs)!!,
-            0.0
+            0.0,
         )
     }
 

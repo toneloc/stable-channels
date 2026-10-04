@@ -13,17 +13,12 @@ import com.stablechannels.app.BuildConfig
 
 @Composable
 fun AboutView() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // App info card
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 AboutRow("Version", BuildConfig.VERSION_NAME)
@@ -37,9 +32,10 @@ fun AboutView() {
         Spacer(Modifier.height(20.dp))
 
         Text(
-            text = "Stable Channels is a self-custodial Bitcoin wallet that maintains a stable USD value using Lightning Network channels. You control your private keys. No third party can access or freeze your funds.",
+            text =
+                "Stable Channels is a self-custodial Bitcoin wallet that maintains a stable USD value using Lightning Network channels. You control your private keys. No third party can access or freeze your funds.",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -48,14 +44,16 @@ fun AboutView() {
 private fun AboutRow(label: String, value: String, valueColor: Color = Color.Unspecified) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(text = label, style = MaterialTheme.typography.bodyLarge)
         Text(
             text = value,
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,
-            color = if (valueColor != Color.Unspecified) valueColor else MaterialTheme.colorScheme.onSurface
+            color =
+                if (valueColor != Color.Unspecified) valueColor
+                else MaterialTheme.colorScheme.onSurface,
         )
     }
 }

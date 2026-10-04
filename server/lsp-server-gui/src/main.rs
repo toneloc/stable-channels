@@ -1,13 +1,18 @@
-mod app;
+mod actions;
 mod config;
+mod dashboard;
+mod format;
+mod health;
+mod history;
+mod ledger;
+mod platform;
 mod state;
-mod task;
 mod ui;
 
 // Native entry point
 #[cfg(not(target_arch = "wasm32"))]
-fn main() -> eframe::Result<()> {
-	use eframe::egui;
+fn main() {
+	use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
 
 	let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -18,57 +23,21 @@ fn main() -> eframe::Result<()> {
 		)
 		.init();
 
-	let options = eframe::NativeOptions {
-		viewport: egui::ViewportBuilder::default()
-			.with_inner_size([1200.0, 800.0])
-			.with_min_inner_size([1000.0, 640.0]),
-		..Default::default()
-	};
+	let window = WindowBuilder::new()
+		.with_title("LSP Server GUI")
+		.with_inner_size(LogicalSize::new(1200.0, 800.0))
+		.with_min_inner_size(LogicalSize::new(1000.0, 640.0));
+	let config = Config::new().with_window(window).with_background_color((0, 0, 0, 255));
+	// macOS needs the default Edit menu for copy/paste shortcuts; elsewhere match the old menu-less window.
+	#[cfg(not(target_os = "macos"))]
+	let config = config.with_menu(None);
 
-	eframe::run_native(
-		"Stable Channels LSP",
-		options,
-		Box::new(|cc| Ok(Box::new(app::LspServerApp::new(cc)))),
-	)
+	dioxus::LaunchBuilder::desktop().with_cfg(config).launch(ui::App);
 }
 
 // WASM entry point
 #[cfg(target_arch = "wasm32")]
 fn main() {
-	use wasm_bindgen::JsCast;
-
-	// Redirect tracing to console.log
-	eframe::WebLogger::init(log::LevelFilter::Debug).ok();
-
-	let web_options = eframe::WebOptions::default();
-
-	wasm_bindgen_futures::spawn_local(async {
-		// Get the canvas element
-		let document = web_sys::window().expect("No window").document().expect("No document");
-
-		let canvas = document
-			.get_element_by_id("lsp_server_gui_canvas")
-			.expect("Failed to find canvas element")
-			.dyn_into::<web_sys::HtmlCanvasElement>()
-			.expect("Element is not a canvas");
-
-		let start_result = eframe::WebRunner::new()
-			.start(canvas, web_options, Box::new(|cc| Ok(Box::new(app::LspServerApp::new(cc)))))
-			.await;
-
-		// Remove the loading text and spinner
-		if let Some(loading_text) = document.get_element_by_id("loading_text") {
-			match start_result {
-				Ok(_) => {
-					loading_text.remove();
-				},
-				Err(e) => {
-					loading_text.set_inner_html(&format!(
-                        "<p>The app has crashed. See the developer console for details.</p><p>Error: {:?}</p>",
-                        e
-                    ));
-				},
-			}
-		}
-	});
+	platform::install_panic_hook();
+	dioxus::LaunchBuilder::web().launch(ui::App);
 }

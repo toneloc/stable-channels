@@ -22,42 +22,42 @@ import androidx.core.content.PermissionChecker
 fun NotificationsView() {
     val context = LocalContext.current
 
-    val notifEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.checkSelfPermission(
-            context, Manifest.permission.POST_NOTIFICATIONS
-        ) == PermissionChecker.PERMISSION_GRANTED
-    } else true
+    val notifEnabled =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PermissionChecker.PERMISSION_GRANTED
+        } else true
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // Status card
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier.padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text("Push Notifications", style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.weight(1f))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
                         color = if (notifEnabled) Color(0xFF10B981) else Color(0xFFEF4444),
-                        modifier = Modifier.size(8.dp)
+                        modifier = Modifier.size(8.dp),
                     ) {}
                     Text(
                         text = if (notifEnabled) "Enabled" else "Disabled",
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium,
-                        color = if (notifEnabled) Color(0xFF10B981) else Color(0xFFEF4444)
+                        color = if (notifEnabled) Color(0xFF10B981) else Color(0xFFEF4444),
                     )
                 }
             }
@@ -66,25 +66,28 @@ fun NotificationsView() {
         Spacer(Modifier.height(16.dp))
 
         Text(
-            text = "Notifications are required to receive stability payments while the app is closed. Without them, your USD position may drift when BTC price moves.",
+            text =
+                "Notifications are required to receive stability payments while the app is closed. Without them, your USD position may drift when BTC price moves.",
             style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
 
         if (!notifEnabled) {
             Spacer(Modifier.height(20.dp))
             Button(
                 onClick = {
-                    val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    }
+                    val intent =
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
                     context.startActivity(intent)
                 },
                 modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF10B981),
-                    contentColor = Color.White
-                )
+                colors =
+                    ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFF10B981),
+                        contentColor = Color.White,
+                    ),
             ) {
                 Text("Enable in Settings")
             }

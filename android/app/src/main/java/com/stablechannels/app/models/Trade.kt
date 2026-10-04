@@ -7,10 +7,11 @@ enum class TradeAction(val value: String) {
     SELL_BTC("sell");
 
     val displayName: String
-        get() = when (this) {
-            BUY_BTC -> "Buy BTC"
-            SELL_BTC -> "Sell BTC"
-        }
+        get() =
+            when (this) {
+                BUY_BTC -> "Buy BTC"
+                SELL_BTC -> "Sell BTC"
+            }
 
     companion object {
         fun fromString(s: String): TradeAction? = entries.find { it.value == s }
@@ -23,7 +24,7 @@ data class PendingTrade(
     val btcPrice: Double,
     val feeUSD: Double,
     val btcAmount: Double,
-    val netAmountUSD: Double
+    val netAmountUSD: Double,
 )
 
 data class PendingTradePayment(
@@ -31,14 +32,14 @@ data class PendingTradePayment(
     val price: Double,
     val tradeDbId: Long,
     val action: String,
-    val status: String = "sent"
+    val status: String = "sent",
 )
 
 data class PendingSplice(
     val direction: String, // "in" or "out"
     val amountSats: Long,
     val address: String? = null,
-    val paymentRowId: Long
+    val paymentRowId: Long,
 )
 
 data class ChannelRecord(
@@ -49,7 +50,7 @@ data class ChannelRecord(
     val backingSats: Long,
     val receiverSats: Long = 0,
     val latestPrice: Double = 0.0,
-    val syncVersion: Long = 0
+    val syncVersion: Long = 0,
 )
 
 data class TradeRecord(
@@ -63,10 +64,13 @@ data class TradeRecord(
     val paymentId: String?,
     val status: String,
     val createdAt: Long,
-    val reasonCode: String? = null
+    val reasonCode: String? = null,
 ) {
-    val date: Date get() = Date(createdAt * 1000)
-    val tradeAction: TradeAction? get() = TradeAction.fromString(action)
+    val date: Date
+        get() = Date(createdAt * 1000)
+
+    val tradeAction: TradeAction?
+        get() = TradeAction.fromString(action)
 }
 
 data class PaymentRecord(
@@ -83,20 +87,26 @@ data class PaymentRecord(
     val feeMsat: Long = 0,
     val txid: String? = null,
     val address: String? = null,
-    val confirmations: Int = 0
+    val confirmations: Int = 0,
 ) {
-    val date: Date get() = Date(createdAt * 1000)
-    val amountSats: Long get() = amountMsat / 1000
-    val isIncoming: Boolean get() = direction == "received"
+    val date: Date
+        get() = Date(createdAt * 1000)
+
+    val amountSats: Long
+        get() = amountMsat / 1000
+
+    val isIncoming: Boolean
+        get() = direction == "received"
 }
 
 data class PriceRecord(
     val id: Long,
     val price: Double,
     val source: String?,
-    val timestamp: Long
+    val timestamp: Long,
 ) {
-    val date: Date get() = Date(timestamp * 1000)
+    val date: Date
+        get() = Date(timestamp * 1000)
 }
 
 data class DailyPriceRecord(
@@ -105,7 +115,7 @@ data class DailyPriceRecord(
     val high: Double,
     val low: Double,
     val close: Double,
-    val volume: Double?
+    val volume: Double?,
 )
 
 data class OnchainTxRecord(
@@ -117,7 +127,8 @@ data class OnchainTxRecord(
     val btcPrice: Double?,
     val status: String,
     val confirmations: Int,
-    val createdAt: Long
+    val createdAt: Long,
 ) {
-    val date: Date get() = Date(createdAt * 1000)
+    val date: Date
+        get() = Date(createdAt * 1000)
 }

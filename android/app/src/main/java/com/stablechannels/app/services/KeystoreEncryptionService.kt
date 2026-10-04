@@ -15,14 +15,10 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * Encrypted blob containing the IV and ciphertext produced by AES-256-GCM encryption.
- */
+/** Encrypted blob containing the IV and ciphertext produced by AES-256-GCM encryption. */
 data class EncryptedBlob(val iv: ByteArray, val ciphertext: ByteArray) {
 
-    /**
-     * Serializes to the on-disk format: [4-byte big-endian IV length][IV][ciphertext]
-     */
+    /** Serializes to the on-disk format: [4-byte big-endian IV length][IV][ciphertext] */
     fun toByteArray(): ByteArray {
         val buffer = ByteBuffer.allocate(4 + iv.size + ciphertext.size)
         buffer.putInt(iv.size)
@@ -32,9 +28,7 @@ data class EncryptedBlob(val iv: ByteArray, val ciphertext: ByteArray) {
     }
 
     companion object {
-        /**
-         * Deserializes from the on-disk format: [4-byte big-endian IV length][IV][ciphertext]
-         */
+        /** Deserializes from the on-disk format: [4-byte big-endian IV length][IV][ciphertext] */
         fun fromByteArray(data: ByteArray): EncryptedBlob {
             val buffer = ByteBuffer.wrap(data)
             val ivLength = buffer.getInt()
@@ -60,11 +54,11 @@ data class EncryptedBlob(val iv: ByteArray, val ciphertext: ByteArray) {
 }
 
 /**
- * Service for encrypting/decrypting the seed phrase using AES-256-GCM
- * with a key stored in the Android Keystore.
+ * Service for encrypting/decrypting the seed phrase using AES-256-GCM with a key stored in the
+ * Android Keystore.
  *
- * The key requires user authentication (biometric) to use, and attempts
- * hardware-backed StrongBox storage with a software fallback.
+ * The key requires user authentication (biometric) to use, and attempts hardware-backed StrongBox
+ * storage with a software fallback.
  */
 object KeystoreEncryptionService {
 
@@ -77,8 +71,8 @@ object KeystoreEncryptionService {
     private const val PLAINTEXT_FILE_NAME = "seed_phrase"
 
     /**
-     * Encrypts the given plaintext using AES-256-GCM with the Keystore-backed key.
-     * Generates a new IV for each encryption operation.
+     * Encrypts the given plaintext using AES-256-GCM with the Keystore-backed key. Generates a new
+     * IV for each encryption operation.
      *
      * @param plaintext The data to encrypt
      * @return An [EncryptedBlob] containing the IV and ciphertext
@@ -109,8 +103,8 @@ object KeystoreEncryptionService {
     }
 
     /**
-     * Checks whether the Keystore key is still valid.
-     * A key becomes invalid when biometric enrollment changes on the device.
+     * Checks whether the Keystore key is still valid. A key becomes invalid when biometric
+     * enrollment changes on the device.
      *
      * @return true if the key exists and can be used, false if invalidated or missing
      */
@@ -132,8 +126,8 @@ object KeystoreEncryptionService {
     }
 
     /**
-     * Deletes the encryption key from the Android Keystore.
-     * After deletion, encrypted data can no longer be decrypted.
+     * Deletes the encryption key from the Android Keystore. After deletion, encrypted data can no
+     * longer be decrypted.
      */
     fun deleteKey() {
         try {
@@ -149,9 +143,9 @@ object KeystoreEncryptionService {
     /**
      * Migrates the plaintext seed phrase to encrypted storage.
      *
-     * Reads the `seed_phrase` file, encrypts it, writes the `seed_encrypted` file
-     * in the format [4-byte IV length][IV][ciphertext], and deletes the plaintext
-     * file only after successful write.
+     * Reads the `seed_phrase` file, encrypts it, writes the `seed_encrypted` file in the format
+     * [4-byte IV length][IV][ciphertext], and deletes the plaintext file only after successful
+     * write.
      *
      * @param context Android context for accessing the user data directory
      * @return true if migration succeeded, false if it failed or was not needed
@@ -214,9 +208,7 @@ object KeystoreEncryptionService {
         }
     }
 
-    /**
-     * Retrieves the existing key from the Keystore, or generates a new one if not present.
-     */
+    /** Retrieves the existing key from the Keystore, or generates a new one if not present. */
     private fun getOrCreateKey(): SecretKey {
         val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE)
         keyStore.load(null)
@@ -232,8 +224,8 @@ object KeystoreEncryptionService {
     }
 
     /**
-     * Generates a new AES-256-GCM key in the Android Keystore.
-     * Attempts StrongBox hardware backing first, falls back to software-backed TEE.
+     * Generates a new AES-256-GCM key in the Android Keystore. Attempts StrongBox hardware backing
+     * first, falls back to software-backed TEE.
      */
     private fun generateKey(): SecretKey {
         // Try with StrongBox first (API 28+)
@@ -249,23 +241,23 @@ object KeystoreEncryptionService {
         return generateKeyWithSpec(strongBox = false)
     }
 
-    /**
-     * Generates the AES key with the specified parameters.
-     */
+    /** Generates the AES key with the specified parameters. */
     private fun generateKeyWithSpec(strongBox: Boolean): SecretKey {
-        val keyGenerator = KeyGenerator.getInstance(
-            KeyProperties.KEY_ALGORITHM_AES,
-            ANDROID_KEYSTORE
-        )
+        val keyGenerator =
+            KeyGenerator.getInstance(
+                KeyProperties.KEY_ALGORITHM_AES,
+                ANDROID_KEYSTORE,
+            )
 
-        val specBuilder = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            .setUserAuthenticationRequired(true)
+        val specBuilder =
+            KeyGenParameterSpec.Builder(
+                    KEY_ALIAS,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
+                )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUserAuthenticationRequired(true)
 
         if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             specBuilder.setIsStrongBoxBacked(true)

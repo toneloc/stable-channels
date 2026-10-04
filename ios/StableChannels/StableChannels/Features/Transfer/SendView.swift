@@ -9,13 +9,12 @@ struct SendView: View {
     @State private var input = ""
     @State private var amountSats = ""
     @State private var amountUSDStr = ""
-    @State private var isSendMax = false
     @State private var isSending = false
     @State private var errorMessage: String?
     @State private var success = false
     @State private var sentAmountSats: UInt64 = 0
     @State private var qrAlertMessage = ""
-    @State private var feeRateSatVb: UInt64?
+    @State private var feeRateSatVb: Double?
 
     private enum InputType {
         case bolt11
@@ -68,9 +67,6 @@ struct SendView: View {
             }
             return manualAmountMsat / 1000
         case .bolt12, .onchain:
-            if detectedType == .onchain, isSendMax {
-                return appState.spendableOnchainSats
-            }
             return convertedSats(fromUSD: amountSats, price: appState.accountingBTCPrice) ?? 0
         case .unknown:
             return 0
@@ -112,12 +108,18 @@ struct SendView: View {
         guard let feeRateSatVb else {
             return String(localized: "info_fee_estimating", defaultValue: "Estimating...")
         }
-        let vbytes = isSendMax ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
-        let feeSats = feeRateSatVb * vbytes
+        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: false)
+        let displayRate: UInt64
+        if feeRateSatVb.isFinite && feeRateSatVb > 0 {
+            let rounded = feeRateSatVb.rounded()
+            displayRate = rounded >= Double(UInt64.max) ? UInt64.max : UInt64(max(1.0, rounded))
+        } else {
+            displayRate = 1
+        }
         return String(
             format: String(localized: "info_onchain_fee_estimate_value", defaultValue: "~%@ BTC (%llu sat/vB)"),
             feeSats.btcSpacedFormatted,
-            feeRateSatVb
+            displayRate
         )
     }
 
@@ -283,42 +285,17 @@ struct SendView: View {
                                 }
                             }
                         case .onchain:
-                            HStack {
-                                Label(
-                                    String(localized: "label_on_chain_address", defaultValue: "Onchain Address"),
-                                    systemImage: "link"
-                                )
-                                .foregroundStyle(.orange)
-                                Spacer()
-                                if !appState.nodeService.channels.contains(where: \.isChannelReady) {
-                                    Button(
-                                        isSendMax
-                                            ? String(localized: "button_enter_amount", defaultValue: "Enter Amount")
-                                            : String(localized: "toggle_send_all", defaultValue: "Send All")
-                                    ) {
-                                        isSendMax.toggle()
-                                        amountSats = ""
-                                    }
-                                    .font(.subheadline)
-                                }
-                            }
-                            if isSendMax {
-                                Label(
-                                    String(
-                                        localized: "label_all_available_funds",
-                                        defaultValue: "All available funds"
-                                    ),
-                                    systemImage: "infinity"
-                                )
-                                .font(.headline)
-                            } else {
-                                TextField(
-                                    String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
-                                    text: $amountSats
-                                )
-                                .keyboardType(.decimalPad)
-                                .autocorrectionDisabled()
-                            }
+                            Label(
+                                String(localized: "label_on_chain_address", defaultValue: "Onchain Address"),
+                                systemImage: "link"
+                            )
+                            .foregroundStyle(.orange)
+                            TextField(
+                                String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
+                                text: $amountSats
+                            )
+                            .keyboardType(.decimalPad)
+                            .autocorrectionDisabled()
                             if let usd = displayUSD {
                                 HStack {
                                     Text(String(localized: "label_amount", defaultValue: "Amount"))
@@ -460,7 +437,7 @@ struct SendView: View {
         switch detectedType {
         case .onchain:
             requiresAuth = transactionAuth
-            reason = isSendMax ? "Confirm onchain withdrawal of all funds" : "Confirm onchain send"
+            reason = "Confirm onchain withdrawal of all funds"
         case .bolt11, .bolt12:
             requiresAuth = transactionAuth
             reason = "Confirm payment of \(displaySats) sats"
@@ -492,6 +469,7 @@ struct SendView: View {
                 let price: Double
                 if invoiceMsat > 0 {
                     price = appState.btcPrice
+                    try appState.ensureNoUnsettledSurplus(amountMsat: invoiceMsat)
                     paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
                     actualMsat = invoiceMsat
                 } else {
@@ -500,6 +478,7 @@ struct SendView: View {
                         throw untrustedPriceError()
                     }
                     actualMsat = converted
+                    try appState.ensureNoUnsettledSurplus(amountMsat: actualMsat)
                     paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
                 }
                 let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (
@@ -525,6 +504,7 @@ struct SendView: View {
                 }
                 let offer = try Offer.fromStr(offerStr: trimmed)
                 let msat = sats * 1000
+                try appState.ensureNoUnsettledSurplus(amountMsat: msat)
                 let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
                 let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
                 _ = try? appState.databaseService?.paymentRepo.recordPayment(
@@ -567,11 +547,7 @@ struct SendView: View {
                         throw error
                     }
                 } else {
-                    let txid = if isSendMax {
-                        try appState.nodeService.sendAllOnchain(address: trimmed)
-                    } else {
-                        try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
-                    }
+                    let txid = try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
                     _ = try? appState.databaseService?.paymentRepo.recordPayment(
                         paymentId: txid,
                         paymentType: "onchain",
@@ -598,7 +574,7 @@ struct SendView: View {
 
             success = true
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
         }
     }
 }

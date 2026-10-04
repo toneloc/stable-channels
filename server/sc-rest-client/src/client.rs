@@ -7,8 +7,8 @@ use js_sys;
 use bitcoin_hashes::hmac::{Hmac, HmacEngine};
 use bitcoin_hashes::{sha256, Hash, HashEngine};
 use ldk_server_grpc::api::{
-	Bolt11ClaimForHashRequest, Bolt11ClaimForHashResponse, Bolt11FailForHashRequest,
-	Bolt11FailForHashResponse, Bolt11ReceiveForHashRequest, Bolt11ReceiveForHashResponse,
+	Bolt11ClaimForIdRequest, Bolt11ClaimForIdResponse, Bolt11FailForIdRequest,
+	Bolt11FailForIdResponse, Bolt11ReceiveForHashRequest, Bolt11ReceiveForHashResponse,
 	Bolt11ReceiveRequest, Bolt11ReceiveResponse, Bolt11ReceiveVariableAmountViaJitChannelRequest,
 	Bolt11ReceiveVariableAmountViaJitChannelResponse, Bolt11ReceiveViaJitChannelRequest,
 	Bolt11ReceiveViaJitChannelResponse, Bolt11SendRequest, Bolt11SendResponse,
@@ -29,7 +29,7 @@ use ldk_server_grpc::api::{
 	UpdateChannelConfigResponse, VerifySignatureRequest, VerifySignatureResponse,
 };
 use ldk_server_grpc::endpoints::{
-	BOLT11_CLAIM_FOR_HASH_PATH, BOLT11_FAIL_FOR_HASH_PATH, BOLT11_RECEIVE_FOR_HASH_PATH,
+	BOLT11_CLAIM_FOR_ID_PATH, BOLT11_FAIL_FOR_ID_PATH, BOLT11_RECEIVE_FOR_HASH_PATH,
 	BOLT11_RECEIVE_PATH, BOLT11_RECEIVE_VARIABLE_AMOUNT_VIA_JIT_CHANNEL_PATH,
 	BOLT11_RECEIVE_VIA_JIT_CHANNEL_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
 	CLOSE_CHANNEL_PATH, CONNECT_PEER_PATH, DISCONNECT_PEER_PATH, EXPORT_PATHFINDING_SCORES_PATH,
@@ -48,6 +48,10 @@ use sc_protos::stable::{
 	LogRequest, LogResponse, AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
 	LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH,
 	LIST_STABLE_CHANNELS_PATH,
+};
+use sc_protos::revenue::{
+	GetRevenueRequest, GetRevenueResponse, RefundTradeFeeRequest, RefundTradeFeeResponse,
+	GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH,
 };
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
@@ -210,21 +214,21 @@ impl LspRestClient {
 		self.post_request(&request, &url).await
 	}
 
-	/// Manually claim a payment for a given payment hash with the corresponding preimage.
-	/// For API contract/usage, refer to docs for [`Bolt11ClaimForHashRequest`] and [`Bolt11ClaimForHashResponse`].
-	pub async fn bolt11_claim_for_hash(
-		&self, request: Bolt11ClaimForHashRequest,
-	) -> Result<Bolt11ClaimForHashResponse, LspRestError> {
-		let url = format!("https://{}/{BOLT11_CLAIM_FOR_HASH_PATH}", self.base_url);
+	/// Manually claim a claimable payment by its payment ID.
+	/// For API contract/usage, refer to docs for [`Bolt11ClaimForIdRequest`] and [`Bolt11ClaimForIdResponse`].
+	pub async fn bolt11_claim_for_id(
+		&self, request: Bolt11ClaimForIdRequest,
+	) -> Result<Bolt11ClaimForIdResponse, LspRestError> {
+		let url = format!("https://{}/{BOLT11_CLAIM_FOR_ID_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
-	/// Manually fail a payment for a given payment hash.
-	/// For API contract/usage, refer to docs for [`Bolt11FailForHashRequest`] and [`Bolt11FailForHashResponse`].
-	pub async fn bolt11_fail_for_hash(
-		&self, request: Bolt11FailForHashRequest,
-	) -> Result<Bolt11FailForHashResponse, LspRestError> {
-		let url = format!("https://{}/{BOLT11_FAIL_FOR_HASH_PATH}", self.base_url);
+	/// Manually fail a claimable payment by its payment ID.
+	/// For API contract/usage, refer to docs for [`Bolt11FailForIdRequest`] and [`Bolt11FailForIdResponse`].
+	pub async fn bolt11_fail_for_id(
+		&self, request: Bolt11FailForIdRequest,
+	) -> Result<Bolt11FailForIdResponse, LspRestError> {
+		let url = format!("https://{}/{BOLT11_FAIL_FOR_ID_PATH}", self.base_url);
 		self.post_request(&request, &url).await
 	}
 
@@ -517,6 +521,20 @@ impl LspRestClient {
 		self.post_request(&request, &url).await
 	}
 
+	/// Revenue summary and activity for a window, from the SC daemon's snapshot.
+	pub async fn get_revenue(&self, request: GetRevenueRequest) -> Result<GetRevenueResponse, LspRestError> {
+		let url = self.build_url(GET_REVENUE_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Sends a rejected trade's fee back to the user, once.
+	pub async fn refund_trade_fee(
+		&self, request: RefundTradeFeeRequest,
+	) -> Result<RefundTradeFeeResponse, LspRestError> {
+		let url = self.build_url(REFUND_TRADE_FEE_PATH);
+		self.post_request(&request, &url).await
+	}
+
 	/// Tail LDK Server's log file via the SC daemon.
 	pub async fn ldk_log(&self, request: LogRequest) -> Result<LogResponse, LspRestError> {
 		let url = self.build_url(LDK_LOG_PATH);
@@ -559,6 +577,10 @@ impl LspRestClient {
 				)
 			})?)
 		} else {
+			// An unknown route (daemon or nginx) answers with no body; carry the status, not an empty message.
+			if payload.is_empty() {
+				return Err(LspRestError::new(InternalError, format!("HTTP {}", status)));
+			}
 			let error_response = ErrorResponse::decode(&payload[..]).map_err(|e| {
 				LspRestError::new(
 					InternalError,

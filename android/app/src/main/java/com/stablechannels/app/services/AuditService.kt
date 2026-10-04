@@ -1,8 +1,8 @@
 package com.stablechannels.app.services
 
-import org.json.JSONObject
 import java.io.File
 import java.time.Instant
+import org.json.JSONObject
 
 object AuditService {
     private var logFile: File? = null
@@ -15,11 +15,12 @@ object AuditService {
     fun log(event: String, data: Map<String, Any?> = emptyMap()) {
         val file = logFile ?: return
         try {
-            val entry = JSONObject().apply {
-                put("ts", Instant.now().toString())
-                put("event", event)
-                put("data", JSONObject(data))
-            }
+            val entry =
+                JSONObject().apply {
+                    put("ts", Instant.now().toString())
+                    put("event", event)
+                    put("data", JSONObject(data))
+                }
             val line = entry.toString() + "\n"
             file.appendText(line)
         } catch (_: Exception) {

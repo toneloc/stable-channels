@@ -1,6 +1,7 @@
 package com.stablechannels.app.ui.settings
 
 import android.content.Context
+import androidx.biometric.BiometricManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -11,7 +12,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.biometric.BiometricManager
 
 @Composable
 fun AppAccessView() {
@@ -26,29 +26,26 @@ fun AppAccessView() {
     }
 
     val biometricManager = BiometricManager.from(context)
-    val biometricsAvailable = biometricManager.canAuthenticate(
-        BiometricManager.Authenticators.BIOMETRIC_STRONG or
+    val biometricsAvailable =
+        biometricManager.canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
                 BiometricManager.Authenticators.DEVICE_CREDENTIAL
-    ) == BiometricManager.BIOMETRIC_SUCCESS
+        ) == BiometricManager.BIOMETRIC_SUCCESS
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (!biometricsAvailable) {
             Surface(
                 shape = MaterialTheme.shapes.medium,
                 tonalElevation = 1.dp,
                 color = MaterialTheme.colorScheme.errorContainer,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = "Biometric enrollment is required to use these features. Please set up fingerprint, face, or device credentials in your device settings.",
+                    text =
+                        "Biometric enrollment is required to use these features. Please set up fingerprint, face, or device credentials in your device settings.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onErrorContainer,
-                    modifier = Modifier.padding(16.dp)
+                    modifier = Modifier.padding(16.dp),
                 )
             }
             Spacer(Modifier.height(20.dp))
@@ -58,23 +55,23 @@ fun AppAccessView() {
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier.padding(16.dp),
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "App Unlock",
                         style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = "Require authentication on app launch and resume",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Switch(
@@ -86,13 +83,14 @@ fun AppAccessView() {
                         }
                     },
                     enabled = biometricsAvailable,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Color(0xFF10B981),
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                    modifier = Modifier.height(24.dp)
+                    colors =
+                        SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF10B981),
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                    modifier = Modifier.height(24.dp),
                 )
             }
         }
@@ -103,23 +101,23 @@ fun AppAccessView() {
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Row(
                 modifier = Modifier.padding(16.dp),
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Payment Confirmation",
                         style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium
+                        fontWeight = FontWeight.Medium,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
                         text = "Require authentication before sends (Lightning and on-chain)",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Switch(
@@ -127,17 +125,21 @@ fun AppAccessView() {
                     onCheckedChange = { newValue ->
                         if (biometricsAvailable) {
                             paymentConfirmEnabled = newValue
-                            prefs.edit().putBoolean("payment_confirmation_enabled", newValue).apply()
+                            prefs
+                                .edit()
+                                .putBoolean("payment_confirmation_enabled", newValue)
+                                .apply()
                         }
                     },
                     enabled = biometricsAvailable,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Color(0xFF10B981),
-                        uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                    ),
-                    modifier = Modifier.height(24.dp)
+                    colors =
+                        SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Color(0xFF10B981),
+                            uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
+                        ),
+                    modifier = Modifier.height(24.dp),
                 )
             }
         }

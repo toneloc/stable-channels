@@ -15,11 +15,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.lifecycleScope
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.ui.ContentView
 import com.stablechannels.app.ui.theme.StableChannelsTheme
-import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -61,7 +61,7 @@ class MainActivity : FragmentActivity() {
             StableChannelsTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
+                    color = MaterialTheme.colorScheme.background,
                 ) {
                     if (isLocked) {
                         AuthLockOverlay()
@@ -143,7 +143,8 @@ class MainActivity : FragmentActivity() {
             isAuthenticating = true
             authError = null
             scope.launch {
-                val result = BiometricService.authenticate(this@MainActivity, "Unlock Stable Channels")
+                val result =
+                    BiometricService.authenticate(this@MainActivity, "Unlock Stable Channels")
                 if (result == BiometricService.AuthResult.SUCCESS) {
                     isLocked = false
                 } else {
@@ -159,34 +160,32 @@ class MainActivity : FragmentActivity() {
         }
 
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
+            modifier = Modifier.fillMaxSize().padding(32.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Center,
         ) {
             Text(
                 "Stable Channels",
-                style = MaterialTheme.typography.headlineMedium
+                style = MaterialTheme.typography.headlineMedium,
             )
             Spacer(Modifier.height(16.dp))
             Text(
                 "Authentication required",
                 style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             authError?.let {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     it,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
             Spacer(Modifier.height(24.dp))
             Button(
                 onClick = { performAuth() },
-                enabled = !isAuthenticating
+                enabled = !isAuthenticating,
             ) {
                 if (isAuthenticating) {
                     CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -199,8 +198,9 @@ class MainActivity : FragmentActivity() {
 
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
+            if (
+                ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                    PackageManager.PERMISSION_GRANTED
             ) {
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }

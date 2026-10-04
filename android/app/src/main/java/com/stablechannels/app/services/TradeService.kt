@@ -1,51 +1,67 @@
 package com.stablechannels.app.services
 
+import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.util.Constants
+import kotlin.math.max
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.CustomTlvRecord
 import org.lightningdevkit.ldknode.NodeException
-import kotlin.math.max
-import com.stablechannels.app.models.Bitcoin
 
 data class TradeResult(
     val paymentId: String,
     val newExpectedUSD: Double,
     val btcAmount: Double,
-    val tradeDbId: Long
+    val tradeDbId: Long,
 )
 
 class TradeService(
     private val nodeService: NodeService,
-    private val databaseService: DatabaseService
+    private val databaseService: DatabaseService,
 ) {
     private fun liveSnapshot(sc: StableChannel, price: Double): StabilizationSnapshot? {
-        val channel = nodeService.node?.listChannels()?.firstOrNull { it.userChannelId == sc.userChannelId && it.isChannelReady }
-            ?: return null
+        val channel =
+            nodeService.node?.listChannels()?.firstOrNull {
+                it.userChannelId == sc.userChannelId && it.isChannelReady
+            } ?: return null
         val capacity = (channel.outboundCapacityMsat / 1000u).toLong()
-        return StabilizationSnapshot(capacity + (channel.unspendablePunishmentReserve?.toLong() ?: 0L),
-            capacity, sc.backingSats, sc.expectedUSD.amount, price)
+        return StabilizationSnapshot(
+            capacity + (channel.unspendablePunishmentReserve?.toLong() ?: 0L),
+            capacity,
+            sc.backingSats,
+            sc.expectedUSD.amount,
+            price,
+        )
     }
 
-    fun maxSellCents(sc: StableChannel, price: Double): Long = liveSnapshot(sc, price)?.maxOrderCents() ?: 0L
+    fun maxSellCents(sc: StableChannel, price: Double): Long =
+        liveSnapshot(sc, price)?.maxOrderCents() ?: 0L
 
     fun executeBuy(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
-        price: Double
+        price: Double,
     ): TradeResult {
         if (!price.isFinite() || price <= 0)
             throw TradeValidationException("A fresh BTC/USD quote is required before trading.")
         if (!amountUSD.isFinite() || amountUSD <= 0)
             throw TradeValidationException(TradeFailure.INVALID_AMOUNT.userMessage())
         if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount))
-            throw TradeValidationException("That is more than your stabilized balance. Reduce the amount.")
+            throw TradeValidationException(
+                "That is more than your stabilized balance. Reduce the amount."
+            )
         val netAmount = amountUSD - feeUSD
         val newExpectedUSD = max(sc.expectedUSD.amount - amountUSD, 0.0)
         val btcAmount = netAmount / price
         return preparePersistAndSend(
-            sc, "buy", amountUSD, btcAmount, feeUSD, newExpectedUSD, price
+            sc,
+            "buy",
+            amountUSD,
+            btcAmount,
+            feeUSD,
+            newExpectedUSD,
+            price,
         )
     }
 
@@ -53,7 +69,7 @@ class TradeService(
         sc: StableChannel,
         amountUSD: Double,
         feeUSD: Double,
-        price: Double
+        price: Double,
     ): TradeResult {
         if (!price.isFinite() || price <= 0)
             throw TradeValidationException("A fresh BTC/USD quote is required before trading.")
@@ -63,7 +79,13 @@ class TradeService(
         val newExpectedUSD = sc.expectedUSD.amount + netAmount
         val btcAmount = netAmount / price
         return preparePersistAndSend(
-            sc, "sell", amountUSD, btcAmount, feeUSD, newExpectedUSD, price
+            sc,
+            "sell",
+            amountUSD,
+            btcAmount,
+            feeUSD,
+            newExpectedUSD,
+            price,
         )
     }
 
@@ -74,81 +96,107 @@ class TradeService(
         amountBtc: Double,
         feeUsd: Double,
         newExpectedUsd: Double,
-        price: Double
+        price: Double,
     ): TradeResult {
-        val snapshot = liveSnapshot(sc, price)
-            ?: throw TradeValidationException("The live channel balance is unavailable. Retry when the channel is ready.")
-        if (newExpectedUsd > sc.expectedUSD.amount && !snapshot.accepts(kotlin.math.floor(amountUsd * 100 + 1e-7).toLong()))
-            throw TradeValidationException(StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents()))
+        val snapshot =
+            liveSnapshot(sc, price)
+                ?: throw TradeValidationException(
+                    "The live channel balance is unavailable. Retry when the channel is ready."
+                )
+        if (
+            newExpectedUsd > sc.expectedUSD.amount &&
+                !snapshot.accepts(kotlin.math.floor(amountUsd * 100 + 1e-7).toLong())
+        )
+            throw TradeValidationException(
+                StabilizationPolicy.limitExceededMessage(snapshot.maxOrderCents())
+            )
         val liveSc = sc.copy(stableReceiverBTC = Bitcoin(snapshot.receiverSats))
         // Only one of prepare()'s refusals is an allocation problem. Reporting a malformed
         // channel or an unaffordable fee as "settle the stability adjustment" sends the user
         // somewhere that cannot help them (issue #272).
-        val prepared = when (
-            val preparation = TradeProtocol.prepareOrFailure(
-                sc = liveSc,
-                spendableSats = snapshot.spendableSats,
-                action = action,
-                amountUsd = amountUsd,
-                amountBtc = amountBtc,
-                feeUsd = feeUsd,
-                newExpectedUsd = newExpectedUsd,
-                quotePrice = price
-            )
-        ) {
-            is TradePreparation.Success -> preparation.trade
-            is TradePreparation.Failure ->
-                throw TradeValidationException(preparation.reason.userMessage())
-        }
+        val prepared =
+            when (
+                val preparation =
+                    TradeProtocol.prepareOrFailure(
+                        sc = liveSc,
+                        spendableSats = snapshot.spendableSats,
+                        action = action,
+                        amountUsd = amountUsd,
+                        amountBtc = amountBtc,
+                        feeUsd = feeUsd,
+                        newExpectedUsd = newExpectedUsd,
+                        quotePrice = price,
+                    )
+            ) {
+                is TradePreparation.Success -> preparation.trade
+                is TradePreparation.Failure ->
+                    throw TradeValidationException(preparation.reason.userMessage())
+            }
 
         // This row is the recovery authority. It must exist before the non-refundable fee send.
         val tradeDbId = databaseService.recordPreparedTrade(prepared)
-        val paymentId = try {
-            val signature = nodeService.signMessage(
-                prepared.requestPayload.toByteArray(Charsets.UTF_8)
-            )
-            val envelope = JSONObject().apply {
-                put("payload", prepared.requestPayload)
-                put("signature", signature)
-            }.toString().toByteArray(Charsets.UTF_8)
-            nodeService.sendKeysendWithTLV(
-                prepared.feeMsat,
-                sc.counterparty,
-                listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelope))
-            )
-        } catch (error: Exception) {
-            // LDK can fail to persist its payment row after starting the keysend. Leave
-            // our prepared row recoverable and keep the next trade blocked until resolved.
-            if (error is NodeException.PersistenceFailed) {
-                AuditService.log("TRADE_SEND_OUTCOME_UNKNOWN", mapOf("trade_id" to prepared.tradeId))
-                throw TradeValidationException("The trade may have been sent, but its status could not be saved. Keep the wallet connected and check History. Do not place the order again.")
+        val paymentId =
+            try {
+                val signature =
+                    nodeService.signMessage(prepared.requestPayload.toByteArray(Charsets.UTF_8))
+                val envelope =
+                    JSONObject()
+                        .apply {
+                            put("payload", prepared.requestPayload)
+                            put("signature", signature)
+                        }
+                        .toString()
+                        .toByteArray(Charsets.UTF_8)
+                nodeService.sendKeysendWithTLV(
+                    prepared.feeMsat,
+                    sc.counterparty,
+                    listOf(CustomTlvRecord(Constants.STABLE_CHANNEL_TLV_TYPE.toULong(), envelope)),
+                )
+            } catch (error: Exception) {
+                // LDK can fail to persist its payment row after starting the keysend. Leave
+                // our prepared row recoverable and keep the next trade blocked until resolved.
+                if (error is NodeException.PersistenceFailed) {
+                    AuditService.log(
+                        "TRADE_SEND_OUTCOME_UNKNOWN",
+                        mapOf("trade_id" to prepared.tradeId),
+                    )
+                    throw TradeValidationException(
+                        "The trade may have been sent, but its status could not be saved. Keep the wallet connected and check History. Do not place the order again."
+                    )
+                }
+                databaseService.markTradeSendFailed(tradeDbId)
+                throw error
             }
-            databaseService.markTradeSendFailed(tradeDbId)
-            throw error
-        }
 
         // The payment has left the node at this point. A local bookkeeping failure must not
         // report a send failure (or invite the user to pay the non-refundable fee twice).
-        val attached = try {
-            databaseService.attachTradePaymentId(tradeDbId, paymentId)
-        } catch (error: Exception) {
-            false
-        }
+        val attached =
+            try {
+                databaseService.attachTradePaymentId(tradeDbId, paymentId)
+            } catch (error: Exception) {
+                false
+            }
         if (!attached) {
-            AuditService.log("TRADE_PAYMENT_ID_PERSIST_FAILED", mapOf(
-                "trade_db_id" to tradeDbId,
-                "trade_id" to prepared.tradeId,
-                "payment_id" to paymentId
-            ))
+            AuditService.log(
+                "TRADE_PAYMENT_ID_PERSIST_FAILED",
+                mapOf(
+                    "trade_db_id" to tradeDbId,
+                    "trade_id" to prepared.tradeId,
+                    "payment_id" to paymentId,
+                ),
+            )
         }
-        AuditService.log("TRADE_MESSAGE_SENT", mapOf(
-            "trade_id" to prepared.tradeId,
-            "request_hash" to prepared.requestHash,
-            "payment_id" to paymentId,
-            "fee_msat" to prepared.feeMsat,
-            "new_expected_usd" to prepared.newExpectedUsd,
-            "new_backing_sats" to prepared.newBackingSats
-        ))
+        AuditService.log(
+            "TRADE_MESSAGE_SENT",
+            mapOf(
+                "trade_id" to prepared.tradeId,
+                "request_hash" to prepared.requestHash,
+                "payment_id" to paymentId,
+                "fee_msat" to prepared.feeMsat,
+                "new_expected_usd" to prepared.newExpectedUsd,
+                "new_backing_sats" to prepared.newBackingSats,
+            ),
+        )
         return TradeResult(paymentId, prepared.newExpectedUsd, amountBtc, tradeDbId)
     }
 }

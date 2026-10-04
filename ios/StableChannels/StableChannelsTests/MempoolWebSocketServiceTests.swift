@@ -962,4 +962,83 @@ final class MempoolWebSocketServiceTests: XCTestCase {
 
         XCTAssertEqual(service.reconnectAttempts, 0)
     }
+
+    // MARK: - ProcessedTxStore Tests
+
+    @MainActor
+    func testProcessedTxStoreRecordsAndEvicts() {
+        let store = ProcessedTxStore(ttl: 60, maxEntries: 10)
+        for idx in 0..<15 {
+            store.recordProcessedTx("tx_\(idx)")
+        }
+        XCTAssertTrue(store.count <= 10)
+        XCTAssertTrue(store.isRecentlyProcessed("tx_14"))
+        XCTAssertFalse(store.isRecentlyProcessed("tx_0"))
+    }
+
+    // MARK: - Fee Decoding Tests
+
+    @MainActor
+    func testFeeUpdateWithFloatingPointRatesDecodesWithExactPrecision() {
+        let exp = expectation(description: "Fees updated with floating point payload")
+        var receivedFees: MempoolWSFees?
+
+        service.onFeesUpdated = { fees in
+            receivedFees = fees
+            exp.fulfill()
+        }
+
+        let json = """
+        {
+          "fees": {
+            "fastestFee": 1.5,
+            "halfHourFee": 0.913,
+            "hourFee": 0.466,
+            "economyFee": 0.2,
+            "minimumFee": 0.1
+          }
+        }
+        """
+
+        service.handleMessage(json)
+        wait(for: [exp], timeout: 1.0)
+
+        XCTAssertEqual(receivedFees?.fastestFee, 1.5)
+        XCTAssertEqual(receivedFees?.halfHourFee, 0.913)
+        XCTAssertEqual(receivedFees?.hourFee, 0.466)
+        XCTAssertEqual(receivedFees?.economyFee, 0.2)
+        XCTAssertEqual(receivedFees?.minimumFee, 0.1)
+    }
+
+    @MainActor
+    func testFeeUpdateWithIntegerRatesDecodes() {
+        let exp = expectation(description: "Fees updated with integer payload")
+        var receivedFees: MempoolWSFees?
+
+        service.onFeesUpdated = { fees in
+            receivedFees = fees
+            exp.fulfill()
+        }
+
+        let json = """
+        {
+          "fees": {
+            "fastestFee": 25,
+            "halfHourFee": 15,
+            "hourFee": 8,
+            "economyFee": 4,
+            "minimumFee": 1
+          }
+        }
+        """
+
+        service.handleMessage(json)
+        wait(for: [exp], timeout: 1.0)
+
+        XCTAssertEqual(receivedFees?.fastestFee, 25)
+        XCTAssertEqual(receivedFees?.halfHourFee, 15)
+        XCTAssertEqual(receivedFees?.hourFee, 8)
+        XCTAssertEqual(receivedFees?.economyFee, 4)
+        XCTAssertEqual(receivedFees?.minimumFee, 1)
+    }
 }

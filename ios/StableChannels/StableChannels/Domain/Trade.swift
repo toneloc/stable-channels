@@ -172,3 +172,20 @@ struct OnchainTxRecord: Codable, Identifiable {
         Date(timeIntervalSince1970: TimeInterval(createdAt))
     }
 }
+
+// MARK: - Trade Policies
+
+/// Pure business rules for USD -> BTC conversion limits.
+/// Enforces two-decimal down-rounding to eliminate floating-point overshoot above available balance.
+enum BuyAmountPolicy {
+    static func maximumUsd(_ balanceUsd: Double) -> Double {
+        guard balanceUsd.isFinite, balanceUsd > 0.0 else { return 0.0 }
+        let cents = floor(balanceUsd * 100.0 + 1e-9)
+        return cents / 100.0
+    }
+
+    static func accepts(amountUsd: Double, balanceUsd: Double) -> Bool {
+        guard amountUsd.isFinite, amountUsd > 0.0 else { return false }
+        return amountUsd <= maximumUsd(balanceUsd)
+    }
+}

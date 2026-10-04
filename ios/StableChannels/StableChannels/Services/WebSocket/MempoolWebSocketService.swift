@@ -57,6 +57,29 @@ struct MempoolWSMessage: Decodable {
     // Bulk tracking payloads
     let multiAddressTransactions: [String: MempoolWSAddressTransactions]?
     let trackedTxs: [String: MempoolWSTxTrackingInfo]?
+    let fees: MempoolWSFees?
+
+    init(
+        block: MempoolWSBlock? = nil,
+        blocks: [MempoolWSBlock]? = nil,
+        addressTransactions: [MempoolWSTransaction]? = nil,
+        blockTransactions: [MempoolWSTransaction]? = nil,
+        address: String? = nil,
+        txid: String? = nil,
+        multiAddressTransactions: [String: MempoolWSAddressTransactions]? = nil,
+        trackedTxs: [String: MempoolWSTxTrackingInfo]? = nil,
+        fees: MempoolWSFees? = nil
+    ) {
+        self.block = block
+        self.blocks = blocks
+        self.addressTransactions = addressTransactions
+        self.blockTransactions = blockTransactions
+        self.address = address
+        self.txid = txid
+        self.multiAddressTransactions = multiAddressTransactions
+        self.trackedTxs = trackedTxs
+        self.fees = fees
+    }
 
     enum CodingKeys: String, CodingKey {
         case block
@@ -65,9 +88,9 @@ struct MempoolWSMessage: Decodable {
         case blockTransactions = "block-transactions"
         case address
         case txid
-
         case multiAddressTransactions = "multi-address-transactions"
         case trackedTxs = "tracked-txs"
+        case fees
     }
 }
 
@@ -113,6 +136,10 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     var onTransactionDetected: ((WebSocketEvent) -> Void)?
     /// Fired when a new block header is mined.
     var onBlockHeader: ((MempoolWSBlock) -> Void)?
+    /// Fired when real-time recommended fees are updated.
+    var onFeesUpdated: ((MempoolWSFees) -> Void)?
+    /// Latest recommended fee rates received from WebSocket.
+    private(set) var latestFees: MempoolWSFees?
 
     // MARK: - Init
 
@@ -262,12 +289,12 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
 
     // MARK: - Subscription
 
-    /// Subscribe to block tip announcements and mempool-block projections.
+    /// Subscribe to block tip announcements, mempool-block projections, and live stats (including fees).
     private func subscribeToBlocks() {
         let payload = """
-        { "action": "want", "data": ["blocks", "mempool-blocks"] }
+        { "action": "want", "data": ["blocks", "mempool-blocks", "stats"] }
         """
-        logger.info("[WebSocket] Requesting block tip + mempool-blocks stream")
+        logger.info("[WebSocket] Requesting block tip + mempool-blocks + stats stream")
         send(payload)
     }
 
@@ -444,6 +471,25 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                         onTransactionDetected?(.trackedOutspend(trackedTxid: trackedTxid, spendingTxid: spendingTxid))
                     }
                 }
+            }
+        }
+
+        // 5. Handle recommended fee updates
+        if let fees = msg.fees {
+            let previousFees = self.latestFees
+            self.latestFees = fees
+            if fees != previousFees {
+                logger
+                    .info(
+                        "Real-time mempool fees received via WebSocket: fastest=\(fees.fastestFee) halfHour=\(fees.halfHourFee) hour=\(fees.hourFee) min=\(fees.minimumFee)"
+                    )
+                AuditService.log("WEBSOCKET_FEES_UPDATED", data: [
+                    "fastest": "\(fees.fastestFee)",
+                    "half_hour": "\(fees.halfHourFee)",
+                    "hour": "\(fees.hourFee)",
+                    "min": "\(fees.minimumFee)"
+                ])
+                onFeesUpdated?(fees)
             }
         }
     }

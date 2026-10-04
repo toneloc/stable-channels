@@ -26,7 +26,7 @@ class TradeProtocolTest {
         val payload = "{\"type\":\"TRADE_V1\",\"user_channel_id\":\"7\",\"expected_usd\":25.0}"
         assertEquals(
             "c07dcdff3aae2fc7ebd4fb19a7f1cd60b8e61c94a89acd35c5c600935d671602",
-            TradeProtocol.requestHash(payload.toByteArray())
+            TradeProtocol.requestHash(payload.toByteArray()),
         )
     }
 
@@ -42,25 +42,27 @@ class TradeProtocolTest {
 
     @Test
     fun preparedTradeContainsCorrelationQuoteTimestampAndStoredAllocation() {
-        val sc = StableChannel(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUSD = USD(50.0),
-            stableReceiverBTC = Bitcoin(100_000),
-            backingSats = 55_000
-        )
-        val prepared = TradeProtocol.prepare(
-            spendableSats = 100_000,
-            sc = sc,
-            action = "sell",
-            amountUsd = 10.0,
-            amountBtc = 0.000099,
-            feeUsd = 0.1,
-            newExpectedUsd = 59.9,
-            quotePrice = 100_000.0,
-            now = 1_786_310_000L,
-            tradeId = identifier
-        )
+        val sc =
+            StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(50.0),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 55_000,
+            )
+        val prepared =
+            TradeProtocol.prepare(
+                spendableSats = 100_000,
+                sc = sc,
+                action = "sell",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 59.9,
+                quotePrice = 100_000.0,
+                now = 1_786_310_000L,
+                tradeId = identifier,
+            )
         assertNotNull(prepared)
         prepared!!
         val payload = JSONObject(prepared.requestPayload)
@@ -77,24 +79,26 @@ class TradeProtocolTest {
 
     @Test
     fun flooredBuyMaximumStillExitsFractionalCentBalance() {
-        val sc = StableChannel(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUSD = USD(81.026),
-            stableReceiverBTC = Bitcoin(100_000),
-            backingSats = 81_026
-        )
+        val sc =
+            StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(81.026),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 81_026,
+            )
         val amount = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
-        val prepared = TradeProtocol.prepare(
-            sc = sc,
-            spendableSats = 100_000,
-            action = "buy",
-            amountUsd = amount,
-            amountBtc = (amount - amount * 0.01) / 100_000.0,
-            feeUsd = amount * 0.01,
-            newExpectedUsd = sc.expectedUSD.amount - amount,
-            quotePrice = 100_000.0
-        )
+        val prepared =
+            TradeProtocol.prepare(
+                sc = sc,
+                spendableSats = 100_000,
+                action = "buy",
+                amountUsd = amount,
+                amountBtc = (amount - amount * 0.01) / 100_000.0,
+                feeUsd = amount * 0.01,
+                newExpectedUsd = sc.expectedUSD.amount - amount,
+                quotePrice = 100_000.0,
+            )
         assertNotNull(prepared)
         assertEquals(0.0, prepared!!.newExpectedUsd, 0.0)
         assertEquals(0L, prepared.newBackingSats)
@@ -102,69 +106,92 @@ class TradeProtocolTest {
 
     @Test
     fun flooredBuyMaximumDoesNotBypassFullExitDriftCheck() {
-        val sc = StableChannel(
-            channelId = identifier,
-            userChannelId = "7",
-            expectedUSD = USD(81.026),
-            stableReceiverBTC = Bitcoin(100_000),
-            backingSats = 90_000
-        )
+        val sc =
+            StableChannel(
+                channelId = identifier,
+                userChannelId = "7",
+                expectedUSD = USD(81.026),
+                stableReceiverBTC = Bitcoin(100_000),
+                backingSats = 90_000,
+            )
         val amount = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
-        assertNull(TradeProtocol.prepare(
-            sc = sc,
-            spendableSats = 100_000,
-            action = "buy",
-            amountUsd = amount,
-            amountBtc = (amount - amount * 0.01) / 100_000.0,
-            feeUsd = amount * 0.01,
-            newExpectedUsd = sc.expectedUSD.amount - amount,
-            quotePrice = 100_000.0
-        ))
+        assertNull(
+            TradeProtocol.prepare(
+                sc = sc,
+                spendableSats = 100_000,
+                action = "buy",
+                amountUsd = amount,
+                amountBtc = (amount - amount * 0.01) / 100_000.0,
+                feeUsd = amount * 0.01,
+                newExpectedUsd = sc.expectedUSD.amount - amount,
+                quotePrice = 100_000.0,
+            )
+        )
     }
 
     @Test
     fun signedControlRequiresCompleteCanonicalCorrelation() {
-        val payload = JSONObject().apply {
-            put("type", "SYNC_V1")
-            put("channel_id", identifier)
-            put("user_channel_id", "7")
-            put("expected_usd", 25.0)
-            put("backing_sats", 31_250)
-            put("sync_version", 4)
-            put("trade_id", identifier)
-            put("trade_payment_id", identifier)
-            put("request_hash", identifier)
-        }.toString()
-        val envelope = JSONObject().apply {
-            put("payload", payload)
-            put("signature", "valid")
-        }.toString().toByteArray()
-        val parsed = TradeProtocol.parseSignedControl(envelope, "peer") { bytes, signature, peer ->
-            bytes.contentEquals(payload.toByteArray()) && signature == "valid" && peer == "peer"
-        }
+        val payload =
+            JSONObject()
+                .apply {
+                    put("type", "SYNC_V1")
+                    put("channel_id", identifier)
+                    put("user_channel_id", "7")
+                    put("expected_usd", 25.0)
+                    put("backing_sats", 31_250)
+                    put("sync_version", 4)
+                    put("trade_id", identifier)
+                    put("trade_payment_id", identifier)
+                    put("request_hash", identifier)
+                }
+                .toString()
+        val envelope =
+            JSONObject()
+                .apply {
+                    put("payload", payload)
+                    put("signature", "valid")
+                }
+                .toString()
+                .toByteArray()
+        val parsed =
+            TradeProtocol.parseSignedControl(envelope, "peer") { bytes, signature, peer ->
+                bytes.contentEquals(payload.toByteArray()) && signature == "valid" && peer == "peer"
+            }
         assertTrue(parsed is TradeControlMessage.Sync)
         assertNotNull((parsed as TradeControlMessage.Sync).correlation)
 
         val partial = JSONObject(payload).apply { remove("request_hash") }.toString()
-        val partialEnvelope = JSONObject().apply {
-            put("payload", partial)
-            put("signature", "valid")
-        }.toString().toByteArray()
+        val partialEnvelope =
+            JSONObject()
+                .apply {
+                    put("payload", partial)
+                    put("signature", "valid")
+                }
+                .toString()
+                .toByteArray()
         assertNull(TradeProtocol.parseSignedControl(partialEnvelope, "peer") { _, _, _ -> true })
         assertNull(TradeProtocol.parseSignedControl(envelope, "peer") { _, _, _ -> false })
 
         val fractionalVersion = JSONObject(payload).apply { put("sync_version", 1.5) }.toString()
-        val fractionalEnvelope = JSONObject().apply {
-            put("payload", fractionalVersion)
-            put("signature", "valid")
-        }.toString().toByteArray()
+        val fractionalEnvelope =
+            JSONObject()
+                .apply {
+                    put("payload", fractionalVersion)
+                    put("signature", "valid")
+                }
+                .toString()
+                .toByteArray()
         assertNull(TradeProtocol.parseSignedControl(fractionalEnvelope, "peer") { _, _, _ -> true })
 
         val booleanExpected = JSONObject(payload).apply { put("expected_usd", true) }.toString()
-        val booleanEnvelope = JSONObject().apply {
-            put("payload", booleanExpected)
-            put("signature", "valid")
-        }.toString().toByteArray()
+        val booleanEnvelope =
+            JSONObject()
+                .apply {
+                    put("payload", booleanExpected)
+                    put("signature", "valid")
+                }
+                .toString()
+                .toByteArray()
         assertNull(TradeProtocol.parseSignedControl(booleanEnvelope, "peer") { _, _, _ -> true })
     }
 }

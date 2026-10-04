@@ -1,24 +1,26 @@
-use eframe::egui;
+use dioxus::prelude::*;
 
-use crate::app::LspServerApp;
-use crate::state::LogsTab;
+use crate::state::{AppCtx, LogsTab};
+use crate::ui::widgets::{Gate, SegBtn};
 
-pub fn render(ui: &mut egui::Ui, app: &mut LspServerApp) {
-	ui.horizontal(|ui| {
-		if ui.selectable_label(app.state.logs_tab == LogsTab::Audit, "Audit").clicked() {
-			app.state.logs_tab = LogsTab::Audit;
+#[component]
+pub fn Logs() -> Element {
+	let ctx = use_context::<AppCtx>();
+	if !ctx.is_connected() {
+		return rsx! { Gate {} };
+	}
+	let active = ctx.nav.read().logs_tab;
+	let mut nav = ctx.nav;
+	rsx! {
+		div { class: "seg", style: "align-self: flex-start;",
+			SegBtn { active: active == LogsTab::Audit, onclick: move |_| nav.write().logs_tab = LogsTab::Audit, "Audit" }
+			SegBtn { active: active == LogsTab::ChannelLedger, onclick: move |_| nav.write().logs_tab = LogsTab::ChannelLedger, "Channel History" }
+			SegBtn { active: active == LogsTab::Ldk, onclick: move |_| nav.write().logs_tab = LogsTab::Ldk, "LDK server" }
 		}
-		if ui.selectable_label(app.state.logs_tab == LogsTab::ChannelLedger, "Channel Ledger").clicked() {
-			app.state.logs_tab = LogsTab::ChannelLedger;
+		match active {
+			LogsTab::Audit => rsx! { crate::ui::audit_log::AuditLog {} },
+			LogsTab::ChannelLedger => rsx! { crate::ui::channel_ledger::ChannelLedger {} },
+			LogsTab::Ldk => rsx! { crate::ui::ldk_log::LdkLog {} },
 		}
-		if ui.selectable_label(app.state.logs_tab == LogsTab::Ldk, "LDK server").clicked() {
-			app.state.logs_tab = LogsTab::Ldk;
-		}
-	});
-	ui.separator();
-	match app.state.logs_tab {
-		LogsTab::Audit => crate::ui::audit_log::render(ui, app),
-		LogsTab::ChannelLedger => crate::ui::channel_ledger::render(ui, app),
-		LogsTab::Ldk => crate::ui::ldk_log::render(ui, app),
 	}
 }

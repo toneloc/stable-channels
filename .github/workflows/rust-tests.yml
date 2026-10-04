@@ -1,4 +1,4 @@
-name: Rust Tests
+name: "Core: Rust Tests"
 
 on:
   pull_request:
@@ -17,23 +17,43 @@ on:
       - "server/**"
       - ".github/workflows/rust-tests.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: rust-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
+    name: Rust Workspace Tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      CARGO_PROFILE_TEST_DEBUG: 1
+      RUSTFLAGS: "-C link-arg=-Wl,--no-keep-memory"
+      CARGO_INCREMENTAL: 0
+      CARGO_NET_RETRY: 10
+      CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Run affected Rust tests
-        run: cargo test -p stable-channels -p stable-channels-lsp --locked
+      # The GUI's native build links WebKitGTK; the web build needs the wasm target.
+      - name: Install GUI system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev pkg-config
+          rustup target add wasm32-unknown-unknown
 
-      - name: Build affected Rust packages
-        run: cargo build -p stable-channels -p stable-channels-lsp --locked
+      - name: Run Rust tests
+        run: cargo test -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+
+      - name: Build Rust packages
+        run: cargo build -p stable-channels -p stable-channels-lsp -p sc-protos -p sc-rest-client -p lsp-server-gui --locked
+
+      - name: Check the GUI web build
+        run: cargo check -p lsp-server-gui --locked --target wasm32-unknown-unknown --no-default-features --features web

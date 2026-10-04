@@ -2,16 +2,22 @@
 # pins. Trigger manually or by pushing an `umbrel-v*` tag; images are tagged
 # with the short commit SHA (what umbrel/stable-channels-lsp/docker-compose.yml
 # references) plus `latest`.
-name: umbrel-images
+name: "Server: Umbrel Images"
 
 on:
   workflow_dispatch:
   push:
     tags: ["umbrel-v*"]
 
+concurrency:
+  group: umbrel-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
@@ -25,17 +31,17 @@ jobs:
           - name: sc-lsp-gui
             dockerfile: umbrel/docker/Dockerfile.lsp-gui
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           file: ${{ matrix.dockerfile }}

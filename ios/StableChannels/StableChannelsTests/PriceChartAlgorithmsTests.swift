@@ -15,51 +15,27 @@ final class PriceChartAlgorithmsTests: XCTestCase {
             makeRecord(500, 54000)
         ]
 
-        let d50 = Date(timeIntervalSince1970: 50)
-        let d100 = Date(timeIntervalSince1970: 100)
-        let d150 = Date(timeIntervalSince1970: 150)
-        let d300 = Date(timeIntervalSince1970: 300)
-        let d450 = Date(timeIntervalSince1970: 450)
-        let d500 = Date(timeIntervalSince1970: 500)
-        let d550 = Date(timeIntervalSince1970: 550)
-
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d50), 0)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d100), 0)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d150), 1)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d300), 2)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d450), 4)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d500), 4)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d550), 5)
-        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: [], cutoff: d100), 0)
+        func d(_ ts: TimeInterval) -> Date { Date(timeIntervalSince1970: ts) }
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(50)), 0)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(100)), 0)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(150)), 1)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(300)), 2)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(450)), 4)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(500)), 4)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: records, cutoff: d(550)), 5)
+        XCTAssertEqual(PriceChartAlgorithms.lowerBound(in: [], cutoff: d(100)), 0)
     }
 
     func testNearestRecord() {
-        let records = [
-            makeRecord(100, 50000),
-            makeRecord(200, 51000),
-            makeRecord(300, 52000)
-        ]
-
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 50))?.timestamp,
-            100
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 140))?.timestamp,
-            100
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 160))?.timestamp,
-            200
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 250))?.timestamp,
-            200
-        )
-        XCTAssertEqual(
-            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: 350))?.timestamp,
-            300
-        )
+        let records = [makeRecord(100, 50000), makeRecord(200, 51000), makeRecord(300, 52000)]
+        func near(_ ts: TimeInterval) -> Int64? {
+            PriceChartAlgorithms.nearestRecord(in: records, targetDate: Date(timeIntervalSince1970: ts))?.timestamp
+        }
+        XCTAssertEqual(near(50), 100)
+        XCTAssertEqual(near(140), 100)
+        XCTAssertEqual(near(160), 200)
+        XCTAssertEqual(near(250), 200)
+        XCTAssertEqual(near(350), 300)
         XCTAssertNil(PriceChartAlgorithms.nearestRecord(in: [], targetDate: Date(timeIntervalSince1970: 100)))
     }
 
@@ -95,15 +71,35 @@ final class PriceChartAlgorithmsTests: XCTestCase {
             makeRecord(Int64(i * 100), 50000.0 + Double(i * 100))
         }
 
-        // targetCount >= records.count returns original
+        // Empty collection
+        XCTAssertTrue(PriceChartAlgorithms.lttbDownsample([PriceRecord](), targetCount: 10).isEmpty)
+
+        // Single element collection
+        let single = makeRecord(100, 50000)
+        let singleResult = PriceChartAlgorithms.lttbDownsample([single], targetCount: 10)
+        XCTAssertEqual(singleResult.count, 1)
+        XCTAssertEqual(singleResult.first?.timestamp, single.timestamp)
+
+        // targetCount <= 0 returns empty
+        XCTAssertTrue(PriceChartAlgorithms.lttbDownsample(records, targetCount: 0).isEmpty)
+        XCTAssertTrue(PriceChartAlgorithms.lttbDownsample(records, targetCount: -5).isEmpty)
+
+        // targetCount == 1 returns first element
+        let onePoint = PriceChartAlgorithms.lttbDownsample(records, targetCount: 1)
+        XCTAssertEqual(onePoint.count, 1)
+        XCTAssertEqual(onePoint.first?.timestamp, records.first?.timestamp)
+
+        // targetCount == 2 returns first and last endpoints
+        let twoPoints = PriceChartAlgorithms.lttbDownsample(records, targetCount: 2)
+        XCTAssertEqual(twoPoints.count, 2)
+        XCTAssertEqual(twoPoints.first?.timestamp, records.first?.timestamp)
+        XCTAssertEqual(twoPoints.last?.timestamp, records.last?.timestamp)
+
+        // targetCount >= records.count returns original records
         let sameCount = PriceChartAlgorithms.lttbDownsample(records, targetCount: 10)
         XCTAssertEqual(sameCount.count, 10)
-        let largerCount = PriceChartAlgorithms.lttbDownsample(records, targetCount: 20)
+        let largerCount = PriceChartAlgorithms.lttbDownsample(records, targetCount: 50)
         XCTAssertEqual(largerCount.count, 10)
-
-        // targetCount <= 2 returns original records per LTTB boundary guard
-        let twoPoints = PriceChartAlgorithms.lttbDownsample(records, targetCount: 2)
-        XCTAssertEqual(twoPoints.count, records.count)
 
         // Preserves local valley (drop)
         var valleyRecords: [PriceRecord] = []
@@ -122,5 +118,115 @@ final class PriceChartAlgorithmsTests: XCTestCase {
         for i in 0..<(monotonicSampled.count - 1) {
             XCTAssertLessThan(monotonicSampled[i].timestamp, monotonicSampled[i + 1].timestamp)
         }
+    }
+
+    func testLttbDownsampleZeroCopySlice() {
+        var allRecords: [PriceRecord] = []
+        for i in 0..<100 {
+            let price: Double = (i == 40) ? 99999.0 : Double(50000 + i * 10)
+            allRecords.append(makeRecord(Int64(i * 100), price))
+        }
+
+        // Subslice starting at offset 20 (non-zero startIndex)
+        let slice = allRecords[20..<80]
+        XCTAssertEqual(slice.startIndex, 20)
+        XCTAssertEqual(slice.count, 60)
+
+        let targetCount = 15
+        let sampled = PriceChartAlgorithms.lttbDownsample(slice, targetCount: targetCount)
+        XCTAssertEqual(sampled.count, targetCount)
+        XCTAssertEqual(sampled.first?.timestamp, slice.first?.timestamp)
+        XCTAssertEqual(sampled.last?.timestamp, slice.last?.timestamp)
+        XCTAssertTrue(
+            sampled.contains { $0.price == 99999.0 },
+            "Must preserve peak even from non-zero startIndex slice"
+        )
+    }
+
+    func testDailyDateParsing() {
+        // Epoch 0: 1970-01-01
+        XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("1970-01-01"), 0)
+        // Valid leap day: 2024-02-29
+        XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2024-02-29"), 1709164800)
+        // Valid century leap day (divisible by 400): 2000-02-29
+        XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2000-02-29"), 951782400)
+        // Target reference date: 2026-09-21
+        XCTAssertEqual(PriceHistoryService.parseDailyDateToTimestamp("2026-09-21"), 1789948800)
+        // Valid 30-day month end: 2026-04-30
+        XCTAssertNotNil(PriceHistoryService.parseDailyDateToTimestamp("2026-04-30"))
+
+        let invalidDates = [
+            "2026-02-29", "2026-02-30", "2026-02-31", "1900-02-29",
+            "2026-04-31", "2026-06-31", "2026-09-31", "2026-11-31",
+            "2026-00-15", "2026-13-15", "2026-05-00", "2026-05-32",
+            "2026-99-99", "invalid-date", "2026-4-5", "2026-04-05T00:00:00Z"
+        ]
+        for invalid in invalidDates {
+            XCTAssertNil(PriceHistoryService.parseDailyDateToTimestamp(invalid), "Expected nil for \(invalid)")
+        }
+    }
+
+    func testPriceHistoryServiceInvalidateCacheAndEmptyState() async {
+        let service = PriceHistoryService(databaseService: nil)
+        let empty = await service.fetchPriceHistory(for: .day)
+        XCTAssertTrue(empty.isEmpty)
+
+        await service.invalidateCache()
+        let reloaded = await service.fetchPriceHistory(for: .day, force: true)
+        XCTAssertTrue(reloaded.isEmpty)
+    }
+
+    func testPercentageChange() throws {
+        // Gain: 50,000 to 55,000 (+10%)
+        let gain = PriceChartAlgorithms.percentageChange(first: 50_000, current: 55_000)
+        XCTAssertNotNil(gain)
+        XCTAssertEqual(try XCTUnwrap(gain), 10.0, accuracy: 0.0001)
+
+        // Loss: 50,000 to 45,000 (-10%)
+        let loss = PriceChartAlgorithms.percentageChange(first: 50_000, current: 45_000)
+        XCTAssertNotNil(loss)
+        XCTAssertEqual(try XCTUnwrap(loss), -10.0, accuracy: 0.0001)
+
+        // Flat: 50,000 to 50,000 (0%)
+        let flat = PriceChartAlgorithms.percentageChange(first: 50_000, current: 50_000)
+        XCTAssertNotNil(flat)
+        XCTAssertEqual(try XCTUnwrap(flat), 0.0, accuracy: 0.0001)
+
+        // Edge case: first price <= 0 or non-finite
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: 0, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: -100, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: .nan, current: 50_000))
+        XCTAssertNil(PriceChartAlgorithms.percentageChange(first: 50_000, current: .infinity))
+    }
+
+    func testChartPeriodPropertiesAndPersistence() {
+        // Verify all periods have non-empty raw values and valid day spans
+        for period in ChartPeriod.allCases {
+            XCTAssertFalse(period.rawValue.isEmpty)
+            XCTAssertGreaterThan(period.days, 0)
+            XCTAssertFalse(period.label.isEmpty)
+        }
+
+        // Test 5Y (5 years) specifically
+        let fiveYear = ChartPeriod.fiveYear
+        XCTAssertEqual(fiveYear.rawValue, "5Y")
+        XCTAssertEqual(fiveYear.days, 1825)
+        XCTAssertFalse(fiveYear.usesHourly)
+        XCTAssertFalse(fiveYear.label.isEmpty)
+
+        // Test UserDefaults persistence round-trip (as used by @AppStorage)
+        let testKey = "test_selected_price_chart_period"
+        UserDefaults.standard.set(fiveYear.rawValue, forKey: testKey)
+        let storedRaw = UserDefaults.standard.string(forKey: testKey)
+        XCTAssertEqual(storedRaw, "5Y")
+        let restored = storedRaw.flatMap(ChartPeriod.init(rawValue:))
+        XCTAssertEqual(restored, .fiveYear)
+
+        // Verify fallback for unrecognized raw value
+        let invalid = "UNKNOWN"
+        let fallback = ChartPeriod(rawValue: invalid) ?? .day
+        XCTAssertEqual(fallback, .day)
+
+        UserDefaults.standard.removeObject(forKey: testKey)
     }
 }

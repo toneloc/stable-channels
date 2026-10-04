@@ -26,4 +26,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "StableChannels"
+
 include(":app")

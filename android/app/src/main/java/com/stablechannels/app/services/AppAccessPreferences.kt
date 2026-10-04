@@ -16,12 +16,12 @@ import android.content.Context
  */
 data class AppAccessPreferences(
     val appUnlockEnabled: Boolean = false,
-    val paymentConfirmationEnabled: Boolean = false
+    val paymentConfirmationEnabled: Boolean = false,
 )
 
 /**
- * Utility for reading/writing App Access preferences and determining
- * when authentication is required.
+ * Utility for reading/writing App Access preferences and determining when authentication is
+ * required.
  */
 object AppAccessPreferencesManager {
 
@@ -32,41 +32,31 @@ object AppAccessPreferencesManager {
     private fun getPrefs(context: Context) =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-    /**
-     * Reads the current App Access preferences from SharedPreferences.
-     */
+    /** Reads the current App Access preferences from SharedPreferences. */
     fun getPreferences(context: Context): AppAccessPreferences {
         val prefs = getPrefs(context)
         return AppAccessPreferences(
             appUnlockEnabled = prefs.getBoolean(KEY_APP_UNLOCK, false),
-            paymentConfirmationEnabled = prefs.getBoolean(KEY_PAYMENT_CONFIRMATION, false)
+            paymentConfirmationEnabled = prefs.getBoolean(KEY_PAYMENT_CONFIRMATION, false),
         )
     }
 
-    /**
-     * Returns whether App Unlock is enabled (require auth on launch/resume after 5s).
-     */
+    /** Returns whether App Unlock is enabled (require auth on launch/resume after 5s). */
     fun isAppUnlockEnabled(context: Context): Boolean {
         return getPrefs(context).getBoolean(KEY_APP_UNLOCK, false)
     }
 
-    /**
-     * Returns whether Payment Confirmation is enabled (require auth before Lightning sends).
-     */
+    /** Returns whether Payment Confirmation is enabled (require auth before Lightning sends). */
     fun isPaymentConfirmationEnabled(context: Context): Boolean {
         return getPrefs(context).getBoolean(KEY_PAYMENT_CONFIRMATION, false)
     }
 
-    /**
-     * Sets the App Unlock preference.
-     */
+    /** Sets the App Unlock preference. */
     fun setAppUnlockEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_APP_UNLOCK, enabled).apply()
     }
 
-    /**
-     * Sets the Payment Confirmation preference.
-     */
+    /** Sets the Payment Confirmation preference. */
     fun setPaymentConfirmationEnabled(context: Context, enabled: Boolean) {
         getPrefs(context).edit().putBoolean(KEY_PAYMENT_CONFIRMATION, enabled).apply()
     }
@@ -74,8 +64,8 @@ object AppAccessPreferencesManager {
     /**
      * Determines whether biometric authentication should be required for a send operation.
      *
-     * Matches iOS parity: a single Payment Confirmation toggle governs both send types,
-     * with no hardcoded exception for on-chain.
+     * Matches iOS parity: a single Payment Confirmation toggle governs both send types, with no
+     * hardcoded exception for on-chain.
      *
      * @param context Android context for reading preferences
      * @param isOnChain true if this is an on-chain send (splice-out or direct), false for Lightning
@@ -88,8 +78,7 @@ object AppAccessPreferencesManager {
     /**
      * Determines whether auth is required to change a toggle.
      *
-     * Enabling a toggle does NOT require auth.
-     * Disabling a toggle DOES require auth.
+     * Enabling a toggle does NOT require auth. Disabling a toggle DOES require auth.
      *
      * @param currentlyEnabled the current state of the toggle
      * @param requestedEnabled the new state the user wants
@@ -101,8 +90,8 @@ object AppAccessPreferencesManager {
     }
 
     /**
-     * Whether auth is required to view the seed phrase.
-     * Returns true if either app unlock or payment confirmation is enabled.
+     * Whether auth is required to view the seed phrase. Returns true if either app unlock or
+     * payment confirmation is enabled.
      */
     fun shouldRequireAuthForSeedPhrase(context: Context): Boolean {
         val prefs = getPreferences(context)

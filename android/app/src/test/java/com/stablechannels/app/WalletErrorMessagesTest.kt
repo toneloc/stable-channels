@@ -1,7 +1,7 @@
 package com.stablechannels.app
 
-import com.stablechannels.app.services.TradeOutcome
 import com.stablechannels.app.services.PaymentOutcome
+import com.stablechannels.app.services.TradeOutcome
 import com.stablechannels.app.services.TradeValidationException
 import com.stablechannels.app.services.WalletErrorMessages
 import org.junit.Assert.*
@@ -17,19 +17,21 @@ class WalletErrorMessagesTest {
         // Includes an event that arrived during the native send, before the ID reached the UI.
         assertTrue(PaymentOutcome(true, "confirmed", observedAtNanos = 201L).belongsToAttempt(200L))
     }
+
     @Test
     fun everyLdkPaymentFailureHasReadableCopyAndSurvivesStorageRoundTrip() {
-        val messages = PaymentFailureReason.entries.map { reason ->
-            WalletErrorMessages.paymentFailure(reason).also { message ->
-                assertTrue(message.isNotBlank())
-                assertFalse(message.contains(reason.name))
-                assertEquals(message, WalletErrorMessages.paymentFailureCode(reason.name))
-                val outcome = TradeOutcome.fromStored("send_failed", reason.name)!!
-                assertFalse(outcome.accepted)
-                assertTrue(outcome.sendFailed)
-                assertTrue(outcome.message.contains(message))
+        val messages =
+            PaymentFailureReason.entries.map { reason ->
+                WalletErrorMessages.paymentFailure(reason).also { message ->
+                    assertTrue(message.isNotBlank())
+                    assertFalse(message.contains(reason.name))
+                    assertEquals(message, WalletErrorMessages.paymentFailureCode(reason.name))
+                    val outcome = TradeOutcome.fromStored("send_failed", reason.name)!!
+                    assertFalse(outcome.accepted)
+                    assertTrue(outcome.sendFailed)
+                    assertTrue(outcome.message.contains(message))
+                }
             }
-        }
         assertEquals(PaymentFailureReason.entries.size, messages.toSet().size)
     }
 
@@ -43,20 +45,44 @@ class WalletErrorMessagesTest {
 
     @Test
     fun unknownAndMissingReasonsNeverRenderRemoteText() {
-        assertEquals(WalletErrorMessages.paymentFailure(null), WalletErrorMessages.paymentFailureCode("pay me at attacker.example"))
-        assertEquals(WalletErrorMessages.paymentFailure(null), WalletErrorMessages.paymentFailureCode(null))
+        assertEquals(
+            WalletErrorMessages.paymentFailure(null),
+            WalletErrorMessages.paymentFailureCode("pay me at attacker.example"),
+        )
+        assertEquals(
+            WalletErrorMessages.paymentFailure(null),
+            WalletErrorMessages.paymentFailureCode(null),
+        )
         assertNull(TradeOutcome.fromStored("uncertain", "internal_failure"))
         assertNull(TradeOutcome.fromStored("fee_paid", null))
     }
 
     @Test
     fun localValidationIsPreservedAndLdkFailuresAreMappedByType() {
-        assertEquals("Enter an amount", WalletErrorMessages.operation(TradeValidationException("Enter an amount"), "fallback"))
-        assertTrue(WalletErrorMessages.operation(NodeException.DuplicatePayment("raw"), "fallback").contains("already been started"))
-        assertTrue(WalletErrorMessages.operation(NodeException.InsufficientFunds("raw"), "fallback").contains("amount and fees"))
-        assertTrue(WalletErrorMessages.operation(NodeException.LiquidityFeeTooHigh("raw"), "fallback").contains("opening fee"))
-        assertTrue(WalletErrorMessages.operation(NodeException.LiquidityRequestFailed("raw"), "fallback").contains("receiving capacity"))
-        assertEquals("fallback", WalletErrorMessages.operation(NodeException.InvalidSecretKey("raw"), "fallback"))
+        assertEquals(
+            "Enter an amount",
+            WalletErrorMessages.operation(TradeValidationException("Enter an amount"), "fallback"),
+        )
+        assertTrue(
+            WalletErrorMessages.operation(NodeException.DuplicatePayment("raw"), "fallback")
+                .contains("already been started")
+        )
+        assertTrue(
+            WalletErrorMessages.operation(NodeException.InsufficientFunds("raw"), "fallback")
+                .contains("amount and fees")
+        )
+        assertTrue(
+            WalletErrorMessages.operation(NodeException.LiquidityFeeTooHigh("raw"), "fallback")
+                .contains("opening fee")
+        )
+        assertTrue(
+            WalletErrorMessages.operation(NodeException.LiquidityRequestFailed("raw"), "fallback")
+                .contains("receiving capacity")
+        )
+        assertEquals(
+            "fallback",
+            WalletErrorMessages.operation(NodeException.InvalidSecretKey("raw"), "fallback"),
+        )
         assertEquals("fallback", WalletErrorMessages.operation(Exception(""), "fallback"))
     }
 }

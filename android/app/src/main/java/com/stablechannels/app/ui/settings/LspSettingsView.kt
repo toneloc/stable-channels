@@ -43,37 +43,32 @@ fun LspSettingsView(appState: AppState) {
         refreshKey++
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp)
-    ) {
+    Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         Text(
             text = "Connection",
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(bottom = 12.dp)
+            modifier = Modifier.padding(bottom = 12.dp),
         )
 
         Surface(
             shape = MaterialTheme.shapes.medium,
             tonalElevation = 1.dp,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("LSP Address", style = MaterialTheme.typography.bodyLarge)
                     if (isCustom) {
                         Text(
                             text = "Custom",
                             style = MaterialTheme.typography.labelSmall,
-                            color = Color(0xFF3B82F6)
+                            color = Color(0xFF3B82F6),
                         )
                     }
                 }
@@ -82,7 +77,7 @@ fun LspSettingsView(appState: AppState) {
                     text = activeAddress,
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
                 Spacer(Modifier.height(16.dp))
@@ -90,13 +85,15 @@ fun LspSettingsView(appState: AppState) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Node ID", style = MaterialTheme.typography.bodyLarge)
-                    TextButton(onClick = {
-                        clipboardManager.setText(AnnotatedString(activePubkey))
-                        copiedNodeId = true
-                    }) {
+                    TextButton(
+                        onClick = {
+                            clipboardManager.setText(AnnotatedString(activePubkey))
+                            copiedNodeId = true
+                        }
+                    ) {
                         Text(if (copiedNodeId) "Copied ✓" else "Copy")
                     }
                 }
@@ -104,7 +101,7 @@ fun LspSettingsView(appState: AppState) {
                     text = activePubkey,
                     style = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -115,20 +112,21 @@ fun LspSettingsView(appState: AppState) {
             Surface(
                 shape = MaterialTheme.shapes.medium,
                 color = Color(0xFFF59E0B).copy(alpha = 0.12f),
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = "Your LSP cannot be changed while channels are active. Close all channels before switching.",
+                    text =
+                        "Your LSP cannot be changed while channels are active. Close all channels before switching.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color(0xFFF59E0B),
-                    modifier = Modifier.padding(16.dp)
+                    modifier = Modifier.padding(16.dp),
                 )
             }
         } else {
             Button(
                 onClick = { showSwitchDialog = true },
                 enabled = !isBusy,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Switch LSP")
             }
@@ -144,7 +142,7 @@ fun LspSettingsView(appState: AppState) {
                     }
                 },
                 enabled = !isBusy && isCustom,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Reset")
             }
@@ -152,7 +150,10 @@ fun LspSettingsView(appState: AppState) {
 
         if (isBusy) {
             Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                 Text("Restarting node...", style = MaterialTheme.typography.bodyMedium)
             }
@@ -163,7 +164,8 @@ fun LspSettingsView(appState: AppState) {
             Text(
                 text = message,
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (message.startsWith("LSP updated")) Color(0xFF10B981) else Color(0xFFEF4444)
+                color =
+                    if (message.startsWith("LSP updated")) Color(0xFF10B981) else Color(0xFFEF4444),
             )
         }
     }
@@ -178,7 +180,7 @@ fun LspSettingsView(appState: AppState) {
                 scope.launch {
                     appState.switchLsp(pubkey, address) { error -> finish(error) }
                 }
-            }
+            },
         )
     }
 }
@@ -186,7 +188,7 @@ fun LspSettingsView(appState: AppState) {
 @Composable
 private fun SwitchLspDialog(
     onDismiss: () -> Unit,
-    onSubmit: (pubkey: String, address: String) -> Unit
+    onSubmit: (pubkey: String, address: String) -> Unit,
 ) {
     var pubkey by remember { mutableStateOf("") }
     var address by remember { mutableStateOf("") }
@@ -200,49 +202,64 @@ private fun SwitchLspDialog(
         text = {
             Column {
                 Text(
-                    text = "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration.",
+                    text =
+                        "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration.",
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(16.dp))
                 OutlinedTextField(
                     value = pubkey,
-                    onValueChange = { pubkey = it; error = null },
+                    onValueChange = {
+                        pubkey = it
+                        error = null
+                    },
                     label = { Text("Pubkey") },
                     placeholder = { Text("02... or 03... (66 hex chars)") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = address,
-                    onValueChange = { address = it; error = null },
+                    onValueChange = {
+                        address = it
+                        error = null
+                    },
                     label = { Text("Address") },
                     placeholder = { Text("domain.com:9735") },
                     singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier.fillMaxWidth(),
                 )
                 error?.let {
                     Spacer(Modifier.height(8.dp))
-                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        it,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = {
-                if (!LspPreferencesManager.isValidPubkey(pubkey)) {
-                    error = "Pubkey must start with 02 or 03 and be exactly 66 hex characters."
-                    return@TextButton
+            TextButton(
+                onClick = {
+                    if (!LspPreferencesManager.isValidPubkey(pubkey)) {
+                        error = "Pubkey must start with 02 or 03 and be exactly 66 hex characters."
+                        return@TextButton
+                    }
+                    if (!LspPreferencesManager.isValidAddress(address)) {
+                        error = "Address must be in host:port format (e.g. domain.com:9735)."
+                        return@TextButton
+                    }
+                    onSubmit(pubkey.trim(), address.trim())
                 }
-                if (!LspPreferencesManager.isValidAddress(address)) {
-                    error = "Address must be in host:port format (e.g. domain.com:9735)."
-                    return@TextButton
-                }
-                onSubmit(pubkey.trim(), address.trim())
-            }) { Text("Save") }
+            ) {
+                Text("Save")
+            }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
+        },
     )
 }

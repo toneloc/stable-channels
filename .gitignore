@@ -238,3 +238,7 @@ umbrel/test/store-server/store-repo/
 *.txt
 *.crt
 /chart.html
+
+# Local sensitive files
+.agents/
+seed_phrase_backup.txt

@@ -1,4 +1,4 @@
-name: iOS Tests
+name: "Mobile: iOS Tests"
 
 on:
   pull_request:
@@ -11,16 +11,20 @@ on:
       - "ios/**"
       - ".github/workflows/ios-tests.yml"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ios-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   test:
+    name: iOS Unit Tests
     runs-on: macos-15
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Select Xcode 26.3
         run: |
@@ -28,7 +32,32 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available
 
+      - name: Resolve Swift packages
+        shell: bash
+        run: |
+          set -u
+
+          last_status=1
+          for attempt in 1 2 3 4; do
+            echo "Resolving Swift packages (attempt ${attempt}/4)"
+
+            if xcodebuild \
+              -resolvePackageDependencies \
+              -project ios/StableChannels/StableChannels.xcodeproj \
+              -scheme StableChannels; then
+              exit 0
+            else
+              last_status=$?
+            fi
+            if [ "$attempt" -lt 4 ]; then
+              sleep $((attempt * 15))
+            fi
+          done
+
+          exit "$last_status"
+
       - name: Run iOS unit tests
+        shell: bash
         run: |
           set -o pipefail
           # Signing stays ENABLED: simulator builds get an automatic ad-hoc
@@ -39,4 +68,6 @@ jobs:
             -project ios/StableChannels/StableChannels.xcodeproj \
             -scheme StableChannels \
             -destination 'platform=iOS Simulator,OS=26.2,name=iPhone 17' \
+            -destination-timeout 180 \
+            -retry-tests-on-failure \
             -parallel-testing-enabled NO

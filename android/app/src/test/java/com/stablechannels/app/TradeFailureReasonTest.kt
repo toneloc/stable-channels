@@ -17,8 +17,8 @@ import org.robolectric.annotation.Config
 
 /**
  * Local trade refusals must name themselves. The stabilization cap already did — it throws with a
- * computed maximum. The other four returned a bare `null` and every one of them reached the user
- * as "settle the stability adjustment and retry", which is only true for one of them (issue #272).
+ * computed maximum. The other four returned a bare `null` and every one of them reached the user as
+ * "settle the stability adjustment and retry", which is only true for one of them (issue #272).
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -30,14 +30,15 @@ class TradeFailureReasonTest {
         userChannelId: String = "7",
         expectedUsd: Double = 50.0,
         receiverSats: Long = 100_000,
-        backingSats: Long = 55_000
-    ) = StableChannel(
-        channelId = channelId,
-        userChannelId = userChannelId,
-        expectedUSD = USD(expectedUsd),
-        stableReceiverBTC = Bitcoin(receiverSats),
-        backingSats = backingSats
-    )
+        backingSats: Long = 55_000,
+    ) =
+        StableChannel(
+            channelId = channelId,
+            userChannelId = userChannelId,
+            expectedUSD = USD(expectedUsd),
+            stableReceiverBTC = Bitcoin(receiverSats),
+            backingSats = backingSats,
+        )
 
     /** A buy, so the stabilization cap does not apply and the other refusals are observable. */
     private fun prepareBuy(
@@ -47,19 +48,20 @@ class TradeFailureReasonTest {
         amountBtc: Double = 0.000099,
         feeUsd: Double = 0.1,
         newExpectedUsd: Double = 40.0,
-        quotePrice: Double = 100_000.0
-    ) = TradeProtocol.prepareOrFailure(
-        sc = sc,
-        spendableSats = spendableSats,
-        action = "buy",
-        amountUsd = amountUsd,
-        amountBtc = amountBtc,
-        feeUsd = feeUsd,
-        newExpectedUsd = newExpectedUsd,
-        quotePrice = quotePrice,
-        now = 1_786_310_000L,
-        tradeId = identifier
-    )
+        quotePrice: Double = 100_000.0,
+    ) =
+        TradeProtocol.prepareOrFailure(
+            sc = sc,
+            spendableSats = spendableSats,
+            action = "buy",
+            amountUsd = amountUsd,
+            amountBtc = amountBtc,
+            feeUsd = feeUsd,
+            newExpectedUsd = newExpectedUsd,
+            quotePrice = quotePrice,
+            now = 1_786_310_000L,
+            tradeId = identifier,
+        )
 
     private fun reasonOf(preparation: TradePreparation): TradeFailure {
         assertTrue("expected a refusal, got $preparation", preparation is TradePreparation.Failure)
@@ -76,11 +78,11 @@ class TradeFailureReasonTest {
     fun anUnusableChannelIsNotReportedAsAnAllocationProblem() {
         assertEquals(
             TradeFailure.INVALID_CHANNEL,
-            reasonOf(prepareBuy(sc = channel(channelId = "not-canonical")))
+            reasonOf(prepareBuy(sc = channel(channelId = "not-canonical"))),
         )
         assertEquals(
             TradeFailure.INVALID_CHANNEL,
-            reasonOf(prepareBuy(sc = channel(userChannelId = "")))
+            reasonOf(prepareBuy(sc = channel(userChannelId = ""))),
         )
     }
 
@@ -106,20 +108,21 @@ class TradeFailureReasonTest {
                     sc = channel(expectedUsd = 500.0, receiverSats = 1, backingSats = 0),
                     spendableSats = 1,
                     amountUsd = 400.0,
-                    newExpectedUsd = 100.0
+                    newExpectedUsd = 100.0,
                 )
-            )
+            ),
         )
     }
 
     @Test
     fun aGenuineAllocationProblemKeepsTheSettlementCopy() {
-        val reason = reasonOf(
-            prepareBuy(
-                sc = channel(expectedUsd = 50.0, receiverSats = 100_000, backingSats = 0),
-                newExpectedUsd = 0.0
+        val reason =
+            reasonOf(
+                prepareBuy(
+                    sc = channel(expectedUsd = 50.0, receiverSats = 100_000, backingSats = 0),
+                    newExpectedUsd = 0.0,
+                )
             )
-        )
         assertEquals(TradeFailure.ALLOCATION_UNAVAILABLE, reason)
         assertTrue(reason.userMessage().contains("Settle the stability adjustment"))
     }
@@ -139,16 +142,30 @@ class TradeFailureReasonTest {
         // Eight call sites still use prepare(); it must keep agreeing with prepareOrFailure().
         assertNotNull(
             TradeProtocol.prepare(
-                sc = channel(), spendableSats = 100_000, action = "buy", amountUsd = 10.0,
-                amountBtc = 0.000099, feeUsd = 0.1, newExpectedUsd = 40.0,
-                quotePrice = 100_000.0, now = 1_786_310_000L, tradeId = identifier
+                sc = channel(),
+                spendableSats = 100_000,
+                action = "buy",
+                amountUsd = 10.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 40.0,
+                quotePrice = 100_000.0,
+                now = 1_786_310_000L,
+                tradeId = identifier,
             )
         )
         assertNull(
             TradeProtocol.prepare(
-                sc = channel(), spendableSats = 100_000, action = "buy", amountUsd = 0.0,
-                amountBtc = 0.000099, feeUsd = 0.1, newExpectedUsd = 40.0,
-                quotePrice = 100_000.0, now = 1_786_310_000L, tradeId = identifier
+                sc = channel(),
+                spendableSats = 100_000,
+                action = "buy",
+                amountUsd = 0.0,
+                amountBtc = 0.000099,
+                feeUsd = 0.1,
+                newExpectedUsd = 40.0,
+                quotePrice = 100_000.0,
+                now = 1_786_310_000L,
+                tradeId = identifier,
             )
         )
     }

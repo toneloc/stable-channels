@@ -7,9 +7,9 @@ class TransactionMatcher {
         trackedAddresses: Set<String>,
         trackedTxids: Set<String>,
         msg: MempoolWSMessage,
-        tx: MempoolWSTransaction
+        tx: MempoolWSTransaction,
     ): List<MatchResult> {
-        val results = mutableListOf<MatchResult>()
+        val results = LinkedHashSet<MatchResult>()
 
         if (!msg.address.isNullOrBlank() && trackedAddresses.contains(msg.address)) {
             results.add(MatchResult(target = msg.address, isTxid = false))
@@ -18,28 +18,19 @@ class TransactionMatcher {
         tx.vout?.forEach { vout ->
             val addr = vout.scriptpubkeyAddress
             if (!addr.isNullOrBlank() && trackedAddresses.contains(addr)) {
-                val res = MatchResult(target = addr, isTxid = false)
-                if (!results.contains(res)) {
-                    results.add(res)
-                }
+                results.add(MatchResult(target = addr, isTxid = false))
             }
         }
 
         tx.vin?.forEach { vin ->
             val inputTxid = vin.txid
             if (!inputTxid.isNullOrBlank() && trackedTxids.contains(inputTxid)) {
-                val res = MatchResult(target = inputTxid, isTxid = true)
-                if (!results.contains(res)) {
-                    results.add(res)
-                }
+                results.add(MatchResult(target = inputTxid, isTxid = true))
             }
         }
 
         if (!msg.txid.isNullOrBlank() && trackedTxids.contains(msg.txid)) {
-            val res = MatchResult(target = msg.txid, isTxid = true)
-            if (!results.contains(res)) {
-                results.add(res)
-            }
+            results.add(MatchResult(target = msg.txid, isTxid = true))
         }
 
         msg.multiAddressTransactions?.forEach { (addr, txGroup) ->
@@ -52,13 +43,10 @@ class TransactionMatcher {
             val inRemoved = txGroup.removed?.any { it.txid == tx.txid } == true
 
             if (inMempool || inConfirmed || inRemoved) {
-                val res = MatchResult(target = addr, isTxid = false)
-                if (!results.contains(res)) {
-                    results.add(res)
-                }
+                results.add(MatchResult(target = addr, isTxid = false))
             }
         }
 
-        return results
+        return results.toList()
     }
 }

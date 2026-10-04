@@ -13,13 +13,14 @@ class PriceChartAlgorithmsTest {
 
     @Test
     fun testLowerBound() {
-        val records = listOf(
-            makeRecord(100, 50000.0),
-            makeRecord(200, 51000.0),
-            makeRecord(300, 52000.0),
-            makeRecord(400, 53000.0),
-            makeRecord(500, 54000.0)
-        )
+        val records =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+                makeRecord(300, 52000.0),
+                makeRecord(400, 53000.0),
+                makeRecord(500, 54000.0),
+            )
 
         assertEquals(0, PriceChartAlgorithms.lowerBound(records, 50))
         assertEquals(0, PriceChartAlgorithms.lowerBound(records, 100))
@@ -33,11 +34,12 @@ class PriceChartAlgorithmsTest {
 
     @Test
     fun testMinMaxPrices() {
-        val records = listOf(
-            makeRecord(100, 10000.0),
-            makeRecord(200, 20000.0),
-            makeRecord(300, 15000.0)
-        )
+        val records =
+            listOf(
+                makeRecord(100, 10000.0),
+                makeRecord(200, 20000.0),
+                makeRecord(300, 15000.0),
+            )
 
         val (minP, maxP) = PriceChartAlgorithms.minMaxPrices(records)
         assertEquals(9800.0, minP, 0.001)
@@ -46,10 +48,11 @@ class PriceChartAlgorithmsTest {
 
     @Test
     fun testLttbDownsample() {
-        val records = (0..99).map { i ->
-            val price = if (i == 50) 99999.0 else 50000.0 + i * 10
-            makeRecord(i.toLong() * 100, price)
-        }
+        val records =
+            (0..99).map { i ->
+                val price = if (i == 50) 99999.0 else 50000.0 + i * 10
+                makeRecord(i.toLong() * 100, price)
+            }
 
         val targetCount = 20
         val sampled = PriceChartAlgorithms.lttbDownsample(records, targetCount)
@@ -63,9 +66,10 @@ class PriceChartAlgorithmsTest {
 
     @Test
     fun testLttbEdgeCases() {
-        val records = (0..9).map { i ->
-            makeRecord(i.toLong() * 100, 50000.0 + i * 100)
-        }
+        val records =
+            (0..9).map { i ->
+                makeRecord(i.toLong() * 100, 50000.0 + i * 100)
+            }
 
         // targetCount >= records.size returns original
         val sameCount = PriceChartAlgorithms.lttbDownsample(records, 10)
@@ -78,10 +82,11 @@ class PriceChartAlgorithmsTest {
         assertEquals(records.size, twoPoints.size)
 
         // Preserves local valley (negative extrema)
-        val valleyRecords = (0..99).map { i ->
-            val price = if (i == 50) 1000.0 else 50000.0 + i * 10
-            makeRecord(i.toLong() * 100, price)
-        }
+        val valleyRecords =
+            (0..99).map { i ->
+                val price = if (i == 50) 1000.0 else 50000.0 + i * 10
+                makeRecord(i.toLong() * 100, price)
+            }
         val valleySampled = PriceChartAlgorithms.lttbDownsample(valleyRecords, 20)
         assertEquals(20, valleySampled.size)
         assertTrue(valleySampled.any { it.price == 1000.0 })
@@ -98,5 +103,76 @@ class PriceChartAlgorithmsTest {
         assertEquals("$65K", PriceChartAlgorithms.formatYAxis(65432.0))
         assertEquals("$100K", PriceChartAlgorithms.formatYAxis(100000.0))
         assertEquals("$999", PriceChartAlgorithms.formatYAxis(999.0))
+    }
+
+    @Test
+    fun testSliceHistoryHourlyUsesHourlyWhenSufficient() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+                makeRecord(300, 52000.0),
+            )
+        val daily =
+            listOf(
+                makeRecord(100, 49000.0),
+                makeRecord(200, 49500.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.DAY_1, hourly, daily, cutoffSec = 150)
+        assertEquals(2, result.size)
+        assertEquals(200L, result[0].timestamp)
+        assertEquals(300L, result[1].timestamp)
+        assertEquals(51000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryHourlyFallsBackToDailyWhenSparse() {
+        val hourly = listOf(makeRecord(300, 52000.0))
+        val daily =
+            listOf(
+                makeRecord(100, 49000.0),
+                makeRecord(200, 49500.0),
+                makeRecord(300, 50000.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.DAY_1, hourly, daily, cutoffSec = 50)
+        assertEquals(3, result.size)
+        assertEquals(49000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryDailyUsesDailyWhenSufficient() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+            )
+        val daily =
+            listOf(
+                makeRecord(100, 60000.0),
+                makeRecord(200, 61000.0),
+                makeRecord(300, 62000.0),
+            )
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.MONTH_1, hourly, daily, cutoffSec = 150)
+        assertEquals(2, result.size)
+        assertEquals(200L, result[0].timestamp)
+        assertEquals(61000.0, result[0].price, 0.001)
+    }
+
+    @Test
+    fun testSliceHistoryDailyFallsBackToHourlyWhenSparse() {
+        val hourly =
+            listOf(
+                makeRecord(100, 50000.0),
+                makeRecord(200, 51000.0),
+                makeRecord(300, 52000.0),
+            )
+        val daily = listOf(makeRecord(300, 62000.0))
+        val result =
+            PriceChartAlgorithms.sliceHistory(ChartPeriod.MONTH_1, hourly, daily, cutoffSec = 50)
+        assertEquals(3, result.size)
+        assertEquals(50000.0, result[0].price, 0.001)
     }
 }

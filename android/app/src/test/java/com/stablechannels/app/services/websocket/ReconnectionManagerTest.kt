@@ -42,7 +42,8 @@ class ReconnectionManagerTest {
     @Test
     fun `backoff delay is capped at max reconnect delay`() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
-        val manager = ReconnectionManager(this, maxReconnectDelaySeconds = 3, dispatcher = dispatcher)
+        val manager =
+            ReconnectionManager(this, maxReconnectDelaySeconds = 3, dispatcher = dispatcher)
         var reconnectCount = 0
         manager.onReconnect = { reconnectCount += 1 }
 

@@ -9,8 +9,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Chain-freshness rule for stability payments (see #243): a stability payment may only be
- * sent when LDK completed a Lightning-wallet sync within the last 120 seconds.
+ * Chain-freshness rule for stability payments (see #243): a stability payment may only be sent when
+ * LDK completed a Lightning-wallet sync within the last 120 seconds.
  */
 class StabilityFreshnessTest {
 

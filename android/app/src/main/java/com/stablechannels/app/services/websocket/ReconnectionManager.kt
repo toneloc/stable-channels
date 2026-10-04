@@ -1,25 +1,24 @@
 package com.stablechannels.app.services.websocket
 
-import kotlinx.coroutines.CoroutineScope
+import kotlin.math.min
+import kotlin.math.pow
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlin.math.min
-import kotlin.math.pow
 
 class ReconnectionManager(
     private val scope: CoroutineScope,
     private val maxReconnectDelaySeconds: Long = 60L,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     @Volatile
     var reconnectAttempts: Int = 0
         private set
 
-    @Volatile
-    var isManualDisconnect: Boolean = false
+    @Volatile var isManualDisconnect: Boolean = false
 
     private var reconnectJob: Job? = null
 
@@ -50,15 +49,17 @@ class ReconnectionManager(
     private fun scheduleReconnect() {
         stopReconnectTask()
 
-        val delaySeconds = min((2.0.pow(reconnectAttempts.toDouble())).toLong(), maxReconnectDelaySeconds)
+        val delaySeconds =
+            min((2.0.pow(reconnectAttempts.toDouble())).toLong(), maxReconnectDelaySeconds)
         reconnectAttempts += 1
 
-        reconnectJob = scope.launch(dispatcher) {
-            delay(delaySeconds * 1000)
-            if (!isManualDisconnect) {
-                onReconnect?.invoke()
+        reconnectJob =
+            scope.launch(dispatcher) {
+                delay(delaySeconds * 1000)
+                if (!isManualDisconnect) {
+                    onReconnect?.invoke()
+                }
             }
-        }
     }
 
     fun stopReconnectTask() {
