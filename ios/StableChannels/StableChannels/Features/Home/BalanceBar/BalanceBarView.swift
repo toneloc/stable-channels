@@ -14,7 +14,7 @@ struct BalanceBarView: View {
     @State private var animator = BalanceBarAnimationCoordinator()
     @State private var pulseScale: CGFloat = 1.0
 
-    static let defaultThumbDiameter: CGFloat = 22.0
+    static let defaultThumbDiameter: CGFloat = BalanceBarTradeCalculator.defaultThumbDiameter
     private let thumbDiameter: CGFloat = Self.defaultThumbDiameter
     private let barHeight: CGFloat = 20
     private let headerHeight: CGFloat = 34
@@ -90,6 +90,7 @@ struct BalanceBarView: View {
                             state.handleDragChange(
                                 touchStartX: gesture.startLocation.x,
                                 translationX: gesture.translation.width,
+                                translationY: gesture.translation.height,
                                 barWidth: barWidth,
                                 currentThumbX: thumbX,
                                 thumbDiameter: thumbDiameter,
@@ -104,6 +105,7 @@ struct BalanceBarView: View {
                             guard interactive else { return }
                             state.handleDragEnd(
                                 translationX: gesture.translation.width,
+                                translationY: gesture.translation.height,
                                 barWidth: barWidth,
                                 allocation: allocation,
                                 maxSellUSD: maxSellUSD,

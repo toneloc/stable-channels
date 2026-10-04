@@ -155,6 +155,133 @@ final class BalanceBarStateTests: XCTestCase {
         XCTAssertTrue(state.showDepositPrompt)
     }
 
+    func testEmptyDragWithVerticalMovementOverThresholdShowsDepositPromptNotTap() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let emptyAllocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 50000.0
+        )
+        var emptyActionCalled = false
+
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 0.0,
+            translationY: 10.0,
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        XCTAssertTrue(state.isPressing)
+        XCTAssertEqual(state.cumulativeDragDistance, 10.0, accuracy: 0.001)
+
+        state.handleDragEnd(
+            translationX: 0.0,
+            translationY: 10.0,
+            barWidth: 300.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: { emptyActionCalled = true },
+            onTradeRequest: nil
+        )
+
+        XCTAssertFalse(state.isPressing)
+        XCTAssertFalse(emptyActionCalled)
+        XCTAssertTrue(state.showDepositPrompt)
+    }
+
+    func testEmptyDragDiagonalOverThresholdShowsDepositPromptNotTap() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let emptyAllocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 50000.0
+        )
+        var emptyActionCalled = false
+
+        // 4pt X + 4pt Y = hypot(4, 4) ≈ 5.657pt > 5.0pt threshold
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 4.0,
+            translationY: 4.0,
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        XCTAssertEqual(state.cumulativeDragDistance, hypot(4.0, 4.0), accuracy: 0.001)
+
+        state.handleDragEnd(
+            translationX: 4.0,
+            translationY: 4.0,
+            barWidth: 300.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: { emptyActionCalled = true },
+            onTradeRequest: nil
+        )
+
+        XCTAssertFalse(emptyActionCalled)
+        XCTAssertTrue(state.showDepositPrompt)
+    }
+
+    func testEmptyDragVerticalUnderThresholdTriggersTapAction() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let emptyAllocation = ChannelAllocation(
+            stableUSD: 0.0,
+            lightningBalanceSats: 0,
+            btcPrice: 50000.0
+        )
+        var emptyActionCalled = false
+
+        // 0.5pt X + 2.0pt Y = hypot(0.5, 2.0) ≈ 2.06pt <= 5.0pt threshold
+        state.handleDragChange(
+            touchStartX: 150.0,
+            translationX: 0.5,
+            translationY: 2.0,
+            barWidth: 300.0,
+            currentThumbX: 150.0,
+            thumbDiameter: 22.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+
+        XCTAssertEqual(state.cumulativeDragDistance, hypot(0.5, 2.0), accuracy: 0.001)
+
+        state.handleDragEnd(
+            translationX: 0.5,
+            translationY: 2.0,
+            barWidth: 300.0,
+            allocation: emptyAllocation,
+            maxSellUSD: 0.0,
+            isAwakening: false,
+            reduceMotion: false,
+            onEmptyInteraction: { emptyActionCalled = true },
+            onTradeRequest: nil
+        )
+
+        XCTAssertTrue(emptyActionCalled)
+        XCTAssertFalse(state.showDepositPrompt)
+    }
+
     func testNonEmptyDragClampsToSellLimitAndTriggersHaptics() {
         let spy = SpyBalanceBarHaptics()
         let state = BalanceBarState(haptics: spy)
