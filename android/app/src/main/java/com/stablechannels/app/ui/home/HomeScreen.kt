@@ -187,8 +187,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             Spacer(Modifier.height(8.dp))
 
-            // Balance bar
-            if (lightningSats > 0) {
+            // Balance bar. Lightning balance also counts funds of a closed channel that are still
+            // being claimed on-chain, so the live bar needs a ready channel.
+            if (lightningSats > 0 && hasReadyChannel) {
                 BalanceBar(
                     stableUSD = sc.expectedUSD.amount,
                     nativeSats = nativeSatsCached,
@@ -212,7 +213,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         else null,
                 )
                 Spacer(Modifier.height(12.dp))
-            } else if (onchainSats > 0 || pendingOnchainSends.isNotEmpty()) {
+            } else if (lightningSats > 0 || onchainSats > 0 || pendingOnchainSends.isNotEmpty()) {
                 // Funds are on-chain only (e.g. channel closed): keep the bar, empty.
                 BalanceBar(
                     stableUSD = 0.0,
