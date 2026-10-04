@@ -234,6 +234,7 @@
 		F54F1E51D4AF15D8700AB399 /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A2BA7D52F62DF17EFF532635 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */; };
 		49206DF53073A8A200217838 /* SendAmountCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF43073A8A200217838 /* SendAmountCalculator.swift */; };
+		49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -492,6 +493,7 @@
 		F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreBackupSheet.swift; sourceTree = "<group>"; };
 		FFC40949E35E9317ACA30E35 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		49206DF43073A8A200217838 /* SendAmountCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculator.swift; sourceTree = "<group>"; };
+		49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LemniscateBloomIcon.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -772,6 +774,7 @@
 				4904A08B3055544100582069 /* BalanceScaleKinematics.swift */,
 				49BB390B0000000000000001 /* CurveProgressIndicator.swift */,
 				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
+				49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */,
 				49D997523074F6490024B3A7 /* OfflineNoticeSheet.swift */,
 				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
 				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
@@ -1264,6 +1267,7 @@
 				49DDB0042FF0000100000001 /* OnchainReceiveRepository.swift in Sources */,
 				49DDB0052FF0000100000001 /* PriceRepository.swift in Sources */,
 				49DDB0092FF0000100000001 /* HeaderRepository.swift in Sources */,
+				49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */,
 				4944457C3053DB3700B5A146 /* PriceChartAlgorithms.swift in Sources */,
 				4944457D3053DB3700B5A146 /* PriceChartPeriod.swift in Sources */,
 				4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */,
