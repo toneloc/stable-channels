@@ -12839,67 +12839,67 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الساتوشي الداعمة (Backing)"
+            "value" : "BTC الداعمة (Backing)"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ব্যাকিং স্যাটস"
+            "value" : "ব্যাকিং BTC"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Absichernde Sats"
+            "value" : "Absichernde BTC"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Backing Sats"
+            "value" : "Backing BTC"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sats de Respaldo"
+            "value" : "BTC de Respaldo"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sats de soutien"
+            "value" : "BTC de soutien"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "बैकिंग सैट्स"
+            "value" : "बैकिंग BTC"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裏付けSats"
+            "value" : "裏付けBTC"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Sats de Apoio"
+            "value" : "BTC de Apoio"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Обеспечение в сатоши"
+            "value" : "Обеспечение в BTC"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "支持的 Sats"
+            "value" : "支持的 BTC"
           }
         }
       }

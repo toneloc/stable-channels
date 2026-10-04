@@ -3,6 +3,7 @@ package com.stablechannels.app.models
 import android.content.Context
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.btcSpacedFormatted
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToLong
@@ -29,7 +30,7 @@ data class Bitcoin(val sats: Long = 0) {
     fun toBTC(): Double = sats.toDouble() / Constants.SATS_IN_BTC
 
     val formatted: String
-        get() = String.format(Locale.US, "%.8f BTC", toBTC())
+        get() = "${sats.btcSpacedFormatted()} BTC"
 }
 
 @Serializable

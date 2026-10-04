@@ -439,7 +439,7 @@ struct SendView: View {
             reason = "Confirm onchain withdrawal of all funds"
         case .bolt11, .bolt12:
             requiresAuth = transactionAuth
-            reason = "Confirm payment of \(displaySats) sats"
+            reason = "Confirm payment of \(displaySats.btcSpacedFormatted) BTC"
         default:
             requiresAuth = false
             reason = ""

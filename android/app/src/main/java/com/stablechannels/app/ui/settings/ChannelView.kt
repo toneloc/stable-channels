@@ -14,8 +14,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
-import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -67,15 +67,21 @@ fun ChannelView(appState: AppState) {
             Spacer(Modifier.height(20.dp))
 
             // Capacity
-            ChannelDetailRow("Capacity", ch.channelValueSats.toLong().satsFormatted())
+            ChannelDetailRow("Capacity", "${ch.channelValueSats.toLong().btcSpacedFormatted()} BTC")
             Spacer(Modifier.height(16.dp))
 
             // Outbound
-            ChannelDetailRow("Outbound", (ch.outboundCapacityMsat.toLong() / 1000).satsFormatted())
+            ChannelDetailRow(
+                "Outbound",
+                "${(ch.outboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+            )
             Spacer(Modifier.height(16.dp))
 
             // Inbound
-            ChannelDetailRow("Inbound", (ch.inboundCapacityMsat.toLong() / 1000).satsFormatted())
+            ChannelDetailRow(
+                "Inbound",
+                "${(ch.inboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+            )
 
             // Funding Tx
             appState.fundingTxid?.let { txid ->
