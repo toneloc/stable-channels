@@ -2951,6 +2951,17 @@ class AppState(private val context: Context) : ViewModel() {
                         } else {
                             val db = databaseService ?: return SpliceCompletion.DEFERRED
                             val sc = _stableChannel.value
+                            // The channel closed while this splice was confirming, so there are no
+                            // stable books left to reconcile. Retrying would fail forever and leave
+                            // the splice in flight, which also blocks new deposits from being
+                            // recorded.
+                            if (sc.userChannelId.isEmpty() && nodeService.channels.isEmpty()) {
+                                AuditService.log(
+                                    "SPLICE_RECONCILE_SKIPPED",
+                                    mapOf("txid" to txid, "reason" to "channel_closed"),
+                                )
+                                return@synchronized true
+                            }
                             // Reconcile against the current row, not a snapshot that may predate a
                             // signed correction or a background settlement. A retry removes no more
                             // backing once the row fits the confirmed channel balance.
