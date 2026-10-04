@@ -2147,8 +2147,9 @@ final class DatabaseServiceTests: XCTestCase {
             feeMsat: 0
         )
 
-        // Drop backing_applied column to simulate pre-migration database
+        // Drop backing_applied column and migration tracking to simulate pre-migration database
         try service.rawSQL.execute("ALTER TABLE payments DROP COLUMN backing_applied")
+        try service.rawSQL.execute("DELETE FROM schema_migrations WHERE name = 'migration_backing_applied_v1'")
 
         // Re-open DatabaseService on the same dataDir so migration runs
         let migratedService = try DatabaseService(dataDir: dataDir)
@@ -2198,6 +2199,66 @@ final class DatabaseServiceTests: XCTestCase {
         )
         XCTAssertFalse(healResult.isNewPayment)
         XCTAssertEqual(healResult.backingSats, 30_000)
+    }
+
+    func testMigration_interruptedBetweenDDLAndBackfill_resumesAndRecovers() throws {
+        let ucid = "ucid-interrupted-migration-test"
+        try service.rawSQL.execute(
+            """
+            INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+            VALUES (?, ?, 30000)
+            """,
+            params: [.text("chan-interrupted-test"), .text(ucid)]
+        )
+
+        let interruptedPaymentId = "interrupted-legacy-completed"
+        try service.paymentRepo.recordPayment(
+            paymentId: interruptedPaymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            counterparty: nil,
+            status: "completed"
+        )
+
+        // Simulate interrupted state: column backing_applied is present with default 0,
+        // but backfill was skipped and schema_migrations did not record completion.
+        try service.rawSQL.execute(
+            "UPDATE payments SET backing_applied = 0 WHERE payment_id = ?",
+            params: [.text(interruptedPaymentId)]
+        )
+        try service.rawSQL.execute("DELETE FROM schema_migrations WHERE name = 'migration_backing_applied_v1'")
+
+        // Re-open DatabaseService: init must detect unrecorded migration progress, resume, and backfill
+        let resumedService = try DatabaseService(dataDir: dataDir)
+
+        let rows = try resumedService.rawSQL.query(
+            "SELECT backing_applied FROM payments WHERE payment_id = ?",
+            params: [.text(interruptedPaymentId)]
+        )
+        XCTAssertEqual(rows.first?.int64(0), 1)
+
+        let migrationRow = try resumedService.rawSQL.query(
+            "SELECT 1 FROM schema_migrations WHERE name = 'migration_backing_applied_v1'"
+        )
+        XCTAssertEqual(migrationRow.count, 1)
+
+        // Recovery / reconciliation must not double-debit (remains at 30,000, not 20,000 or 10,000)
+        let reconcileResult = try resumedService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: interruptedPaymentId,
+            paymentType: "stability",
+            direction: "sent",
+            amountMsat: 10_000_000,
+            amountUSD: 10.0,
+            btcPrice: 100_000,
+            status: "completed",
+            userChannelId: ucid,
+            backingDeltaSats: -10_000
+        )
+        XCTAssertFalse(reconcileResult.isNewPayment)
+        XCTAssertEqual(reconcileResult.backingSats, 30_000)
     }
 }
 

@@ -229,6 +229,12 @@ final class DatabaseService {
                 consumed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
@@ -315,13 +321,27 @@ final class DatabaseService {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN is_placeholder INTEGER NOT NULL DEFAULT 0")
         }
 
-        // Migrate: add backing_applied to payments if missing (accounting confirmation for stability backing deltas)
-        if !paymentsColNames.contains("backing_applied") {
-            try rawSQL.execute("ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0")
-            // Backfill legacy completed rows as already applied so existing stability records
-            // are not debited a second time upon node upgrade, while preserving genuinely
-            // unapplied placeholder rows for recovery.
-            try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
+        // Migrate: add backing_applied to payments if missing, with atomic schema change and persisted progress
+        let migrationBackingApplied = "migration_backing_applied_v1"
+        let isBackingMigrationApplied = try !rawSQL.query(
+            "SELECT 1 FROM schema_migrations WHERE name = ?",
+            params: [.text(migrationBackingApplied)]
+        ).isEmpty
+
+        if !isBackingMigrationApplied {
+            try rawSQL.inTransaction(mode: "IMMEDIATE") {
+                if !paymentsColNames.contains("backing_applied") {
+                    try rawSQL.execute("ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0")
+                }
+                // Backfill legacy completed rows as already applied so existing stability records
+                // are not debited a second time upon node upgrade, while preserving genuinely
+                // unapplied placeholder rows for recovery.
+                try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
+                try rawSQL.execute(
+                    "INSERT OR REPLACE INTO schema_migrations (name) VALUES (?)",
+                    params: [.text(migrationBackingApplied)]
+                )
+            }
         }
 
         // Must come after the resolution_id ALTER above — on legacy DBs the column

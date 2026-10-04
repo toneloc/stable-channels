@@ -60,23 +60,68 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             return false
         }
 
+        // Ensure schema_migrations table exists to track multi-step migrations reliably
+        let createMigrationsSQL = """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        """
+        if sqlite3_exec(db, createMigrationsSQL, nil, nil, nil) != SQLITE_OK {
+            return false
+        }
+
         var success = true
-        for col in ["is_placeholder", "backing_applied"] {
-            if !existingCols.contains(col) {
-                let alterSQL = "ALTER TABLE payments ADD COLUMN \(col) INTEGER NOT NULL DEFAULT 0;"
-                var errMsg: UnsafeMutablePointer<CChar>?
-                let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
-                if rc != SQLITE_OK {
-                    if let errPtr = errMsg {
-                        let errStr = String(cString: errPtr)
-                        sqlite3_free(errMsg)
-                        if !errStr.contains("duplicate column name") {
-                            success = false
-                        }
-                    } else {
+        // 1. is_placeholder column
+        if !existingCols.contains("is_placeholder") {
+            let alterSQL = "ALTER TABLE payments ADD COLUMN is_placeholder INTEGER NOT NULL DEFAULT 0;"
+            var errMsg: UnsafeMutablePointer<CChar>?
+            let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
+            if rc != SQLITE_OK {
+                if let errPtr = errMsg {
+                    let errStr = String(cString: errPtr)
+                    sqlite3_free(errMsg)
+                    if !errStr.contains("duplicate column name") {
                         success = false
                     }
-                } else if col == "backing_applied" {
+                } else {
+                    success = false
+                }
+            }
+        }
+
+        // 2. backing_applied column and backfill migration with persisted progress
+        var isMigrationApplied = false
+        var checkStmt: OpaquePointer?
+        let checkSQL = "SELECT 1 FROM schema_migrations WHERE name = 'migration_backing_applied_v1' LIMIT 1;"
+        if sqlite3_prepare_v2(db, checkSQL, -1, &checkStmt, nil) == SQLITE_OK {
+            if sqlite3_step(checkStmt) == SQLITE_ROW {
+                isMigrationApplied = true
+            }
+            sqlite3_finalize(checkStmt)
+        }
+
+        if !isMigrationApplied {
+            if sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK {
+                var migrationFailed = false
+                if !existingCols.contains("backing_applied") {
+                    let alterSQL = "ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0;"
+                    var errMsg: UnsafeMutablePointer<CChar>?
+                    let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
+                    if rc != SQLITE_OK {
+                        if let errPtr = errMsg {
+                            let errStr = String(cString: errPtr)
+                            sqlite3_free(errMsg)
+                            if !errStr.contains("duplicate column name") {
+                                migrationFailed = true
+                            }
+                        } else {
+                            migrationFailed = true
+                        }
+                    }
+                }
+
+                if !migrationFailed {
                     // Backfill legacy completed rows as already applied so existing stability records
                     // are not debited a second time upon node upgrade, while preserving genuinely
                     // unapplied placeholder rows for recovery.
@@ -87,9 +132,33 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                         if backfillErr != nil {
                             sqlite3_free(backfillErr)
                         }
-                        success = false
+                        migrationFailed = true
                     }
                 }
+
+                if !migrationFailed {
+                    var markErr: UnsafeMutablePointer<CChar>?
+                    let markSQL = "INSERT OR REPLACE INTO schema_migrations (name) VALUES ('migration_backing_applied_v1');"
+                    let markRc = sqlite3_exec(db, markSQL, nil, nil, &markErr)
+                    if markRc != SQLITE_OK {
+                        if markErr != nil {
+                            sqlite3_free(markErr)
+                        }
+                        migrationFailed = true
+                    }
+                }
+
+                if !migrationFailed {
+                    if sqlite3_exec(db, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                        _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                        success = false
+                    }
+                } else {
+                    _ = sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+                    success = false
+                }
+            } else {
+                success = false
             }
         }
         return success

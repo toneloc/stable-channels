@@ -145,7 +145,7 @@ enum PaymentDestinationClassifier {
             lower.hasPrefix("1") || lower.hasPrefix("3") ||
             lower.hasPrefix("m") || lower.hasPrefix("n") || lower.hasPrefix("2") {
             if isValidOnchainAddress(normalized, network: network) {
-                let finalAddress = normalizeOnchainAddress(normalized)
+                let finalAddress = normalizeAddress(normalized)
                 return .valid(.onchain(address: finalAddress, amountSats: nil))
             }
             if network != nil && isValidOnchainAddress(normalized, network: nil) {
@@ -247,7 +247,7 @@ enum PaymentDestinationClassifier {
         }
 
         if isValidOnchainAddress(address, network: network) {
-            let finalAddr = normalizeOnchainAddress(address)
+            let finalAddr = normalizeAddress(address)
             return .valid(.onchain(address: finalAddr, amountSats: amountSats))
         }
 
@@ -297,12 +297,17 @@ enum PaymentDestinationClassifier {
         return params
     }
 
-    private static func normalizeOnchainAddress(_ address: String) -> String {
-        let lower = address.lowercased()
+    /// Normalizes a Bitcoin address according to BIP-173 / BIP-350 specifications.
+    /// Native SegWit and Taproot (bc1, tb1, bcrt1) addresses are converted to lowercase.
+    /// Base58 addresses (1, 3, 2, m, n) retain their exact case.
+    static func normalizeAddress(_ address: String) -> String {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.contains(where: \.isUppercase) else { return trimmed }
+        let lower = trimmed.lowercased()
         if lower.hasPrefix("bc1") || lower.hasPrefix("tb1") || lower.hasPrefix("bcrt1") {
             return lower
         }
-        return address
+        return trimmed
     }
 
     private static func parseBTCAmountToSats(_ btcString: String) -> UInt64? {

@@ -43,17 +43,9 @@ enum QRCodeExtractor {
     }
 
     /// Normalizes a Bitcoin address according to BIP-173 / BIP-350 specifications.
-    /// Native SegWit and Taproot (bc1, tb1, bcrt1) addresses are converted to lowercase.
-    /// Base58 addresses (1, 3, 2, m, n) retain their exact case.
+    /// Delegates to domain-level PaymentDestinationClassifier to eliminate duplication.
     static func normalizeAddress(_ raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.contains(where: \.isUppercase) else { return trimmed }
-
-        let lower = trimmed.lowercased()
-        if lower.hasPrefix("bc1") || lower.hasPrefix("tb1") || lower.hasPrefix("bcrt1") {
-            return lower
-        }
-        return trimmed
+        PaymentDestinationClassifier.normalizeAddress(raw)
     }
 
     static func sanitizeAddress(_ raw: String) -> String {

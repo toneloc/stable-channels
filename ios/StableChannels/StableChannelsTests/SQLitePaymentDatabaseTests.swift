@@ -437,4 +437,87 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
             sqlite3_finalize(seenStmt)
         }
     }
+
+    func testMigration_interruptedBetweenDDLAndBackfill_resumesAndRecovers() throws {
+        let interruptedSchema = """
+        CREATE TABLE payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id TEXT UNIQUE,
+            payment_type TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            amount_msat INTEGER NOT NULL,
+            amount_usd REAL,
+            btc_price REAL,
+            status TEXT NOT NULL,
+            is_placeholder INTEGER NOT NULL DEFAULT 0,
+            backing_applied INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        CREATE TABLE channels (
+            channel_id TEXT PRIMARY KEY,
+            user_channel_id TEXT UNIQUE,
+            stable_sats INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, is_placeholder, backing_applied)
+        VALUES ('interrupted-completed-1', 'stability', 'sent', 10000000, 'completed', 0, 0);
+        INSERT INTO channels (channel_id, user_channel_id, stable_sats)
+        VALUES ('chan-1', 'ucid-interrupted-1', 40000);
+        """
+
+        try executeRawSQL(path: tempDBPath, sql: interruptedSchema)
+
+        SQLitePaymentDatabase.didEnsureColumns = false
+        let db = SQLitePaymentDatabase(dbPath: tempDBPath)
+
+        // Trigger openDB and migration check
+        _ = db.recordPayment(
+            paymentId: "trigger-recovery-1",
+            paymentType: "lightning",
+            direction: "received",
+            amountMsat: 1000,
+            amountUSD: 1.0,
+            btcPrice: 100000.0,
+            backingDeltaSats: nil,
+            userChannelId: nil,
+            settlementId: nil
+        )
+
+        var sqlite: OpaquePointer?
+        guard sqlite3_open_v2(tempDBPath, &sqlite, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            XCTFail("Failed to open sqlite")
+            return
+        }
+        defer { sqlite3_close(sqlite) }
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(
+            sqlite,
+            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = 'interrupted-completed-1'",
+            -1,
+            &stmt,
+            nil
+        ) == SQLITE_OK {
+            XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW)
+            XCTAssertEqual(sqlite3_column_int64(stmt, 0), 1)
+            XCTAssertEqual(sqlite3_column_int64(stmt, 1), 0)
+            sqlite3_finalize(stmt)
+        } else {
+            XCTFail("Failed to prepare query on payments")
+        }
+
+        var migStmt: OpaquePointer?
+        if sqlite3_prepare_v2(
+            sqlite,
+            "SELECT 1 FROM schema_migrations WHERE name = 'migration_backing_applied_v1'",
+            -1,
+            &migStmt,
+            nil
+        ) == SQLITE_OK {
+            XCTAssertEqual(sqlite3_step(migStmt), SQLITE_ROW)
+            sqlite3_finalize(migStmt)
+        } else {
+            XCTFail("Failed to query schema_migrations")
+        }
+    }
 }
