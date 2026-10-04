@@ -404,6 +404,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             // 2. Channel closing
                             Spacer(Modifier.height(10.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             if (hasPendingOnchainReceive) {
@@ -555,6 +556,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     if (effectiveTxid != null) "Channel closing\u2026"
                                     else "Channel closed"
                                 PendingRow(text, effectiveTxid, context)
+                                PendingReceiveRows(pendingReceives, context, btcPrice)
                             } else if (hasPendingOnchainReceive) {
                                 // One row per pending deposit — more than one can be confirming.
                                 pendingReceives.forEachIndexed { index, receive ->
@@ -586,7 +588,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 )
                             }
                         } else {
-                            // 4. No channel, confirmed deposit — just needs Lightning
+                            // 4. No channel, confirmed deposit — just needs Lightning.
+                            // A newer deposit can still be confirming alongside it.
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 "Receive a payment over Lightning to activate your account.",
@@ -752,6 +756,28 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             payment = payment,
             currentPrice = btcPrice,
             onDismiss = { selectedPayment = null },
+        )
+    }
+}
+
+/** One "+" row per pending onchain deposit. */
+@Composable
+private fun PendingReceiveRows(
+    receives: List<PaymentRecord>,
+    context: android.content.Context,
+    btcPrice: Double,
+) {
+    receives.forEach { receive ->
+        Spacer(Modifier.height(10.dp))
+        PendingRow(
+            "Receiving onchain...",
+            receive.txid,
+            context,
+            amountSats = receive.amountSats,
+            confirmations = receive.confirmations,
+            requiredConfirmations = AppState.requiredConfirmationsForType(receive.paymentType),
+            btcPrice = btcPrice,
+            sign = "+",
         )
     }
 }
