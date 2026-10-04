@@ -235,7 +235,7 @@ fun BalanceBar(
                     Box(
                         Modifier.weight(1f)
                             .fillMaxHeight()
-                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                            .background(nativeColor.copy(alpha = 0.3f))
                     )
                 }
                 if (!empty && visFrac > 0.01f) {
