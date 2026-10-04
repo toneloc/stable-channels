@@ -222,6 +222,7 @@ final class BalanceBarStateTests: XCTestCase {
         XCTAssertEqual(receivedRequest?.direction, .sell)
         XCTAssertEqual(receivedRequest?.amountUSD ?? 0, 20.0, accuracy: 0.001)
         XCTAssertEqual(spy.impactCount, 1)
+        XCTAssertEqual(spy.tickCount, 2)
     }
 
     func testNullOnTradeRequestSnapsBackWithoutLeavingThumbStranded() {
@@ -471,5 +472,74 @@ final class BalanceBarStateTests: XCTestCase {
 
     func testLiveThumbDiameterConstantMatchesAndroid() {
         XCTAssertEqual(BalanceBarView.defaultThumbDiameter, 22.0)
+    }
+
+    func testResetSelectionWhileIdleDoesNotSwallowNextGesture() {
+        let state = BalanceBarState(haptics: SpyBalanceBarHaptics())
+        let funded = ChannelAllocation(stableUSD: 50.0, lightningBalanceSats: 200_000, btcPrice: 100_000.0)
+        state.resetSelection()
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 10.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: funded,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertTrue(state.isPressing)
+    }
+
+    func testFundedDragCrossingOneDollarThresholdTriggersTickHaptic() {
+        let spy = SpyBalanceBarHaptics()
+        let state = BalanceBarState(haptics: spy)
+        let fundedAllocation = ChannelAllocation(
+            stableUSD: 50.0,
+            lightningBalanceSats: 200_000,
+            btcPrice: 100_000.0
+        )
+        // Touch down triggers initial contact tick
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 0.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertEqual(spy.tickCount, 1)
+
+        // Drag 27.8pt (crosses > $1 threshold to $20 sell) -> fires threshold tick
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 27.8,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertEqual(spy.tickCount, 2)
+
+        // Further movement within same gesture does not re-fire tick
+        state.handleDragChange(
+            touchStartX: 75.0,
+            translationX: 35.0,
+            barWidth: 300.0,
+            currentThumbX: 75.0,
+            thumbDiameter: 22.0,
+            allocation: fundedAllocation,
+            maxSellUSD: 50.0,
+            isAwakening: false,
+            onDragStarted: nil
+        )
+        XCTAssertEqual(spy.tickCount, 2)
     }
 }

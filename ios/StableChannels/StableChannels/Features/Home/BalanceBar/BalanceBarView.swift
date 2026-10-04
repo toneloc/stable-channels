@@ -100,6 +100,7 @@ struct BalanceBarView: View {
                             )
                         }
                         .onEnded { gesture in
+                            state.acknowledgeGestureEnd()
                             guard interactive else { return }
                             state.handleDragEnd(
                                 translationX: gesture.translation.width,
@@ -116,8 +117,11 @@ struct BalanceBarView: View {
             }
             .animation(.spring(response: 0.45, dampingFraction: 0.75), value: allocation.isEmpty)
             .onChange(of: allocation.isEmpty) { wasEmpty, isEmpty in
-                if wasEmpty && !isEmpty && !reduceMotion {
-                    animator.triggerAwakening(targetFraction: CGFloat(allocation.stableFraction))
+                if wasEmpty && !isEmpty {
+                    state.resetSelection()
+                    if !reduceMotion {
+                        animator.triggerAwakening(targetFraction: CGFloat(allocation.stableFraction))
+                    }
                 }
             }
             .onChange(of: isTrading) { wasTrading, isTrading in
@@ -153,7 +157,17 @@ struct BalanceBarView: View {
             .position(x: thumbX, y: thumbDiameter / 2)
             .animation(.easeOut(duration: 0.15), value: state.isPressing)
             .onAppear {
+                guard !reduceMotion else { return }
                 withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) { pulseScale = 1.08 }
+            }
+            .onChange(of: reduceMotion) { _, newValue in
+                if newValue {
+                    pulseScale = 1.0
+                } else if !state.isPressing {
+                    withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                        pulseScale = 1.08
+                    }
+                }
             }
     }
 

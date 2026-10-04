@@ -87,6 +87,12 @@ class BalanceBarState(
     var dragOffsetPx by mutableFloatStateOf(0f)
         private set
 
+    var dragStartBaseFraction by mutableStateOf<Float?>(null)
+        private set
+
+    var startedEmpty by mutableStateOf(false)
+        private set
+
     var atSellLimit by mutableStateOf(false)
         private set
 
@@ -102,11 +108,16 @@ class BalanceBarState(
     private var accumulatedTranslationX = 0f
     private var depositPromptJob: Job? = null
     private var snapBackJob: Job? = null
+    private var snapBackToken = 0
+    private var hasTriggeredSellLimitHaptic = false
+    private var sellLimitHapticJob: Job? = null
 
     private val baseFraction: Float
         get() =
-            if (isEmpty) 0.5f
-            else if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
+            dragStartBaseFraction
+                ?: (if (isEmpty) 0.5f
+                else if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat()
+                else 0.5f)
 
     val baseXPx: Float
         get() {
@@ -146,17 +157,49 @@ class BalanceBarState(
         this.onEmptyInteraction = onEmptyInteraction
     }
 
-    fun triggerSnapBack(fromOffset: Float, onFinished: (() -> Unit)? = null) {
+    private val canonicalFraction: Float
+        get() =
+            if (isEmpty) 0.5f
+            else if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0.5f
+
+    fun triggerSnapBack(
+        fromOffset: Float,
+        rebase: Boolean = true,
+        onFinished: (() -> Unit)? = null,
+    ) {
         snapBackJob?.cancel()
+        val token = ++snapBackToken
+        val usable = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
+        val latched = dragStartBaseFraction
+        val adjusted =
+            if (rebase && latched != null && usable > 0f)
+                fromOffset + (latched - canonicalFraction) * usable
+            else fromOffset
+        dragStartBaseFraction = null
         isSnappingBack = true
         snapBackJob = scope.launch {
             try {
-                snapBack.animateToZero(fromOffset)
+                snapBack.animateToZero(adjusted)
                 dragOffsetPx = 0f
                 accumulatedTranslationX = 0f
             } finally {
-                isSnappingBack = false
-                onFinished?.invoke()
+                if (token == snapBackToken) {
+                    isSnappingBack = false
+                    startedEmpty = false
+                    onFinished?.invoke()
+                }
+            }
+        }
+    }
+
+    private fun triggerSellLimitHaptic() {
+        if (!hasTriggeredSellLimitHaptic) {
+            hasTriggeredSellLimitHaptic = true
+            haptics.warning()
+            sellLimitHapticJob?.cancel()
+            sellLimitHapticJob = scope.launch {
+                delay(500)
+                hasTriggeredSellLimitHaptic = false
             }
         }
     }
@@ -170,12 +213,20 @@ class BalanceBarState(
             )
         if (isEmpty || withinThumb) {
             snapBackJob?.cancel()
+            snapBackToken++
             isDragging = true
             isSnappingBack = false
             hasTriggeredHaptic = false
+            hasTriggeredSellLimitHaptic = false
+            sellLimitHapticJob?.cancel()
             atSellLimit = false
             totalDragDistance = 0f
             accumulatedTranslationX = 0f
+            startedEmpty = isEmpty
+            dragStartBaseFraction =
+                if (isEmpty) 0.5f
+                else if (totalUSD > 0.0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat()
+                else 0.5f
             depositPromptJob?.cancel()
             showDepositPrompt = false
             dragOffsetPx = 0f
@@ -198,7 +249,7 @@ class BalanceBarState(
             )
 
         val usableWidth = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
-        if (isEmpty) {
+        if (isEmpty || startedEmpty) {
             dragOffsetPx = (rawFraction - 0.5f) * usableWidth
             return
         }
@@ -216,7 +267,7 @@ class BalanceBarState(
         if (clampedResult.isAtSellLimit) {
             if (!atSellLimit) {
                 atSellLimit = true
-                haptics.warning()
+                triggerSellLimitHaptic()
             }
         } else {
             atSellLimit = false
@@ -249,11 +300,17 @@ class BalanceBarState(
         if (!isDragging) {
             dragOffsetPx = 0f
             accumulatedTranslationX = 0f
+            dragStartBaseFraction = null
+            startedEmpty = false
             return
         }
         isDragging = false
 
-        if (isEmpty) {
+        val wasStartedEmpty = startedEmpty
+        val initialFraction = dragStartBaseFraction ?: baseFraction
+
+        if (isEmpty || wasStartedEmpty) {
+            startedEmpty = false
             haptics.tick()
             showDepositPrompt = true
             depositPromptJob?.cancel()
@@ -268,13 +325,13 @@ class BalanceBarState(
         val usableWidth = (barWidthPx - thumbDiameterPx).coerceAtLeast(0f)
         val targetFraction =
             if (usableWidth > 0f) {
-                (baseFraction + (dragOffsetPx / usableWidth)).coerceIn(0f, 1f)
+                (initialFraction + (dragOffsetPx / usableWidth)).coerceIn(0f, 1f)
             } else {
-                baseFraction
+                initialFraction
             }
         val evaluation =
             BalanceBarTradeCalculator.calculateSelection(
-                initialFraction = baseFraction,
+                initialFraction = initialFraction,
                 targetFraction = targetFraction,
                 totalUSD = totalUSD,
                 stableUSD = stableUSD,
@@ -282,6 +339,7 @@ class BalanceBarState(
             )
 
         if (evaluation.isValidTrade && evaluation.direction != null && onTradeRequest != null) {
+            startedEmpty = false
             haptics.impact()
             val request =
                 TradeRequest(direction = evaluation.direction, amountUSD = evaluation.clampedUSD)
@@ -291,8 +349,9 @@ class BalanceBarState(
         }
     }
 
-    fun onDragCancel() {
+    fun onDragCancel(rebase: Boolean = true) {
         isDragging = false
-        triggerSnapBack(dragOffsetPx)
+        startedEmpty = false
+        triggerSnapBack(dragOffsetPx, rebase = rebase)
     }
 }

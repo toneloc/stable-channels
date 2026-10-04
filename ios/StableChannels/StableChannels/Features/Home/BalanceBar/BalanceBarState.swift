@@ -11,12 +11,14 @@ final class BalanceBarState {
     var showDepositPrompt = false
 
     private let haptics: BalanceBarHaptics
-    private var hasTriggeredHaptic = false
+    private var hasTriggeredTradeThresholdHaptic = false
+    private var hasTriggeredSellLimitHaptic = false
     private var lastTranslationX: CGFloat = 0
     private(set) var cumulativeDragDistance: CGFloat = 0
     private var depositPromptTimer: DispatchWorkItem?
     private var dragStartBaseFraction: CGFloat?
     private var startedEmpty = false
+    private var isGestureCancelled = false
 
     init(haptics: BalanceBarHaptics = SystemBalanceBarHaptics()) {
         self.haptics = haptics
@@ -39,7 +41,7 @@ final class BalanceBarState {
         isAwakening: Bool,
         onDragStarted: (() -> Void)?
     ) {
-        guard barWidth > 0, !isAwakening else { return }
+        guard barWidth > 0, !isAwakening, !isGestureCancelled else { return }
 
         if !isPressing {
             let withinThumb = BalanceBarTradeCalculator.isWithinThumb(
@@ -49,7 +51,8 @@ final class BalanceBarState {
             )
             guard allocation.isEmpty || withinThumb else { return }
             isPressing = true
-            hasTriggeredHaptic = false
+            hasTriggeredTradeThresholdHaptic = false
+            hasTriggeredSellLimitHaptic = false
             atSellLimit = false
             lastTranslationX = 0
             cumulativeDragDistance = 0
@@ -96,6 +99,20 @@ final class BalanceBarState {
         } else {
             atSellLimit = false
         }
+
+        if !hasTriggeredTradeThresholdHaptic {
+            let evaluation = BalanceBarTradeCalculator.calculateSelection(
+                initialFraction: baseFraction,
+                targetFraction: clampedResult.fraction,
+                totalUSD: allocation.totalUSD,
+                stableUSD: allocation.stableUSD,
+                maxSellUSD: maxSellUSD
+            )
+            if evaluation.isValidTrade {
+                hasTriggeredTradeThresholdHaptic = true
+                haptics.tick()
+            }
+        }
     }
 
     func handleDragEnd(
@@ -108,7 +125,9 @@ final class BalanceBarState {
         onEmptyInteraction: (() -> Void)?,
         onTradeRequest: ((TradeRequest) -> Void)?
     ) {
-        guard isPressing else { return }
+        let wasCancelled = isGestureCancelled
+        isGestureCancelled = false
+        guard isPressing, !wasCancelled else { return }
         isPressing = false
         atSellLimit = false
 
@@ -167,11 +186,21 @@ final class BalanceBarState {
     }
 
     func resetSelection() {
+        if isPressing {
+            isGestureCancelled = true
+        }
+        isPressing = false
         dragStartBaseFraction = nil
         startedEmpty = false
+        showDepositPrompt = false
+        depositPromptTimer?.cancel()
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             userSelectedFraction = nil
         }
+    }
+
+    func acknowledgeGestureEnd() {
+        isGestureCancelled = false
     }
 
     func cancelTimers() {
@@ -179,11 +208,11 @@ final class BalanceBarState {
     }
 
     private func triggerSellLimitHaptic() {
-        guard !hasTriggeredHaptic else { return }
-        hasTriggeredHaptic = true
+        guard !hasTriggeredSellLimitHaptic else { return }
+        hasTriggeredSellLimitHaptic = true
         haptics.warning()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.hasTriggeredHaptic = false
+            self?.hasTriggeredSellLimitHaptic = false
         }
     }
 }

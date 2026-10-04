@@ -14,9 +14,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.util.Constants
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -76,10 +80,51 @@ fun BalanceBar(
 
     val animator = rememberBalanceBarAnimationCoordinator()
 
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var reduceMotion by remember {
+        mutableStateOf(
+            try {
+                android.provider.Settings.Global.getFloat(
+                    context.contentResolver,
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                    1f,
+                ) == 0f
+            } catch (_: Exception) {
+                false
+            }
+        )
+    }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                reduceMotion =
+                    try {
+                        android.provider.Settings.Global.getFloat(
+                            context.contentResolver,
+                            android.provider.Settings.Global.ANIMATOR_DURATION_SCALE,
+                            1f,
+                        ) == 0f
+                    } catch (_: Exception) {
+                        false
+                    }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     var wasEmpty by remember { mutableStateOf(isEmpty) }
     LaunchedEffect(isEmpty) {
         if (wasEmpty && !isEmpty) {
-            animator.triggerAwakening(canonicalFraction)
+            if (state.isDragging) {
+                state.onDragCancel(rebase = reduceMotion)
+            }
+            if (!reduceMotion) {
+                animator.triggerAwakening(canonicalFraction)
+            }
         }
         wasEmpty = isEmpty
     }
@@ -101,6 +146,7 @@ fun BalanceBar(
     val currentFraction =
         when {
             animator.isAwakening && animator.settleFraction != null -> animator.settleFraction!!
+            state.dragStartBaseFraction != null -> state.dragStartBaseFraction!!
             isEmpty -> 0.5f
             else -> canonicalFraction
         }
@@ -131,8 +177,8 @@ fun BalanceBar(
     val nativeColor = Color(0xFFF59E0B)
 
     val pulseScale = remember { Animatable(1f) }
-    if (interactive && !isEmpty) {
-        LaunchedEffect(Unit) {
+    LaunchedEffect(interactive, isEmpty, reduceMotion) {
+        if (interactive && !isEmpty && !reduceMotion) {
             pulseScale.animateTo(
                 targetValue = 1.08f,
                 animationSpec =
@@ -141,6 +187,8 @@ fun BalanceBar(
                         repeatMode = RepeatMode.Reverse,
                     ),
             )
+        } else {
+            pulseScale.snapTo(1f)
         }
     }
 
@@ -174,22 +222,28 @@ fun BalanceBar(
                         state.updateLayout(it.width.toFloat(), thumbDiameterPx)
                     }
                     .then(
-                        if (interactive && !animator.isAwakening) {
+                        if (interactive) {
                             Modifier.pointerInput(Unit) {
                                     detectTapGestures(
                                         onTap = { offset ->
-                                            state.onTap(offset)
+                                            if (!animator.isAwakening) {
+                                                state.onTap(offset)
+                                            }
                                         }
                                     )
                                 }
                                 .pointerInput(Unit) {
                                     detectDragGestures(
                                         onDragStart = { offset ->
-                                            state.onDragStart(offset)
+                                            if (!animator.isAwakening) {
+                                                state.onDragStart(offset)
+                                            }
                                         },
                                         onDrag = { change, dragAmount ->
-                                            change.consume()
-                                            state.onDrag(dragAmount.x)
+                                            if (!animator.isAwakening) {
+                                                change.consume()
+                                                state.onDrag(dragAmount.x)
+                                            }
                                         },
                                         onDragEnd = { state.onDragEnd() },
                                         onDragCancel = { state.onDragCancel() },
