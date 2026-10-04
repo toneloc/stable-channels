@@ -212,6 +212,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         else null,
                 )
                 Spacer(Modifier.height(12.dp))
+            } else if (onchainSats > 0 || pendingOnchainSends.isNotEmpty()) {
+                // Funds are on-chain only (e.g. channel closed): keep the bar, empty.
+                BalanceBar(
+                    stableUSD = 0.0,
+                    nativeSats = 0L,
+                    totalSats = 0L,
+                    btcPrice = btcPrice,
+                    showBtcFormat = showBTC,
+                    empty = true,
+                    modifier = Modifier.padding(horizontal = 18.dp),
+                )
+                Spacer(Modifier.height(12.dp))
             }
 
             // Syncing indicator
@@ -349,6 +361,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                         appState.spliceTxid,
                                         context,
                                         amountSats = appState.pendingSplice?.amountSats,
+                                        confirmations = 0,
+                                        requiredConfirmations =
+                                            AppState.requiredConfirmationsForType("splice_out"),
                                         btcPrice = btcPrice,
                                         sign = spliceSign,
                                     )
@@ -378,6 +393,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 appState.spliceTxid,
                                 context,
                                 amountSats = appState.pendingSplice?.amountSats,
+                                confirmations = 0,
+                                requiredConfirmations =
+                                    AppState.requiredConfirmationsForType("splice_out"),
                                 btcPrice = btcPrice,
                                 sign = spliceSign,
                             )

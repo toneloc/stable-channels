@@ -58,16 +58,19 @@ fun BalanceBar(
     btcPrice: Double,
     maxSellUSD: Double = 0.0,
     showBtcFormat: Boolean = false,
+    empty: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
     onTradeRequest: ((TradeDirection, Double) -> Unit)? = null,
 ) {
     val nativeUSD = (nativeSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
     val totalUSD = stableUSD + nativeUSD
-    if (totalUSD <= 0) return
+    // empty: all funds are on-chain (e.g. channel closed), so show a $0 / $0 placeholder bar.
+    if (totalUSD <= 0 && !empty) return
 
-    val stableFraction = (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat()
-    val interactive = onTradeRequest != null
+    val stableFraction =
+        if (totalUSD > 0) (stableUSD / totalUSD).coerceIn(0.0, 1.0).toFloat() else 0f
+    val interactive = onTradeRequest != null && !empty
     val barHeight = if (interactive) 12.dp else 8.dp
     val thumbDiameter = 22.dp
     val minTradeUSD = 1.0
@@ -228,7 +231,14 @@ fun BalanceBar(
             Row(
                 modifier = Modifier.fillMaxWidth().height(barHeight).clip(RoundedCornerShape(6.dp))
             ) {
-                if (visFrac > 0.01f) {
+                if (empty) {
+                    Box(
+                        Modifier.weight(1f)
+                            .fillMaxHeight()
+                            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                    )
+                }
+                if (!empty && visFrac > 0.01f) {
                     Box(
                         Modifier.weight(max(visFrac, 0.03f))
                             .fillMaxHeight()
@@ -239,7 +249,7 @@ fun BalanceBar(
                             )
                     )
                 }
-                if ((1 - visFrac) > 0.01f) {
+                if (!empty && (1 - visFrac) > 0.01f) {
                     Box(
                         Modifier.weight(max(1f - visFrac, 0.03f))
                             .fillMaxHeight()
