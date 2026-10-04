@@ -310,13 +310,13 @@ pub struct StableChannelManager {
     pub enforce_max_stabilization: bool,
     db: Arc<Database>,
     data_dir: PathBuf,
-    /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
-    spend_debounce: std::collections::HashMap<u128, u8>,
     /// Splice events still awaiting a usable snapshot or a committed correction.
     pending_splices: std::collections::HashMap<u128, Option<String>>,
     pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
+    /// Channels whose live balance is below backing, so the deferral is audited once per episode.
+    balance_deferred: std::collections::HashSet<u128>,
     /// Channels awaiting a startup SYNC or retry. Accepted attempts and terminal outcomes are
     /// persisted in settlement_payments; this set also covers failures before an ID is recorded.
     startup_sync_pending: std::collections::HashSet<u128>,
@@ -392,7 +392,6 @@ impl StableChannelManager {
         self.stable_channels[idx] = pending.proposed;
         self.pending_book_updates.remove(&uid);
         self.pending_splices.remove(&uid);
-        self.spend_debounce.remove(&uid);
         for (event, data) in pending.audits {
             stable_channels::audit::audit_event(event, data);
         }
@@ -716,10 +715,10 @@ impl StableChannelManager {
             enforce_max_stabilization: false,
             db,
             data_dir,
-            spend_debounce: std::collections::HashMap::new(),
             pending_splices: std::collections::HashMap::new(),
             pending_book_updates: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
+            balance_deferred: std::collections::HashSet::new(),
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
@@ -905,10 +904,10 @@ impl StableChannelManager {
             }
         });
         if let Some(t) = target {
-            self.spend_debounce.remove(&t);
             self.pending_splices.remove(&t);
             self.pending_book_updates.remove(&t);
             self.stability_throttle.remove(&t);
+            self.balance_deferred.remove(&t);
         }
         if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
             tracing::error!(
@@ -1369,7 +1368,7 @@ impl StableChannelManager {
     }
 
     /// On PaymentReceived, route a STABLE_CHANNEL_TLV to the trade handler. A plain payment (no
-    /// such TLV) is left to run_tick + reconcile_from_grpc to catch up.
+    /// such TLV) changes no books here; settlement for that channel waits while its balance is below backing.
     pub async fn handle_payment_received(
         &mut self,
         custom_records: Vec<CustomTlvRecord>,
@@ -1444,8 +1443,7 @@ impl StableChannelManager {
                 }
                 // Tagged-but-not-envelope = a user's stability payment. Reconcile the
                 // books NOW: with stale backing_sats the channel still reads above par
-                // (double-charge risk) and the balance-truth backstop would misread the
-                // user's payment as an unreconciled spend and deduct expected_usd.
+                // (double-charge risk) and the tick would keep deferring settlement.
                 self.reconcile_incoming_stability(payment_id.as_deref(), amount_msat, ldk, btc_price)
                     .await;
             } else {
@@ -1898,7 +1896,6 @@ impl StableChannelManager {
             stable.backing_sats = backing_after;
             stable.native_sats = native_after;
             stable_channels::stable::recompute_native(stable);
-            self.spend_debounce.remove(&stable.user_channel_id);
         }
         stable_channels::audit::audit_event(
             "STABILITY_PAYMENT_V1_APPLIED",
@@ -1964,8 +1961,8 @@ impl StableChannelManager {
     /// The event carries no channel id, so the channel is attributed by amount:
     /// the tracked channel whose live user-side balance dropped by the payment
     /// amount (±1 sat for msat rounding) since the last tick snapshot. If the match
-    /// is not unique, nothing is mutated and the miss is audited — the tick +
-    /// backstop path then handles it as before, but visibly.
+    /// is not unique, nothing is mutated and the miss is audited. A later tick
+    /// does not use the capacity drop alone to repair an unattributed payment.
     async fn reconcile_incoming_stability(
         &mut self,
         payment_id: Option<&str>,
@@ -2060,8 +2057,6 @@ impl StableChannelManager {
         sc.backing_sats = settled_backing;
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
-        // The drop is settled; make sure the backstop forgets any ticks it counted.
-        self.spend_debounce.remove(&uid);
 
         if let Err(e) = self.db.save_channel(
             &channel_id,
@@ -2090,7 +2085,7 @@ impl StableChannelManager {
         );
     }
 
-    /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one.
+    /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one. Never changes the books from a balance drop; a channel whose balance is below backing gets no payment.
     pub async fn run_tick(
         &mut self,
         ldk: &dyn LdkServerCalls,
@@ -2100,7 +2095,7 @@ impl StableChannelManager {
         let had_pending = !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty();
         if !self.retry_pending_reconciliations(ldk, btc_price).await || had_pending {
             // Give the event loop a chance to process the events held behind this correction
-            // before considering another balance-based deduction or stability payment.
+            // before considering another stability payment.
             return;
         }
         // LDK Server's event stream is not replayable. Finish any receive that was durably
@@ -2133,10 +2128,6 @@ impl StableChannelManager {
         let dollar_threshold = stable_channels::constants::STABILITY_THRESHOLD_USD;
         let cooldown = stable_channels::constants::STABILITY_PAYMENT_COOLDOWN_SECS as i64;
 
-        // Accepted USD and sat allocations for backstop SYNCs sent after the iter_mut borrow ends.
-        let mut backstop_syncs: Vec<(u128, String, f64, u64, String)> = Vec::new();
-        const BACKSTOP_DEBOUNCE_TICKS: u8 = 2;
-
         for sc in self.stable_channels.iter_mut() {
             if self.pending_splices.contains_key(&sc.user_channel_id) {
                 // A failed splice save must finish before a tick can change these books.
@@ -2155,71 +2146,30 @@ impl StableChannelManager {
             proposed.stable_receiver_usd = USD::from_bitcoin(proposed.stable_receiver_btc, btc_price);
             proposed.latest_price = btc_price;
 
-            // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced since outbound_capacity excludes in-flight HTLCs.
             let uid = sc.user_channel_id;
-            if their_sats < sc.backing_sats {
-                let count = {
-                    let cnt = self.spend_debounce.entry(uid).or_insert(0);
-                    *cnt = cnt.saturating_add(1);
-                    *cnt
-                };
-                if count >= BACKSTOP_DEBOUNCE_TICKS {
-                    if let Some(usd_deducted) =
-                        stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price)
-                    {
-                        if let Err(e) = self.db.save_channel(
-                            &c.channel_id,
-                            &format!("{}", uid),
-                            proposed.expected_usd.0,
-                            proposed.backing_sats,
-                            proposed.native_sats,
-                            proposed.note.as_deref(),
-                        ) {
-                            tracing::error!("[stable] backstop save_channel failed: {}", e);
-                            stable_channels::audit::audit_event(
-                                "DB_WRITE_FAILED",
-                                serde_json::json!({ "op": "save_channel", "context": "backstop", "user_channel_id": format!("{}", uid), "channel_id": c.channel_id, "error": e.to_string() }),
-                            );
-                            let data = serde_json::json!({
-                                "channel_id": c.channel_id, "user_channel_id": uid.to_string(),
-                                "their_sats": their_sats, "usd_deducted": usd_deducted,
-                                "new_expected_usd": proposed.expected_usd.0,
-                                "new_backing_sats": proposed.backing_sats,
-                            });
-                            self.pending_book_updates.insert(uid, PendingBookUpdate {
-                                channel_id: c.channel_id.clone(), proposed,
-                                context: "backstop",
-                                audits: vec![("BACKSTOP_STABLE_DEDUCTED", data)],
-                                needs_sync: true,
-                            });
-                            // Preserve the exact failed correction and leave published books intact.
-                            continue;
-                        }
-                        stable_channels::audit::audit_event(
-                            "BACKSTOP_STABLE_DEDUCTED",
-                            serde_json::json!({
-                                "channel_id": c.channel_id,
-                                "user_channel_id": format!("{}", uid),
-                                "their_sats": their_sats,
-                                "usd_deducted": usd_deducted,
-                                "new_expected_usd": proposed.expected_usd.0,
-                                "new_backing_sats": proposed.backing_sats,
-                            }),
-                        );
-                        backstop_syncs.push((
-                            uid,
-                            c.channel_id.clone(),
-                            proposed.expected_usd.0,
-                            proposed.backing_sats,
-                            proposed.counterparty.to_string(),
-                        ));
-                    }
-                    self.spend_debounce.remove(&uid);
-                }
-            } else {
-                self.spend_debounce.remove(&uid);
-            }
+            let below_backing = their_sats < sc.backing_sats;
             *sc = proposed;
+            if !below_backing {
+                self.balance_deferred.remove(&uid);
+            } else {
+                // Live capacity excludes unresolved HTLCs, so a balance below backing may be a payment still in flight. Only a completed payment's own event changes the books; settlement waits until they agree again.
+                if self.balance_deferred.insert(uid) {
+                    stable_channels::audit::audit_event(
+                        "STABILITY_DEFERRED_BALANCE_BELOW_BACKING",
+                        serde_json::json!({
+                            "channel_id": c.channel_id,
+                            "user_channel_id": format!("{}", uid),
+                            "their_sats": their_sats,
+                            "backing_sats": sc.backing_sats,
+                            "expected_usd": sc.expected_usd.0,
+                        }),
+                    );
+                }
+                // An offline peer may be holding an unclaimed top-up, so it still gets the wake push below; only a payment waits.
+                if c.is_usable {
+                    continue;
+                }
+            }
 
             let stable_usd_value = if sc.backing_sats > 0 {
                 (sc.backing_sats as f64 / 100_000_000.0) * btc_price
@@ -2274,7 +2224,14 @@ impl StableChannelManager {
             } else {
                 "user_to_lsp"
             };
-            let amount_sats = ((dollars_from_par / btc_price) * 100_000_000.0) as u64;
+            let equilibrium_sats = ((target / btc_price) * 100_000_000.0) as u64;
+            let amount_sats = if is_receiver_below_expected {
+                // Pay exactly the sats that reach equilibrium; a separately rounded amount can land one sat short and leave the balance below backing for good.
+                let held_sats = if sc.backing_sats > 0 { sc.backing_sats } else { their_sats };
+                equilibrium_sats.saturating_sub(held_sats)
+            } else {
+                ((dollars_from_par / btc_price) * 100_000_000.0) as u64
+            };
             let amount_msat = amount_sats.saturating_mul(1000);
 
             if c.is_usable {
@@ -2380,8 +2337,7 @@ impl StableChannelManager {
                     let expected_usd_for_db = sc.expected_usd.0;
                     let note_for_db = sc.note.clone();
                     let backing_before = sc.backing_sats;
-                    let backing_after =
-                        ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
+                    let backing_after = equilibrium_sats;
                     let native_before = sc.native_sats;
                     let last_stability_payment_before = sc.last_stability_payment;
                     let counterparty_for_db = sc.counterparty.to_string();
@@ -2505,21 +2461,6 @@ impl StableChannelManager {
             }
         }
 
-        for (uid, channel_id, expected_usd, backing_sats, counterparty) in backstop_syncs {
-            let sent = self
-                .send_sync_message(
-                    ldk,
-                    uid,
-                    &channel_id,
-                    expected_usd,
-                    backing_sats,
-                    &counterparty,
-                )
-                .await;
-            if !sent {
-                self.startup_sync_pending.insert(uid);
-            }
-        }
     }
 
     /// Sign a SYNC_V1 payload and keysend it (1 msat) to the counterparty in custom TLV 13377331.
@@ -4765,6 +4706,118 @@ mod tests {
             .is_none());
     }
 
+    /// A $50 channel whose price fell to $80k: the LSP has sent a 12,500-sat top-up the peer has not claimed.
+    async fn manager_with_unclaimed_top_up() -> (StableChannelManager, FakeLdkServer, std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>) {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        assert_eq!(ldk.sends.lock().unwrap().len(), 1);
+        (mgr, ldk, push)
+    }
+
+    /// make_channel takes the LSP's side of the 100,000-sat channel; the peer holds the rest.
+    fn set_receiver_sats(ldk: &FakeLdkServer, their_sats: u64) {
+        *ldk.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, (100_000 - their_sats) * 1000, true,
+        )];
+    }
+
+    #[tokio::test]
+    async fn unclaimed_top_up_is_not_deducted_as_a_spend() {
+        let (mut mgr, ldk, push) = manager_with_unclaimed_top_up().await;
+
+        // The phone sleeps before claiming: the live balance stays 50,000 against 62,500 backing.
+        for _ in 0..3 {
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        }
+
+        assert!((mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6, "the user spent nothing; the target must stay $50");
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        assert_eq!(ldk.sends.lock().unwrap().len(), 1, "no SYNC may publish a deduction");
+
+        // The top-up then fails: the books return to their state before the send.
+        let rollback = mgr.handle_failed_stability_payment("fake-payment-id").expect("rollback metadata");
+        assert!(rollback.applied);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
+        assert!((mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn forwarded_spend_is_deducted_once_the_top_up_resolves() {
+        for succeeded in [true, false] {
+            let (mut mgr, ldk, push) = manager_with_unclaimed_top_up().await;
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+            let backing = if succeeded {
+                assert!(mgr.db.mark_settlement_succeeded("fake-payment-id", Some(12_500_000), None, Some("lsp_to_user")).unwrap());
+                62_500
+            } else {
+                assert!(mgr.handle_failed_stability_payment("fake-payment-id").unwrap().applied);
+                50_000
+            };
+            assert_eq!(mgr.stable_channels[0].backing_sats, backing);
+
+            // The user then forwards 10,000 sats out of the stable allocation.
+            set_receiver_sats(&ldk, backing - 10_000);
+            mgr.handle_payment_forwarded(
+                USER_CHANNEL_ID_HEX.into(), Some("next-ucid".into()),
+                CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+                "next-peer".into(), 10_000_000, 0, None, &ldk, 100_000.0,
+            ).await;
+            let deducted = 50.0 - mgr.stable_channels[0].expected_usd.0;
+            assert!((deducted - 10.0).abs() < 0.01, "10,000 sats at $100k is $10, got {deducted} (succeeded={succeeded})");
+        }
+    }
+
+    #[tokio::test]
+    async fn top_up_pays_exactly_the_sats_that_reach_equilibrium() {
+        let mut mgr = make_manager();
+        // $38.54 at $94,000 is exactly 41,000 sats; the dollar gap divided by the price rounds to 1,456, one sat short of the 1,457 needed.
+        seed_channel(&mut mgr, 1, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 38.54, 39_543, 0, 39_543, 94_000.0);
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, "1", COUNTERPARTY_HEX, 100_000, 60_457_000, true,
+        )]);
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 94_000.0).await;
+
+        let sends = ldk.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 41_000);
+        assert_eq!(sends[0].amount_msat, 1_457_000, "balance after the claim must equal the new backing");
+    }
+
+    #[tokio::test]
+    async fn top_up_amount_ignores_native_sats_and_handles_unset_backing() {
+        // (backing, native, live balance, target, price) -> sats to send
+        for (backing, native, live, target, price, amount_sats) in [
+            // Native sats are the user's own; only backing moves to the 12,500-sat equilibrium.
+            (10_000, 40_000, 50_000, 10.0, 80_000.0, 2_500),
+            // Legacy channel with no recorded backing: the live balance moves to equilibrium (41,000), not one sat short.
+            (0, 0, 39_543, 38.54, 94_000.0, 1_457),
+        ] {
+            let mut mgr = make_manager();
+            seed_channel(&mut mgr, 1, COUNTERPARTY_HEX, CHANNEL_ID_HEX, target, backing, native, live, price);
+            let ldk = FakeLdkServer::new(vec![make_channel(
+                CHANNEL_ID_HEX, "1", COUNTERPARTY_HEX, 100_000, (100_000 - live) * 1000, true,
+            )]);
+            let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+            ));
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, price).await;
+            let sends = ldk.sends.lock().unwrap();
+            assert_eq!(sends.len(), 1, "backing {backing}");
+            assert_eq!(sends[0].amount_msat, amount_sats * 1000, "backing {backing}");
+        }
+    }
+
     #[tokio::test]
     async fn run_tick_skips_high_risk_channel() {
         let mut mgr = make_manager();
@@ -4850,58 +4903,6 @@ mod tests {
         assert_eq!(payload["type"], "SYNC_V1");
         assert_eq!(payload["expected_usd"], expected);
         assert_eq!(payload["backing_sats"], backing);
-    }
-
-    #[tokio::test]
-    async fn backstop_save_failure_preserves_books_and_retries() {
-        let mut mgr = make_manager();
-        seed_persisted_save_test_channel(&mut mgr, 10.0);
-        let conn = save_test_connection(&mgr);
-        // Fail after UPDATE channels, to exercise rollback of the full save transaction.
-        conn.execute_batch(
-            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
-             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
-             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
-        )
-        .unwrap();
-        let before_commits = committed_book_count(&conn);
-        let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_DECIMAL,
-            COUNTERPARTY_HEX,
-            100_000,
-            95_000_000,
-            true,
-        )]);
-        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
-            &crate::config::PushConfig::default(),
-            mgr.data_dir(),
-        )));
-        mgr.run_tick(&fake, &push, 100_000.0).await;
-        let before = serde_json::to_string(&mgr.stable_channels[0]).unwrap();
-        // Price drift also exercises the requirement to skip settlement after a failed save.
-        for _ in 0..3 {
-            mgr.run_tick(&fake, &push, 80_000.0).await;
-            assert_eq!(
-                serde_json::to_string(&mgr.stable_channels[0]).unwrap(),
-                before
-            );
-            assert_saved_books(&mgr, 10.0, 10_000, 40_000);
-            assert!(fake.sends.lock().unwrap().is_empty());
-            assert!(fake.sign_calls.lock().unwrap().is_empty());
-            assert_eq!(committed_book_count(&conn), before_commits);
-        }
-
-        conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
-        // Save the original $4 correction calculated at $80k; a later price must not reprice it.
-        mgr.run_tick(&fake, &push, 100_000.0).await;
-        assert_saved_books(&mgr, 6.0, 5_000, 0);
-        assert_eq!(committed_book_count(&conn), before_commits + 1);
-        assert_book_sync(&fake, 6.0, 5_000);
-        mgr.run_tick(&fake, &push, 100_000.0).await;
-        assert_saved_books(&mgr, 6.0, 5_000, 0);
-        assert_eq!(committed_book_count(&conn), before_commits + 1);
-        assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -5055,7 +5056,7 @@ mod tests {
         }
     }
 
-    async fn failed_correction_before_forward(splice: bool, hold_database_failure: bool) {
+    async fn failed_correction_before_forward(hold_database_failure: bool) {
         let mut mgr = make_manager();
         seed_persisted_save_test_channel(&mut mgr, 10.0);
         let conn = save_test_connection(&mgr);
@@ -5078,19 +5079,14 @@ mod tests {
             &crate::config::PushConfig::default(),
             mgr.data_dir(),
         )));
-        if splice {
-            mgr.handle_channel_ready(
-                CHANNEL_ID_HEX.to_owned(),
-                USER_CHANNEL_ID_DECIMAL.to_owned(),
-                Some("splice-before-forward:0".to_owned()),
-                &fake,
-                100_000.0,
-            )
-            .await;
-        } else {
-            mgr.run_tick(&fake, &push, 100_000.0).await;
-            mgr.run_tick(&fake, &push, 100_000.0).await;
-        }
+        mgr.handle_channel_ready(
+            CHANNEL_ID_HEX.to_owned(),
+            USER_CHANNEL_ID_DECIMAL.to_owned(),
+            Some("splice-before-forward:0".to_owned()),
+            &fake,
+            100_000.0,
+        )
+        .await;
         assert_saved_books(&mgr, 10.0, 10_000, 40_000);
         assert!(fake.sends.lock().unwrap().is_empty());
         if !hold_database_failure {
@@ -5221,7 +5217,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_splice_is_committed_before_a_later_forward() {
-        failed_correction_before_forward(true, false).await;
+        failed_correction_before_forward(false).await;
     }
 
     #[tokio::test]
@@ -5273,14 +5269,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_backstop_is_committed_before_a_later_forward() {
-        failed_correction_before_forward(false, false).await;
-    }
-
-    #[tokio::test]
     async fn failed_correction_holds_the_event_until_database_recovery() {
-        failed_correction_before_forward(true, true).await;
-        failed_correction_before_forward(false, true).await;
+        failed_correction_before_forward(true).await;
     }
 
     #[tokio::test]
@@ -5317,39 +5307,177 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backstop_deducts_and_syncs_after_two_low_ticks() {
-        let mut mgr = make_manager();
-        // expected $10 -> backing 10_000; receiver 50_000 (native 40_000) at $100k.
-        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
-        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
-            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
-        ));
-        // Live balance dropped to 5_000 (< backing 10_000): a spend the forwarded event missed.
-        let fake = FakeLdkServer::new(vec![make_channel(
+    async fn persistent_capacity_deficit_never_deducts_or_settles() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        fake.sends.lock().unwrap().clear();
+        // Live balance 5,000 against 10,000 backing: a payment in flight, or one whose event never arrived.
+        *fake.channels.lock().unwrap() = vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
-        )]);
-
-        // Tick 1: debounce only.
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
-        assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "tick 1 must not deduct");
-        assert!(fake.sends.lock().unwrap().is_empty(), "tick 1 must not SYNC");
-
-        // Tick 2: act.
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
-        let exp = mgr.stable_channels[0].expected_usd.0;
-        assert!((exp - 5.0).abs() < 0.01, "tick 2 must deduct ~$5 (10_000-5_000 sats), got {}", exp);
-        let sends = fake.sends.lock().unwrap();
-        assert_eq!(sends.len(), 1, "tick 2 must send exactly one SYNC");
-        assert_eq!(sends[0].custom_tlvs.len(), 1, "SYNC must carry exactly one stable TLV");
-        assert_eq!(
-            sends[0].custom_tlvs[0].type_num,
-            stable_channels::constants::STABLE_CHANNEL_TLV_TYPE,
-            "SYNC TLV must be the stable-channel type",
-        );
+        )];
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )));
+        stable_channels::audit::enable_test_capture();
+        // Neither repeated observations nor a price change establishes a completed spend.
+        for price in [100_000.0, 100_000.0, 80_000.0, 120_000.0, 100_000.0] {
+            mgr.run_tick(&fake, &push, price).await;
+            assert_deficit_books(&mgr, 10.0, 10_000);
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(fake.sends.lock().unwrap().is_empty(), "no SYNC, top-up or deduction while the balance is below backing");
+        assert!(fake.sign_calls.lock().unwrap().is_empty());
+        let deferred = events.iter().filter(|(e, _)| e == "STABILITY_DEFERRED_BALANCE_BELOW_BACKING").count();
+        assert_eq!(deferred, 1, "the deferral is recorded once, not on every tick");
     }
 
     #[tokio::test]
-    async fn backstop_single_tick_dip_does_not_deduct() {
+    async fn each_deferral_episode_is_audited_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )));
+        stable_channels::audit::enable_test_capture();
+        // Below backing, recovered, then below again: two episodes.
+        for lsp_side_msat in [95_000_000, 95_000_000, 50_000_000, 50_000_000, 95_000_000, 95_000_000] {
+            *fake.channels.lock().unwrap() = vec![make_channel(
+                CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, lsp_side_msat, true,
+            )];
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let deferred = events.iter().filter(|(e, _)| e == "STABILITY_DEFERRED_BALANCE_BELOW_BACKING").count();
+        assert_eq!(deferred, 2);
+    }
+
+    #[tokio::test]
+    async fn offline_peer_below_backing_is_still_woken() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = manager_with_unclaimed_top_up().await;
+        // The phone slept before claiming, and the price keeps falling.
+        *ldk.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, false,
+        )];
+        mgr.stable_channels[0].last_stability_payment = 0;
+        stable_channels::audit::enable_test_capture();
+        for _ in 0..3 {
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 60_000.0).await;
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert!(events.iter().any(|(e, _)| e == "STABILITY_PUSH_QUEUED"), "the peer must be woken to claim and settle");
+        assert_eq!(events.iter().filter(|(e, _)| e == "STABILITY_DEFERRED_BALANCE_BELOW_BACKING").count(), 1);
+        assert_eq!(ldk.sends.lock().unwrap().len(), 1, "no second top-up is sent while the first is unclaimed");
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        assert!((mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn held_forward_survives_restart_and_failure() {
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        fake.sends.lock().unwrap().clear();
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+        )];
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )));
+        for _ in 0..3 {
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        assert_deficit_books(&mgr, 10.0, 10_000);
+
+        let data_dir = mgr.data_dir().to_path_buf();
+        drop(mgr);
+        let db = Arc::new(stable_channels::db::Database::open(&data_dir).unwrap());
+        let mut mgr = StableChannelManager::new(db, data_dir);
+        mgr.reconcile_from_grpc(&fake, 100_000.0).await;
+        for _ in 0..3 {
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        assert_deficit_books(&mgr, 10.0, 10_000);
+
+        // Failure releases the HTLC and restores capacity without a PaymentForwarded event.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )];
+        mgr.run_tick(&fake, &push, 100_000.0).await;
+        assert_deficit_books(&mgr, 10.0, 10_000);
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_forward_is_accounted_once_and_only_after_success() {
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        fake.sends.lock().unwrap().clear();
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
+        )];
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )));
+        for _ in 0..3 {
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        assert_deficit_books(&mgr, 10.0, 10_000);
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        // The 45,000-sat forward completes: 40,000 native and 5,000 stable were spent.
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
+            CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+            "next-peer".into(), 45_000_000, 0, None, &fake, 100_000.0,
+        ).await;
+        assert_deficit_books(&mgr, 5.0, 5_000);
+        let sends_after_success = fake.sends.lock().unwrap().len();
+        for _ in 0..3 {
+            mgr.run_tick(&fake, &push, 100_000.0).await;
+        }
+        assert_deficit_books(&mgr, 5.0, 5_000);
+        assert_eq!(fake.sends.lock().unwrap().len(), sends_after_success);
+    }
+
+    #[tokio::test]
+    async fn settlement_resumes_when_the_balance_covers_backing_again() {
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        fake.sends.lock().unwrap().clear();
+        mgr.stable_channels[0].backing_sats = 50_000;
+        mgr.stable_channels[0].native_sats = 0;
+        mgr.stable_channels[0].expected_usd = USD::from_f64(50.0);
+        let push = Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )));
+        // A top-up is due at $80k, but a 10,000-sat payment is in flight.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true,
+        )];
+        mgr.run_tick(&fake, &push, 80_000.0).await;
+        assert!(fake.sends.lock().unwrap().is_empty(), "no top-up while the balance is below backing");
+
+        // The payment fails back; the next tick pays the top-up.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )];
+        mgr.run_tick(&fake, &push, 80_000.0).await;
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].amount_msat, 12_500_000);
+    }
+
+    fn assert_deficit_books(mgr: &StableChannelManager, expected: f64, backing: u64) {
+        assert!((mgr.stable_channels[0].expected_usd.0 - expected).abs() < 1e-6);
+        assert_eq!(mgr.stable_channels[0].backing_sats, backing);
+        let saved = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert!((saved.expected_usd - expected).abs() < 1e-6);
+        assert_eq!(saved.backing_sats, backing);
+    }
+
+    #[tokio::test]
+    async fn transient_balance_dip_does_not_deduct() {
         let mut mgr = make_manager();
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -5371,7 +5499,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backstop_noop_when_balance_healthy() {
+    async fn books_unchanged_when_balance_healthy() {
         let mut mgr = make_manager();
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
@@ -5384,7 +5512,7 @@ mod tests {
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
-        assert!(fake.sends.lock().unwrap().is_empty(), "no backstop action when healthy");
+        assert!(fake.sends.lock().unwrap().is_empty(), "no action when healthy");
     }
 
     #[tokio::test]
@@ -8359,7 +8487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incoming_stability_payment_prevents_backstop_misfire() {
+    async fn incoming_stability_payment_stays_reconciled_across_ticks() {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let mut mgr = make_manager();
         let fake0 = FakeLdkServer::new(vec![make_channel(
@@ -8381,8 +8509,8 @@ mod tests {
         ).await;
         let expected_before = mgr.stable_channels[0].expected_usd.0;
 
-        // Two ticks at the new price: without receive-time reconcile the backstop
-        // would read the settled sats as an unreconciled spend and deduct expected_usd.
+        // Two ticks at the new price: without receive-time reconcile the settled sats
+        // would leave the balance below backing and settlement deferred.
         stable_channels::audit::enable_test_capture();
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 110_000.0).await;
@@ -8390,8 +8518,8 @@ mod tests {
         stable_channels::audit::disable_test_capture();
 
         assert!(
-            !events.iter().any(|(e, _)| e == "BACKSTOP_STABLE_DEDUCTED"),
-            "settled stability payment must not trigger the backstop"
+            !events.iter().any(|(e, _)| e == "STABILITY_DEFERRED_BALANCE_BELOW_BACKING"),
+            "settled stability payment must not leave the balance below backing"
         );
         assert_eq!(
             mgr.stable_channels[0].expected_usd.0, expected_before,

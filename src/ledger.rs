@@ -983,6 +983,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "STABILITY_RECEIVE_UNATTRIBUTED",
     "STABILITY_PUSH_QUEUED",
     "STABILITY_CHECK_ONLY",
+    "STABILITY_DEFERRED_BALANCE_BELOW_BACKING",
     // SYNC publications and their final outcomes (never each retry).
     "SYNC_MESSAGE_SENT",
     "SYNC_RETRY_EXHAUSTED",
