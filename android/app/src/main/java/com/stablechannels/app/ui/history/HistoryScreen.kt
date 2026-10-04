@@ -28,8 +28,8 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.relativeString
-import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -315,7 +315,7 @@ private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: ()
                         price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
                     }
             val amountText =
-                displayUsd?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+                displayUsd?.usdFormatted() ?: "${payment.amountSats.btcSpacedFormatted()} BTC"
             Text(
                 text = (if (isIncoming) "+" else "-") + amountText,
                 style = MaterialTheme.typography.bodyLarge,

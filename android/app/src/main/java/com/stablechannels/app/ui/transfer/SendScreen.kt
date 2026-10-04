@@ -744,7 +744,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (isOnChain) {
                                     "Confirm onchain withdrawal"
                                 } else {
-                                    "Confirm payment of $displaySats sats"
+                                    "Confirm payment of ${displaySats.btcSpacedFormatted()} BTC"
                                 }
                             val authResult = BiometricService.authenticate(activity, reason)
                             if (authResult != BiometricService.AuthResult.SUCCESS) {

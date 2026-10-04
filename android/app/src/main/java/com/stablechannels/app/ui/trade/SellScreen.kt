@@ -21,6 +21,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.StabilizationPolicy
 import com.stablechannels.app.services.WalletErrorMessages
@@ -184,7 +185,7 @@ fun SellScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: ()
                 if (amountUSD > 0 && btcPrice > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "~ ${String.format(Locale.US, "%.8f", btcAmount)}",
+                        "~ ${Bitcoin.fromBTC(btcAmount).formatted}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

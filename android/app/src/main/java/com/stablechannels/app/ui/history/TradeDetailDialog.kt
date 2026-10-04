@@ -98,7 +98,8 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                     )
                     DetailRow(
                         "BTC Amount",
-                        Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted(),
+                        Math.round(trade.amountBTC * Constants.SATS_IN_BTC).btcSpacedFormatted() +
+                            " BTC",
                     )
                     HorizontalDivider(
                         modifier = Modifier.padding(vertical = 8.dp),

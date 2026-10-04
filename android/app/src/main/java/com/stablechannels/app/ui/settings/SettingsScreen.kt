@@ -22,8 +22,8 @@ import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
-import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -139,10 +139,19 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
 
                     val ch = channels.first()
-                    DetailRow("Capacity", ch.channelValueSats.toLong().satsFormatted())
+                    DetailRow(
+                        "Capacity",
+                        "${ch.channelValueSats.toLong().btcSpacedFormatted()} BTC",
+                    )
                     DetailRow("Status", if (ch.isChannelReady) "Ready" else "Pending")
-                    DetailRow("Outbound", (ch.outboundCapacityMsat.toLong() / 1000).satsFormatted())
-                    DetailRow("Inbound", (ch.inboundCapacityMsat.toLong() / 1000).satsFormatted())
+                    DetailRow(
+                        "Outbound",
+                        "${(ch.outboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+                    )
+                    DetailRow(
+                        "Inbound",
+                        "${(ch.inboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+                    )
 
                     appState.fundingTxid?.let { txid ->
                         if (txid.isNotEmpty()) {
@@ -172,7 +181,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
 
                     DetailRow("Expected USD", sc.expectedUSD.formatted)
-                    DetailRow("Backing Sats", sc.backingSats.satsFormatted())
+                    DetailRow("Backing BTC", "${sc.backingSats.btcSpacedFormatted()} BTC")
                     DetailRow("Native BTC", sc.nativeChannelBTC.formatted)
                     DetailRow("Stability", stabilityResult.action.value)
                     if (stabilityResult.percentFromPar > 0) {
@@ -214,7 +223,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             Column(Modifier.padding(16.dp)) {
                 Text("Onchain", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
-                DetailRow("Balance", onchainSats.satsFormatted())
+                DetailRow("Balance", "${onchainSats.btcSpacedFormatted()} BTC")
 
                 TextButton(onClick = { showOnchainSend = true }) { Text("Send Onchain") }
             }

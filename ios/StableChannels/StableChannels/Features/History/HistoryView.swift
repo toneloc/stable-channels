@@ -183,7 +183,7 @@ struct PaymentRowView: View {
                     Text(usd.usdFormatted)
                         .fontWeight(.medium)
                 } else {
-                    Text(payment.amountSats.satsFormatted)
+                    Text("\(payment.amountSats.btcSpacedFormatted) BTC")
                         .fontWeight(.medium)
                 }
                 Text(statusLabel)

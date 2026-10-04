@@ -28,7 +28,6 @@ import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.btcSpacedFormatted
-import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -280,7 +279,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 if (satsFromUSD > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "~ ${satsFromUSD.satsFormatted()} sats",
+                        "~ ${satsFromUSD.btcSpacedFormatted()} BTC",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -414,7 +413,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             throw e
                                         }
                                         result =
-                                            "Splice-out initiated for ${sats.satsFormatted()} sats."
+                                            "Splice-out initiated for ${sats.btcSpacedFormatted()} BTC."
                                         successTxid = null
                                     } else {
                                         val txid = appState.nodeService.sendOnchain(addr, sats)

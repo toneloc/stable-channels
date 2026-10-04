@@ -50,6 +50,10 @@ struct SellView: View {
         return amountUSD / tradePrice
     }
 
+    private var btcAmountFinalText: String {
+        Bitcoin.fromBTC(btcAmountFinal).formatted
+    }
+
     private var btcAmountFinal: Double {
         guard tradePrice > 0 else { return 0 }
         return netAmountUSD / tradePrice
@@ -102,7 +106,7 @@ struct SellView: View {
                 }
 
             if amountUSD > 0 {
-                Text(String(format: "≈ %.8f BTC", btcAmount))
+                Text("≈ \(Bitcoin.fromBTC(btcAmount).formatted)")
                     .foregroundStyle(.secondary)
             }
 
@@ -223,10 +227,9 @@ struct SellView: View {
                 Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + netAmountUSD.usdFormatted)
+                Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + btcAmountFinalText +
+                    " for " +
+                    netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -236,10 +239,8 @@ struct SellView: View {
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + netAmountUSD.usdFormatted)
+                Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + btcAmountFinalText +
+                    " for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 

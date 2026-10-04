@@ -15,7 +15,7 @@ struct ChannelSettingsView: View {
                     HStack {
                         Text(String(localized: "label_capacity", defaultValue: "Capacity"))
                         Spacer()
-                        Text(channel.channelValueSats.satsFormatted)
+                        Text("\(channel.channelValueSats.btcSpacedFormatted) BTC")
                     }
                     HStack {
                         Text(String(localized: "label_status", defaultValue: "Status"))
@@ -32,12 +32,12 @@ struct ChannelSettingsView: View {
                     HStack {
                         Text(String(localized: "label_outbound", defaultValue: "Outbound"))
                         Spacer()
-                        Text((channel.outboundCapacityMsat / 1000).satsFormatted)
+                        Text("\((channel.outboundCapacityMsat / 1000).btcSpacedFormatted) BTC")
                     }
                     HStack {
                         Text(String(localized: "label_inbound", defaultValue: "Inbound"))
                         Spacer()
-                        Text(((channel.inboundCapacityMsat) / 1000).satsFormatted)
+                        Text("\((channel.inboundCapacityMsat / 1000).btcSpacedFormatted) BTC")
                     }
 
                     if let closeTxid = appState.transactionLinkService.lastCloseTxid, !closeTxid.isEmpty {
