@@ -33,11 +33,11 @@ struct BalanceBarView: View {
     }
 
     private var totalHeight: CGFloat {
-        interactive ? (headerHeight + verticalSpacing + thumbDiameter) : 10
+        interactive ? (headerHeight + verticalSpacing + thumbDiameter) : barHeight
     }
 
     private var currentBarHeight: CGFloat {
-        interactive ? barHeight : 10
+        barHeight
     }
 
     private var visibleFraction: CGFloat {
@@ -81,7 +81,7 @@ struct BalanceBarView: View {
                         thumbView(thumbX: thumbX)
                     }
                 }
-                .frame(width: barWidth, height: interactive ? thumbDiameter : 10)
+                .frame(width: barWidth, height: interactive ? thumbDiameter : barHeight)
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)

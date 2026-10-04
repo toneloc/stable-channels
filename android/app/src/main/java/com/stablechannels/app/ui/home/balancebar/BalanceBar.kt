@@ -53,7 +53,7 @@ fun BalanceBar(
     val interactive =
         (isEmpty && onEmptyInteraction != null) ||
             (!isEmpty && isPriceReady && onTradeRequest != null)
-    val barHeight = if (interactive) 12.dp else 8.dp
+    val barHeight = 20.dp
     val thumbDiameter = BalanceBarDefaults.THUMB_DIAMETER
 
     var barWidthPx by remember { mutableFloatStateOf(0f) }
