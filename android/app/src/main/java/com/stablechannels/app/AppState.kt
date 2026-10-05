@@ -985,7 +985,12 @@ class AppState(private val context: Context) : ViewModel() {
     // The balance cache can't serve as the baseline: it is refreshed while detection is deferred.
     private var prevOnchainSats: Long =
         context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).let {
-            it.getLong("deposit_baseline_sats", it.getLong("cached_onchain_sats", 0L))
+            if (!it.contains("deposit_baseline_sats")) {
+                it.edit()
+                    .putLong("deposit_baseline_sats", it.getLong("cached_onchain_sats", 0L))
+                    .apply()
+            }
+            it.getLong("deposit_baseline_sats", 0L)
         }
         set(value) {
             if (field != value) {

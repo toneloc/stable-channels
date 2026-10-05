@@ -2163,8 +2163,9 @@ class DatabaseService(context: Context) :
 
     /**
      * Records a deposit found by an on-chain address lookup. Skipped when a resolved receive row
-     * with the same amount already exists in the window (older rows may lack a txid, so the txid
-     * check alone would duplicate them). Txid-less pending placeholders are adopted instead.
+     * for this txid, or a txid-less one with the same amount, already exists in the window (older
+     * rows may lack a txid, so the txid check alone would duplicate them). Txid-less pending
+     * placeholders are adopted instead.
      */
     fun recordMissedReceive(
         txid: String,
@@ -2181,11 +2182,12 @@ class DatabaseService(context: Context) :
                     SELECT 1 FROM payments
                     WHERE payment_type = 'onchain' AND direction = 'received'
                       AND amount_msat = ? AND created_at >= ?
-                      AND status != 'failed' AND NOT (status = 'pending' AND txid IS NULL)
+                      AND status != 'failed' AND (txid IS NULL OR txid = ?)
+                      AND NOT (status = 'pending' AND txid IS NULL)
                     LIMIT 1
                     """
                         .trimIndent(),
-                    arrayOf((amountSats * 1000).toString(), sinceSecs.toString()),
+                    arrayOf((amountSats * 1000).toString(), sinceSecs.toString(), txid),
                 )
                 .use { it.moveToFirst() }
         if (duplicate) return -1L
