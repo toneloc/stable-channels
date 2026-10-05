@@ -716,6 +716,34 @@ impl Database {
         native_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
+        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, false)
+    }
+
+    /// Save a channel after a forwarded spend. A spend is not a newer allocation decision, so a
+    /// pending outbound stability payment whose rollback snapshot matched the channel still
+    /// matches it afterwards, and its failure restores what that payment changed.
+    pub fn save_channel_after_spend(
+        &self,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        note: Option<&str>,
+    ) -> SqliteResult<()> {
+        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, true)
+    }
+
+    fn save_channel_inner(
+        &self,
+        channel_id: &str,
+        user_channel_id: &str,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        note: Option<&str>,
+        keep_pending_rollback: bool,
+    ) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
@@ -750,6 +778,26 @@ impl Database {
                     .map_or(true, |previous| previous.5.as_deref() != note);
             if !row_changed {
                 return Ok(());
+            }
+            if let (true, Some((old_expected, old_backing, old_native, ..))) = (keep_pending_rollback, &before) {
+                // Move the snapshot by the same spend, only where it matched the row being replaced.
+                conn.execute(
+                    "UPDATE settlement_payments
+                     SET backing_sats_before = backing_sats_before + ?1 - ?2,
+                         backing_sats_after = ?1, native_sats_before = ?3, expected_usd = ?4
+                     WHERE user_channel_id = ?5 AND kind = 'stability' AND outcome = 'pending'
+                       AND backing_sats_after = ?2 AND native_sats_before = ?6 AND expected_usd = ?7
+                       AND backing_sats_before + ?1 - ?2 >= 0",
+                    params![
+                        backing_sats as i64,
+                        old_backing,
+                        native_sats as i64,
+                        expected_usd,
+                        user_channel_id,
+                        old_native,
+                        old_expected
+                    ],
+                )?;
             }
             // Try to update by user_channel_id first (handles channel_id changes from splices)
             let updated = conn.execute(
@@ -4435,6 +4483,42 @@ mod tests {
         let channel = db.load_channel("user-channel").unwrap().unwrap();
         assert_eq!(channel.backing_sats, 70_000);
         assert_eq!(channel.native_sats, 30_000);
+    }
+
+    fn channel_with_pending_top_up() -> Database {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("channel", "user-channel", 50.0, 50_000, 0, None).unwrap();
+        assert!(db
+            .record_stability_settlement_with_rollback(
+                "payment", "user-channel", "channel", 50_000, 62_500, 0, 50.0, 17,
+                12_500_000, "lsp_to_user", "counterparty", None,
+            )
+            .unwrap());
+        db
+    }
+
+    #[test]
+    fn failed_stability_settlement_is_still_undone_after_a_forwarded_spend() {
+        let db = channel_with_pending_top_up();
+        // A 10,000-sat spend at $80k leaves the stable allocation while the payment is pending.
+        db.save_channel_after_spend("channel", "user-channel", 42.0, 52_500, 0, None).unwrap();
+
+        let rollback = db.rollback_failed_stability_settlement("payment").unwrap().unwrap();
+        assert!(rollback.applied);
+        assert_eq!((rollback.backing_sats_before, rollback.backing_sats_after), (40_000, 52_500));
+        let channel = db.load_channel("user-channel").unwrap().unwrap();
+        assert_eq!((channel.expected_usd, channel.backing_sats, channel.native_sats), (42.0, 40_000, 0));
+    }
+
+    #[test]
+    fn forwarded_spend_does_not_revive_a_rollback_that_a_newer_allocation_replaced() {
+        let db = channel_with_pending_top_up();
+        db.save_channel("channel", "user-channel", 55.0, 70_000, 0, None).unwrap();
+        db.save_channel_after_spend("channel", "user-channel", 47.0, 60_000, 0, None).unwrap();
+
+        let rollback = db.rollback_failed_stability_settlement("payment").unwrap().unwrap();
+        assert!(!rollback.applied);
+        assert_eq!(db.load_channel("user-channel").unwrap().unwrap().backing_sats, 60_000);
     }
 
     #[test]

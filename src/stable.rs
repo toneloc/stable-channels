@@ -184,6 +184,9 @@ pub fn repair_overbacked_allocation_if_safe(
 /// in a PaymentForwarded handler) must add `total_forwarded_sats` back first —
 /// passing the post-spend balance understates native and over-deducts stable.
 ///
+/// Backing drops by this forward's own overflow only. A live balance that already reflects
+/// another settled forward leaves that spend in backing for its own event to deduct.
+///
 /// Returns `Some(usd_deducted)` if stable was reduced, `None` otherwise.
 pub fn reconcile_forwarded(
     sc: &mut StableChannel,
@@ -207,11 +210,16 @@ pub fn reconcile_forwarded(
     let new_expected = (old_expected - usd_to_deduct).max(0.0);
 
     sc.expected_usd = USD::from_f64(new_expected);
-    // After forwarding: user's actual remaining balance is user_sats - total_forwarded_sats
+    // An overflow means native was fully consumed, so the remaining balance is all stable. This
+    // forward explains its own overflow plus one sat of msat rounding. A lower balance is another
+    // spend, which stays in backing until its own event deducts it.
     let remaining_user_sats = user_sats.saturating_sub(total_forwarded_sats);
-    // An overflow means native was fully consumed, so all remaining sats are stable. Preserve
-    // that exact allocation instead of deriving a new one from a potentially newer BTC price.
-    sc.backing_sats = remaining_user_sats;
+    let after_own_overflow = sc.backing_sats.saturating_sub(overflow_sats);
+    sc.backing_sats = if after_own_overflow > remaining_user_sats.saturating_add(1) {
+        after_own_overflow
+    } else {
+        remaining_user_sats
+    };
     sc.native_sats = 0;
     recompute_native(sc);
 
@@ -720,7 +728,8 @@ pub fn stability_payment_is_fresh(payment: &StabilityPaymentPayload, now: u64) -
 ///
 /// The paid sats are authoritative, but PR #231's local-equilibrium floor remains in force: a
 /// payment may settle an above-par surplus, never manufacture a below-par claim at the LSP's
-/// price. The final live-balance clamp preserves the allocation invariant.
+/// price. The final clamp keeps backing within the live balance, but only for the drop this
+/// payment explains: sats already missing before it stay in backing for their own event.
 pub fn backing_after_user_to_lsp_stability(
     current_backing_sats: u64,
     expected_usd: f64,
@@ -748,7 +757,15 @@ pub fn backing_after_user_to_lsp_stability(
     } else {
         current_backing_sats
     };
-    Some(settled.min(live_receiver_sats))
+    // The payment explains a drop of its own amount plus one sat of msat rounding. A lower live
+    // balance is another spend or an HTLC in flight, which this payment must not write off.
+    let after_own_amount = current_backing_sats.saturating_sub(amount_sats);
+    let ceiling = if after_own_amount > live_receiver_sats.saturating_add(1) {
+        after_own_amount
+    } else {
+        live_receiver_sats
+    };
+    Some(settled.min(ceiling))
 }
 
 /// Apply an LSP-to-wallet stability payment to the wallet's local allocation.
@@ -1242,6 +1259,25 @@ mod tests {
     }
 
     #[test]
+    fn user_to_lsp_settlement_clamps_only_the_shortfall_it_caused() {
+        // At par on 50k backing with 10k already missing before a 1-sat payment: only the paid sat leaves backing.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(50_000, 50.0, 100_000.0, 1, 39_999),
+            Some(49_999)
+        );
+        // An overpayment with no native sats is still clamped to the live balance.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 5_000, 5_000),
+            Some(5_000)
+        );
+        // A one-sat difference is the payment's own msat rounding.
+        assert_eq!(
+            backing_after_user_to_lsp_stability(10_000, 10.0, 110_000.0, 909, 9_090),
+            Some(9_090)
+        );
+    }
+
+    #[test]
     fn lsp_to_user_settlement_uses_local_equilibrium_and_keeps_excess_native() {
         assert_eq!(
             backing_after_lsp_to_user_stability(9_000, 10.0, 100_000.0, 1_000, 50_000),
@@ -1584,6 +1620,38 @@ mod tests {
         let deducted = reconcile_forwarded(&mut sc, 500_000, 100_000, 100_000.0).unwrap();
         assert!((deducted - 100.0).abs() < 0.01);
         assert!((sc.expected_usd.0 - 400.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn forwarded_removes_only_its_own_overflow_from_backing() {
+        // $50 stable on 50k sats. Two 10k forwards settled before either was reconciled, so the live balance is 30k.
+        let mut sc = test_sc(50.0, 100_000.0, 30_000);
+        let first = reconcile_forwarded(&mut sc, 40_000, 10_000, 100_000.0).unwrap();
+        assert!((first - 10.0).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 40_000, "the other forward's sats stay in backing until it is reconciled");
+
+        let second = reconcile_forwarded(&mut sc, 40_000, 10_000, 100_000.0).unwrap();
+        assert!((second - 10.0).abs() < 1e-9);
+        assert!((sc.expected_usd.0 - 30.0).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 30_000);
+        assert_eq!(sc.native_sats, 0);
+    }
+
+    #[test]
+    fn forwarded_absorbs_its_own_msat_rounding() {
+        // The live balance fell one sat more than the whole-sat amount, leaving 39,999 of 50k.
+        let mut sc = test_sc(50.0, 100_000.0, 39_999);
+        let deducted = reconcile_forwarded(&mut sc, 49_999, 10_000, 100_000.0).unwrap();
+        assert!((deducted - 10.0).abs() < 1e-9);
+        assert_eq!(sc.backing_sats, 39_999, "a rounding sat must not stay above the live balance");
+    }
+
+    #[test]
+    fn forwarded_keeps_a_gap_wider_than_its_own_rounding() {
+        // Two sats more than this forward are missing, which is another spend and not rounding.
+        let mut sc = test_sc(50.0, 100_000.0, 39_998);
+        reconcile_forwarded(&mut sc, 49_998, 10_000, 100_000.0).unwrap();
+        assert_eq!(sc.backing_sats, 40_000);
     }
 
     #[test]
