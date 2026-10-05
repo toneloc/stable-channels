@@ -1,0 +1,48 @@
+# Step 23 — Aux: onchain receive waits for 6 confirmations
+# A deposit with 1 confirmation must show a counting badge ("1/6 confirmed"), not Confirmed; only at 6 does it complete.
+#
+# Guards PR #267's ConfirmationPolicy (onchain = 6 confs, vs 1 for splices —
+# pre-#267 behavior completed onchain rows early). Run right after 01.
+appId: com.stablechannels.app
+tags: [android, ios, onchain, receive, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+---
+- launchApp:
+    stopApp: false
+- tapOn: "Receive"
+- tapOn: "Onchain"
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "bcrt1.*"
+- runScript:
+    file: helpers/send_onchain.js
+
+# One confirmation only — the row must exist and still be counting.
+- runScript:
+    file: helpers/mine_blocks.js
+    env:
+      MINE_BLOCKS: "1"
+- tapOn: "(Back|Receive)"
+- tapOn:
+    text: "Done"
+    optional: true
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "\\d/6 confirmed"
+    timeout: 240000
+- assertNotVisible: "Confirmed"
+
+# Five more blocks: the same row must complete.
+- runScript:
+    file: helpers/mine_blocks.js
+    env:
+      MINE_BLOCKS: "5"
+- extendedWaitUntil:
+    visible: "Confirmed"
+    timeout: 240000
+- tapOn: "Home"

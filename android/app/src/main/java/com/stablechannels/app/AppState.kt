@@ -18,6 +18,7 @@ import com.stablechannels.app.util.AppFormatters
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.TestOverrides
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import java.io.File
@@ -1040,7 +1041,9 @@ class AppState(private val context: Context) : ViewModel() {
 
                 // Load cached channel state so UI has correct slider/values immediately
                 loadChannelFromDB()
-                priceService.startAutoRefresh()
+                priceService.startAutoRefresh(
+                    TestOverrides.priceRefreshSecs ?: Constants.PRICE_CACHE_REFRESH_SECS
+                )
 
                 // Resolve best esplora endpoint before starting node
                 chainUrl = resolveChainUrl()
@@ -1078,7 +1081,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     loadChannelFromDB() // reload — SPS may have incremented backingSats while we
                     // waited
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     resetNodeStartRetryState()
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
@@ -1180,7 +1183,7 @@ class AppState(private val context: Context) : ViewModel() {
                 } else {
                     // New wallet — auto-create
                     _phase.value = Phase.SYNCING
-                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    nodeService.start(ldkNetwork(), chainUrl, null)
                     resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
                     reconcilePendingLightningPayments()
@@ -1204,7 +1207,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+                nodeService.start(ldkNetwork(), chainUrl, mnemonic)
                 resetNodeStartRetryState()
                 _phase.value = Phase.WALLET
                 reconcilePendingLightningPayments()
@@ -1376,7 +1379,7 @@ class AppState(private val context: Context) : ViewModel() {
             try {
                 loadChannelFromDB()
                 _phase.value = Phase.SYNCING
-                nodeService.start(Network.BITCOIN, chainUrl, null)
+                nodeService.start(ldkNetwork(), chainUrl, null)
                 resetNodeStartRetryState()
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
@@ -1581,7 +1584,7 @@ class AppState(private val context: Context) : ViewModel() {
         if (nodeService.isRunning) {
             nodeService.stop()
         }
-        nodeService.start(Network.BITCOIN, chainUrl, null, strictLspConnect = true)
+        nodeService.start(ldkNetwork(), chainUrl, null, strictLspConnect = true)
         // Refresh the in-memory counterparty from the new LSP pubkey. Only safe to overwrite when
         // there's no channel yet (which switchLsp/resetLspToDefault already require); an open
         // channel's counterparty is derived from the live channel in refreshBalances() instead.
@@ -2775,7 +2778,7 @@ class AppState(private val context: Context) : ViewModel() {
                             }
                         }
                     }
-                    delay(30_000)
+                    delay(Constants.SPLICE_CONFIRMATION_POLL_INTERVAL_SECS * 1000)
                 }
             }
     }
@@ -3945,7 +3948,7 @@ class AppState(private val context: Context) : ViewModel() {
                 while (
                     isActive && _spendableOnchainSats.value == 0L && _onchainBalanceSats.value > 0
                 ) {
-                    delay(10_000)
+                    delay(Constants.ONCHAIN_DEPOSIT_POLL_INTERVAL_SECS * 1000)
                     refreshBalances()
                 }
 
@@ -4073,6 +4076,9 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
+    /** Network from Constants.DEFAULT_NETWORK — "regtest" only via TestOverrides (E2E). */
+    private fun ldkNetwork(): Network = Constants.LDK_NETWORK
+
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
 
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */

@@ -1,0 +1,62 @@
+# Step 21 — Aux: 99% stabilization cap
+# Selling above the cap is rejected with the dollar-max copy; Max lands at the capped amount and the trade completes, leaving a native BTC remainder.
+#
+# Guards PR #273 (trade-entry stabilization cap: client enforces the buffered
+# limit, "Maximum additional trade: $X.XX" copy, Max button on the sell sheet).
+# Run RIGHT AFTER 01 (fresh $85 balance, $0 USD, price $100,000): the full $85
+# is above the cap, so entering it must be rejected, while Max must succeed.
+appId: com.stablechannels.app
+tags: [android, ios, trade, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 30000
+- assertVisible: "\\$0\\.00"
+
+# The sell sheet must disclose the capped maximum as a dollar amount.
+- tapOn: "BTC → USD"
+- assertVisible: "How much BTC to convert to USD\\?"
+- assertVisible: "Maximum additional trade: \\$\\d+\\.\\d\\d"
+
+# Manual over-limit entry: $85 gross of an $85 balance exceeds the cap and must
+# be rejected client-side — before any fee is sent. The error is two lines
+# (dollar max + "Keeps a small BTC reserve in the channel."); match on the
+# reserve line, which only the error carries ((?s) lets .* cross the newline).
+- tapOn: "\\$?0\\.00"
+- inputText: "85"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Continue"
+- extendedWaitUntil:
+    visible: "(?s).*Keeps a small BTC reserve in the channel.*"
+    timeout: 10000
+
+# Reopen the sheet clean (flow 02's proven pattern) and use Max: the prefilled
+# capped amount must be ACCEPTED end-to-end.
+- tapOn: "Cancel"
+- tapOn: "BTC → USD"
+- assertVisible: "How much BTC to convert to USD\\?"
+- tapOn: "Max"
+- tapOn: "Continue"
+- assertVisible: "Review BTC -> USD"
+- assertVisible: "Fee \\(1%\\)"
+- tapOn: "Confirm Order"
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+
+# Home: the position is near-fully stabilized (~$81-84 of the $85 after the 1%
+# fee and the native floor), and a native BTC remainder survives — the cap is a
+# limit, not a sweep-to-zero.
+- extendedWaitUntil:
+    visible: "\\$8[0-9]\\.\\d\\d"
+    timeout: 60000
+- assertVisible: "USD → BTC"

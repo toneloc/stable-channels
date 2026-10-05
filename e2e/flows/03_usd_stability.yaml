@@ -1,0 +1,86 @@
+# Step 3 — USD Stability
+# "A stability settlement occurs after the BTC price changes."
+# The harness moves the mocked price -0.5%; the LSP's stability tick must send
+# a settlement keysend to the app. The flow verifies both the LSP audit event
+# and the app's received-payment status.
+#
+# Both sides must agree on price: the harness /feeds/* drive BOTH the app
+# (SC_PRICE_FEED_BASE / TestOverrides) and the LSP (SC_PRICE_FEED_BASE env in
+# docker-compose). The LSP image must be built WITH the constants.rs hook or
+# it prices from real feeds and the settlement books won't reconcile.
+#
+# Precondition: run right after 02 (stable position $74.25 after the trade fee;
+# -0.5% drift clears both thresholds and requires a 373-sat settlement).
+appId: com.stablechannels.app
+tags: [android, ios, stability]
+env:
+  HARNESS_API: "http://localhost:9737"
+  PRICE_USD: "99500"        # -0.5% from the canonical 100000
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+
+# Price down 0.5%: the user's fixed-sats backing ($75 -> ~$74.63) is now worth
+# less than par, so the LSP owes the app a 373-sat stability payment.
+- runScript:
+    file: helpers/set_price_and_mark.js
+
+# App must see the new price (feeds refresh every ~5s).
+- extendedWaitUntil:
+    visible: "\\$99,500.*"
+    timeout: 60000
+
+# Verify that the LSP sent the settlement in the expected direction.
+- runScript:
+    env:
+      SETTLEMENT_AFTER_ISO: ${output.settlementAfterIso}
+      EXPECTED_PRICE_USD: ${PRICE_USD}
+      EXPECTED_AMOUNT_MSAT: "373000"
+      AMOUNT_TOLERANCE_MSAT: "8000"
+    file: helpers/assert_lsp_stability_payment.js
+
+# Verify that the app persisted the incoming stability payment. The payment
+# type copy genuinely differs by platform, so keep explicit platform checks.
+- tapOn: "History"
+- tapOn: "Payments"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Settlement.*"
+          timeout: 120000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Stability"
+          timeout: 120000
+- assertVisible: "Received"
+
+# Exercise History → Payments → Payment Detail and verify the settlement value.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "Settlement.*"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Stability"
+- extendedWaitUntil:
+    visible: "Payment Details?"
+    timeout: 30000
+- assertVisible: "Received"
+- assertVisible: "Stability"
+- assertVisible: "\\$0\\.3[78]"
+- tapOn: "Done"
+
+# Keep the mocked price at $99,500 for every remaining flow.
+- tapOn: "Home"
+- assertVisible: "\\$99,500.*"

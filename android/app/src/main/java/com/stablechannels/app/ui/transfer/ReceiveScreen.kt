@@ -12,6 +12,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.text
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -48,8 +50,15 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
     val btcPrice by appState.priceService.currentPrice.collectAsState()
+    val paymentReceived by appState.paymentFlash.collectAsState()
 
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
+
+    LaunchedEffect(paymentReceived) {
+        if (paymentReceived && invoice != null) {
+            onDismiss()
+        }
+    }
 
     val enteredUSD = amountUSD.toDoubleOrNull() ?: 0.0
     val enteredSats =

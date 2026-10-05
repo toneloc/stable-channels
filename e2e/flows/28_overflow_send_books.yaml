@@ -1,0 +1,122 @@
+# Step 28 — Aux: overflow Lightning send must not corrupt the stable books
+# A Lightning send larger than the native balance debits USD by exactly the overflow; after an app restart, NO stability settlement may fire at an unchanged price, and trading must still work.
+#
+# Replicates issue #296 (expectedUSD/backingSats persist-half desync): on a
+# build with the bug, the restart reloads a reduced expectedUSD paired with
+# stale backingSats, and the next stability check pays the LSP a phantom
+# above-par excess (~$6 at this scale; $8.53 in the field) with the price
+# never having moved — then trades bounce with invalid_fee. This is flow 06's
+# long-promised "variant b" plus the restart and the invariants.
+#
+# Run RIGHT AFTER 01 + 02 at the $100k base: position $75.31/$74.22 with
+# ~$8.9-10.0 native; the $15 send overflows native by ~$5-6.1, so home lands
+# in the $68-$69.99 band and MUST stay there after the restart.
+appId: com.stablechannels.app
+tags: [android, ios, send, stability, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  INVOICE_MSAT: "15000000"    # $15 — deliberately above the ~$9-10 native balance
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- assertVisible: "\\$7[45]\\.\\d\\d"
+
+# Mark the audit-log position: every settlement after this point is suspect.
+- runScript:
+    file: helpers/mark_time.js
+
+# Ordinary Lightning send of $15 (flow 06's selector dance).
+- runScript:
+    file: helpers/create_invoice.js
+- tapOn: "Send"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.invoice}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+      - tapOn:
+          text: "Send"
+          index: 1
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn:
+          text: "Send"
+          index: 1
+- extendedWaitUntil:
+    visible: "(Done|Payment sent.*|Payment confirmed.*)"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# The overflow must debit USD immediately: ~$75 − ~$6 overflow → $68-69.99.
+- extendedWaitUntil:
+    visible: "\\$6[89]\\.\\d\\d"
+    timeout: 60000
+
+# Restart: the reloaded books must be the SAME books (issue #296's trigger —
+# a stale persisted pair detonates here on a buggy build).
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+
+# Give the stability checker a full window at the UNCHANGED price...
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "30"
+
+# ...during which NO user→LSP settlement may fire (the price never moved; any
+# settlement here is the phantom excess from the desynced pair).
+- runScript:
+    file: helpers/assert_stability_payment_v1.js
+    env:
+      SETTLEMENT_AFTER_ISO: ${output.markIso}
+      EXPECT: "absent"
+      DIRECTION: "user_to_lsp"
+
+# The USD balance survived the restart unchanged.
+- assertVisible: "\\$6[89]\\.\\d\\d"
+
+# And trading still works: on a corrupted build this is rejected (invalid_fee).
+- tapOn: "USD → BTC"
+- assertVisible: "How much USD to convert to BTC\\?"
+- tapOn: "0.00"
+- inputText: "2"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Continue"
+- runFlow:
+    when:
+      visible: "Review USD -> BTC"
+    commands:
+      - tapOn: "Confirm Order"
+# Generous window: the LSP's durable retry redelivers the result, and a
+# harness LSP degraded by sync-retry spam to dead lifecycle channels can be
+# slow on the first attempt (the local twin of the prod give-up bug).
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 120000
+- tapOn: "Done"

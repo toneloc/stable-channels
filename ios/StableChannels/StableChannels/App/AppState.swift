@@ -50,12 +50,27 @@ class AppState {
     /// Last auth error for UI display.
     var authError: String?
 
+    /// Network from Constants.defaultNetwork — "regtest" only via TestOverrides (E2E).
+    static func ldkNetwork() -> Network {
+        switch Constants.defaultNetwork.lowercased() {
+        case "regtest": return .regtest
+        case "signet": return .signet
+        case "testnet": return .testnet
+        default: return .bitcoin
+        }
+    }
+
     func lock() {
         isUnlocked = false
         authError = nil
     }
 
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
+        // E2E harness bypass — debug builds with test_config.json only
+        // (simulators have no biometrics; the prompt would fail instantly).
+        if TestOverrides.shared.disableSendAuth {
+            return true
+        }
         guard !isAuthenticating else { return false }
         isAuthenticating = true
         defer { isAuthenticating = false }
@@ -849,7 +864,11 @@ class AppState {
         }
 
         // Start price fetching
-        priceService.startAutoRefresh()
+        // E2E hook: a frozen refresh interval keeps the client's quote at the pre-move
+        // price while the harness shifts the LSP's view (deterministic rejection flows).
+        priceService.startAutoRefresh(
+            intervalSecs: TestOverrides.shared.priceRefreshSecs ?? Constants.priceCacheRefreshSecs
+        )
 
         // Subscribe to LDK events
         subscribeToEvents()
@@ -2698,7 +2717,9 @@ class AppState {
                         return
                     }
                 }
-                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                try? await Task.sleep(
+                    nanoseconds: Constants.spliceConfirmationPollIntervalSecs * 1_000_000_000
+                )
             }
         }
     }
@@ -3599,7 +3620,7 @@ class AppState {
         let initialURL = chainURL
         do {
             try await nodeService.start(
-                network: .bitcoin,
+                network: Self.ldkNetwork(),
                 esploraURL: initialURL,
                 mnemonic: mnemonic,
                 lspConfig: activeLSP
@@ -3624,7 +3645,7 @@ class AppState {
 
             do {
                 try await nodeService.start(
-                    network: .bitcoin,
+                    network: Self.ldkNetwork(),
                     esploraURL: fallbackURL,
                     mnemonic: mnemonic,
                     lspConfig: activeLSP

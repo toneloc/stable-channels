@@ -1,0 +1,53 @@
+# Step 33 — Aux: life after a close — the same wallet opens a new channel and works
+# After closing its channel, the wallet receives over Lightning again: a new JIT channel opens, a BTC→USD trade completes, and a price move settles on the NEW channel.
+#
+# Guards the "old channel's leftovers poison the new one" class: #266 and #303
+# (trade-sync lookups keyed on channel_id; messages for a gone channel must be
+# dropped, never wedge the LDK event queue), #310 (close state clears), and
+# the LSP's per-channel books when one node id owns a closed channel and a new
+# one (the harness LSP keeps retrying sync messages to the dead channel —
+# the local twin of the prod sync-spam bug). No other flow uses the wallet
+# after a close.
+#
+# Run AFTER 01 + 02 + 09 (channel closed, funds swept onchain). Reuses flows
+# 02 and 03 as subflows so the trade and settlement assertions stay identical
+# to the canonical ones — but now on the second channel.
+appId: com.stablechannels.app
+tags: [android, ios, onboard, trade, stability, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "Onchain Account"
+    timeout: 60000
+
+# Receive over Lightning again — flow 01's steps on a used wallet.
+- tapOn: "Receive"
+- tapOn: "0.00"
+- inputText: "85"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Generate Invoice"
+- extendedWaitUntil:
+    visible: "(Copy|Your Lightning Invoice)"
+    timeout: 20000
+- copyTextFrom:
+    text: "ln.*"
+# pay_invoice blocks until the payment settles, i.e. the new JIT channel is
+# open and ready; the Receive screen then closes on its own.
+- runScript:
+    file: helpers/pay_invoice.js
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 90000
+
+# The new channel is tradable and stabilized, exactly like the first one.
+- runFlow:
+    file: 02_btc_to_usd.yaml
+- runFlow:
+    file: 03_usd_stability.yaml

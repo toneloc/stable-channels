@@ -1,0 +1,112 @@
+# Step 16 — Aux: stability drift preserved across trades
+# Sub-threshold drift accrues, the user trades, the price moves again: the LSP must settle the FULL cumulative drift — a drift-reset regression re-bases backing at the trade and the settlement never fires.
+#
+# Guards PRs #225 (drift preserved across trades), #231/#233 (settle by amount,
+# authenticated), #221 (backing derived consistently on both sides) and spot-checks
+# #194 (fee lines on the review sheet).
+#
+# Precondition: run RIGHT AFTER 02 in place of 03 (needs the flow-02 position of
+# ~$75 with NO prior settlement — the 120s settlement cooldown must not be running).
+# End state matches 03's contract for later flows: settled to par at $99,500.
+# Math (Android position $75.31 / iOS $74.22, backing ≈ position sats at $100k):
+#   $99,700: drift ≈ $0.22 — above the 0.1% percent floor but under the $0.25
+#     dollar floor → NO settlement may fire.
+#   buy $20 back: only the delta converts at $99,700; the $0.22 drift carries.
+#   $99,500: cumulative drift ≈ $0.33-0.34 → ~333-338 sat settlement, lsp_to_user.
+#   Under drift-reset the post-trade drift is only ~$0.11 → nothing ever settles.
+appId: com.stablechannels.app
+tags: [android, ios, trade, stability, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+
+# Phase 1: -0.3%. The LSP tick (5s in e2e) must observe and SKIP this drift.
+- runScript:
+    file: helpers/set_price_and_mark.js
+    env:
+      PRICE_USD: "99700"
+- extendedWaitUntil:
+    visible: "\\$99,700.*"
+    timeout: 60000
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "12"
+- runScript:
+    file: helpers/assert_stability_payment_v1.js
+    env:
+      SETTLEMENT_AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "absent"
+
+# Phase 2: trade WHILE the $0.22 drift is outstanding. The trade must be
+# accepted (partial deltas preserve drift by design) — and must not re-base.
+- tapOn: "USD → BTC"
+- assertVisible: "How much USD to convert to BTC\\?"
+- tapOn: "0.00"
+- inputText: "20"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Continue"
+- assertVisible: "Review USD -> BTC"
+# PR #194 spot-check: the review sheet must disclose the 1% fee.
+- assertVisible: "Fee \\(1%\\)"
+- assertVisible: "\\$0\\.20"
+- tapOn: "Confirm Order"
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+- extendedWaitUntil:
+    visible: "BTC → USD"
+    timeout: 15000
+
+# Phase 3: -0.5% total. Cumulative drift clears both floors; the LSP owes the
+# carried pre-trade drift PLUS the new move. This assertion timing out = the
+# drift was reset by the trade.
+- runScript:
+    file: helpers/set_price_and_mark.js
+    env:
+      PRICE_USD: "99500"
+- extendedWaitUntil:
+    visible: "\\$99,500.*"
+    timeout: 60000
+- runScript:
+    file: helpers/assert_stability_payment_v1.js
+    env:
+      SETTLEMENT_AFTER_ISO: ${output.settlementAfterIso}
+      EXPECT: "present"
+      DIRECTION: "lsp_to_user"
+      EXPECTED_PRICE_USD: "99500"
+      EXPECTED_AMOUNT_MSAT: "336000"
+      AMOUNT_TOLERANCE_MSAT: "16000"
+
+# The app must persist the incoming settlement.
+- tapOn: "History"
+- tapOn: "Payments"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Settlement.*"
+          timeout: 120000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Stability"
+          timeout: 120000
+- assertVisible: "Received"
+
+# Leave the canonical post-03 state: $99,500, settled to par.
+- tapOn: "Home"
+- assertVisible: "\\$99,500.*"

@@ -70,6 +70,11 @@ struct ReceiveView: View {
                 }
             }
         }
+        .onChange(of: appState.paymentFlash) {
+            if appState.paymentFlash, invoice != nil {
+                dismiss()
+            }
+        }
         .onDisappear { copyResetTask?.cancel() }
         .onChange(of: appState.lastReceivedPaymentHash) { _, newHash in
             if let newHash, let invoicePaymentHash, newHash == invoicePaymentHash {

@@ -27,7 +27,6 @@ import com.stablechannels.app.util.openInAppBrowser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.lightningdevkit.ldknode.Network
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -64,7 +63,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         scope.launch(Dispatchers.IO) {
             try {
                 appState.nodeService.stop()
-                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
+                appState.nodeService.start(Constants.LDK_NETWORK, Constants.PRIMARY_CHAIN_URL, input)
                 withContext(Dispatchers.Main) {
                     showRestore = false
                     restoreMnemonic = ""

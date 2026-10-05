@@ -1,0 +1,118 @@
+# Step 30 — Aux: failed and interrupted Lightning sends keep the books whole
+# A send the recipient rejects shows a named error, lands as Failed in History, and deducts nothing. A send killed mid-flight, then settled while the app is dead, is reconciled exactly once on relaunch.
+#
+# Guards #297 (Android payment failures recorded + pending sends recovered
+# after restart) and #299 (overflow reconcile persisted once, never twice).
+# Both halves use harness HOLD invoices (/hold-invoice), so the outcome is
+# decided by the test, not by timing:
+#   mode "fail" — the counterparty rejects the HTLC the moment it arrives
+#                 (LDK PaymentFailureReason RecipientRejected);
+#   mode "hold" — the HTLC stays pending until /hold-claim.
+# Both sends are $15, deliberately above the ~$9–10 native balance, so a
+# wrong deduction would be visible in the Stable USD figure.
+#
+# Run RIGHT AFTER 01 + 02 at the $100k base (position $75.31 / iOS $74.22).
+appId: com.stablechannels.app
+tags: [android, send, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  INVOICE_MSAT: "15000000"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- assertVisible: "\\$7[45]\\.\\d\\d"
+- runScript:
+    file: helpers/mark_time.js
+
+# ── Part 1: the recipient rejects the payment ─────────────────────────────
+- runScript:
+    file: helpers/hold_invoice.js
+    env:
+      HOLD_MODE: "fail"
+- tapOn: "Send"
+- tapOn: "To"
+- setClipboard: ${output.invoice}
+- pasteText
+- hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- extendedWaitUntil:
+    visible: "Payment failed: The recipient rejected the payment.*"
+    timeout: 60000
+- back
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Nothing was deducted: Stable USD still reads the pre-send target.
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 15000
+- assertVisible: "\\$75\\.3\\d"
+
+# The attempt is on record as Failed, not silently dropped or left pending.
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Failed"
+    timeout: 30000
+- tapOn: "Home"
+
+# ── Part 2: kill mid-flight, settle while the app is dead ─────────────────
+- runScript:
+    file: helpers/hold_invoice.js
+    env:
+      HOLD_MODE: "hold"
+- tapOn: "Send"
+- tapOn: "To"
+- setClipboard: ${output.invoice}
+- pasteText
+- hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+# The HTLC reached the counterparty and is pending — the send is in flight.
+- runScript:
+    file: helpers/hold_wait.js
+    env:
+      HOLD_HASH: ${output.holdHash}
+      HOLD_STATE: "held"
+- stopApp
+# Settle while the app is dead: the preimage reaches the LSP, and the app
+# learns of it only when it reconnects on relaunch.
+- runScript:
+    file: helpers/hold_claim.js
+    env:
+      HOLD_HASH: ${output.holdHash}
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+
+# Reconciled exactly once: ~$75 − ~$6 overflow → $68–69.99.
+- extendedWaitUntil:
+    visible: "\\$6[89]\\.\\d\\d"
+    timeout: 90000
+
+# And only once: after another restart and a stability window at the
+# unchanged price, the books are the same and nothing settled.
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "30"
+- assertVisible: "\\$6[89]\\.\\d\\d"
+- runScript:
+    file: helpers/assert_audit_events.js
+    env:
+      EVENTS: "STABILITY_PAYMENT_V1_APPLIED,STABILITY_PAYMENT_V1_SENT"
+      AFTER_ISO: ${output.markIso}
+      EXPECT: "absent"

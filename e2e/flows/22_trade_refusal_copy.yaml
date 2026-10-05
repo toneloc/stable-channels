@@ -1,0 +1,51 @@
+# Step 22 — Aux: local trade refusals are named, never an outage
+# A buy exceeding the stable balance must surface its own named message and never the generic outage copy — the exact #272 report ("Trade service unavailable" for a zero-USD buy).
+#
+# Guards PRs #274/#275 (typed trade-failure results). Run RIGHT AFTER 01:
+# the wallet holds $0 stabilized, so ANY buy amount exceeds the balance.
+# Android blocks at the amount step ("Enter an amount between $0 and $0.00");
+# iOS may surface the service-layer copy instead — both are named refusals,
+# and the assertion accepts either while rejecting the outage copy.
+appId: com.stablechannels.app
+tags: [android, ios, trade, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- assertVisible: "\\$0\\.00"
+
+# Buy $5 against a $0 stable balance.
+- tapOn: "USD → BTC"
+- assertVisible: "How much USD to convert to BTC\\?"
+- tapOn: "0.00"
+- inputText: "5"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn: "Continue"
+
+# If a review step appears (platform-dependent), push through to the guard.
+- runFlow:
+    when:
+      visible: "Review USD -> BTC"
+    commands:
+      - tapOn: "Confirm Order"
+
+# The refusal must be NAMED — either the screen-level bound or the service copy.
+- extendedWaitUntil:
+    visible: "(Enter an amount between.*|.*more than your stabilized balance.*)"
+    timeout: 10000
+# And must never masquerade as an outage (the #272 regression).
+- assertNotVisible: "Trade service unavailable"
+
+# Nothing moved: dismiss and confirm the allocation is untouched.
+- tapOn: "(Cancel|Back|Done)"
+- extendedWaitUntil:
+    visible: "\\$0\\.00"
+    timeout: 10000

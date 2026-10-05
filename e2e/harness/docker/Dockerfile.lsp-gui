@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1.7
+# Builds the lsp-server-gui web (wasm) bundle from THIS repo (context = repo
+# root) and serves it as a static site. trunk drives the wasm build per
+# server/lsp-server-gui/index.html (web feature, no default features) and
+# auto-downloads matching wasm-bindgen/wasm-opt tooling.
+FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
+ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/* \
+ && rustup target add wasm32-unknown-unknown
+RUN --mount=type=cache,id=lspgui-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=lspgui-cargo-git,target=/usr/local/cargo/git \
+    cargo install --locked trunk --version ^0.21 -j "$CARGO_BUILD_JOBS"
+WORKDIR /src
+COPY . .
+WORKDIR /src/server/lsp-server-gui
+RUN --mount=type=cache,id=lspgui-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=lspgui-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=lspgui-target,target=/src/target \
+    --mount=type=cache,id=lspgui-trunk,target=/root/.cache/trunk \
+    trunk build --release
+
+FROM nginx:alpine
+COPY --from=build /src/server/lsp-server-gui/dist /usr/share/nginx/html
+# The wasm client requests /api/<path> relative to its own origin; nginx
+# proxies those to sc-lsp (see lsp-gui-nginx.conf).
+COPY e2e/harness/docker/lsp-gui-nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80

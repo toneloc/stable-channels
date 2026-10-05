@@ -1,0 +1,70 @@
+# Step 31 — Aux: an onchain deposit survives an app kill
+# Send to the receive address, kill the app before the deposit confirms, relaunch, mine: exactly one Received row with its txid, counting to Confirmed, and the funds land.
+#
+# Guards the deposit-recovery work: #290 (iOS persists the receive address so
+# resolution works after restart), #267 (relaunch deposit recovery), #222/#228
+# (confirmation replays must not duplicate the row). Flows 05/23 cover a
+# deposit with the app alive throughout; nothing killed the app mid-deposit.
+# The new-address-mid-deposit case is flow 34.
+#
+# Run RIGHT AFTER 01 + 02 (a funded channel; the onchain box empty).
+appId: com.stablechannels.app
+tags: [android, ios, onchain, receive, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- tapOn: "Receive"
+- tapOn: "Onchain"
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "bcrt1.*"
+- runScript:
+    file: helpers/send_onchain.js
+- tapOn: "(Back|Receive)"
+- tapOn:
+    text: "Done"
+    optional: true
+# The deposit is noticed before the kill (the onchain card's pending row).
+- extendedWaitUntil:
+    visible: "(.*Receiving onchain.*|Deposit confirming.*)"
+    timeout: 120000
+
+# Kill before it confirms, then confirm it while the app is dead.
+- stopApp
+- runScript:
+    file: helpers/mine_blocks.js
+    env:
+      MINE_BLOCKS: "6"
+- launchApp
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+
+# Exactly one Received onchain row, fully confirmed, with its txid (the
+# detail sheet's explorer link needs one).
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Confirmed"
+    timeout: 240000
+- assertVisible: "Onchain · .*"
+- assertNotVisible:
+    text: "Onchain · .*"
+    index: 1
+- tapOn: "Onchain · .*"
+- assertVisible: "View on [Ee]xplorer"
+- tapOn: "Done"
+
+# The funds landed in the onchain box.
+- tapOn: "Home"
+- extendedWaitUntil:
+    visible: "(Swap|Move|Ready to move.*)"
+    timeout: 120000
