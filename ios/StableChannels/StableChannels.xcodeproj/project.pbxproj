@@ -235,6 +235,9 @@
 		FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */; };
 		49206DF53073A8A200217838 /* SendAmountCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF43073A8A200217838 /* SendAmountCalculator.swift */; };
 		49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */; };
+		49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E033073A92D00217838 /* SendPaymentExecutor.swift */; };
+		49206E073073A92D00217838 /* SendFlowStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E023073A92D00217838 /* SendFlowStep.swift */; };
+		49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E043073A92D00217838 /* SlideToSendButton.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -494,6 +497,9 @@
 		FFC40949E35E9317ACA30E35 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		49206DF43073A8A200217838 /* SendAmountCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculator.swift; sourceTree = "<group>"; };
 		49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LemniscateBloomIcon.swift; sourceTree = "<group>"; };
+		49206E023073A92D00217838 /* SendFlowStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowStep.swift; sourceTree = "<group>"; };
+		49206E033073A92D00217838 /* SendPaymentExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPaymentExecutor.swift; sourceTree = "<group>"; };
+		49206E043073A92D00217838 /* SlideToSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideToSendButton.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -944,6 +950,16 @@
 			path = LNURL;
 			sourceTree = "<group>";
 		};
+		49206E003073A91800217838 /* Send */ = {
+			isa = PBXGroup;
+			children = (
+				49206E023073A92D00217838 /* SendFlowStep.swift */,
+				49206E033073A92D00217838 /* SendPaymentExecutor.swift */,
+				49206E043073A92D00217838 /* SlideToSendButton.swift */,
+			);
+			path = Send;
+			sourceTree = "<group>";
+		};
 		DD0CC2D41227228C216D4BE8 /* Transfer */ = {
 			isa = PBXGroup;
 			children = (
@@ -951,6 +967,7 @@
 				D9FF3A7A30FD6A84388868F3 /* OnChainView.swift */,
 				445B52C4DEC5CE8D3B0B3DA9 /* ReceiveView.swift */,
 				7E0FAABBD08BCBF20220C850 /* SendView.swift */,
+				49206E003073A91800217838 /* Send */,
 			);
 			path = Transfer;
 			sourceTree = "<group>";
@@ -1251,6 +1268,9 @@
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
+				49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */,
+				49206E073073A92D00217838 /* SendFlowStep.swift in Sources */,
+				49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */,
 				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
 				49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */,
 				499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */,
