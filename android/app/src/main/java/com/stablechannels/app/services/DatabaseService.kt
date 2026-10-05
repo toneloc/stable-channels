@@ -2162,6 +2162,44 @@ class DatabaseService(context: Context) :
     }
 
     /**
+     * Records a deposit found by an on-chain address lookup. Skipped when a resolved receive row
+     * with the same amount already exists in the window (older rows may lack a txid, so the txid
+     * check alone would duplicate them). Txid-less pending placeholders are adopted instead.
+     */
+    fun recordMissedReceive(
+        txid: String,
+        amountSats: Long,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        address: String,
+        sinceSecs: Long,
+    ): Long {
+        val duplicate =
+            readableDatabase
+                .rawQuery(
+                    """
+                    SELECT 1 FROM payments
+                    WHERE payment_type = 'onchain' AND direction = 'received'
+                      AND amount_msat = ? AND created_at >= ?
+                      AND NOT (status = 'pending' AND txid IS NULL)
+                    LIMIT 1
+                    """
+                        .trimIndent(),
+                    arrayOf((amountSats * 1000).toString(), sinceSecs.toString()),
+                )
+                .use { it.moveToFirst() }
+        if (duplicate) return -1L
+        return recordWebSocketReceive(
+            paymentId = "onchain_receive_$txid",
+            amountMsat = amountSats * 1000,
+            amountUSD = amountUSD,
+            btcPrice = btcPrice,
+            txid = txid,
+            address = address,
+        )
+    }
+
+    /**
      * Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction. If a
      * row already carries the txid AND its amount matches the placeholder's, the websocket recorded
      * this same deposit first — the placeholder is a duplicate, delete it. On an amount mismatch

@@ -981,10 +981,24 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
     private var sweepOnchainStart: Long = 0
+    // Persisted so a deposit deferred during a splice/close is still detected after a restart.
+    // The balance cache can't serve as the baseline: it is refreshed while detection is deferred.
     private var prevOnchainSats: Long =
-        context
-            .getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-            .getLong("cached_onchain_sats", 0L)
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).let {
+            it.getLong("deposit_baseline_sats", it.getLong("cached_onchain_sats", 0L))
+        }
+        set(value) {
+            if (field != value) {
+                context
+                    .getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                    .edit()
+                    .putLong("deposit_baseline_sats", value)
+                    .apply()
+            }
+            field = value
+        }
+
+    private var lastMissedReceiveCheckSecs = 0L
     private var stabilityJob: Job? = null
     private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
@@ -3814,6 +3828,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     internal fun detectOnchainDeposit() {
         val db = databaseService
+        recoverMissedReceive()
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
         // Deposits are deferred (not dropped) while a splice/close is in flight, since the
@@ -3924,6 +3939,63 @@ class AppState(private val context: Context) : ViewModel() {
             startPendingDepositPolling()
         }
         prevOnchainSats = currentSats
+    }
+
+    /**
+     * Backstop for deposits neither the websocket nor the balance-delta path caught: asks the block
+     * explorer what recently paid our current receive address and records what is missing.
+     * Throttled; the DB call skips txids and amounts that already have a row.
+     */
+    private fun recoverMissedReceive() {
+        val address = _onchainReceiveAddress.value?.takeIf { it.isNotBlank() } ?: return
+        val db = databaseService ?: return
+        val now = System.currentTimeMillis() / 1000
+        if (now - lastMissedReceiveCheckSecs < 300) return
+        lastMissedReceiveCheckSecs = now
+        viewModelScope.launch(Dispatchers.IO) {
+            val urls =
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            for (baseUrl in urls) {
+                try {
+                    val request =
+                        Request.Builder()
+                            .url("${baseUrl.trimEnd('/')}/address/$address/txs")
+                            .build()
+                    val body =
+                        httpClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) response.body?.string() else null
+                        } ?: continue
+                    val price = priceService.currentPrice.value
+                    var recorded = false
+                    MissedReceiveRecovery.recentReceives(body, address, now).forEach { receive ->
+                        val rowId =
+                            db.recordMissedReceive(
+                                txid = receive.txid,
+                                amountSats = receive.sats,
+                                amountUSD =
+                                    if (price > 0) {
+                                        receive.sats.toDouble() / Constants.SATS_IN_BTC * price
+                                    } else null,
+                                btcPrice = price.takeIf { it > 0 },
+                                address = address,
+                                sinceSecs = now - MissedReceiveRecovery.WINDOW_SECS,
+                            )
+                        if (rowId != -1L) {
+                            recorded = true
+                            AuditService.log(
+                                "ONCHAIN_RECEIVE_RECOVERED",
+                                mapOf("txid" to receive.txid, "sats" to receive.sats),
+                            )
+                        }
+                    }
+                    if (recorded) notifyPaymentRecorded()
+                    return@launch
+                } catch (e: Exception) {
+                    Log.w("AppState", "Missed receive check failed: ${e.message}")
+                }
+            }
+        }
     }
 
     /** Poll every 10s until spendable on-chain balance updates (deposit confirmed). */
