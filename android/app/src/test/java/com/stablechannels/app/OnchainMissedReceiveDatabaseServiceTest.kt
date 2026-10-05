@@ -80,6 +80,17 @@ class OnchainMissedReceiveDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun recordsReplacementWhenSameAmountRowFailed() {
+        val service = DatabaseService(context)
+        service.recordMissedReceive("tx1", 11_732, null, null, "addr", since)
+        service.failPaymentByTxid("tx1")
+
+        assertNotEquals(-1L, service.recordMissedReceive("tx2", 11_732, null, null, "addr", since))
+        assertEquals(listOf("tx2"), service.getPendingOnchainReceives().map { it.txid })
+        service.close()
+    }
+
     private fun deleteDatabaseFiles() {
         listOf(dbFile, File("${dbFile.path}-wal"), File("${dbFile.path}-shm")).forEach { file ->
             if (file.exists()) assertTrue(file.delete())

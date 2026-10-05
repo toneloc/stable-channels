@@ -2181,7 +2181,7 @@ class DatabaseService(context: Context) :
                     SELECT 1 FROM payments
                     WHERE payment_type = 'onchain' AND direction = 'received'
                       AND amount_msat = ? AND created_at >= ?
-                      AND NOT (status = 'pending' AND txid IS NULL)
+                      AND status != 'failed' AND NOT (status = 'pending' AND txid IS NULL)
                     LIMIT 1
                     """
                         .trimIndent(),
