@@ -67,7 +67,6 @@ private fun OfflineCard(onTryAgain: () -> Unit) {
             modifier = Modifier.fillMaxWidth().padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            // Header: badge + title, centered
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
