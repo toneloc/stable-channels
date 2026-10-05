@@ -3983,6 +3983,9 @@ class AppState(private val context: Context) : ViewModel() {
                             )
                         if (rowId != -1L) {
                             recorded = true
+                            // Lets the balance-delta path see this txid already has a row, as the
+                            // websocket path does, instead of adding a second placeholder row.
+                            setLastReceiveTxid(receive.txid, address)
                             AuditService.log(
                                 "ONCHAIN_RECEIVE_RECOVERED",
                                 mapOf("txid" to receive.txid, "sats" to receive.sats),
