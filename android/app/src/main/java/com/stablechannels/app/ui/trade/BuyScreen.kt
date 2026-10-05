@@ -26,6 +26,7 @@ import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.BuyAmountPolicy
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
+import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -76,25 +77,26 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     ) {
         // Top Toolbar (Cancel / Title)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            if (step != TradeStep.DONE) {
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.CenterStart),
-                    colors =
-                        ButtonDefaults.textButtonColors(
-                            containerColor =
-                                if (LocalDarkTheme.current) {
-                                    MaterialTheme.colorScheme.surfaceVariant
-                                } else {
-                                    Color(0xFFE5E5EA)
-                                },
-                            contentColor = MaterialTheme.colorScheme.primary,
-                        ),
-                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                ) {
-                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
-                }
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.align(Alignment.CenterStart),
+                colors =
+                    ButtonDefaults.textButtonColors(
+                        containerColor =
+                            if (LocalDarkTheme.current) {
+                                MaterialTheme.colorScheme.surfaceVariant
+                            } else {
+                                Color(0xFFE5E5EA)
+                            },
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    ),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+            ) {
+                Text(
+                    if (step == TradeStep.DONE) "Close" else "Cancel",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
             Text(
                 text = if (step == TradeStep.CONFIRM) "Review USD -> BTC" else "USD → BTC",
@@ -409,12 +411,14 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         if (isDelayed)
                             "The provider's result has not arrived. Keep the wallet connected. Do not place this order again while its result is unknown."
                         else
-                            "Your order is being processed. Balance will update when the provider confirms the order.",
+                            "Your order is being processed. Balance will update when the provider confirms the order. Do not place this order again while its result is unknown.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
                 Spacer(Modifier.height(16.dp))
-                Button(onClick = onDismiss) { Text("Done") }
+                if (PaymentResultControls.showsTradeDone(outcome)) {
+                    Button(onClick = onDismiss) { Text("Done") }
+                }
             }
         }
     }
