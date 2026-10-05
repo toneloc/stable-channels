@@ -2201,6 +2201,61 @@ class DatabaseService(context: Context) :
         )
     }
 
+    fun hasTxidlessPendingReceive(): Boolean =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT 1 FROM payments
+                WHERE payment_type = 'onchain' AND direction = 'received'
+                  AND status = 'pending' AND (txid IS NULL OR txid = '')
+                LIMIT 1
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { it.moveToFirst() }
+
+    /**
+     * Attaches [txid] to the oldest txid-less pending receive with exactly [amountMsat], whatever
+     * its address. For placeholders the websocket never resolved (e.g. the deposit arrived while
+     * the app was closed), using a txid the wallet itself reports. Does nothing if any row already
+     * carries the txid. Returns true when a row was updated.
+     */
+    fun adoptTxidForPlaceholder(txid: String, amountMsat: Long): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val tracked =
+                db.rawQuery("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)).use {
+                    it.moveToFirst()
+                }
+            if (tracked) return false
+            val rowId =
+                db.rawQuery(
+                        """
+                        SELECT id FROM payments
+                        WHERE payment_type = 'onchain' AND direction = 'received'
+                          AND status = 'pending' AND (txid IS NULL OR txid = '')
+                          AND amount_msat = ?
+                        ORDER BY created_at ASC LIMIT 1
+                        """
+                            .trimIndent(),
+                        arrayOf(amountMsat.toString()),
+                    )
+                    .use { if (it.moveToFirst()) it.getLong(0) else null } ?: return false
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", "onchain_receive_$txid")
+                    put("txid", txid)
+                }
+            val updated = db.update("payments", cv, "id = ?", arrayOf(rowId.toString())) > 0
+            db.setTransactionSuccessful()
+            return updated
+        } finally {
+            db.endTransaction()
+        }
+    }
+
     /**
      * Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction. If a
      * row already carries the txid AND its amount matches the placeholder's, the websocket recorded

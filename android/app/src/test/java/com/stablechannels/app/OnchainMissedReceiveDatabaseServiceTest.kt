@@ -81,6 +81,42 @@ class OnchainMissedReceiveDatabaseServiceTest {
     }
 
     @Test
+    fun adoptsTxidForAddresslessPlaceholderWithMatchingAmount() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+        )
+
+        assertTrue(service.hasTxidlessPendingReceive())
+        assertEquals(false, service.adoptTxidForPlaceholder("tx9", 5_000_000))
+        assertTrue(service.adoptTxidForPlaceholder("tx1", 2_323_000))
+
+        assertEquals(listOf("tx1"), service.getPendingOnchainReceives().map { it.txid })
+        assertEquals(false, service.hasTxidlessPendingReceive())
+        service.close()
+    }
+
+    @Test
+    fun adoptSkipsTxidAlreadyOnARow() {
+        val service = DatabaseService(context)
+        service.recordMissedReceive("tx1", 2_323, null, null, "addr", since)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+        )
+
+        assertEquals(false, service.adoptTxidForPlaceholder("tx1", 2_323_000))
+        service.close()
+    }
+
+    @Test
     fun recordsReplacementWhenSameAmountRowFailed() {
         val service = DatabaseService(context)
         service.recordMissedReceive("tx1", 11_732, null, null, "addr", since)

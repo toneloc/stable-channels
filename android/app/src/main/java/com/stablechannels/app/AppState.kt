@@ -3834,6 +3834,7 @@ class AppState(private val context: Context) : ViewModel() {
     internal fun detectOnchainDeposit() {
         val db = databaseService
         recoverMissedReceive()
+        resolveTxidlessReceives()
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
         // Deposits are deferred (not dropped) while a splice/close is in flight, since the
@@ -3944,6 +3945,41 @@ class AppState(private val context: Context) : ViewModel() {
             startPendingDepositPolling()
         }
         prevOnchainSats = currentSats
+    }
+
+    /**
+     * Gives txid-less pending receive rows their txid from the wallet's own payment list, matching
+     * on exact amount. Covers deposits that arrived while the app was closed, which would otherwise
+     * stay at 0 confirmations forever because the confirmation poller only tracks rows with a txid.
+     */
+    private fun resolveTxidlessReceives() {
+        val db = databaseService ?: return
+        if (!db.hasTxidlessPendingReceive()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val inbound =
+                try {
+                    nodeService.node?.listPayments().orEmpty().mapNotNull { p ->
+                        val kind = p.kind as? PaymentKind.Onchain ?: return@mapNotNull null
+                        val msat = p.amountMsat?.toLong() ?: return@mapNotNull null
+                        if (p.direction != PaymentDirection.INBOUND) return@mapNotNull null
+                        kind.txid to msat
+                    }
+                } catch (e: Exception) {
+                    Log.w("AppState", "listPayments failed resolving receive txids: ${e.message}")
+                    return@launch
+                }
+            var resolved = false
+            inbound.forEach { (txid, msat) ->
+                if (db.adoptTxidForPlaceholder(txid, msat)) {
+                    resolved = true
+                    AuditService.log(
+                        "ONCHAIN_RECEIVE_TXID_RESOLVED",
+                        mapOf("txid" to txid, "sats" to msat / 1000),
+                    )
+                }
+            }
+            if (resolved) notifyPaymentRecorded()
+        }
     }
 
     /**
