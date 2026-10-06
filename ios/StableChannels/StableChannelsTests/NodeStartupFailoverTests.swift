@@ -10,6 +10,7 @@ final class NodeStartupFailoverTests: XCTestCase {
             NodeServiceError.alreadyRunning,
             NodeServiceError.notRunning,
             NodeServiceError.dataDirLocked,
+            NodeServiceError.invalidFeeRate,
             NodeError.PersistenceFailed(message: "Disk full"),
             NodeError.InvalidAddress(message: "Bad address"),
             NodeError.ChannelCreationFailed(message: "Channel open error"),

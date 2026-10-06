@@ -72,6 +72,8 @@
 		4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278D2FFEC05D00D9C81F /* Constants.swift */; };
 		499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991278E2FFEC05D00D9C81F /* StableControlParser.swift */; };
 		499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127912FFEC7B700D9C81F /* NotificationContentMutator.swift */; };
+		4993593230712F2600D6B50E /* SQLitePaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4991277E2FFEB50B00D9C81F /* SQLitePaymentDatabase.swift */; };
+		4993593430712F3200D6B50E /* PaymentDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499127872FFEB51600D9C81F /* PaymentDatabase.swift */; };
 		4993590C307003E600D6B50E /* BalanceBarHeaderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935905307003E600D6B50E /* BalanceBarHeaderView.swift */; };
 		4993590D307003E600D6B50E /* BalanceBarAnimationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935904307003E600D6B50E /* BalanceBarAnimationCoordinator.swift */; };
 		4993590E307003E600D6B50E /* BalanceBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993590A307003E600D6B50E /* BalanceBarView.swift */; };
@@ -80,6 +82,13 @@
 		49935911307003E600D6B50E /* SliderConversionMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993590B307003E600D6B50E /* SliderConversionMetrics.swift */; };
 		49935912307003E600D6B50E /* BalanceBarTradeCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935909307003E600D6B50E /* BalanceBarTradeCalculator.swift */; };
 		49935913307003E600D6B50E /* BalanceBarState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49935907307003E600D6B50E /* BalanceBarState.swift */; };
+		4993591830712D1500D6B50E /* AddressVisualChunkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591430712D1500D6B50E /* AddressVisualChunkerTests.swift */; };
+		4993591930712D1500D6B50E /* Base58CheckTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591530712D1500D6B50E /* Base58CheckTests.swift */; };
+		4993591A30712D1500D6B50E /* SQLitePaymentDatabaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */; };
+		4993591B30712D1500D6B50E /* PaymentDestinationClassifierTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591630712D1500D6B50E /* PaymentDestinationClassifierTests.swift */; };
+		4993591F30712DDF00D6B50E /* AddressVisualChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591C30712DDF00D6B50E /* AddressVisualChunker.swift */; };
+		4993592030712DDF00D6B50E /* SendDestination.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591E30712DDF00D6B50E /* SendDestination.swift */; };
+		4993592130712DDF00D6B50E /* Base58Check.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4993591D30712DDF00D6B50E /* Base58Check.swift */; };
 		49948C312FBB9DF900327290 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 49948C302FBB9DF900327290 /* Localizable.xcstrings */; };
 		499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */; };
 		499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */; };
@@ -319,6 +328,13 @@
 		49935909307003E600D6B50E /* BalanceBarTradeCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarTradeCalculator.swift; sourceTree = "<group>"; };
 		4993590A307003E600D6B50E /* BalanceBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BalanceBarView.swift; sourceTree = "<group>"; };
 		4993590B307003E600D6B50E /* SliderConversionMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetrics.swift; sourceTree = "<group>"; };
+		4993591430712D1500D6B50E /* AddressVisualChunkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunkerTests.swift; sourceTree = "<group>"; };
+		4993591530712D1500D6B50E /* Base58CheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58CheckTests.swift; sourceTree = "<group>"; };
+		4993591630712D1500D6B50E /* PaymentDestinationClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDestinationClassifierTests.swift; sourceTree = "<group>"; };
+		4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLitePaymentDatabaseTests.swift; sourceTree = "<group>"; };
+		4993591C30712DDF00D6B50E /* AddressVisualChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddressVisualChunker.swift; sourceTree = "<group>"; };
+		4993591D30712DDF00D6B50E /* Base58Check.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Base58Check.swift; sourceTree = "<group>"; };
+		4993591E30712DDF00D6B50E /* SendDestination.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendDestination.swift; sourceTree = "<group>"; };
 		49948C302FBB9DF900327290 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PendingPushPaymentTests.swift; sourceTree = "<group>"; };
 		499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnchainTxidResolver.swift; sourceTree = "<group>"; };
@@ -866,7 +882,10 @@
 		D20000000000000000000001 /* Send */ = {
 			isa = PBXGroup;
 			children = (
+				4993591C30712DDF00D6B50E /* AddressVisualChunker.swift */,
+				4993591D30712DDF00D6B50E /* Base58Check.swift */,
 				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
+				4993591E30712DDF00D6B50E /* SendDestination.swift */,
 			);
 			path = Send;
 			sourceTree = "<group>";
@@ -926,6 +945,8 @@
 		F11CF0F21D3319E86AF791B6 /* StableChannelsTests */ = {
 			isa = PBXGroup;
 			children = (
+				4993591430712D1500D6B50E /* AddressVisualChunkerTests.swift */,
+				4993591530712D1500D6B50E /* Base58CheckTests.swift */,
 				D20000000000000000000036 /* Bech32Tests.swift */,
 				4944458130540C3500B5A146 /* BinarySearchTests.swift */,
 				49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */,
@@ -943,6 +964,7 @@
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
+				4993591630712D1500D6B50E /* PaymentDestinationClassifierTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
@@ -952,6 +974,7 @@
 				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
+				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
@@ -1090,6 +1113,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4993591830712D1500D6B50E /* AddressVisualChunkerTests.swift in Sources */,
+				4993591930712D1500D6B50E /* Base58CheckTests.swift in Sources */,
 				D20000000000000000000037 /* Bech32Tests.swift in Sources */,
 				D20000000000000000000043 /* LNURLServiceTests.swift in Sources */,
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
@@ -1099,8 +1124,10 @@
 				D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
 				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
+				4993591A30712D1500D6B50E /* SQLitePaymentDatabaseTests.swift in Sources */,
 				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
 				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
+				4993591B30712D1500D6B50E /* PaymentDestinationClassifierTests.swift in Sources */,
 				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
 				D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */,
 				499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */,
@@ -1140,6 +1167,10 @@
 				D20000000000000000000019 /* LNURLService.swift in Sources */,
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
 				D20000000000000000000017 /* PaymentFeeEstimator.swift in Sources */,
+				4993593230712F2600D6B50E /* SQLitePaymentDatabase.swift in Sources */,
+				4993591F30712DDF00D6B50E /* AddressVisualChunker.swift in Sources */,
+				4993592130712DDF00D6B50E /* Base58Check.swift in Sources */,
+				4993592030712DDF00D6B50E /* SendDestination.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,
@@ -1231,6 +1262,7 @@
 				8D7AA44935C2E984E70D42AE /* StabilityService.swift in Sources */,
 				495CB3FA3013F14100560837 /* TransactionMatcher.swift in Sources */,
 				B58FDE639A431D2000E0F86D /* StableChannel.swift in Sources */,
+				4993593430712F3200D6B50E /* PaymentDatabase.swift in Sources */,
 				49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */,
 				06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */,
 				49F0B0DE2FC0EF3A003A3B89 /* BackupSettingsView.swift in Sources */,
