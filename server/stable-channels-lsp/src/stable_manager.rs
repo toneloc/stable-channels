@@ -323,6 +323,8 @@ pub struct StableChannelManager {
     startup_sync_initialized: bool,
     /// Channels whose failure-driven SYNC retries stopped at the cap, audited once each.
     sync_retry_exhausted: std::collections::HashSet<u128>,
+    /// Usable channels that cannot carry a 1 msat SYNC, by block reason; audited once per (channel, reason).
+    sync_retry_blocked_reported: std::collections::HashSet<(u128, &'static str)>,
 }
 
 /// Outcome of an `edit_stable_channel` call.
@@ -637,6 +639,8 @@ impl StableChannelManager {
                 "TRADE_REJECTION_QUEUED",
                 serde_json::json!({
                     "protocol_path": "hardened",
+                    "user_channel_id": user_channel_id,
+                    "channel_id": channel_id,
                     "trade_id": trade_id,
                     "trade_payment_id": inbound_payment_id,
                     "request_hash": request_hash,
@@ -719,6 +723,7 @@ impl StableChannelManager {
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
+            sync_retry_blocked_reported: std::collections::HashSet::new(),
         }
     }
 
@@ -1037,8 +1042,10 @@ impl StableChannelManager {
         );
 
         if !self.startup_sync_initialized && !self.stable_channels.is_empty() {
-            self.startup_sync_pending
-                .extend(self.stable_channels.iter().map(|sc| sc.user_channel_id));
+            // Only books with a stable position need republishing; routing peers have none.
+            self.startup_sync_pending.extend(
+                self.stable_channels.iter().filter(|sc| sc.expected_usd.0 > 0.0).map(|sc| sc.user_channel_id),
+            );
             self.startup_sync_initialized = true;
         }
         self.retry_startup_sync(ldk).await;
@@ -1088,20 +1095,47 @@ impl StableChannelManager {
         if syncs.is_empty() {
             return;
         }
-        // An offline peer cannot take a keysend: keep the obligation queued and consume no version.
-        let usable: std::collections::HashSet<u128> =
-            match ldk.list_channels(ListChannelsRequest {}).await {
-                Ok(response) => response
-                    .channels
-                    .iter()
-                    .filter(|c| c.is_usable)
-                    .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
-                    .collect(),
-                Err(error) => {
-                    tracing::warn!("[stable] SYNC retry skipped, list_channels failed: {}", error);
-                    return;
-                }
-            };
+        // An offline peer, or a channel the LSP cannot send 1 msat over, cannot take the keysend: keep it queued, consume no version.
+        let channels = match ldk.list_channels(ListChannelsRequest {}).await {
+            Ok(response) => response.channels,
+            Err(error) => {
+                tracing::warn!("[stable] SYNC retry skipped, list_channels failed: {}", error);
+                return;
+            }
+        };
+        let usable: std::collections::HashSet<u128> = channels
+            .iter()
+            .filter(|c| c.is_usable && c.next_outbound_htlc_minimum_msat <= 1 && c.next_outbound_htlc_limit_msat >= 1)
+            .filter_map(|c| parse_user_channel_id(&c.user_channel_id))
+            .collect();
+        // A usable channel that cannot carry the 1 msat keysend silently blocks every SYNC: say so once per reason, not every minute.
+        let blocked: std::collections::HashMap<u128, (String, &'static str, &'static str, u64)> = channels
+            .iter()
+            .filter(|c| c.is_usable)
+            .filter_map(|c| {
+                let (reason, field, value) = if c.next_outbound_htlc_minimum_msat > 1 {
+                    ("htlc_minimum_above_1_msat", "next_outbound_htlc_minimum_msat", c.next_outbound_htlc_minimum_msat)
+                } else if c.next_outbound_htlc_limit_msat < 1 {
+                    ("no_outbound_liquidity", "next_outbound_htlc_limit_msat", c.next_outbound_htlc_limit_msat)
+                } else {
+                    return None;
+                };
+                parse_user_channel_id(&c.user_channel_id).map(|uid| (uid, (c.channel_id.clone(), reason, field, value)))
+            })
+            .collect();
+        self.sync_retry_blocked_reported
+            .retain(|(uid, reason)| blocked.get(uid).is_some_and(|b| b.1 == *reason));
+        for (uid, (channel_id, reason, field, value)) in &blocked {
+            if syncs.iter().any(|(queued, ..)| queued == uid) && self.sync_retry_blocked_reported.insert((*uid, *reason)) {
+                let mut detail = serde_json::json!({
+                    "user_channel_id": uid.to_string(),
+                    "channel_id": channel_id,
+                    "reason": reason,
+                });
+                detail[*field] = (*value).into();
+                stable_channels::audit::audit_event("SYNC_RETRY_BLOCKED", detail);
+            }
+        }
         for (uid, channel_id, live_sats, counterparty) in syncs {
             if !usable.contains(&uid) {
                 continue;
@@ -1869,6 +1903,7 @@ impl StableChannelManager {
         stable_channels::audit::audit_event(
             "STABILITY_PAYMENT_V1_APPLIED",
             serde_json::json!({
+                "user_channel_id": canonical_user_channel_id,
                 "settlement_id": payload.settlement_id,
                 "payment_id": payment_id,
                 "channel_id": payload.channel_id,
@@ -2590,6 +2625,13 @@ impl StableChannelManager {
                         "error": e.to_string(),
                     }),
                 );
+                // A refused send counts as a failed attempt, so the retry queue backs off and caps it.
+                match self.db.record_refused_sync_attempt(&user_channel_id.to_string(), sync_version) {
+                    Ok(()) => {
+                        self.startup_sync_pending.remove(&user_channel_id);
+                    },
+                    Err(error) => tracing::error!("[stable] failed to record refused SYNC for {}: {}", user_channel_id, error),
+                }
                 false
             }
         }
@@ -3253,6 +3295,8 @@ impl StableChannelManager {
                         "TRADE_ACCEPTED",
                         serde_json::json!({
                             "protocol_path": "hardened",
+                            "user_channel_id": chan.user_channel_id,
+                            "channel_id": chan.channel_id,
                             "trade_id": trade_id,
                             "trade_payment_id": inbound_payment_id,
                             "correlation_payment_id": correlation_payment_id,
@@ -3826,6 +3870,7 @@ mod tests {
             counterparty_unspendable_punishment_reserve: 0,
             channel_value_sats: value_sats,
             outbound_capacity_msat: outbound_msat,
+            next_outbound_htlc_limit_msat: outbound_msat,
             inbound_capacity_msat: remote_sats.saturating_mul(1000),
             is_usable,
             is_channel_ready: true,
@@ -3974,7 +4019,8 @@ mod tests {
         let failing = FakeLdkServer::new(channels.clone()).with_send_failure();
         mgr.reconcile_from_grpc(&failing as &dyn LdkServerCalls, 100_000.0)
             .await;
-        assert!(!mgr.startup_sync_pending.is_empty());
+        // The refused send is now a durable failed attempt that the retry queue owns.
+        assert_eq!(mgr.db.list_failed_sync_channels().unwrap(), vec![USER_CHANNEL_ID_DECIMAL.to_string()]);
 
         let restored = FakeLdkServer::new(channels);
         mgr.reconcile_from_grpc(&restored as &dyn LdkServerCalls, 100_000.0)
@@ -4407,8 +4453,8 @@ mod tests {
             "prev-node-pubkey".to_string(),
             "next-node-pubkey".to_string(),
             45_000_000,
-            0,
-            None,
+            9,
+            Some(7),
             &fake as &dyn LdkServerCalls,
             100_000.0,
         ).await;
@@ -4429,6 +4475,7 @@ mod tests {
         assert_eq!(data.detail["next_user_channel_id"], "outbound-ucid", "outbound leg must be recorded");
         assert_eq!(data.detail["prev_node_id"], "prev-node-pubkey");
         assert_eq!(data.detail["next_node_id"], "next-node-pubkey");
+        assert_eq!(data.detail["skimmed_fee_msat"], 7, "the JIT skim is kept for revenue");
     }
 
     #[tokio::test]
@@ -5649,6 +5696,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peer_refusing_1_msat_htlcs_is_audited_once_and_syncs_resume_when_it_relents() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 1_000;
+        stable_channels::audit::enable_test_capture();
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
+        assert_eq!(blocked.len(), 1, "audited once, not every tick");
+        assert_eq!(blocked[0].1["user_channel_id"], "7");
+        assert_eq!(blocked[0].1["next_outbound_htlc_minimum_msat"], 1_000);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt the peer would refuse");
+        assert!(mgr.startup_sync_pending.contains(&7), "the obligation stays queued");
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 0;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 2, "the SYNC goes out once the peer relents");
+        assert!(mgr.sync_retry_blocked_reported.is_empty(), "a later block is audited again");
+    }
+
+    #[tokio::test]
+    async fn a_channel_without_outbound_liquidity_is_audited_once_as_blocked() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
+        dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
+        fake.channels.lock().unwrap()[0].next_outbound_htlc_limit_msat = 0;
+        stable_channels::audit::enable_test_capture();
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
+        assert_eq!(blocked.len(), 1, "audited once, not every tick");
+        assert_eq!(blocked[0].1["reason"], "no_outbound_liquidity");
+        assert_eq!(blocked[0].1["next_outbound_htlc_limit_msat"], 0);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt without liquidity");
+    }
+
+    #[tokio::test]
     async fn sync_retry_backs_off_after_repeated_delivery_failures() {
         let (dir, mut mgr, fake) = sync_delivery_fixture().await;
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
@@ -5703,6 +5791,74 @@ mod tests {
         mgr.reconcile_if_empty(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len() as u64, SYNC_RETRY_MAX_ATTEMPTS + 3,
             "retries resume once a SYNC is delivered");
+    }
+
+    const ROUTING_CHANNEL_HEX: &str = "7c1d0e6b2a9f4c3e8d5b0a1f6e2c9d4b3a8f7e6d5c4b3a2918f7e6d5c4b3a291";
+    const ROUTING_PEER_HEX: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    fn sync_manager(channels: &[(&str, &str, f64)]) -> (tempfile::TempDir, StableChannelManager) {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path()).unwrap());
+        for (channel_id, uid, expected_usd) in channels {
+            let backing = if *expected_usd > 0.0 { 31_250 } else { 0 };
+            db.save_channel(channel_id, uid, *expected_usd, backing, 18_750, None).unwrap();
+        }
+        let mgr = StableChannelManager::new(db, dir.path().to_path_buf());
+        (dir, mgr)
+    }
+
+    #[tokio::test]
+    async fn startup_sync_skips_channels_without_a_stable_position() {
+        let (_dir, mut mgr) = sync_manager(&[(CHANNEL_ID_HEX, "7", 25.0), (ROUTING_CHANNEL_HEX, "8", 0.0)]);
+        let fake = FakeLdkServer::new(vec![
+            make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 50_000_000, true),
+            make_channel(ROUTING_CHANNEL_HEX, "8", ROUTING_PEER_HEX, 170_000, 20_000_000, true),
+        ]);
+        mgr.reconcile_from_grpc(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1, "only the channel with a stable position gets the startup SYNC");
+        assert_eq!(sends[0].node_id, COUNTERPARTY_HEX);
+    }
+
+    #[tokio::test]
+    async fn sync_waits_while_the_lsp_has_nothing_to_send() {
+        let (_dir, mut mgr) = sync_manager(&[(CHANNEL_ID_HEX, "7", 25.0)]);
+        // Usable, but every sat sits on the user's side: not even a 1-msat keysend can leave.
+        let fake = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 0, true)]);
+        mgr.reconcile_from_grpc(&fake, 80_000.0).await;
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert!(fake.sends.lock().unwrap().is_empty(), "no SYNC is attempted without outbound liquidity");
+        *fake.channels.lock().unwrap() = vec![make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 50_000_000, true)];
+        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "the queued SYNC goes out once the LSP can send");
+        assert_eq!(sent_sync_payload(&fake, 0)["sync_version"], 1, "waiting consumed no version");
+    }
+
+    #[tokio::test]
+    async fn refused_sync_sends_back_off_and_stop_at_the_cap() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        stable_channels::audit::enable_test_capture();
+        let (dir, mut mgr) = sync_manager(&[(CHANNEL_ID_HEX, "7", 25.0)]);
+        let fake = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 50_000_000, true)])
+            .with_send_failure();
+        let refused = |events: &[(String, serde_json::Value)]| {
+            events.iter().filter(|(event, data)| event == "SYNC_MESSAGE_FAILED" && data["stage"] == "send").count() as u64
+        };
+        mgr.reconcile_from_grpc(&fake, 80_000.0).await;
+        for _ in 0..3 {
+            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        }
+        let mut events = stable_channels::audit::drain_test_capture();
+        assert_eq!(refused(&events), 2, "an instantly refused SYNC backs off like a failed one");
+        for _ in 0..(2 * SYNC_RETRY_MAX_ATTEMPTS) {
+            age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
+            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        }
+        events.extend(stable_channels::audit::drain_test_capture());
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(refused(&events), SYNC_RETRY_MAX_ATTEMPTS, "refused attempts stop at the cap");
+        assert_eq!(events.iter().filter(|(event, _)| event == "SYNC_RETRY_EXHAUSTED").count(), 1);
     }
 
     #[tokio::test]
@@ -6353,6 +6509,36 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn trade_decisions_name_their_channel_for_its_history() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut mgr = make_manager();
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX,
+            USER_CHANNEL_ID_DECIMAL,
+            COUNTERPARTY_HEX,
+            300_000,
+            100_000,
+            true,
+        )]);
+        let uid = USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap();
+        seed_channel(&mut mgr, uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 50_000, 100_000, 100_000.0);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 50_000, None).unwrap();
+        stable_channels::audit::enable_test_capture();
+        let rejected = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"d".repeat(64), 60.0, 100_000.0);
+        mgr.handle_trade_payment(&rejected, Some(&"e".repeat(64)), Some(1), &fake, 100_000.0).await;
+        let accepted = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"b".repeat(64), 60.0, 100_000.0);
+        let fee = expected_trade_fee_msat(50.0, 60.0, 100_000.0).unwrap();
+        mgr.handle_trade_payment(&accepted, Some(&"c".repeat(64)), Some(fee), &fake, 100_000.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        for name in ["TRADE_REJECTION_QUEUED", "TRADE_ACCEPTED"] {
+            let (_, detail) = events.iter().find(|(event, _)| event == name).unwrap_or_else(|| panic!("{name} audited"));
+            assert_eq!(detail["user_channel_id"], USER_CHANNEL_ID_DECIMAL, "{name}");
+            assert_eq!(detail["channel_id"], CHANNEL_ID_HEX, "{name}");
+        }
     }
 
     #[tokio::test]

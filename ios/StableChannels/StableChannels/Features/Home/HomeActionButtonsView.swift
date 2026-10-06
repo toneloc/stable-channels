@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HomeActionButtonsView: View {
     let hasReadyChannel: Bool
+    var pulseReceive: Bool = false
     let onSend: () -> Void
     let onReceive: () -> Void
     let onBuy: () -> Void
@@ -28,7 +29,7 @@ struct HomeActionButtonsView: View {
                     icon: "arrow.down",
                     color: receiveGreen,
                     textColor: .primary,
-                    pulse: !hasReadyChannel,
+                    pulse: pulseReceive,
                     action: onReceive
                 )
             }

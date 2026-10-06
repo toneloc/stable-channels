@@ -50,6 +50,10 @@ struct BuyView: View {
         return amountUSD / tradePrice
     }
 
+    private var btcAmountFinalText: String {
+        Bitcoin.fromBTC(btcAmountFinal).formatted
+    }
+
     private var btcAmountFinal: Double {
         guard tradePrice > 0 else { return 0 }
         return netAmountUSD / tradePrice
@@ -103,7 +107,7 @@ struct BuyView: View {
                 }
 
             if amountUSD > 0 {
-                Text(String(format: "≈ %.8f BTC", btcAmount))
+                Text("≈ \(Bitcoin.fromBTC(btcAmount).formatted)")
                     .foregroundStyle(.secondary)
             }
 
@@ -157,7 +161,7 @@ struct BuyView: View {
                 Divider()
                 confirmRow(
                     String(localized: "label_you_receive", defaultValue: "You receive"),
-                    String(format: "%.8f BTC", btcAmountFinal),
+                    btcAmountFinalText,
                     bold: true
                 )
             }
@@ -223,10 +227,8 @@ struct BuyView: View {
                 Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_bought_btc_for", defaultValue: "Converted ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + amountUSD.usdFormatted)
+                Text(String(localized: "trade_bought_btc_for", defaultValue: "Converted ") + btcAmountFinalText +
+                    " for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -236,10 +238,8 @@ struct BuyView: View {
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_buying_btc_for", defaultValue: "Converting ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + amountUSD.usdFormatted)
+                Text(String(localized: "trade_buying_btc_for", defaultValue: "Converting ") + btcAmountFinalText +
+                    " for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 

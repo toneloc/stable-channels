@@ -49,6 +49,10 @@ use sc_protos::stable::{
 	LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH,
 	LIST_STABLE_CHANNELS_PATH,
 };
+use sc_protos::revenue::{
+	GetRevenueRequest, GetRevenueResponse, RefundTradeFeeRequest, RefundTradeFeeResponse,
+	GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH,
+};
 use prost::Message;
 use reqwest::header::CONTENT_TYPE;
 #[cfg(not(target_arch = "wasm32"))]
@@ -517,6 +521,20 @@ impl LspRestClient {
 		self.post_request(&request, &url).await
 	}
 
+	/// Revenue summary and activity for a window, from the SC daemon's snapshot.
+	pub async fn get_revenue(&self, request: GetRevenueRequest) -> Result<GetRevenueResponse, LspRestError> {
+		let url = self.build_url(GET_REVENUE_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Sends a rejected trade's fee back to the user, once.
+	pub async fn refund_trade_fee(
+		&self, request: RefundTradeFeeRequest,
+	) -> Result<RefundTradeFeeResponse, LspRestError> {
+		let url = self.build_url(REFUND_TRADE_FEE_PATH);
+		self.post_request(&request, &url).await
+	}
+
 	/// Tail LDK Server's log file via the SC daemon.
 	pub async fn ldk_log(&self, request: LogRequest) -> Result<LogResponse, LspRestError> {
 		let url = self.build_url(LDK_LOG_PATH);
@@ -559,6 +577,10 @@ impl LspRestClient {
 				)
 			})?)
 		} else {
+			// An unknown route (daemon or nginx) answers with no body; carry the status, not an empty message.
+			if payload.is_empty() {
+				return Err(LspRestError::new(InternalError, format!("HTTP {}", status)));
+			}
 			let error_response = ErrorResponse::decode(&payload[..]).map_err(|e| {
 				LspRestError::new(
 					InternalError,

@@ -325,11 +325,12 @@ async fn run(state: AppState) {
                 "history_complete": reconciliation_complete && counts.lost_scopes == 0,
                 "coverage": "current_gap_only",
             });
+            // Only a committed ledger row counts; a JSONL mirror would make the guard pass vacuously.
             let result_recorded = match stable_channels::audit::record_event(
                 "RECONCILIATION_RESULT",
                 reconciliation.clone(),
             ) {
-                Ok(_) => true,
+                Ok(outcome) => outcome.event_id > 0,
                 Err(error) => {
                     checkpoint_failed("record_reconciliation_result", &error);
                     false

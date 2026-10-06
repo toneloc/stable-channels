@@ -14,12 +14,14 @@ use serde_json::{json, Value};
 // live events outside this window remain explicitly uncorrelated observations.
 const CORRELATION_WINDOW_MS: i64 = 120_000;
 
-fn fingerprint(detail: &Value) -> Option<String> {
+/// Route, amount and fee of a live or history forward row's detail; None when the route is missing.
+pub fn fingerprint(detail: &Value) -> Option<String> {
+    // Live rows write 0 where LDK omits the amount or fee, history rows null.
     Some(forward_fingerprint(
         detail.get("prev_channel_id")?.as_str()?,
         detail.get("next_channel_id")?.as_str()?,
-        detail.get("outbound_amount_msat").or_else(|| detail.get("forwarded_msat")).and_then(Value::as_u64),
-        detail.get("total_fee_msat").or_else(|| detail.get("fee_msat")).and_then(Value::as_u64),
+        Some(detail.get("outbound_amount_msat").or_else(|| detail.get("forwarded_msat")).and_then(Value::as_u64).unwrap_or(0)),
+        Some(detail.get("total_fee_msat").or_else(|| detail.get("fee_msat")).and_then(Value::as_u64).unwrap_or(0)),
     ))
 }
 
@@ -39,6 +41,13 @@ mod tests {
         let mut stmt = conn.prepare("SELECT detail_json FROM ledger_events ORDER BY id").unwrap();
         stmt.query_map([], |row| row.get::<_, String>(0)).unwrap()
             .map(|raw| serde_json::from_str(&raw.unwrap()).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_null_history_fee_and_a_zero_live_fee_share_a_fingerprint() {
+        let history = json!({"prev_channel_id": "aa", "next_channel_id": "bb", "outbound_amount_msat": null, "total_fee_msat": null});
+        let live = json!({"prev_channel_id": "aa", "next_channel_id": "bb", "forwarded_msat": 0, "fee_msat": 0});
+        assert_eq!(fingerprint(&history), fingerprint(&live));
     }
 
     #[test]
