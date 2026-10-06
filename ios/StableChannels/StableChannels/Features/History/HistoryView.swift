@@ -33,6 +33,7 @@ struct HistoryView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollBounceBehavior(.always)
                 .overlay {
                     if selectedSegment == 0 && trades.isEmpty {
                         ContentUnavailableView(
@@ -69,7 +70,14 @@ struct HistoryView: View {
                 }
             }
             .refreshable {
-                appState.refreshBalances()
+                if appState.networkMonitor.isOnline {
+                    appState.refreshBalances()
+                    await appState.priceService.fetchPrice()
+                    appState.recordCurrentPrice()
+                    appState.ensureLSPConnected()
+                } else {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
                 loadHistory()
             }
             .sheet(item: $selectedTrade) { trade in

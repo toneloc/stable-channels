@@ -61,13 +61,12 @@ struct HomeView: View {
                 .padding(.horizontal)
                 .padding(.bottom)
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .scrollBounceBehavior(.always)
             .navigationBarHidden(true)
             .refreshable {
                 if !appState.networkMonitor.isOnline {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        appState.phase = .offline
-                    }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    appState.refreshBalances()
                     return
                 }
                 appState.refreshBalances()
@@ -124,7 +123,7 @@ struct HomeView: View {
                 allocation: allocation,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
                     sc: appState.stableChannel,
-                    price: appState.accountingBTCPrice > 0 ? appState.accountingBTCPrice : appState.btcPrice
+                    price: appState.effectiveTradePrice
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
                 onDragStarted: { appState.ensureLSPConnected() },
