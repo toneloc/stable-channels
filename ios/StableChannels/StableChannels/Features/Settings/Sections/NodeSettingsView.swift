@@ -76,7 +76,7 @@ struct NodeSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private var isOnline: Bool { appState.networkMonitor.isOnline }
+    private var isOnline: Bool { appState.isOnline }
     private var isNodeRunning: Bool { appState.nodeService.isRunning }
 
     private var statusColor: Color {

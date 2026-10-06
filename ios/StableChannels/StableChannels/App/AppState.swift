@@ -122,12 +122,31 @@ class AppState {
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
+        self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                if status == .online {
-                    await self.retryConnection()
+            let newOnline = (status == .online)
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    if self.isOnline != newOnline {
+                        self.isOnline = newOnline
+                    }
+                    if status == .online {
+                        Task { @MainActor [weak self] in
+                            await self?.retryConnection()
+                        }
+                    }
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if self.isOnline != newOnline {
+                        self.isOnline = newOnline
+                    }
+                    if status == .online {
+                        await self.retryConnection()
+                    }
                 }
             }
         }
@@ -175,9 +194,9 @@ class AppState {
     }
 
     var isRetryingConnection: Bool = false
-    var isOnline: Bool { networkMonitor.isOnline }
+    var isOnline: Bool = true
 
-    private enum BalanceCacheKey {
+    enum BalanceCacheKey {
         static let lightning = "cached_lightning_sats"
         static let onchain = "cached_onchain_sats"
         static let spendable = "cached_spendable_onchain_sats"
@@ -225,6 +244,17 @@ class AppState {
 
     /// The active LSP configuration managed by `LSPService`.
     var activeLSP: LSPConfig { lspService.activeLSP }
+
+    var hasActiveChannel: Bool {
+        !nodeService.channels.isEmpty
+            || hasReadyChannel
+            || lightningBalanceSats > 0
+            || isOpeningChannel
+            || isChannelClosing
+            || !stableChannel.channelId.isEmpty
+            || !stableChannel.userChannelId.isEmpty
+            || !(fundingTxid?.isEmpty ?? true)
+    }
 
     var totalBalanceSats: UInt64 {
         let hasAny = !nodeService.channels.isEmpty
@@ -406,7 +436,10 @@ class AppState {
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
 
-    var fundingTxid: String? {
+    var fundingTxid: String? = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return ud?.string(forKey: "funding_txid")
+    }() {
         didSet {
             UserDefaults(suiteName: Constants.appGroupIdentifier)?
                 .set(fundingTxid, forKey: "funding_txid")
@@ -1077,6 +1110,8 @@ class AppState {
         isRetryingConnection = true
         defer { isRetryingConnection = false }
 
+        isOnline = networkMonitor.isOnline
+
         if !networkMonitor.isOnline {
             AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
             if phase == .offline {
@@ -1141,6 +1176,20 @@ class AppState {
             ensureLSPConnected()
             mempoolWebSocketService.connect()
             priceService.startAutoRefresh()
+        }
+    }
+
+    /// Coordinates user-initiated pull-to-refresh across balances, price, and connectivity.
+    @MainActor
+    func userInitiatedRefresh() async {
+        if isOnline {
+            refreshBalances()
+            await priceService.fetchPrice()
+            recordCurrentPrice()
+            ensureLSPConnected()
+        } else {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            refreshBalances()
         }
     }
 
@@ -4227,10 +4276,23 @@ class AppState {
     /// Switch to a new LSP configuration via LSPService.
     @MainActor
     func switchLSP(to newConfig: LSPConfig) async -> Bool {
-        await lspService.switchLSP(
+        guard !hasActiveChannel else {
+            AuditService.log("LSP_SWITCH_REJECTED_ACTIVE_CHANNEL", data: [
+                "requested_lsp": newConfig.alias
+            ])
+            return false
+        }
+        guard networkMonitor.isOnline else {
+            AuditService.log("LSP_SWITCH_REJECTED_OFFLINE", data: [
+                "requested_lsp": newConfig.alias
+            ])
+            return false
+        }
+        return await lspService.switchLSP(
             to: newConfig,
             nodeService: nodeService,
             chainURL: chainURL,
+            hasActiveChannel: hasActiveChannel,
             onSuccess: { [weak self] in
                 guard let self else { return }
                 if self.stableChannel.channelId.isEmpty {

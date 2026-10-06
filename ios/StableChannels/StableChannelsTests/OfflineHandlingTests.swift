@@ -199,4 +199,117 @@ final class OfflineHandlingTests: XCTestCase {
         let cachedNodeId = UserDefaults(suiteName: suite)?.string(forKey: "node_id")
         XCTAssertEqual(cachedNodeId, expectedNodeId)
     }
+
+    func testHasActiveChannelWhenNodeOfflineWithCachedChannelReady() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(true, forKey: "cached_has_ready_channel")
+        ud?.set(Int64(0), forKey: "cached_lightning_sats")
+        ud?.removeObject(forKey: "funding_txid")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        XCTAssertFalse(appState.nodeService.isRunning)
+        XCTAssertTrue(appState.nodeService.channels.isEmpty)
+        XCTAssertTrue(
+            appState.hasActiveChannel,
+            "hasActiveChannel must remain true when channel is cached ready even if node is offline"
+        )
+    }
+
+    func testHasActiveChannelWhenNodeOfflineWithCachedLightningBalance() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(false, forKey: "cached_has_ready_channel")
+        ud?.set(Int64(25_000), forKey: "cached_lightning_sats")
+        ud?.removeObject(forKey: "funding_txid")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        XCTAssertFalse(appState.nodeService.isRunning)
+        XCTAssertTrue(appState.nodeService.channels.isEmpty)
+        XCTAssertTrue(appState.hasActiveChannel, "hasActiveChannel must remain true when lightning balance is cached")
+    }
+
+    func testHasActiveChannelWhenNodeOfflineWithFundingTxid() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(false, forKey: "cached_has_ready_channel")
+        ud?.set(Int64(0), forKey: "cached_lightning_sats")
+        ud?.set("11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff", forKey: "funding_txid")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        XCTAssertFalse(appState.nodeService.isRunning)
+        XCTAssertTrue(appState.nodeService.channels.isEmpty)
+        XCTAssertTrue(appState.hasActiveChannel, "hasActiveChannel must remain true when fundingTxid is cached")
+    }
+
+    func testHasActiveChannelFalseWhenCleanWithoutChannel() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(false, forKey: "cached_has_ready_channel")
+        ud?.set(Int64(0), forKey: "cached_lightning_sats")
+        ud?.removeObject(forKey: "funding_txid")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        XCTAssertFalse(appState.nodeService.isRunning)
+        XCTAssertTrue(appState.nodeService.channels.isEmpty)
+        XCTAssertFalse(
+            appState.hasActiveChannel,
+            "hasActiveChannel must be false when no channels or cached metrics exist"
+        )
+    }
+
+    func testSwitchLSPRejectedWhenActiveChannelExists() async {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(true, forKey: "cached_has_ready_channel")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .online)
+        let appState = AppState(networkMonitor: mockMonitor)
+        XCTAssertTrue(appState.hasActiveChannel)
+
+        let initialLSP = appState.activeLSP
+        let customLSP = LSPConfig(
+            alias: "Custom Test LSP",
+            pubkey: "02" + String(repeating: "1", count: 64),
+            address: "127.0.0.1:9735",
+            token: nil
+        )
+
+        let result = await appState.switchLSP(to: customLSP)
+        XCTAssertFalse(result, "switchLSP must be rejected when active channel exists")
+        XCTAssertEqual(appState.activeLSP, initialLSP, "Active LSP must remain unchanged after rejected switch")
+    }
+
+    func testSwitchLSPRejectedWhenOffline() async {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(false, forKey: "cached_has_ready_channel")
+        ud?.set(Int64(0), forKey: "cached_lightning_sats")
+        ud?.removeObject(forKey: "funding_txid")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+        XCTAssertFalse(appState.hasActiveChannel)
+        XCTAssertFalse(appState.isOnline)
+
+        let initialLSP = appState.activeLSP
+        let customLSP = LSPConfig(
+            alias: "Custom Test LSP",
+            pubkey: "02" + String(repeating: "2", count: 64),
+            address: "127.0.0.1:9735",
+            token: nil
+        )
+
+        let result = await appState.switchLSP(to: customLSP)
+        XCTAssertFalse(result, "switchLSP must be rejected when offline")
+        XCTAssertEqual(appState.activeLSP, initialLSP, "Active LSP must remain unchanged after rejected switch")
+    }
 }

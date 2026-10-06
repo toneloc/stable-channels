@@ -27,8 +27,8 @@ final class TradeService {
                                          expectedUSD: sc.expectedUSD.amount, price: price)
         }
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        let cachedSats = UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_lightning_sats") ?? 0))
-        let hasReady = ud?.bool(forKey: "cached_has_ready_channel") ?? false
+        let cachedSats = UInt64(bitPattern: Int64(ud?.integer(forKey: AppState.BalanceCacheKey.lightning) ?? 0))
+        let hasReady = ud?.bool(forKey: AppState.BalanceCacheKey.hasReadyChannel) ?? false
         guard hasReady, cachedSats > 0 else { return nil }
         return StabilizationSnapshot(receiverSats: cachedSats,
                                      spendableSats: cachedSats, backingSats: sc.backingSats,

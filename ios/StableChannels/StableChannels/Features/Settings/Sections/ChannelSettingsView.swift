@@ -9,6 +9,7 @@ struct ChannelSettingsView: View {
         // Read observable property on AppState to ensure view invalidation when channel state changes,
         // as NodeService is not directly observable.
         let _ = appState.hasReadyChannel
+        let _ = appState.isOnline
         List {
             if let channel = appState.nodeService.channels.first {
                 Section {
@@ -20,14 +21,7 @@ struct ChannelSettingsView: View {
                     HStack {
                         Text(String(localized: "label_status", defaultValue: "Status"))
                         Spacer()
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(channel.isChannelReady ? .green : .orange)
-                                .frame(width: 8, height: 8)
-                            Text(channel.isChannelReady
-                                ? String(localized: "channel_status_ready", defaultValue: "Ready")
-                                : String(localized: "channel_status_pending", defaultValue: "Pending"))
-                        }
+                        channelStatusBadge(isReady: channel.isChannelReady)
                     }
                     HStack {
                         Text(String(localized: "label_outbound", defaultValue: "Outbound"))
@@ -96,9 +90,10 @@ struct ChannelSettingsView: View {
                         ) {
                             showCloseChannelAlert = true
                         }
-                        .disabled(!appState.networkMonitor.isOnline)
+                        .disabled(!appState.isOnline)
+                        .foregroundStyle(appState.isOnline ? .red : .secondary)
                     } footer: {
-                        if !appState.networkMonitor.isOnline {
+                        if !appState.isOnline {
                             Text(String(
                                 localized: "info_close_channel_offline",
                                 defaultValue: "Internet connection required to close channel."
@@ -124,7 +119,7 @@ struct ChannelSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-            } else if appState.hasReadyChannel || appState.lightningBalanceSats > 0 {
+            } else if appState.hasActiveChannel {
                 Section {
                     HStack {
                         Text(String(localized: "label_capacity", defaultValue: "Capacity"))
@@ -134,14 +129,7 @@ struct ChannelSettingsView: View {
                     HStack {
                         Text(String(localized: "label_status", defaultValue: "Status"))
                         Spacer()
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(appState.networkMonitor.isOnline ? .green : .orange)
-                                .frame(width: 8, height: 8)
-                            Text(appState.networkMonitor.isOnline
-                                ? String(localized: "channel_status_ready", defaultValue: "Ready")
-                                : String(localized: "channel_status_offline", defaultValue: "Offline"))
-                        }
+                        channelStatusBadge(isReady: appState.hasReadyChannel)
                     }
                     if let txid = appState.fundingTxid, !txid.isEmpty {
                         HStack {
@@ -168,6 +156,7 @@ struct ChannelSettingsView: View {
                         showCloseChannelAlert = true
                     }
                     .disabled(true)
+                    .foregroundStyle(.secondary)
                 } footer: {
                     Text(String(
                         localized: "info_close_channel_offline",
@@ -226,6 +215,25 @@ struct ChannelSettingsView: View {
             } catch {
                 appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
                 appState.isChannelClosing = false
+            }
+        }
+    }
+
+    private func channelStatusBadge(isReady: Bool) -> some View {
+        HStack(spacing: 4) {
+            if !appState.isOnline {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: 8, height: 8)
+                Text(String(localized: "channel_status_offline", defaultValue: "Offline"))
+                    .foregroundStyle(.orange)
+            } else {
+                Circle()
+                    .fill(isReady ? .green : .orange)
+                    .frame(width: 8, height: 8)
+                Text(isReady
+                    ? String(localized: "channel_status_ready", defaultValue: "Ready")
+                    : String(localized: "channel_status_pending", defaultValue: "Pending"))
             }
         }
     }

@@ -18,7 +18,7 @@ struct PushConnectivitySettingsView: View {
                         .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if !appState.networkMonitor.isOnline {
+                    if !appState.isOnline {
                         Label(String(localized: "status_offline", defaultValue: "Offline"), systemImage: "bolt.slash")
                             .font(.caption)
                             .foregroundStyle(.orange)
@@ -52,7 +52,7 @@ struct PushConnectivitySettingsView: View {
             } header: {
                 Text(String(localized: "label_channel_info", defaultValue: "Channel Info"))
             } footer: {
-                if !appState.networkMonitor.isOnline {
+                if !appState.isOnline {
                     Text(String(
                         localized: "info_push_connectivity_offline",
                         defaultValue: "Background connection paused until an internet connection is restored."

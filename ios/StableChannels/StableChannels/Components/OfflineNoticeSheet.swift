@@ -1,15 +1,14 @@
 import SwiftUI
 
-/// Dedicated presentation view displaying network unavailability in a clean monochrome style.
-/// Shown during app startup or pull-to-refresh when the network cannot be reached.
-/// Informs the user of the offline state, reassures fund safety, allows retrying,
-/// and provides an option to navigate to the cached home view.
 struct OfflinePageView: View {
     var isRetrying: Bool = false
     var onRetry: () -> Void
     var onGoToHome: (() -> Void)?
 
-    @State private var spinAngle: Double = 0.0
+    @State private var isSpinning: Bool = false
+    @State private var iconScale: CGFloat = 0.75
+    @State private var iconOpacity: Double = 0.0
+    @State private var iconBounceTrigger: Int = 0
 
     var body: some View {
         VStack(spacing: 20) {
@@ -18,6 +17,18 @@ struct OfflinePageView: View {
             Image(systemName: "wifi.exclamationmark")
                 .font(.system(size: 46, weight: .light))
                 .foregroundStyle(.secondary)
+                .symbolEffect(.bounce.up.byLayer, value: iconBounceTrigger)
+                .scaleEffect(iconScale)
+                .opacity(iconOpacity)
+                .onAppear {
+                    iconScale = 0.75
+                    iconOpacity = 0.0
+                    withAnimation(.spring(response: 0.5, dampingFraction: 0.62)) {
+                        iconScale = 1.0
+                        iconOpacity = 1.0
+                    }
+                    iconBounceTrigger += 1
+                }
 
             VStack(spacing: 8) {
                 Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
@@ -42,7 +53,13 @@ struct OfflinePageView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.clockwise")
                             .font(.caption.weight(.medium))
-                            .rotationEffect(.degrees(spinAngle))
+                            .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                            .animation(
+                                isSpinning
+                                    ? .linear(duration: 0.85).repeatForever(autoreverses: false)
+                                    : .easeInOut(duration: 0.2),
+                                value: isSpinning
+                            )
 
                         Text(String(localized: "try_again", defaultValue: "Try again"))
                             .font(.subheadline.weight(.medium))
@@ -54,7 +71,21 @@ struct OfflinePageView: View {
                 .buttonStyle(.bordered)
                 .tint(.primary)
                 .clipShape(Capsule())
+                .blur(radius: isRetrying ? 1.2 : 0)
+                .opacity(isRetrying ? 0.65 : 1.0)
                 .disabled(isRetrying)
+                .animation(.easeInOut(duration: 0.25), value: isRetrying)
+                .onAppear {
+                    if isRetrying {
+                        isSpinning = true
+                    }
+                }
+                .onChange(of: isRetrying) { _, retrying in
+                    isSpinning = retrying
+                    if retrying {
+                        iconBounceTrigger += 1
+                    }
+                }
 
                 if let onGoToHome {
                     Button {
@@ -81,22 +112,65 @@ struct OfflinePageView: View {
     private func triggerRetry() {
         guard !isRetrying else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        withAnimation(.easeInOut(duration: 0.75)) {
-            spinAngle += 360
-        }
+        iconBounceTrigger += 1
+        isSpinning = true
         onRetry()
     }
 }
 
-/// Backwards compatibility aliases.
 typealias OfflineNoticeCard = OfflinePageView
 typealias OfflineHomeView = OfflinePageView
 typealias OfflineNoticeSheet = OfflinePageView
 
+/// Reusable compact curved badge indicating offline state.
+struct OfflineBadgeView: View {
+    var subtitle: String?
+
+    init(subtitle: String? = nil) {
+        self.subtitle = subtitle
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "wifi.slash")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+                .symbolEffect(.pulse.byLayer, options: .repeating)
+
+            if let subtitle {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                        .font(.caption.bold())
+                        .foregroundStyle(.red)
+                    Text(subtitle)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                    .font(.caption.bold())
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.red.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: Color.red.opacity(0.18), radius: 4, x: 0, y: 1)
+    }
+}
+
 #Preview {
-    OfflinePageView(
-        isRetrying: false,
-        onRetry: {},
-        onGoToHome: {}
-    )
+    VStack(spacing: 20) {
+        OfflineBadgeView()
+        OfflineBadgeView(subtitle: "Please check your network connection")
+        OfflinePageView(
+            isRetrying: false,
+            onRetry: {},
+            onGoToHome: {}
+        )
+    }
 }

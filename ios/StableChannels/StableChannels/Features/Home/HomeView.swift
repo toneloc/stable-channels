@@ -48,7 +48,7 @@ struct HomeView: View {
                         hasReadyChannel: appState.hasReadyChannel,
                         pulseReceive: !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState
                             .isOpeningChannel,
-                        isOffline: !appState.networkMonitor.isOnline,
+                        isOffline: !appState.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
                         onBuy: { showBuySheet = true },
@@ -64,15 +64,7 @@ struct HomeView: View {
             .scrollBounceBehavior(.always)
             .navigationBarHidden(true)
             .refreshable {
-                if !appState.networkMonitor.isOnline {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    appState.refreshBalances()
-                    return
-                }
-                appState.refreshBalances()
-                await appState.priceService.fetchPrice()
-                appState.recordCurrentPrice()
-                appState.ensureLSPConnected()
+                await appState.userInitiatedRefresh()
             }
         }
         .onAppear {
@@ -126,17 +118,17 @@ struct HomeView: View {
                     price: appState.effectiveTradePrice
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
+                isOnline: appState.isOnline,
                 onDragStarted: { appState.ensureLSPConnected() },
                 onTradeRequest: appState.hasReadyChannel ? { request in
-                    guard appState.networkMonitor.isOnline else { return }
+                    guard appState.isOnline else { return }
                     tradeRequest = request
                 } : nil,
                 onEmptyInteraction: {
                     showReceiveSheet = true
                 }
             )
-            .disabled(!appState.networkMonitor.isOnline)
-            .opacity(appState.networkMonitor.isOnline ? 1.0 : 0.85)
+            .opacity(appState.isOnline ? 1.0 : 0.85)
             .padding(.horizontal, 24)
 
             HStack(alignment: .top) {

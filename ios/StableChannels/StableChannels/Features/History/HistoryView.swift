@@ -70,14 +70,7 @@ struct HistoryView: View {
                 }
             }
             .refreshable {
-                if appState.networkMonitor.isOnline {
-                    appState.refreshBalances()
-                    await appState.priceService.fetchPrice()
-                    appState.recordCurrentPrice()
-                    appState.ensureLSPConnected()
-                } else {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                }
+                await appState.userInitiatedRefresh()
                 loadHistory()
             }
             .sheet(item: $selectedTrade) { trade in

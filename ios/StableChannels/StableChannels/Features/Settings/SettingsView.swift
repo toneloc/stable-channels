@@ -199,15 +199,7 @@ struct SettingsView: View {
             .navigationTitle(String(localized: "title_settings", defaultValue: "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
-                if appState.networkMonitor.isOnline {
-                    appState.refreshBalances()
-                    await appState.priceService.fetchPrice()
-                    appState.recordCurrentPrice()
-                    appState.ensureLSPConnected()
-                } else {
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    appState.refreshBalances()
-                }
+                await appState.userInitiatedRefresh()
             }
             .onAppear {
                 UNUserNotificationCenter.current().getNotificationSettings { settings in

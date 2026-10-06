@@ -420,7 +420,7 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        guard appState.networkMonitor.isOnline else {
+        guard appState.isOnline else {
             errorMessage = String(
                 localized: "error_offline_send",
                 defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."

@@ -112,10 +112,14 @@ struct SellView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
-                .foregroundStyle(.secondary)
-            Button(String(localized: "button_max", defaultValue: "Max")) {
-                amountStr = String(format: "%.2f", maxSellUSD)
+            if !appState.isOnline {
+                OfflineBadgeView()
+            } else {
+                Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
+                    .foregroundStyle(.secondary)
+                Button(String(localized: "button_max", defaultValue: "Max")) {
+                    amountStr = String(format: "%.2f", maxSellUSD)
+                }
             }
             if amountUSD > maxSellUSD && amountUSD > 0 {
                 Text(StabilizationPolicy.limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)))
@@ -135,7 +139,8 @@ struct SellView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD || tradePrice <= 0)
+                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD || tradePrice <= 0 || !appState
+                    .isOnline)
         }
     }
 
@@ -277,7 +282,7 @@ struct SellView: View {
     }
 
     private func executeTrade() {
-        guard appState.networkMonitor.isOnline else {
+        guard appState.isOnline else {
             errorMessage = String(
                 localized: "error_offline_trade",
                 defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
