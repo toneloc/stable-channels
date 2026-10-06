@@ -22,6 +22,13 @@ async fn run(state: AppState) {
         let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
         if btc_price <= 0.0 {
             warn!("[stability_tick] price cache cold; skipping");
+            // Top-up outcomes need no price, so a cold cache must not leave a claimed one unbooked.
+            state
+                .stable_manager
+                .lock()
+                .await
+                .resolve_top_ups_in_flight(state.ldk_server.as_ref() as &dyn LdkServerCalls)
+                .await;
             continue;
         }
         let mut mgr = state.stable_manager.lock().await;

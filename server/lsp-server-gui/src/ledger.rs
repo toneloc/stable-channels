@@ -167,6 +167,10 @@ pub fn human_summary(event: &ChannelLedgerEvent) -> String {
         },
         "SPLICE_RECONCILED" => "Splice completed".to_owned(),
         "SPLICE_OUT_STABLE_DEDUCTED" => "Splice out reduced stable backing".to_owned(),
+        "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => "Stability payment outcome unknown".to_owned(),
+        "STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => "Stability payment still unclaimed".to_owned(),
+        "STABILITY_TOP_UP_BOOKING_FAILED" => "Claimed stability payment not booked".to_owned(),
+        "STABILITY_TOP_UP_LOOKUP_FAILED" => "Stability payment outcome could not be checked".to_owned(),
         "STABILITY_PAYMENT_SENT" => "Stability payment sent".to_owned(),
         "STABILITY_PAYMENT_SETTLED" => "Stability payment completed".to_owned(),
         "EVENT_STREAM_GAP_CLOSED" => "Channel recovered after reconnect".to_owned(),
@@ -231,6 +235,18 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
         }
         "STABILITY_CHECK_ONLY" => {
             "The channel was above its target, but the LSP cannot pull value from the wallet, so it recorded the check without sending a payment."
+        }
+        "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => {
+            "The LSP sent a stability payment but the node has no record of it. The payment is neither booked nor resent until its outcome is known."
+        }
+        "STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => {
+            "A stability payment has been waiting to be claimed for over an hour, usually because the wallet is offline. The channel gets no other stability payment until this one is claimed or fails."
+        }
+        "STABILITY_TOP_UP_LOOKUP_FAILED" => {
+            "The node could not be asked whether a stability payment on its way was claimed, and another event for the LSP was handled meanwhile. If that event was a payment on this channel, its stable target may be too high. Compare the target with the wallet's balance once the payment settles."
+        }
+        "STABILITY_TOP_UP_BOOKING_FAILED" => {
+            "A stability payment was claimed but the channel's record could not be found, so it was not added to the stable backing. It stays pending and no other stability payment is sent to this channel until the record is found."
         }
         "STABILITY_PAYMENT_SENT" => {
             "The LSP sent a Lightning payment to move the channel's stable value toward its target."

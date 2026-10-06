@@ -43,10 +43,11 @@ pub struct HistoryEntry {
 	pub events: Vec<ChannelLedgerEvent>,
 }
 
-const FAILURE_EVENTS: [&str; 9] = [
+const FAILURE_EVENTS: [&str; 10] = [
 	"STABILITY_PAYMENT_FAILED",
 	"PAYMENT_FAILED",
 	"STABILITY_PAYMENT_ROLLED_BACK",
+	"STABILITY_PAYMENT_ROLLBACK_SKIPPED",
 	"STABILITY_PAYMENT_FAILED_RECONCILED",
 	"SPLICE_NEGOTIATION_FAILED",
 	"SPLICE_FAILED",
@@ -185,6 +186,25 @@ fn has(events: &[ChannelLedgerEvent], names: &[&str]) -> bool {
 	events.iter().any(|e| names.contains(&e.event_type.as_str()))
 }
 
+/// What an operator should know about a top-up that raised an alarm, or None once its own flow shows the alarm no longer applies.
+pub fn top_up_alarm(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
+	let settled = has(events, &["STABILITY_PAYMENT_SETTLED"]);
+	let over = settled
+		|| has(events, &["STABILITY_PAYMENT_FAILED", "PAYMENT_FAILED", "STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED"]);
+	if has(events, &["STABILITY_TOP_UP_LOOKUP_FAILED"]) {
+		// Booking it later does not undo an event handled without knowing its outcome.
+		Some("its outcome could not be checked before another event was handled: verify this channel's books")
+	} else if !settled && has(events, &["STABILITY_TOP_UP_BOOKING_FAILED"]) {
+		Some("it was claimed but not booked: the channel record was not found")
+	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"]) {
+		Some("the node has no record of it: waiting, nothing resent")
+	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_STILL_PENDING"]) {
+		Some("it is still unclaimed: waiting, nothing resent")
+	} else {
+		None
+	}
+}
+
 fn first_u64(events: &[ChannelLedgerEvent], keys: &[&str]) -> Option<u64> {
 	events.iter().find_map(|e| {
 		let d = detail(e);
@@ -279,6 +299,7 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 			"STABILITY_PAYMENT_FAILED",
 			"PAYMENT_FAILED",
 			"STABILITY_PAYMENT_ROLLED_BACK",
+			"STABILITY_PAYMENT_ROLLBACK_SKIPPED",
 			"STABILITY_PAYMENT_FAILED_RECONCILED",
 		]);
 		let to_user = first_str(events, "direction").is_some_and(|d| d == "lsp_to_user" || d == "outbound");
@@ -291,6 +312,11 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 			(false, true, _) => format!("User paid {amt} to the LSP to keep the peg"),
 			(false, false, true) => format!("User's payment of {amt} to keep the peg failed{why}"),
 			(false, false, false) => format!("User sent {amt} to the LSP to keep the peg (not yet confirmed)"),
+		};
+		// An alarm shares the payment's id and so lands in this entry; it must not vanish behind the payment line.
+		let text = match top_up_alarm(events) {
+			Some(alarm) => format!("{text}; {alarm}"),
+			None => text,
 		};
 		return (EntryKind::Stability, text);
 	}
@@ -330,6 +356,10 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		"PEER_DISCONNECTED" => (EntryKind::Peer, "Wallet offline".to_owned()),
 		"STABILITY_PUSH_QUEUED" => (EntryKind::Other, "Wallet above peg: push sent to wake it".to_owned()),
 		"STABILITY_CHECK_ONLY" => (EntryKind::Other, "Wallet above peg: waiting for it to pay".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Stability payment has no known outcome: waiting, nothing resent".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => (EntryKind::Other, "Stability payment still unclaimed: waiting, nothing resent".to_owned()),
+		"STABILITY_TOP_UP_BOOKING_FAILED" => (EntryKind::Other, "Claimed stability payment not booked: channel record not found".to_owned()),
+		"STABILITY_TOP_UP_LOOKUP_FAILED" => (EntryKind::Other, "Stability payment outcome could not be checked: verify this channel's books".to_owned()),
 		"SYNC_RETRY_EXHAUSTED" => (EntryKind::Sync, "Stopped retrying the balance sync".to_owned()),
 		"SYNC_RETRY_BLOCKED" => (EntryKind::Sync, "Balance sync blocked: the channel cannot carry it".to_owned()),
 		"CHANNEL_ACCOUNTING_STATE_COMMITTED"
@@ -497,6 +527,47 @@ mod tests {
 	fn sub_sat_amounts_are_shown_in_msat() {
 		let entries = build_entries(&[ev(1, "PAYMENT_SETTLED", serde_json::json!({"amount_msat": 1, "direction": "outbound"}), &[])], "uid");
 		assert_eq!(entries[0].summary, "Sent 1 msat");
+	}
+
+	#[test]
+	fn top_up_alarms_stay_visible_inside_the_payment_they_belong_to() {
+		let flow = |alarm: &str, settled: bool| {
+			let mut events = vec![
+				ev(1, "STABILITY_PAYMENT_SENT", serde_json::json!({"direction": "lsp_to_user", "amount_msat": 520_000}), &[("payment_id", "p")]),
+				ev(2, alarm, serde_json::json!({}), &[("payment_id", "p")]),
+			];
+			if settled {
+				events.push(ev(3, "STABILITY_PAYMENT_SETTLED", serde_json::json!({"direction": "outbound", "amount_msat": 520_000}), &[("payment_id", "p")]));
+			}
+			let entries = build_entries(&events, "uid");
+			assert_eq!(entries.len(), 1, "{alarm}");
+			entries[0].summary.clone()
+		};
+		for (alarm, text) in [
+			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it is still unclaimed: waiting, nothing resent"),
+			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node has no record of it: waiting, nothing resent"),
+			("STABILITY_TOP_UP_BOOKING_FAILED", "it was claimed but not booked: the channel record was not found"),
+			("STABILITY_TOP_UP_LOOKUP_FAILED", "verify this channel's books"),
+		] {
+			assert!(flow(alarm, false).ends_with(text), "{alarm}: {}", flow(alarm, false));
+		}
+		// A settled payment clears the waiting and booking alarms, but not an event handled without knowing its outcome.
+		assert_eq!(flow("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", true), "LSP paid 520 sats to keep the peg");
+		assert_eq!(flow("STABILITY_TOP_UP_BOOKING_FAILED", true), "LSP paid 520 sats to keep the peg");
+		assert!(flow("STABILITY_TOP_UP_LOOKUP_FAILED", true).ends_with("verify this channel's books"));
+		// A top-up booked the old way whose failure was recovered from the node has only its rollback row to end the flow.
+		for rollback in ["STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED"] {
+			let entries = build_entries(&[
+				ev(1, "STABILITY_PAYMENT_SENT", serde_json::json!({"direction": "lsp_to_user", "amount_msat": 520_000}), &[("payment_id", "p")]),
+				ev(2, "STABILITY_TOP_UP_DEFERRED_STILL_PENDING", serde_json::json!({}), &[("payment_id", "p")]),
+				ev(3, rollback, serde_json::json!({}), &[("payment_id", "p")]),
+			], "uid");
+			assert_eq!(entries[0].summary, "LSP's payment of 520 sats to keep the peg failed", "{rollback}");
+			assert!(entries[0].failed, "{rollback}");
+		}
+		// Without its payment row loaded, the alarm still reads as an alarm.
+		let alone = build_entries(&[ev(1, "STABILITY_TOP_UP_BOOKING_FAILED", serde_json::json!({}), &[("payment_id", "p")])], "uid");
+		assert_eq!(alone[0].summary, "Claimed stability payment not booked: channel record not found");
 	}
 
 	#[test]

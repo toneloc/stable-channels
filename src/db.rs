@@ -51,7 +51,25 @@ pub struct PendingInboundStabilitySettlement {
     pub envelope: String,
 }
 
-/// Result of consuming a failed outbound stability settlement.
+/// A stability top-up the LSP has sent whose outcome is not known yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StabilityTopUp {
+    pub payment_id: String,
+    pub user_channel_id: String,
+    pub top_up_sats: u64,
+    /// Unix seconds at which the top-up was recorded as sent.
+    pub recorded_at: i64,
+}
+
+/// A claimed stability top-up and the backing it left. None means its channel row was not found: nothing was written and the top-up is still on the way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StabilityTopUpClaim {
+    pub user_channel_id: String,
+    pub top_up_sats: u64,
+    pub backing_sats_after: Option<u64>,
+}
+
+/// Result of consuming a failed outbound stability settlement that moved backing when it was sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StabilityRollback {
     pub user_channel_id: String,
@@ -63,6 +81,61 @@ pub struct StabilityRollback {
     /// False means the settlement was marked failed, but a newer allocation had already replaced
     /// the optimistic state, so the channel row was intentionally left untouched.
     pub applied: bool,
+}
+
+/// Channel and sats of a pending top-up that is booked on claim.
+fn pending_top_up(conn: &Connection, payment_id: &str) -> SqliteResult<Option<(String, i64)>> {
+    let row: Option<(Option<String>, i64)> = conn
+        .query_row(
+            "SELECT user_channel_id, top_up_sats FROM settlement_payments
+             WHERE payment_id = ?1 AND kind = 'stability' AND outcome = 'pending' AND top_up_sats IS NOT NULL",
+            params![payment_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(user_channel_id, sats)| Some((user_channel_id?, sats)).filter(|(_, sats)| *sats > 0)))
+}
+
+/// The value of a user channel id written in decimal or, for legacy rows, hex.
+fn user_channel_id_value(user_channel_id: &str) -> Option<u128> {
+    user_channel_id
+        .parse::<u128>()
+        .ok()
+        .or_else(|| u128::from_str_radix(user_channel_id.trim_start_matches("0x"), 16).ok())
+}
+
+/// A channel row's key, channel id, target, backing and native sats. A row keyed in the other notation of the same id is found too; an ambiguous match is treated as missing.
+fn channel_books(conn: &Connection, user_channel_id: &str) -> SqliteResult<Option<(String, String, f64, i64, i64)>> {
+    type Row = (String, String, f64, i64, i64);
+    let read = |row: &rusqlite::Row<'_>| -> SqliteResult<Row> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+    };
+    const COLUMNS: &str = "user_channel_id, channel_id, expected_usd, stable_sats, native_sats";
+    let exact = conn
+        .query_row(&format!("SELECT {COLUMNS} FROM channels WHERE user_channel_id = ?1"), params![user_channel_id], read)
+        .optional()?;
+    let Some(wanted) = user_channel_id_value(user_channel_id).filter(|_| exact.is_none()) else {
+        return Ok(exact);
+    };
+    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM channels WHERE user_channel_id IS NOT NULL"))?;
+    let mut same_id = Vec::new();
+    for row in stmt.query_map([], read)? {
+        let row = row?;
+        if user_channel_id_value(&row.0) == Some(wanted) {
+            same_id.push(row);
+        }
+    }
+    Ok(if same_id.len() == 1 { same_id.pop() } else { None })
+}
+
+fn books_snapshot(row: &(String, String, f64, i64, i64)) -> AccountingSnapshot {
+    AccountingSnapshot {
+        expected_usd: Some(row.2),
+        backing_sats: u64::try_from(row.3).ok(),
+        native_sats: u64::try_from(row.4).ok(),
+        live_receiver_sats: u64::try_from(row.3.saturating_add(row.4)).ok(),
+        ..Default::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -679,9 +752,7 @@ impl Database {
             "ALTER TABLE settlement_payments ADD COLUMN user_channel_id TEXT",
             [],
         ); // Ignore error if column already exists
-        // Outbound stability sends optimistically move backing to equilibrium. Persist the exact
-        // transition so a later asynchronous PaymentFailed can undo it without guessing or
-        // overwriting a newer trade/sync allocation.
+        // Older daemons moved backing when a top-up was sent; these columns hold that transition so a failure of such a row can still undo it.
         let _ = conn.execute(
             "ALTER TABLE settlement_payments ADD COLUMN backing_sats_before INTEGER",
             [],
@@ -704,6 +775,11 @@ impl Database {
         );
         let _ = conn.execute(
             "ALTER TABLE settlement_payments ADD COLUMN outcome TEXT NOT NULL DEFAULT 'pending'",
+            [],
+        );
+        // Sats of a stability top-up that reach the books only when it is claimed; NULL on rows that moved backing at send time.
+        let _ = conn.execute(
+            "ALTER TABLE settlement_payments ADD COLUMN top_up_sats INTEGER",
             [],
         );
         // Ordinary SYNC attempts are ordered by the signed version, so an older payment's
@@ -4171,9 +4247,261 @@ impl Database {
         settlements
     }
 
-    /// Record the reversible allocation transition, optimistic channel state, and ledger event in
-    /// one transaction. Returns false only if the payment id was already present or the supplied
-    /// rollback metadata is invalid.
+    /// Record a stability top-up as on the way without changing the channel's books. Returns false if the payment id was already present.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_stability_top_up_in_flight(
+        &self,
+        payment_id: &str,
+        user_channel_id: &str,
+        channel_id: &str,
+        top_up_sats: u64,
+        expected_usd: f64,
+        backing_sats: u64,
+        native_sats: u64,
+        amount_msat: u64,
+        direction: &str,
+        counterparty: &str,
+    ) -> SqliteResult<bool> {
+        if top_up_sats == 0 || top_up_sats > i64::MAX as u64 {
+            return Ok(false);
+        }
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let mut mirror = None;
+        let result = (|| {
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO settlement_payments (payment_id, kind, user_channel_id, top_up_sats)
+                 VALUES (?1, 'stability', ?2, ?3)",
+                params![payment_id, user_channel_id, top_up_sats as i64],
+            )?;
+            if inserted != 1 {
+                return Ok(false);
+            }
+            let books = AccountingSnapshot {
+                expected_usd: Some(expected_usd),
+                backing_sats: Some(backing_sats),
+                native_sats: Some(native_sats),
+                live_receiver_sats: Some(backing_sats.saturating_add(native_sats)),
+                amount_msat: Some(amount_msat),
+                ..Default::default()
+            };
+            let draft = LedgerEventDraft {
+                event_type: "STABILITY_PAYMENT_SENT".to_owned(),
+                category: "stability".to_owned(),
+                severity: "info".to_owned(),
+                status: "pending".to_owned(),
+                source: "lsp".to_owned(),
+                completeness: LedgerCompleteness::Observed,
+                occurred_at_ms: Utc::now().timestamp_millis(),
+                dedup_key: Some(format!("lsp:stability-payment-sent:{payment_id}")),
+                before: Some(books.clone()),
+                after: Some(books),
+                detail: serde_json::json!({
+                    "payment_id": payment_id,
+                    "channel_id": channel_id,
+                    "user_channel_id": user_channel_id,
+                    "counterparty_node_id": counterparty,
+                    "direction": direction,
+                    "amount_msat": amount_msat,
+                    "expected_usd": expected_usd,
+                    "top_up_sats": top_up_sats,
+                    "backing_sats": backing_sats,
+                    "native_sats": native_sats,
+                    "status": "pending",
+                }),
+                refs: vec![
+                    LedgerRef::new("payment_id", payment_id),
+                    LedgerRef::new("channel_id", channel_id),
+                    LedgerRef::new("user_channel_id", user_channel_id),
+                    LedgerRef::new("node_id", counterparty),
+                ],
+            };
+            let outcome = ledger::append_on_connection(&conn, &draft)?;
+            if outcome.inserted {
+                mirror = Some((draft, outcome.event_id));
+            }
+            Ok(true)
+        })();
+        let committed = finish_transaction(&conn, result);
+        if committed.is_ok() {
+            if let Some((draft, event_id)) = mirror {
+                crate::audit::mirror_committed_ledger_event(&draft, event_id);
+            }
+        }
+        committed
+    }
+
+    /// Stability top-ups sent and not yet known to be claimed or failed, oldest first.
+    pub fn stability_top_ups_in_flight(&self) -> SqliteResult<Vec<StabilityTopUp>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, user_channel_id, top_up_sats, recorded_at FROM settlement_payments
+             WHERE kind = 'stability' AND outcome = 'pending' AND top_up_sats IS NOT NULL
+             ORDER BY recorded_at ASC, payment_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let sats: i64 = row.get(2)?;
+            Ok(StabilityTopUp {
+                payment_id: row.get(0)?,
+                user_channel_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
+                top_up_sats: u64::try_from(sats).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(2, sats))?,
+                recorded_at: row.get(3)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Top-ups an older daemon booked when it sent them and whose outcome is still not recorded, as (payment id, channel, unix seconds recorded).
+    pub fn legacy_stability_payments_pending(&self) -> SqliteResult<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT payment_id, user_channel_id, recorded_at FROM settlement_payments
+             WHERE kind = 'stability' AND outcome = 'pending' AND top_up_sats IS NULL
+               AND backing_sats_after IS NOT NULL AND user_channel_id IS NOT NULL
+             ORDER BY recorded_at ASC, payment_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect()
+    }
+
+    /// Channels with a stability payment from the LSP whose outcome is not known yet, whichever way it was booked.
+    pub fn channels_with_pending_stability_payment(&self) -> SqliteResult<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT user_channel_id FROM settlement_payments
+             WHERE kind = 'stability' AND outcome = 'pending' AND user_channel_id IS NOT NULL
+               AND (top_up_sats IS NOT NULL OR backing_sats_after IS NOT NULL)",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+
+    /// Mark a top-up claimed and add its sats to the channel's backing in one transaction. The pending-to-succeeded transition makes it apply once; None means there was nothing pending to claim.
+    pub fn claim_stability_top_up(
+        &self,
+        payment_id: &str,
+        amount_msat: Option<u64>,
+        fee_paid_msat: Option<u64>,
+    ) -> SqliteResult<Option<StabilityTopUpClaim>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some((user_channel_id, top_up_sats)) = pending_top_up(&tx, payment_id)? else {
+            return Ok(None);
+        };
+        let Some(before) = channel_books(&tx, &user_channel_id)? else {
+            // Settling it without its books would let the next tick pay the same need again.
+            return Ok(Some(StabilityTopUpClaim { user_channel_id, top_up_sats: top_up_sats as u64, backing_sats_after: None }));
+        };
+        if tx.execute(
+            "UPDATE settlement_payments SET outcome = 'succeeded'
+             WHERE payment_id = ?1 AND outcome = 'pending' AND top_up_sats IS NOT NULL",
+            params![payment_id],
+        )? != 1
+        {
+            return Ok(None);
+        }
+        tx.execute(
+            "UPDATE channels SET stable_sats = stable_sats + ?1, updated_at = strftime('%s', 'now')
+             WHERE user_channel_id = ?2",
+            params![top_up_sats, before.0],
+        )?;
+        let before = Some(before);
+        let after = channel_books(&tx, &user_channel_id)?;
+        let mut refs = vec![
+            LedgerRef::new("payment_id", payment_id),
+            LedgerRef::new("user_channel_id", &user_channel_id),
+        ];
+        if let Some((_, channel_id, ..)) = after.as_ref() {
+            refs.push(LedgerRef::new("channel_id", channel_id));
+        }
+        let draft = LedgerEventDraft {
+            event_type: "STABILITY_PAYMENT_SETTLED".to_owned(),
+            category: "stability".to_owned(),
+            severity: "info".to_owned(),
+            status: "completed".to_owned(),
+            source: "lsp".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!("lsp:stability_payment_settled:{payment_id}")),
+            before: before.as_ref().map(books_snapshot),
+            after: after.as_ref().map(|row| AccountingSnapshot { amount_msat, fee_msat: fee_paid_msat, ..books_snapshot(row) }),
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "user_channel_id": user_channel_id,
+                "channel_id": after.as_ref().map(|row| row.1.as_str()),
+                "settlement_kind": "stability",
+                "amount_msat": amount_msat,
+                "fee_paid_msat": fee_paid_msat,
+                "top_up_sats": top_up_sats,
+                "direction": "outbound",
+                "status": "completed",
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
+        Ok(Some(StabilityTopUpClaim {
+            user_channel_id,
+            top_up_sats: top_up_sats as u64,
+            backing_sats_after: after.and_then(|row| u64::try_from(row.3).ok()),
+        }))
+    }
+
+    /// Mark a top-up failed. It never reached the books, so nothing else changes; returns its channel, or None if nothing was pending.
+    pub fn fail_stability_top_up(&self, payment_id: &str) -> SqliteResult<Option<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let Some((user_channel_id, top_up_sats)) = pending_top_up(&tx, payment_id)? else {
+            return Ok(None);
+        };
+        if tx.execute(
+            "UPDATE settlement_payments SET outcome = 'failed'
+             WHERE payment_id = ?1 AND outcome = 'pending' AND top_up_sats IS NOT NULL",
+            params![payment_id],
+        )? != 1
+        {
+            return Ok(None);
+        }
+        let books = channel_books(&tx, &user_channel_id)?;
+        let mut refs = vec![
+            LedgerRef::new("payment_id", payment_id),
+            LedgerRef::new("user_channel_id", &user_channel_id),
+        ];
+        if let Some((_, channel_id, ..)) = books.as_ref() {
+            refs.push(LedgerRef::new("channel_id", channel_id));
+        }
+        let draft = LedgerEventDraft {
+            event_type: "STABILITY_PAYMENT_FAILED".to_owned(),
+            category: "stability".to_owned(),
+            severity: "error".to_owned(),
+            status: "failed".to_owned(),
+            source: "lsp".to_owned(),
+            completeness: LedgerCompleteness::Observed,
+            occurred_at_ms: Utc::now().timestamp_millis(),
+            dedup_key: Some(format!("lsp:stability-payment-failure:{payment_id}")),
+            before: books.as_ref().map(books_snapshot),
+            after: books.as_ref().map(books_snapshot),
+            detail: serde_json::json!({
+                "payment_id": payment_id,
+                "user_channel_id": user_channel_id,
+                "top_up_sats": top_up_sats,
+                "direction": "lsp_to_user",
+                "status": "failed",
+            }),
+            refs,
+        };
+        let ledger_outcome = ledger::append_on_connection(&tx, &draft)?;
+        tx.commit()?;
+        if ledger_outcome.inserted {
+            crate::audit::mirror_committed_ledger_event(&draft, ledger_outcome.event_id);
+        }
+        Ok(Some(user_channel_id))
+    }
+
+    /// How older daemons recorded a top-up: backing moves at send time and the row keeps the transition for a rollback. Kept so rows already in flight at an upgrade, and tests of them, still work.
     #[allow(clippy::too_many_arguments)]
     pub fn record_stability_settlement_with_rollback(
         &self,
@@ -4350,7 +4678,7 @@ impl Database {
         let row: Option<(String, Option<String>, String)> = tx
             .query_row(
                 "SELECT kind, user_channel_id, outcome FROM settlement_payments
-                 WHERE payment_id = ?1",
+                 WHERE payment_id = ?1 AND top_up_sats IS NULL",
                 params![payment_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -4365,7 +4693,7 @@ impl Database {
         }
         let updated = tx.execute(
             "UPDATE settlement_payments SET outcome = 'succeeded'
-             WHERE payment_id = ?1 AND outcome = 'pending'",
+             WHERE payment_id = ?1 AND outcome = 'pending' AND top_up_sats IS NULL",
             params![payment_id],
         )?;
         if updated != 1 {
@@ -4587,12 +4915,12 @@ impl Database {
         )
     }
 
-    /// Pending protocol payments whose terminal LDK outcome still needs to be persisted.
+    /// Pending protocol payments whose terminal LDK outcome still needs to be persisted. Top-ups booked on claim are listed by stability_top_ups_in_flight.
     pub fn list_pending_settlements(&self) -> SqliteResult<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT payment_id, kind FROM settlement_payments
-             WHERE outcome = 'pending' ORDER BY recorded_at ASC, payment_id ASC",
+             WHERE outcome = 'pending' AND top_up_sats IS NULL ORDER BY recorded_at ASC, payment_id ASC",
         )?;
         let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
         rows.collect()
@@ -7135,6 +7463,161 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(outcome, "pending");
+    }
+
+    fn top_up_in_flight(db: &Database, user_channel_id: &str) {
+        assert!(db
+            .record_stability_top_up_in_flight("top-up", user_channel_id, "physical", 2_500, 10.0, 10_000, 5_000, 2_500_000, "lsp_to_user", "counterparty")
+            .unwrap());
+    }
+
+    fn settlement_outcome(db: &Database) -> String {
+        db.conn.lock().unwrap()
+            .query_row("SELECT outcome FROM settlement_payments WHERE payment_id = 'top-up'", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn top_up_reaches_the_books_only_when_claimed_and_only_once() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        top_up_in_flight(&db, "stable");
+
+        let saved = db.load_channel("stable").unwrap().unwrap();
+        assert_eq!((saved.backing_sats, saved.native_sats), (10_000, 5_000), "sending changes no books");
+        let in_flight = db.stability_top_ups_in_flight().unwrap();
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!((in_flight[0].payment_id.as_str(), in_flight[0].user_channel_id.as_str(), in_flight[0].top_up_sats), ("top-up", "stable", 2_500));
+        assert!(in_flight[0].recorded_at > 0);
+        assert_eq!(db.channels_with_pending_stability_payment().unwrap(), ["stable"]);
+        // The paths that settle other payments leave it alone.
+        assert!(db.list_pending_settlements().unwrap().is_empty());
+        assert!(!db.mark_settlement_succeeded("top-up", None, None, None).unwrap());
+        assert!(db.rollback_failed_stability_settlement("top-up").unwrap().is_none());
+        assert_eq!(settlement_outcome(&db), "pending");
+
+        let claim = db.claim_stability_top_up("top-up", Some(2_500_000), None).unwrap().unwrap();
+        assert_eq!(claim.backing_sats_after, Some(12_500));
+        assert!(db.claim_stability_top_up("top-up", Some(2_500_000), None).unwrap().is_none());
+        assert!(db.fail_stability_top_up("top-up").unwrap().is_none());
+        let saved = db.load_channel("stable").unwrap().unwrap();
+        assert_eq!((saved.backing_sats, saved.native_sats, saved.expected_usd), (12_500, 5_000, 10.0));
+        assert_eq!(settlement_outcome(&db), "succeeded");
+        assert!(db.stability_top_ups_in_flight().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_top_up_changes_no_books() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        top_up_in_flight(&db, "stable");
+
+        assert_eq!(db.fail_stability_top_up("top-up").unwrap().as_deref(), Some("stable"));
+        assert!(db.fail_stability_top_up("top-up").unwrap().is_none());
+        assert!(db.claim_stability_top_up("top-up", None, None).unwrap().is_none(), "a failed top-up can never be booked");
+        let saved = db.load_channel("stable").unwrap().unwrap();
+        assert_eq!((saved.backing_sats, saved.native_sats), (10_000, 5_000));
+        assert_eq!(settlement_outcome(&db), "failed");
+    }
+
+    #[test]
+    fn claimed_top_up_follows_a_channel_row_keyed_in_the_other_notation() {
+        // (row key, id the top-up was recorded with): legacy hex against decimal, in both directions.
+        for (row_key, top_up_key) in [("26", "0000000000000000000000000000001a"), ("0000000000000000000000000000001a", "26")] {
+            let db = Database::open_in_memory().unwrap();
+            db.save_channel("physical", row_key, 10.0, 10_000, 5_000, None).unwrap();
+            db.save_channel("other", "27", 10.0, 7_000, 0, None).unwrap();
+            top_up_in_flight(&db, top_up_key);
+
+            let claim = db.claim_stability_top_up("top-up", None, None).unwrap().unwrap();
+            assert_eq!(claim.backing_sats_after, Some(12_500), "row {row_key}");
+            assert_eq!(db.load_channel(row_key).unwrap().unwrap().backing_sats, 12_500);
+            assert_eq!(db.load_channel("27").unwrap().unwrap().backing_sats, 7_000);
+        }
+    }
+
+    #[test]
+    fn claimed_top_up_whose_channel_row_is_missing_stays_on_the_way() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("other", "27", 10.0, 7_000, 0, None).unwrap();
+        top_up_in_flight(&db, "stable");
+
+        let claim = db.claim_stability_top_up("top-up", None, None).unwrap().unwrap();
+        assert_eq!(claim.backing_sats_after, None);
+        assert_eq!(settlement_outcome(&db), "pending", "settling it would let the same need be paid again");
+        assert_eq!(db.stability_top_ups_in_flight().unwrap().len(), 1);
+        assert_eq!(db.load_channel("27").unwrap().unwrap().backing_sats, 7_000);
+
+        // Once the row exists the same claim books it.
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        let claim = db.claim_stability_top_up("top-up", None, None).unwrap().unwrap();
+        assert_eq!(claim.backing_sats_after, Some(12_500));
+        assert_eq!(settlement_outcome(&db), "succeeded");
+    }
+
+    #[test]
+    fn pending_stability_payments_are_listed_per_channel_for_both_bookings() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        db.save_channel("other", "27", 10.0, 7_000, 0, None).unwrap();
+        db.record_settlement_with_channel("sync-payment", "sync", "stable").unwrap();
+        assert!(db.channels_with_pending_stability_payment().unwrap().is_empty());
+
+        top_up_in_flight(&db, "stable");
+        db.record_stability_settlement_with_rollback(
+            "old-top-up", "27", "other", 7_000, 8_000, 0, 10.0, 0, 1_000_000, "lsp_to_user", "counterparty", None,
+        ).unwrap();
+        let mut channels = db.channels_with_pending_stability_payment().unwrap();
+        channels.sort();
+        assert_eq!(channels, ["27", "stable"]);
+        let legacy = db.legacy_stability_payments_pending().unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!((legacy[0].0.as_str(), legacy[0].1.as_str()), ("old-top-up", "27"));
+        assert!(legacy[0].2 > 0);
+
+        db.fail_stability_top_up("top-up").unwrap();
+        assert_eq!(db.channels_with_pending_stability_payment().unwrap(), ["27"]);
+    }
+
+    #[test]
+    fn claimed_top_up_with_two_rows_for_the_same_id_stays_on_the_way() {
+        let db = Database::open_in_memory().unwrap();
+        // Neither row is keyed exactly as the top-up was recorded, and both read as channel 26.
+        db.save_channel("physical", "26", 10.0, 10_000, 5_000, None).unwrap();
+        db.save_channel("other", "0x1a", 10.0, 7_000, 0, None).unwrap();
+        top_up_in_flight(&db, "0000000000000000000000000000001a");
+
+        let claim = db.claim_stability_top_up("top-up", None, None).unwrap().unwrap();
+        assert_eq!(claim.backing_sats_after, None, "booking either row would be a guess");
+        assert_eq!(settlement_outcome(&db), "pending");
+        assert_eq!(db.load_channel("26").unwrap().unwrap().backing_sats, 10_000);
+        assert_eq!(db.load_channel("0x1a").unwrap().unwrap().backing_sats, 7_000);
+    }
+
+    #[test]
+    fn top_up_of_no_sats_is_not_recorded() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        assert!(!db
+            .record_stability_top_up_in_flight("top-up", "stable", "physical", 0, 10.0, 10_000, 5_000, 0, "lsp_to_user", "counterparty")
+            .unwrap());
+        assert!(db.stability_top_ups_in_flight().unwrap().is_empty());
+        assert!(!db.settlement_exists("top-up").unwrap());
+    }
+
+    #[test]
+    fn claim_that_cannot_be_recorded_leaves_the_top_up_on_the_way() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        top_up_in_flight(&db, "stable");
+        db.conn.lock().unwrap().execute_batch(
+            "CREATE TRIGGER inject_claim_ledger_failure BEFORE INSERT ON ledger_events
+             BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END;",
+        ).unwrap();
+
+        assert!(db.claim_stability_top_up("top-up", None, None).is_err());
+        assert_eq!(db.load_channel("stable").unwrap().unwrap().backing_sats, 10_000);
+        assert_eq!(settlement_outcome(&db), "pending");
     }
 
     #[test]

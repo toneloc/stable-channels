@@ -303,6 +303,19 @@ struct PendingBookUpdate {
     needs_sync: bool,
 }
 
+/// A top-up on the way for longer than this is reported once; it still waits for its outcome.
+const STABILITY_TOP_UP_STALE_SECS: i64 = 3600;
+/// How many times an event waits a second for the node to answer about a top-up before it is handled anyway.
+const TOP_UP_LOOKUP_ATTEMPTS: u32 = 3;
+
+/// What a claim did with a payment: it was not a top-up on the way, it was booked, or its channel row was not found and it stays on the way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopUpSettlement {
+    NotOnTheWay,
+    Booked,
+    ChannelMissing,
+}
+
 /// In-memory list of stable channels plus a handle to the shared sqlite channels table.
 pub struct StableChannelManager {
     pub stable_channels: Vec<StableChannel>,
@@ -310,13 +323,21 @@ pub struct StableChannelManager {
     pub enforce_max_stabilization: bool,
     db: Arc<Database>,
     data_dir: PathBuf,
-    /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
-    spend_debounce: std::collections::HashMap<u128, u8>,
     /// Splice events still awaiting a usable snapshot or a committed correction.
     pending_splices: std::collections::HashMap<u128, Option<String>>,
     pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
+    /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
+    spend_debounce: std::collections::HashMap<u128, u8>,
+    /// Alarms already raised for a top-up that keeps waiting, as (payment id, alarm), so each is raised once.
+    top_up_alarms: std::collections::HashSet<(String, &'static str)>,
+    /// Whether the last pass over the top-ups on the way could not read them or could not ask the node about one of them.
+    top_up_lookup_failed: bool,
+    /// Top-ups the last pass could not ask the node about or could not book, as (payment id, channel).
+    top_ups_unresolved: Vec<(String, String)>,
+    /// Whether the unreadable list of top-ups has been reported for the current episode.
+    top_ups_unreadable_reported: bool,
     /// Channels awaiting a startup SYNC or retry. Accepted attempts and terminal outcomes are
     /// persisted in settlement_payments; this set also covers failures before an ID is recorded.
     startup_sync_pending: std::collections::HashSet<u128>,
@@ -347,6 +368,28 @@ impl StableChannelManager {
             if mgr.retry_pending_reconciliations(ldk, price).await {
                 return mgr;
             }
+            drop(mgr);
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    /// lock_for_event, then book any top-up whose outcome event was missed, so the handler does not read its sats as spare balance. A node that cannot be asked is retried briefly before the event is handled anyway.
+    pub(crate) async fn lock_for_event_with_top_ups_resolved<'a>(
+        manager: &'a tokio::sync::Mutex<Self>,
+        ldk: &dyn LdkServerCalls,
+    ) -> tokio::sync::MutexGuard<'a, Self> {
+        let mut attempt = 1;
+        loop {
+            let mut mgr = Self::lock_for_event(manager, ldk).await;
+            mgr.resolve_top_ups_in_flight(ldk).await;
+            if !mgr.top_up_lookup_failed {
+                return mgr;
+            }
+            if attempt >= TOP_UP_LOOKUP_ATTEMPTS {
+                mgr.report_top_ups_unresolved_at_event();
+                return mgr;
+            }
+            attempt += 1;
             drop(mgr);
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
@@ -659,9 +702,234 @@ impl StableChannelManager {
         }
     }
 
-    /// Consume an asynchronous failure for an outbound stability payment. The database performs
-    /// the authoritative compare-and-swap; the in-memory allocation is restored only when it is
-    /// still the exact optimistic state written by that payment.
+    /// Book a claimed top-up: the database marks it settled and adds its sats in one transaction, then the cache follows.
+    pub fn settle_stability_top_up(
+        &mut self,
+        payment_id: &str,
+        amount_msat: Option<u64>,
+        fee_paid_msat: Option<u64>,
+    ) -> rusqlite::Result<TopUpSettlement> {
+        let Some(claim) = self.db.claim_stability_top_up(payment_id, amount_msat, fee_paid_msat)? else {
+            return Ok(TopUpSettlement::NotOnTheWay);
+        };
+        if claim.backing_sats_after.is_none() {
+            // Nothing was written, so the top-up stays on the way and keeps a second one from being sent.
+            if self.top_up_alarms.insert((payment_id.to_owned(), "channel_missing")) {
+                stable_channels::audit::audit_event(
+                    "STABILITY_TOP_UP_BOOKING_FAILED",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "user_channel_id": claim.user_channel_id,
+                        "top_up_sats": claim.top_up_sats,
+                        "reason": "channel_row_not_found",
+                        "dedup_key": format!("lsp:stability-top-up-booking-failed:{payment_id}"),
+                    }),
+                );
+            }
+            return Ok(TopUpSettlement::ChannelMissing);
+        }
+        self.top_up_alarms.retain(|(id, _)| id != payment_id);
+        let uid = parse_user_channel_id(&claim.user_channel_id);
+        if let Some(sc) = self.stable_channels.iter_mut().find(|sc| uid == Some(sc.user_channel_id)) {
+            sc.backing_sats = sc.backing_sats.saturating_add(claim.top_up_sats);
+            sc.last_stability_payment = Self::unix_time_secs();
+        }
+        Ok(TopUpSettlement::Booked)
+    }
+
+    /// A failed top-up never reached the books, so it is only marked failed and the next tick decides afresh. Returns its channel, or None when the payment is not a top-up on the way.
+    pub fn fail_stability_top_up(&mut self, payment_id: &str) -> rusqlite::Result<Option<String>> {
+        let Some(user_channel_id) = self.db.fail_stability_top_up(payment_id)? else {
+            return Ok(None);
+        };
+        self.top_up_alarms.retain(|(id, _)| id != payment_id);
+        if let Some(uid) = parse_user_channel_id(&user_channel_id) {
+            self.stability_throttle.remove(&uid);
+        }
+        Ok(Some(user_channel_id))
+    }
+
+    /// An event is about to be handled without knowing these top-ups' outcomes, which can misstate their channels' books; record each once so it is never silent.
+    fn report_top_ups_unresolved_at_event(&mut self) {
+        for (payment_id, user_channel_id) in std::mem::take(&mut self.top_ups_unresolved) {
+            if self.top_up_alarms.insert((payment_id.clone(), "lookup_failed")) {
+                stable_channels::audit::audit_event(
+                    "STABILITY_TOP_UP_LOOKUP_FAILED",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "user_channel_id": user_channel_id,
+                        "attempts": TOP_UP_LOOKUP_ATTEMPTS,
+                        "dedup_key": format!("lsp:stability-top-up-lookup-failed:{payment_id}"),
+                    }),
+                );
+            }
+        }
+    }
+
+    /// Whether a calculated correction for this channel is still unsaved; saving it later replaces the whole books, so nothing else may be booked first. A splice with no snapshot holds no books and is no barrier.
+    fn correction_pending(&self, user_channel_id: &str) -> bool {
+        parse_user_channel_id(user_channel_id).is_some_and(|uid| self.pending_book_updates.contains_key(&uid))
+    }
+
+    /// Whether a stability payment from the LSP to this channel still has no outcome; an unreadable answer counts as yes.
+    fn stability_payment_pending(&self, uid: u128) -> bool {
+        match self.db.channels_with_pending_stability_payment() {
+            Ok(pending) => pending.iter().any(|id| parse_user_channel_id(id) == Some(uid)),
+            Err(e) => {
+                error!("[stable] pending stability payment lookup failed: {}", e);
+                true
+            }
+        }
+    }
+
+    /// Record, once each, that a top-up keeps waiting: the node has no record of it, or it has been pending for a long time.
+    fn report_waiting_top_up(&mut self, payment_id: &str, user_channel_id: &str, node_knows_it: bool, age_secs: i64) {
+        if !node_knows_it {
+            if self.top_up_alarms.insert((payment_id.to_owned(), "outcome_unknown")) {
+                // The node has no record of the payment, so it is neither booked nor resent.
+                stable_channels::audit::audit_event(
+                    "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN",
+                    serde_json::json!({
+                        "payment_id": payment_id,
+                        "user_channel_id": user_channel_id,
+                        "dedup_key": format!("lsp:stability-top-up-outcome-unknown:{payment_id}"),
+                    }),
+                );
+            }
+        } else if age_secs > STABILITY_TOP_UP_STALE_SECS && self.top_up_alarms.insert((payment_id.to_owned(), "still_pending")) {
+            // Waiting is still right, but the channel gets no other top-up meanwhile and an operator should know.
+            stable_channels::audit::audit_event(
+                "STABILITY_TOP_UP_DEFERRED_STILL_PENDING",
+                serde_json::json!({
+                    "payment_id": payment_id,
+                    "user_channel_id": user_channel_id,
+                    "age_secs": age_secs,
+                    "dedup_key": format!("lsp:stability-top-up-still-pending:{payment_id}"),
+                }),
+            );
+        }
+    }
+
+    /// Ask the node about every top-up still on the way and book the ones it reports claimed or failed. Returns the channels that still have one outstanding, or None when that cannot be established.
+    pub(crate) async fn resolve_top_ups_in_flight(
+        &mut self,
+        ldk: &dyn LdkServerCalls,
+    ) -> Option<std::collections::HashSet<u128>> {
+        self.top_up_lookup_failed = false;
+        self.top_ups_unresolved.clear();
+        let top_ups = match self.db.stability_top_ups_in_flight() {
+            Ok(top_ups) => top_ups,
+            Err(error) => {
+                tracing::error!("[stable] failed to list top-ups in flight: {}", error);
+                self.top_up_lookup_failed = true;
+                if !std::mem::replace(&mut self.top_ups_unreadable_reported, true) {
+                    // Until the list can be read no top-up is sent or booked for any channel.
+                    stable_channels::audit::audit_event(
+                        "STABILITY_TOP_UP_LOOKUP_FAILED",
+                        serde_json::json!({ "reason": "top_ups_unreadable", "error": error.to_string() }),
+                    );
+                }
+                return None;
+            }
+        };
+        self.top_ups_unreadable_reported = false;
+        let now = Self::unix_time_secs();
+        let mut outstanding = std::collections::HashSet::new();
+        for top_up in top_ups {
+            let payment_id = top_up.payment_id.as_str();
+            if self.correction_pending(&top_up.user_channel_id) {
+                outstanding.extend(parse_user_channel_id(&top_up.user_channel_id));
+                continue;
+            }
+            let payment = match ldk
+                .get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.to_owned() })
+                .await
+            {
+                Ok(response) => response.payment,
+                Err(error) => {
+                    tracing::warn!("[stable] top-up lookup failed for {}: {}", payment_id, error);
+                    self.top_up_lookup_failed = true;
+                    self.top_ups_unresolved.push((payment_id.to_owned(), top_up.user_channel_id.clone()));
+                    outstanding.extend(parse_user_channel_id(&top_up.user_channel_id));
+                    continue;
+                }
+            };
+            let status = payment.as_ref().map(|payment| payment.status);
+            let resolved = if status == Some(PaymentStatus::Succeeded as i32) {
+                let payment = payment.unwrap_or_default();
+                self.settle_stability_top_up(payment_id, payment.amount_msat, payment.fee_paid_msat)
+                    .map(|settlement| settlement != TopUpSettlement::ChannelMissing)
+            } else if status == Some(PaymentStatus::Failed as i32) {
+                self.fail_stability_top_up(payment_id).map(|_| true)
+            } else {
+                self.report_waiting_top_up(payment_id, &top_up.user_channel_id, status.is_some(), now.saturating_sub(top_up.recorded_at));
+                Ok(false)
+            };
+            match resolved {
+                Ok(true) => {}
+                Ok(false) => outstanding.extend(parse_user_channel_id(&top_up.user_channel_id)),
+                Err(error) => {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({ "op": "resolve_stability_top_up", "payment_id": payment_id, "user_channel_id": top_up.user_channel_id, "error": error.to_string() }),
+                    );
+                    // The outcome is known but not booked: an event must wait for it like for a failed lookup.
+                    self.top_up_lookup_failed = true;
+                    self.top_ups_unresolved.push((payment_id.to_owned(), top_up.user_channel_id.clone()));
+                    outstanding.extend(parse_user_channel_id(&top_up.user_channel_id));
+                }
+            }
+        }
+        self.resolve_legacy_stability_payments(ldk).await;
+        Some(outstanding)
+    }
+
+    /// Apply a missed outcome to top-ups an older daemon booked when it sent them, the way their events would have, so such a row cannot stay pending forever.
+    async fn resolve_legacy_stability_payments(&mut self, ldk: &dyn LdkServerCalls) {
+        let pending = match self.db.legacy_stability_payments_pending() {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::error!("[stable] failed to list legacy stability payments: {}", error);
+                return;
+            }
+        };
+        let now = Self::unix_time_secs();
+        for (payment_id, user_channel_id, recorded_at) in pending {
+            if self.correction_pending(&user_channel_id) {
+                continue;
+            }
+            let payment = match ldk
+                .get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.clone() })
+                .await
+            {
+                Ok(response) => response.payment,
+                Err(error) => {
+                    tracing::warn!("[stable] stability payment lookup failed for {}: {}", payment_id, error);
+                    self.top_up_lookup_failed = true;
+                    self.top_ups_unresolved.push((payment_id.clone(), user_channel_id.clone()));
+                    continue;
+                }
+            };
+            let Some(payment) = payment else {
+                self.report_waiting_top_up(&payment_id, &user_channel_id, false, now.saturating_sub(recorded_at));
+                continue;
+            };
+            if payment.status == PaymentStatus::Failed as i32 {
+                self.handle_failed_stability_payment(&payment_id);
+            } else if payment.status == PaymentStatus::Succeeded as i32 {
+                if let Err(error) = self.db.mark_settlement_succeeded(&payment_id, payment.amount_msat, payment.fee_paid_msat, Some("outbound")) {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({ "op": "mark_settlement_succeeded", "payment_id": payment_id, "user_channel_id": user_channel_id, "error": error.to_string() }),
+                    );
+                }
+            } else {
+                self.report_waiting_top_up(&payment_id, &user_channel_id, true, now.saturating_sub(recorded_at));
+            }
+        }
+    }
+
+    /// Undo a failed top-up that an older daemon booked when it was sent. The database does the compare-and-swap; the cache is restored only while it still holds that exact state.
     pub fn handle_failed_stability_payment(
         &mut self,
         payment_id: &str,
@@ -716,10 +984,14 @@ impl StableChannelManager {
             enforce_max_stabilization: false,
             db,
             data_dir,
-            spend_debounce: std::collections::HashMap::new(),
             pending_splices: std::collections::HashMap::new(),
             pending_book_updates: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
+            spend_debounce: std::collections::HashMap::new(),
+            top_up_alarms: std::collections::HashSet::new(),
+            top_up_lookup_failed: false,
+            top_ups_unresolved: Vec::new(),
+            top_ups_unreadable_reported: false,
             startup_sync_pending: std::collections::HashSet::new(),
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
@@ -773,6 +1045,24 @@ impl StableChannelManager {
 
         let prior_target = prior.map(|p| p.expected_usd.0);
         let prior_note = prior.and_then(|p| p.note.clone());
+        let prior_books = prior.map(|p| (p.backing_sats, p.native_sats));
+
+        if expected_usd_in.is_some() {
+            if btc_price <= 0.0 {
+                return EditOutcome {
+                    ok: false,
+                    status: "BTC price is unavailable; retry the target edit shortly".to_owned(),
+                };
+            }
+            // A target edit re-derives backing from the price, which would count a top-up still on the way as already received.
+            let payment_pending = parse_user_channel_id(&user_channel_id_str).is_some_and(|uid| self.stability_payment_pending(uid));
+            if payment_pending {
+                return EditOutcome {
+                    ok: false,
+                    status: "A stability payment to this channel is still on the way; retry the target edit once it settles".to_owned(),
+                };
+            }
+        }
 
         let expected_usd_f = match (expected_usd_in, prior_target) {
             (Some(v), _) => v,
@@ -802,12 +1092,18 @@ impl StableChannelManager {
         let stable_provider_usd = USD::from_bitcoin(stable_provider_btc, btc_price);
         let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, btc_price);
 
-        let backing_sats = if btc_price > 0.0 {
-            ((expected_usd_f / btc_price) * 100_000_000.0) as u64
-        } else {
-            0
+        let (backing_sats, native_sats) = match (expected_usd_in, prior_books) {
+            // A note says nothing about the allocation, so the books stay as they are.
+            (None, Some(books)) => books,
+            _ => {
+                let backing_sats = if btc_price > 0.0 {
+                    ((expected_usd_f / btc_price) * 100_000_000.0) as u64
+                } else {
+                    0
+                };
+                (backing_sats, their_balance_sats.saturating_sub(backing_sats))
+            }
         };
-        let native_sats = their_balance_sats.saturating_sub(backing_sats);
 
         // Manual target increases are trade-entry too. Notes/reductions and settlement
         // reconciliation must remain possible for a drift-inflated position.
@@ -905,10 +1201,10 @@ impl StableChannelManager {
             }
         });
         if let Some(t) = target {
-            self.spend_debounce.remove(&t);
             self.pending_splices.remove(&t);
             self.pending_book_updates.remove(&t);
             self.stability_throttle.remove(&t);
+            self.spend_debounce.remove(&t);
         }
         if let Err(e) = self.db.mark_channel_closed(&user_channel_id) {
             tracing::error!(
@@ -2090,7 +2386,7 @@ impl StableChannelManager {
         );
     }
 
-    /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one.
+    /// 60s tick: per stable channel, skip below threshold/cooldown/zero-target, then SpontaneousSend a connected peer or push an offline one. Sending a top-up changes no books; a channel with one on the way gets no second one.
     pub async fn run_tick(
         &mut self,
         ldk: &dyn LdkServerCalls,
@@ -2106,6 +2402,8 @@ impl StableChannelManager {
         // LDK Server's event stream is not replayable. Finish any receive that was durably
         // registered before a transient channel/signature/DB failure.
         self.retry_pending_signed_stability(ldk, btc_price).await;
+        // A missed outcome event is recovered here, before any channel is considered for a new top-up.
+        let top_ups_in_flight = self.resolve_top_ups_in_flight(ldk).await;
         if btc_price <= 0.0 {
             return;
         }
@@ -2274,11 +2572,43 @@ impl StableChannelManager {
             } else {
                 "user_to_lsp"
             };
-            let amount_sats = ((dollars_from_par / btc_price) * 100_000_000.0) as u64;
+            let equilibrium_sats = ((target / btc_price) * 100_000_000.0) as u64;
+            let amount_sats = if is_receiver_below_expected {
+                // Pay exactly the sats that reach equilibrium; a separately rounded amount can land one sat short and leave the balance below backing for good.
+                let held_sats = if sc.backing_sats > 0 { sc.backing_sats } else { their_sats };
+                equilibrium_sats.saturating_sub(held_sats)
+            } else {
+                ((dollars_from_par / btc_price) * 100_000_000.0) as u64
+            };
             let amount_msat = amount_sats.saturating_mul(1000);
 
             if c.is_usable {
                 if is_receiver_below_expected {
+                    if top_ups_in_flight.as_ref().is_none_or(|channels| channels.contains(&sc.user_channel_id)) {
+                        // The top-up already on the way covers this drift; another would pay it twice.
+                        continue;
+                    }
+                    if sc.backing_sats == 0 {
+                        // No backing was ever recorded: book the sats already held first, so the claim's "add what was sent" lands on equilibrium.
+                        let held_sats = their_sats.min(equilibrium_sats);
+                        if let Err(e) = self.db.save_channel(
+                            &c.channel_id,
+                            &c.user_channel_id,
+                            sc.expected_usd.0,
+                            held_sats,
+                            their_sats - held_sats,
+                            sc.note.as_deref(),
+                        ) {
+                            stable_channels::audit::audit_event(
+                                "DB_WRITE_FAILED",
+                                serde_json::json!({ "op": "save_channel", "context": "record_held_backing", "user_channel_id": c.user_channel_id.clone(), "channel_id": c.channel_id, "error": e.to_string() }),
+                            );
+                            continue;
+                        }
+                        sc.backing_sats = held_sats;
+                        sc.native_sats = their_sats - held_sats;
+                        stable_channels::stable::recompute_native(sc);
+                    }
                     let settlement_id = stable_channels::stable::new_stability_settlement_id();
                     let created_at = now.max(0) as u64;
                     let expires_at = created_at.saturating_add(STABILITY_PAYMENT_AUTH_TTL_SECS);
@@ -2378,12 +2708,8 @@ impl StableChannelManager {
                     let channel_id_clone = c.channel_id.clone();
                     let user_channel_id_clone = c.user_channel_id.clone();
                     let expected_usd_for_db = sc.expected_usd.0;
-                    let note_for_db = sc.note.clone();
-                    let backing_before = sc.backing_sats;
-                    let backing_after =
-                        ((sc.expected_usd.0 / btc_price) * 100_000_000.0) as u64;
-                    let native_before = sc.native_sats;
-                    let last_stability_payment_before = sc.last_stability_payment;
+                    let backing_sats_for_db = sc.backing_sats;
+                    let native_sats_for_db = sc.native_sats;
                     let counterparty_for_db = sc.counterparty.to_string();
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
@@ -2401,25 +2727,23 @@ impl StableChannelManager {
                             let persisted = if resp.payment_id.is_empty() {
                                 false
                             } else {
-                                match self.db.record_stability_settlement_with_rollback(
+                                match self.db.record_stability_top_up_in_flight(
                                     &resp.payment_id,
                                     &user_channel_id_clone,
                                     &channel_id_clone,
-                                    backing_before,
-                                    backing_after,
-                                    native_before,
+                                    amount_sats,
                                     expected_usd_for_db,
-                                    last_stability_payment_before,
+                                    backing_sats_for_db,
+                                    native_sats_for_db,
                                     amount_msat,
                                     direction,
                                     &counterparty_for_db,
-                                    note_for_db.as_deref(),
                                 ) {
                                     Ok(true) => true,
                                     Ok(false) => {
                                         stable_channels::audit::audit_event(
                                             "DB_WRITE_FAILED",
-                                            serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or invalid rollback metadata" }),
+                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or zero amount" }),
                                         );
                                         false
                                     },
@@ -2430,17 +2754,15 @@ impl StableChannelManager {
                                         );
                                         stable_channels::audit::audit_event(
                                             "DB_WRITE_FAILED",
-                                            serde_json::json!({ "op": "record_stability_settlement_with_rollback", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
+                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
                                         );
                                         false
                                     },
                                 }
                             };
-                            sc.last_stability_payment = now;
-                            if persisted {
-                                // The database and ledger own this optimistic transition. Only
-                                // update the cache after that transaction commits.
-                                sc.backing_sats = backing_after;
+                            if !persisted {
+                                // With no record of the payment nothing else stops a resend, so the cooldown is the only brake left.
+                                sc.last_stability_payment = now;
                             }
                             self.stability_throttle.insert(
                                 sc.user_channel_id,
@@ -3204,6 +3526,11 @@ impl StableChannelManager {
                 reject_correlated!(TradeRejectionReason::InsufficientCapacity);
             }
 
+            if new_expected < 0.01 && self.stability_payment_pending(target_uid) {
+                // A full exit would close the books before the top-up on the way reaches them, leaving its sats with no target.
+                reject_correlated!(TradeRejectionReason::SettlementRequired);
+            }
+
             let mut updated = current.clone();
             updated.stable_provider_btc = Bitcoin::from_sats(our_sats);
             updated.stable_receiver_btc = Bitcoin::from_sats(their_sats);
@@ -3448,6 +3775,20 @@ impl StableChannelManager {
             return;
         }
         let channel_id_hex = chan.channel_id.clone();
+        if new_expected < 0.01 && self.stability_payment_pending(target_uid) {
+            // A full exit would close the books before the top-up on the way reaches them, leaving its sats with no target.
+            stable_channels::audit::audit_event(
+                "TRADE_ALLOCATION_REJECTED",
+                serde_json::json!({
+                    "channel_id": channel_id_hex,
+                    "user_channel_id": format!("{}", target_uid),
+                    "new_expected_usd": new_expected,
+                    "lsp_price": btc_price,
+                    "reason": "a stability payment to this channel is still on the way",
+                }),
+            );
+            return;
+        }
 
         let persisted = {
             let Some(sc) = self
@@ -3693,6 +4034,8 @@ mod tests {
         pub payments: StdMutex<Vec<GrpcPayment>>,
         pub tracking_mode: StdMutex<i32>,
         pub tracking_mode_fails: bool,
+        /// How many more payment lookups fail before they work again.
+        pub payment_lookup_failures: AtomicUsize,
         pub payments_page_size: StdMutex<Option<usize>>,
     }
 
@@ -3714,6 +4057,7 @@ mod tests {
                 payments: StdMutex::new(Vec::new()),
                 tracking_mode: StdMutex::new(0),
                 tracking_mode_fails: false,
+                payment_lookup_failures: AtomicUsize::new(0),
                 payments_page_size: StdMutex::new(None),
             }
         }
@@ -3818,6 +4162,10 @@ mod tests {
         }
         async fn get_payment_details(&self, req: GetPaymentDetailsRequest)
             -> Result<GetPaymentDetailsResponse, LdkServerError> {
+            if self.payment_lookup_failures.load(Ordering::SeqCst) > 0 {
+                self.payment_lookup_failures.fetch_sub(1, Ordering::SeqCst);
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "payment lookup unavailable"));
+            }
             Ok(GetPaymentDetailsResponse {
                 payment: self
                     .payments
@@ -4597,8 +4945,9 @@ mod tests {
             fake_drift.sign_calls.lock().unwrap().as_slice(),
             [envelope.payload.as_bytes()]
         );
-        assert!(mgr.stable_channels[0].last_stability_payment > 0,
-            "cooldown timestamp should be set");
+        assert_eq!(mgr.stable_channels[0].last_stability_payment, 0,
+            "the record of the top-up on the way holds back a resend, not a cooldown");
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000, "backing moves when the top-up is claimed");
     }
 
     #[tokio::test]
@@ -4686,83 +5035,803 @@ mod tests {
         assert!(fake.sends.lock().unwrap().is_empty(), "LSP must NOT send when user is above par (CHECK_ONLY)");
     }
 
-    #[tokio::test]
-    async fn run_tick_resets_backing_to_equilibrium_after_send() {
-        let mut mgr = make_manager();
-        let fake0 = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
-        )]);
-        // expected_usd=50 at price 100k -> backing_sats = 50_000
-        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &fake0 as &dyn LdkServerCalls, 100_000.0).await;
+    type TopUpFixture = (StableChannelManager, FakeLdkServer, std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>);
 
-        // Price DROPS to 80k: stable_usd_value = 50_000/1e8*80k = $40 < $50 -> lsp_to_user -> send.
-        let fake = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+    /// A $50 channel whose price fell to $80k: the LSP has sent a 12,500-sat top-up the peer has not claimed.
+    async fn top_up_in_flight() -> TopUpFixture {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
         )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
         ));
-        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        (mgr, ldk, push)
+    }
 
-        assert_eq!(fake.sends.lock().unwrap().len(), 1, "should send in lsp_to_user direction");
-        // backing reset to target/price = 50/80000*1e8 = 62_500 (NOT left at stale 50_000).
-        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500, "backing must reset to equilibrium, preventing oscillation");
+    /// make_channel takes the LSP's side of the 100,000-sat channel; the peer holds the rest.
+    fn set_receiver_sats(ldk: &FakeLdkServer, their_sats: u64) {
+        *ldk.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, (100_000 - their_sats) * 1000, true,
+        )];
+    }
+
+    /// Sats of every stability top-up sent; SYNC and trade keysends carry a single TLV.
+    fn top_ups_sent(ldk: &FakeLdkServer) -> Vec<u64> {
+        ldk.sends.lock().unwrap().iter().filter(|send| send.custom_tlvs.len() == 2).map(|send| send.amount_msat / 1000).collect()
+    }
+
+    fn node_reports(ldk: &FakeLdkServer, payment_id: &str, status: PaymentStatus) {
+        *ldk.payments.lock().unwrap() = vec![GrpcPayment {
+            payment_id: payment_id.into(), amount_msat: Some(12_500_000), direction: 1, status: status as i32, ..Default::default()
+        }];
+    }
+
+    /// Ticks with the cooldown cleared, so only the books and the in-flight record can hold a top-up back.
+    async fn tick_past_cooldown(mgr: &mut StableChannelManager, ldk: &FakeLdkServer, push: &std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>, ticks: usize) {
+        for _ in 0..ticks {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(ldk as &dyn LdkServerCalls, push, 80_000.0).await;
+        }
     }
 
     #[tokio::test]
-    async fn failed_outbound_stability_payment_restores_backing_and_cooldown() {
+    async fn sent_top_up_leaves_the_books_alone_and_is_not_repeated() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        // The phone sleeps before claiming; the node still reports the payment as pending.
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 5).await;
+
+        assert_channel_books(&mgr, 50.0, 50_000);
+        assert_eq!(top_ups_sent(&ldk), [12_500], "one top-up per need while it is on the way");
+        assert_eq!(ldk.sends.lock().unwrap().len(), 1, "no SYNC either");
+        assert!(mgr.spend_debounce.is_empty(), "an unclaimed top-up leaves no gap for the balance check to read as a spend");
+    }
+
+    #[tokio::test]
+    async fn missed_spend_is_still_deducted_while_a_top_up_is_on_the_way() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
+        // The user spent 10,000 sats ($8 at $80k) and no forwarded-payment event reported it.
+        set_receiver_sats(&ldk, 40_000);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+        assert_channel_books(&mgr, 42.0, 40_000);
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        assert_eq!(ldk.sends.lock().unwrap().len(), 2, "the corrected target is sent to the wallet");
+
+        // The claim then lands on the corrected books: 52,500 sats at $80k is the $42 target.
+        set_receiver_sats(&ldk, 52_500);
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+        assert_channel_books(&mgr, 42.0, 52_500);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn spend_misread_while_the_node_could_not_be_asked_is_corrected_by_the_balance_check() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        // The top-up has landed, its event was missed, and the node cannot be asked when the user's 10,000-sat forward is handled.
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        set_receiver_sats(&ldk, 52_500);
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
+            CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+            "next-peer".into(), 10_000_000, 0, None, &ldk, 80_000.0,
+        ).await;
+        assert!((mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6, "the forward was read as spare sats");
+
+        // The node answers again: the claim is booked, the books then exceed the balance by the spend, and two ticks later it is deducted.
+        ldk.payment_lookup_failures.store(0, Ordering::SeqCst);
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_channel_books(&mgr, 42.0, 52_500);
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn claimed_top_up_adds_exactly_the_sent_sats_once() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        set_receiver_sats(&ldk, 62_500);
+        // The event is delivered twice; the amount it carries is not what is booked.
+        for _ in 0..2 {
+            dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+        }
+
+        assert_channel_books(&mgr, 50.0, 62_500);
+        assert_eq!(mgr.stable_channels[0].native_sats, 0);
+        assert!(mgr.stable_channels[0].last_stability_payment > 0, "the cooldown starts at the claim");
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_channel_books(&mgr, 50.0, 62_500);
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn failed_top_up_changes_nothing_and_the_next_tick_pays_again() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        // No cooldown is left over from the failed send.
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500, 12_500]);
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn forward_while_a_top_up_is_on_the_way() {
+        for succeeded in [true, false] {
+            let (mut mgr, ldk, push) = top_up_in_flight().await;
+            // The user forwards 10,000 sats ($8 at $80k) out of the stable allocation.
+            set_receiver_sats(&ldk, 40_000);
+            mgr.handle_payment_forwarded(
+                USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
+                CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+                "next-peer".into(), 10_000_000, 0, None, &ldk, 80_000.0,
+            ).await;
+            assert_channel_books(&mgr, 42.0, 40_000);
+
+            if succeeded {
+                set_receiver_sats(&ldk, 52_500);
+                dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+                // 52,500 sats at $80k is the $42 target: the one top-up covered the need.
+                assert_channel_books(&mgr, 42.0, 52_500);
+                tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+                assert_eq!(top_ups_sent(&ldk), [12_500], "succeeded={succeeded}");
+            } else {
+                dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
+                assert_channel_books(&mgr, 42.0, 40_000);
+                tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+                assert_eq!(top_ups_sent(&ldk), [12_500, 12_500], "one fresh top-up for the same need");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn trade_while_a_top_up_is_on_the_way() {
+        for succeeded in [true, false] {
+            let (mut mgr, ldk, push) = top_up_in_flight().await;
+            // The user sells $15 of stable: 18,750 sats at $80k leave the stable allocation.
+            let trade = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 35.0);
+            handle_trade_with_valid_fee(&mut mgr, &trade, &ldk as &dyn LdkServerCalls, 80_000.0).await;
+            assert_channel_books(&mgr, 35.0, 31_250);
+
+            if succeeded {
+                set_receiver_sats(&ldk, 62_500);
+                dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+                // 43,750 sats at $80k is the $35 target.
+                assert_channel_books(&mgr, 35.0, 43_750);
+                tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+                assert_eq!(top_ups_sent(&ldk), [12_500], "succeeded={succeeded}");
+            } else {
+                dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
+                assert_channel_books(&mgr, 35.0, 31_250);
+                tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+                assert_eq!(top_ups_sent(&ldk), [12_500, 12_500], "one fresh top-up for the same need");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_with_a_top_up_on_the_way_asks_the_node_for_its_outcome() {
+        for status in [PaymentStatus::Succeeded, PaymentStatus::Failed] {
+            let (mgr, ldk, push) = top_up_in_flight().await;
+            let data_dir = mgr.data_dir().to_path_buf();
+            drop(mgr);
+            let db = Arc::new(stable_channels::db::Database::open(&data_dir).unwrap());
+            let mut mgr = StableChannelManager::new(db, data_dir);
+            mgr.reconcile_from_grpc(&ldk, 80_000.0).await;
+            assert_channel_books(&mgr, 50.0, 50_000);
+
+            // The outcome message was missed: while the node says pending, nothing is sent again.
+            node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
+            tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+            assert_eq!(top_ups_sent(&ldk), [12_500]);
+            assert_channel_books(&mgr, 50.0, 50_000);
+
+            node_reports(&ldk, "fake-payment-id", status);
+            if status == PaymentStatus::Succeeded {
+                set_receiver_sats(&ldk, 62_500);
+                tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+                assert_channel_books(&mgr, 50.0, 62_500);
+                assert_eq!(top_ups_sent(&ldk), [12_500]);
+            } else {
+                tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
+                assert_channel_books(&mgr, 50.0, 50_000);
+                assert_eq!(top_ups_sent(&ldk), [12_500, 12_500]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_history_pass_leaves_a_top_up_for_the_manager_to_book() {
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+
+        // The history pass has no access to the cached books, so it must not settle the top-up on its own.
+        let db = mgr.db.clone();
+        crate::backfill::reconcile_event_history(&ldk, &db, None).await;
+        assert_eq!(db.stability_top_ups_in_flight().unwrap().len(), 1);
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        assert_eq!(mgr.resolve_top_ups_in_flight(&ldk).await, Some(std::collections::HashSet::new()));
+        assert_channel_books(&mgr, 50.0, 62_500);
+    }
+
+    #[tokio::test]
+    async fn channel_without_recorded_backing_is_topped_up_once() {
         let mut mgr = make_manager();
-        let initial = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_HEX,
-            COUNTERPARTY_HEX,
-            100_000,
-            50_000_000,
-            true,
-        )]);
-        mgr.edit_stable_channel(
-            CHANNEL_ID_HEX,
-            Some(50.0),
-            None,
-            &initial as &dyn LdkServerCalls,
-            100_000.0,
-        )
-        .await;
-        let drift = FakeLdkServer::new(vec![make_channel(
-            CHANNEL_ID_HEX,
-            USER_CHANNEL_ID_HEX,
-            COUNTERPARTY_HEX,
-            100_000,
-            50_000_000,
-            true,
+        // A legacy row: $38.54 target, no backing recorded, 39,543 sats held; equilibrium at $94,000 is 41,000.
+        seed_channel(&mut mgr, USER_CHANNEL_ID_DECIMAL.parse().unwrap(), COUNTERPARTY_HEX, CHANNEL_ID_HEX, 38.54, 0, 39_543, 39_543, 94_000.0);
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_457_000, true,
         )]);
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
         ));
-
-        mgr.run_tick(&drift as &dyn LdkServerCalls, &push, 80_000.0)
-            .await;
-        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
-        assert!(mgr.stable_channels[0].last_stability_payment > 0);
-
-        let rollback = mgr
-            .handle_failed_stability_payment("fake-payment-id")
-            .expect("failure should find reversible stability metadata");
-        assert!(rollback.applied);
-        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 94_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [1_457]);
+        // The sats already held are booked as backing before the top-up goes out.
+        assert_channel_books(&mgr, 38.54, 39_543);
         assert_eq!(mgr.stable_channels[0].native_sats, 0);
-        assert_eq!(mgr.stable_channels[0].last_stability_payment, 0);
+
+        set_receiver_sats(&ldk, 41_000);
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+        assert_channel_books(&mgr, 38.54, 41_000);
+        for _ in 0..3 {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 94_000.0).await;
+        }
+        assert_eq!(top_ups_sent(&ldk), [1_457], "the balance held before the top-up must not be paid out again");
+    }
+
+    #[tokio::test]
+    async fn claimed_top_up_without_a_channel_row_is_held_not_repaid() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        let conn = save_test_connection(&mgr);
+        conn.execute("UPDATE channels SET user_channel_id = 'unreadable'", []).unwrap();
+        set_receiver_sats(&ldk, 62_500);
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+
+        stable_channels::audit::enable_test_capture();
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert_eq!(top_ups_sent(&ldk), [12_500], "a claim that could not be booked must not be paid again");
+        assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 50_000);
+        assert_eq!(events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_BOOKING_FAILED").count(), 1);
+
+        // The row can be found again: the next tick books the claim.
+        conn.execute("UPDATE channels SET user_channel_id = ?1", [USER_CHANNEL_ID_DECIMAL]).unwrap();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
+        assert_channel_books(&mgr, 50.0, 62_500);
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn claimed_top_up_finds_a_channel_row_keyed_in_legacy_hex() {
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        let uid: u128 = USER_CHANNEL_ID_DECIMAL.parse().unwrap();
+        let conn = save_test_connection(&mgr);
+        conn.execute("UPDATE channels SET user_channel_id = ?1", [format!("{uid:032x}")]).unwrap();
+
+        set_receiver_sats(&ldk, 62_500);
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        let saved: i64 = conn.query_row("SELECT stable_sats FROM channels", [], |row| row.get(0)).unwrap();
+        assert_eq!(saved, 62_500);
+        assert!(mgr.db.stability_top_ups_in_flight().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn top_up_claimed_during_a_missed_event_is_booked_before_the_next_event() {
+        let (mgr, ldk, _push) = top_up_in_flight().await;
+        // The claim event was missed: the top-up has landed and the user has since forwarded 10,000 sats.
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+        set_receiver_sats(&ldk, 52_500);
+
+        // The node cannot be asked at first; the event waits for it instead of reading the top-up as spare sats.
+        ldk.payment_lookup_failures.store(1, Ordering::SeqCst);
+
+        let shared = tokio::sync::Mutex::new(mgr);
+        let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&shared, &ldk).await;
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
+            CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+            "next-peer".into(), 10_000_000, 0, None, &ldk, 80_000.0,
+        ).await;
+
+        // The top-up is booked first, so the forward is charged to stable.
+        assert_channel_books(&mgr, 42.0, 52_500);
+    }
+
+    #[tokio::test]
+    async fn event_is_not_held_forever_when_the_node_cannot_be_asked() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mgr, ldk, _push) = top_up_in_flight().await;
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        let shared = tokio::sync::Mutex::new(mgr);
+
+        stable_channels::audit::enable_test_capture();
+        // Two events arrive while the lookup stays broken.
+        for _ in 0..2 {
+            let mgr = tokio::time::timeout(
+                std::time::Duration::from_secs(TOP_UP_LOOKUP_ATTEMPTS as u64 + 2),
+                StableChannelManager::lock_for_event_with_top_ups_resolved(&shared, &ldk),
+            )
+            .await
+            .expect("events must keep flowing while one lookup is broken");
+            assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1, "it stays on the way");
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        // Handling an event without knowing the top-up's outcome can misstate that channel's books, so it is never silent.
+        let alarms: Vec<_> = events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_LOOKUP_FAILED").collect();
+        assert_eq!(alarms.len(), 1, "once per top-up");
+        assert_eq!(alarms[0].1["payment_id"], "fake-payment-id");
+        assert_eq!(alarms[0].1["user_channel_id"], USER_CHANNEL_ID_DECIMAL);
+    }
+
+    #[tokio::test]
+    async fn unreadable_list_of_top_ups_makes_an_event_wait_and_is_reported_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        save_test_connection(&mgr).execute(
+            "INSERT INTO settlement_payments (payment_id, kind, user_channel_id, top_up_sats) VALUES ('unreadable', 'stability', '7', -1)",
+            [],
+        ).unwrap();
+
+        stable_channels::audit::enable_test_capture();
+        for _ in 0..2 {
+            assert_eq!(mgr.resolve_top_ups_in_flight(&ldk).await, None);
+            assert!(mgr.top_up_lookup_failed, "an event must not be handled at once when the top-ups on the way are unknown");
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        // No top-up can be sent or booked for any channel while the list is unreadable, so it is never silent.
+        let alarms: Vec<_> = events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_LOOKUP_FAILED").collect();
+        assert_eq!(alarms.len(), 1, "once per episode");
+        assert_eq!(alarms[0].1["reason"], "top_ups_unreadable");
+    }
+
+    #[tokio::test]
+    async fn claim_that_cannot_be_written_holds_the_event_and_is_not_paid_again() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+        set_receiver_sats(&ldk, 62_500);
+        let conn = save_test_connection(&mgr);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_top_up_claim BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'STABILITY_PAYMENT_SETTLED'
+             BEGIN SELECT RAISE(ABORT, 'forced claim failure'); END;",
+        ).unwrap();
+
+        // The live event reports the failed write, so the stream reconnects instead of treating it as handled.
+        assert_eq!(dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await, crate::event_loop::DispatchOutcome::Reconnect);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500], "a claim that could not be written must not be paid again");
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        // Before another event, the unbooked claim is retried like a failed lookup and then reported.
+        stable_channels::audit::enable_test_capture();
+        let shared = tokio::sync::Mutex::new(mgr);
+        let mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&shared, &ldk).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_LOOKUP_FAILED").count(), 1);
+        drop(mgr);
+
+        // Once the write works, the claim is booked.
+        conn.execute_batch("DROP TRIGGER reject_top_up_claim").unwrap();
+        let mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&shared, &ldk).await;
+        assert_channel_books(&mgr, 50.0, 62_500);
+    }
+
+    #[tokio::test]
+    async fn pending_splice_alone_does_not_hold_a_claim() {
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        let uid = mgr.stable_channels[0].user_channel_id;
+        // A splice with no snapshot yet carries no saved books that could overwrite the claim.
+        mgr.pending_splices.insert(uid, None);
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+
+        assert_eq!(mgr.resolve_top_ups_in_flight(&ldk).await, Some(std::collections::HashSet::new()));
+        assert_channel_books(&mgr, 50.0, 62_500);
+    }
+
+    #[tokio::test]
+    async fn old_top_up_that_keeps_waiting_is_reported() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.db.record_stability_settlement_with_rollback(
+            "old-top-up", USER_CHANNEL_ID_DECIMAL, CHANNEL_ID_HEX, 50_000, 62_500, 0, 50.0, 0, 12_500_000, "lsp_to_user", COUNTERPARTY_HEX, None,
+        ).unwrap());
+        mgr.stable_channels[0].backing_sats = 62_500;
+        let count = |events: &[(String, serde_json::Value)], name: &str| events.iter().filter(|(e, _)| e == name).count();
+
+        // The node has no record of it: it can never resolve on its own, so the operator is told.
+        stable_channels::audit::enable_test_capture();
+        for _ in 0..2 {
+            mgr.resolve_top_ups_in_flight(&ldk).await;
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        assert_eq!(count(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 1);
+
+        // The node still reports it pending an hour later.
+        node_reports(&ldk, "old-top-up", PaymentStatus::Pending);
+        save_test_connection(&mgr).execute("UPDATE settlement_payments SET recorded_at = recorded_at - 7200", []).unwrap();
+        for _ in 0..2 {
+            mgr.resolve_top_ups_in_flight(&ldk).await;
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        assert_eq!(count(&events, "STABILITY_TOP_UP_DEFERRED_STILL_PENDING"), 1);
+
+        // The node cannot be asked before an event: the event waits, then that too is reported.
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        let shared = tokio::sync::Mutex::new(mgr);
+        let mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&shared, &ldk).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let alarms: Vec<_> = events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_LOOKUP_FAILED").collect();
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(alarms[0].1["payment_id"], "old-top-up");
+        assert_eq!(mgr.db.legacy_stability_payments_pending().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn full_exit_is_refused_while_a_top_up_is_on_the_way() {
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        // The price is back at $100k, so nothing looks owed; but the top-up is still on its way.
+        let exit = trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 0.0);
+        handle_trade_with_valid_fee(&mut mgr, &exit, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        // Once it has an outcome the exit goes through.
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
+        handle_trade_with_valid_fee(&mut mgr, &exit, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert_channel_books(&mgr, 0.0, 0);
+    }
+
+    #[tokio::test]
+    async fn correlated_full_exit_is_refused_while_a_top_up_is_on_the_way() {
+        let trade_id = "7".repeat(64);
+        let payment_id = "8".repeat(64);
+        let (mut manager, fake) = correlated_rejection_context(50.0, 50_000, 50_000);
+        manager.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 0, None).unwrap();
+        assert!(manager.db.record_stability_top_up_in_flight(
+            "top-up", USER_CHANNEL_ID_DECIMAL, CHANNEL_ID_HEX, 12_500, 50.0, 50_000, 0, 12_500_000, "lsp_to_user", COUNTERPARTY_HEX,
+        ).unwrap());
+        let envelope = correlated_trade_envelope_at(&trade_id, 0.0, Some(100_000.0), test_unix_now());
         assert_eq!(
-            mgr.db
-                .load_channel(USER_CHANNEL_ID_HEX)
-                .unwrap()
-                .unwrap()
-                .backing_sats,
-            50_000
+            correlated_rejection_reason(
+                &mut manager, &fake, &envelope, &payment_id,
+                expected_trade_fee_msat(50.0, 0.0, 100_000.0).unwrap(), 100_000.0,
+            )
+            .await,
+            TradeRejectionReason::SettlementRequired
         );
-        assert!(mgr
-            .handle_failed_stability_payment("fake-payment-id")
-            .is_none());
+    }
+
+    #[tokio::test]
+    async fn top_up_pending_for_a_long_time_is_reported_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
+        let still_pending = |events: &[(String, serde_json::Value)]| {
+            events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_DEFERRED_STILL_PENDING").count()
+        };
+
+        stable_channels::audit::enable_test_capture();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+        assert_eq!(still_pending(&stable_channels::audit::drain_test_capture()), 0, "a fresh top-up is not an alarm");
+
+        save_test_connection(&mgr)
+            .execute("UPDATE settlement_payments SET recorded_at = recorded_at - 7200", [])
+            .unwrap();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert_eq!(still_pending(&events), 1);
+        assert_eq!(top_ups_sent(&ldk), [12_500], "it keeps waiting");
+    }
+
+    #[tokio::test]
+    async fn top_up_whose_outcome_cannot_be_looked_up_keeps_waiting() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn no_top_up_is_sent_while_the_top_ups_on_the_way_cannot_be_read() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        // A row for another channel that cannot be read makes the whole list unreadable.
+        let conn = save_test_connection(&mgr);
+        conn.execute(
+            "INSERT INTO settlement_payments (payment_id, kind, user_channel_id, top_up_sats) VALUES ('unreadable', 'stability', '7', -1)",
+            [],
+        ).unwrap();
+
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert!(top_ups_sent(&ldk).is_empty(), "without the list nothing proves this drift is not already being paid");
+
+        conn.execute("DELETE FROM settlement_payments WHERE payment_id = 'unreadable'", []).unwrap();
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn top_up_that_cannot_be_recorded_is_held_back_by_the_cooldown() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        save_test_connection(&mgr).execute_batch(
+            "CREATE TRIGGER reject_top_up_record BEFORE INSERT ON settlement_payments
+             BEGIN SELECT RAISE(ABORT, 'forced record failure'); END;",
+        ).unwrap();
+
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        assert!(mgr.db.stability_top_ups_in_flight().unwrap().is_empty());
+        assert!(mgr.stable_channels[0].last_stability_payment > 0, "with no record, only the cooldown holds back a resend");
+
+        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn note_edit_leaves_the_books_alone() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        // The price has moved and a top-up is on the way; a note says nothing about either.
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, None, Some("vip".into()), &ldk as &dyn LdkServerCalls, 80_000.0).await;
+        assert!(edit.ok, "{}", edit.status);
+        assert_channel_books(&mgr, 50.0, 50_000);
+        assert_eq!(mgr.stable_channels[0].note.as_deref(), Some("vip"));
+
+        set_receiver_sats(&ldk, 62_500);
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", true).await;
+        assert_channel_books(&mgr, 50.0, 62_500);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn target_edit_is_refused_while_a_top_up_is_on_the_way() {
+        let (mut mgr, ldk, _push) = top_up_in_flight().await;
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(45.0), None, &ldk as &dyn LdkServerCalls, 80_000.0).await;
+        assert!(!edit.ok, "an edit would re-anchor backing as if the top-up had already arrived");
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        // Once the top-up has an outcome the edit goes through.
+        dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(38.0), None, &ldk as &dyn LdkServerCalls, 80_000.0).await;
+        assert!(edit.ok, "{}", edit.status);
+        assert_channel_books(&mgr, 38.0, 47_500);
+    }
+
+    #[tokio::test]
+    async fn target_edit_is_refused_without_a_price() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(40.0), None, &ldk as &dyn LdkServerCalls, 0.0).await;
+        assert!(!edit.ok, "without a price the target cannot be turned into backing");
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, None, Some("vip".into()), &ldk as &dyn LdkServerCalls, 0.0).await;
+        assert!(edit.ok, "{}", edit.status);
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn claimed_top_up_waits_for_a_correction_that_is_still_unsaved() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        let uid = mgr.stable_channels[0].user_channel_id;
+        // A correction computed before the claim is still waiting to be saved; saving it later replaces the whole books.
+        mgr.pending_book_updates.insert(uid, PendingBookUpdate {
+            channel_id: CHANNEL_ID_HEX.to_owned(),
+            proposed: mgr.stable_channels[0].clone(),
+            context: "test",
+            audits: Vec::new(),
+            needs_sync: false,
+        });
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+        set_receiver_sats(&ldk, 62_500);
+
+        // The cold-price tick resolves top-ups without first finishing corrections.
+        assert_eq!(mgr.resolve_top_ups_in_flight(&ldk).await, Some(std::collections::HashSet::from([uid])));
+        assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1, "booking now would be overwritten by the correction");
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert!(mgr.pending_book_updates.is_empty());
+        assert_channel_books(&mgr, 50.0, 62_500);
+        assert_eq!(top_ups_sent(&ldk), [12_500], "the claim must survive the correction, or the same need is paid again");
+    }
+
+    #[tokio::test]
+    async fn legacy_rollback_waits_for_a_correction_that_is_still_unsaved() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.db.record_stability_settlement_with_rollback(
+            "old-top-up", USER_CHANNEL_ID_DECIMAL, CHANNEL_ID_HEX, 50_000, 62_500, 0, 50.0, 0, 12_500_000, "lsp_to_user", COUNTERPARTY_HEX, None,
+        ).unwrap());
+        mgr.stable_channels[0].backing_sats = 62_500;
+        let uid = mgr.stable_channels[0].user_channel_id;
+        mgr.pending_book_updates.insert(uid, PendingBookUpdate {
+            channel_id: CHANNEL_ID_HEX.to_owned(),
+            proposed: mgr.stable_channels[0].clone(),
+            context: "test",
+            audits: Vec::new(),
+            needs_sync: false,
+        });
+        node_reports(&ldk, "old-top-up", PaymentStatus::Failed);
+
+        mgr.resolve_top_ups_in_flight(&ldk).await;
+        assert_eq!(mgr.db.legacy_stability_payments_pending().unwrap().len(), 1, "a rollback now would be overwritten by the correction");
+        assert_channel_books(&mgr, 50.0, 62_500);
+
+        mgr.pending_book_updates.clear();
+        mgr.resolve_top_ups_in_flight(&ldk).await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_booked_before_the_upgrade_recovers_a_missed_outcome() {
+        for status in [PaymentStatus::Failed, PaymentStatus::Succeeded] {
+            let mut mgr = make_manager();
+            let ldk = FakeLdkServer::new(vec![make_channel(
+                CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+            )]);
+            mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+            let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+            ));
+            // An older daemon raised backing to 62,500 at send time; its outcome event was then missed.
+            assert!(mgr.db.record_stability_settlement_with_rollback(
+                "old-top-up", USER_CHANNEL_ID_DECIMAL, CHANNEL_ID_HEX, 50_000, 62_500, 0, 50.0, 0, 12_500_000, "lsp_to_user", COUNTERPARTY_HEX, None,
+            ).unwrap());
+            mgr.stable_channels[0].backing_sats = 62_500;
+            node_reports(&ldk, "old-top-up", status);
+            if status == PaymentStatus::Succeeded {
+                set_receiver_sats(&ldk, 62_500);
+            }
+
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+
+            assert!(mgr.db.legacy_stability_payments_pending().unwrap().is_empty(), "{status:?}: the row must not stay pending forever");
+            if status == PaymentStatus::Failed {
+                // Rolled back the old way; the same tick then sends a fresh top-up.
+                assert_channel_books(&mgr, 50.0, 50_000);
+                assert_eq!(top_ups_sent(&ldk), [12_500]);
+            } else {
+                assert_channel_books(&mgr, 50.0, 62_500);
+                assert!(top_ups_sent(&ldk).is_empty());
+                let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(45.0), None, &ldk as &dyn LdkServerCalls, 80_000.0).await;
+                assert!(edit.ok, "{}", edit.status);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn top_up_the_node_does_not_know_keeps_waiting_and_is_audited_once() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        stable_channels::audit::enable_test_capture();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 4).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert_eq!(top_ups_sent(&ldk), [12_500], "an unknown outcome is never treated as a failure");
+        assert_channel_books(&mgr, 50.0, 50_000);
+        assert_eq!(events.iter().filter(|(e, _)| e == "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn offline_peer_with_a_top_up_on_the_way_is_still_woken() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
+        // The phone slept before claiming.
+        *ldk.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, false,
+        )];
+        stable_channels::audit::enable_test_capture();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert!(events.iter().any(|(e, _)| e == "STABILITY_PUSH_QUEUED"), "the peer must be woken to claim");
+        assert_eq!(top_ups_sent(&ldk), [12_500]);
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_booked_before_the_upgrade_still_rolls_back() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        // An older daemon raised backing to 62,500 when it sent the top-up.
+        assert!(mgr.db.record_stability_settlement_with_rollback(
+            "old-top-up", USER_CHANNEL_ID_DECIMAL, CHANNEL_ID_HEX, 50_000, 62_500, 0, 50.0, 0, 12_500_000, "lsp_to_user", COUNTERPARTY_HEX, None,
+        ).unwrap());
+        mgr.stable_channels[0].backing_sats = 62_500;
+        mgr.stable_channels[0].last_stability_payment = 1_700_000_000;
+        assert!(mgr.db.stability_top_ups_in_flight().unwrap().is_empty(), "it is not treated as booked on claim");
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(45.0), None, &ldk as &dyn LdkServerCalls, 80_000.0).await;
+        assert!(!edit.ok, "a target edit would make its rollback skip");
+
+        dispatch_sync_outcome(&mut mgr, &ldk, "old-top-up", false).await;
+        assert_channel_books(&mgr, 50.0, 50_000);
+        assert_eq!(mgr.stable_channels[0].last_stability_payment, 0);
+        assert!(mgr.handle_failed_stability_payment("old-top-up").is_none(), "the rollback applies once");
+    }
+
+    #[tokio::test]
+    async fn top_up_amount_ignores_native_sats_and_handles_unset_backing() {
+        // (backing, native, live balance, target, price) -> sats to send
+        for (backing, native, live, target, price, amount_sats) in [
+            // Native sats are the user's own; only backing moves to the 12,500-sat equilibrium.
+            (10_000, 40_000, 50_000, 10.0, 80_000.0, 2_500),
+            // Legacy channel with no recorded backing: the live balance moves to equilibrium (41,000), not one sat short.
+            (0, 0, 39_543, 38.54, 94_000.0, 1_457),
+        ] {
+            let mut mgr = make_manager();
+            seed_channel(&mut mgr, 1, COUNTERPARTY_HEX, CHANNEL_ID_HEX, target, backing, native, live, price);
+            let ldk = FakeLdkServer::new(vec![make_channel(
+                CHANNEL_ID_HEX, "1", COUNTERPARTY_HEX, 100_000, (100_000 - live) * 1000, true,
+            )]);
+            let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+                crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+            ));
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, price).await;
+            let sends = ldk.sends.lock().unwrap();
+            assert_eq!(sends.len(), 1, "backing {backing}");
+            assert_eq!(sends[0].amount_msat, amount_sats * 1000, "backing {backing}");
+        }
     }
 
     #[tokio::test]
@@ -5314,6 +6383,14 @@ mod tests {
         );
         assert!(mgr.pending_splices.is_empty());
         assert!(mgr.stable_channels.is_empty());
+    }
+
+    fn assert_channel_books(mgr: &StableChannelManager, expected: f64, backing: u64) {
+        assert!((mgr.stable_channels[0].expected_usd.0 - expected).abs() < 1e-6);
+        assert_eq!(mgr.stable_channels[0].backing_sats, backing);
+        let saved = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert!((saved.expected_usd - expected).abs() < 1e-6);
+        assert_eq!(saved.backing_sats, backing);
     }
 
     #[tokio::test]
