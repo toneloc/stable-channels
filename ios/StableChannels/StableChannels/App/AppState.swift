@@ -138,6 +138,13 @@ class AppState {
     var stableChannel: StableChannel = .default
     var btcPrice: Double { priceService.currentPrice }
     var accountingBTCPrice: Double { priceService.accountingPrice }
+
+    /// Single source of truth for trade quote pricing: uses validated accounting consensus when available,
+    /// falling back to the last cached display price when consensus is warming up or during offline inspection.
+    var effectiveTradePrice: Double {
+        accountingBTCPrice > 0 ? accountingBTCPrice : btcPrice
+    }
+
     var statusMessage: String = ""
     private let syncStatusMessages: Set<String> = [
         "Syncing wallet...",

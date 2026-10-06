@@ -24,7 +24,7 @@ struct SellView: View {
     }
 
     private var tradePrice: Double {
-        appState.accountingBTCPrice > 0 ? appState.accountingBTCPrice : appState.btcPrice
+        appState.effectiveTradePrice
     }
 
     private var maxSellUSD: Double {
