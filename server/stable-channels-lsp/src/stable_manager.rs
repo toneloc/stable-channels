@@ -3373,9 +3373,14 @@ mod tests {
                     "fake send failure".to_string(),
                 ));
             }
-            self.sends.lock().unwrap().push(req);
+            let mut sends = self.sends.lock().unwrap();
+            sends.push(req);
             Ok(SpontaneousSendResponse {
-                payment_id: "fake-payment-id".to_string(),
+                payment_id: if sends.len() == 1 {
+                    "fake-payment-id".to_string()
+                } else {
+                    format!("fake-payment-id-{}", sends.len())
+                },
             })
         }
         async fn sign_message(
