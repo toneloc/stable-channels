@@ -120,6 +120,8 @@ final class DatabaseService {
                 confirmations INTEGER NOT NULL DEFAULT 0,
                 resolution_id INTEGER,
                 tx_block_height INTEGER,
+                is_placeholder INTEGER NOT NULL DEFAULT 0,
+                backing_applied INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
@@ -227,6 +229,12 @@ final class DatabaseService {
                 consumed_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                name TEXT PRIMARY KEY,
+                applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
             "CREATE INDEX IF NOT EXISTS idx_price_history_timestamp ON price_history(timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_pending_operations_status ON pending_operations(status)",
             "CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at DESC)",
@@ -306,6 +314,42 @@ final class DatabaseService {
         // Migrate: add resolution_id to payments if missing (onchain deposit <-> resolver link)
         if !paymentsColNames.contains("resolution_id") {
             try rawSQL.execute("ALTER TABLE payments ADD COLUMN resolution_id INTEGER")
+        }
+
+        // Migrate: add is_placeholder to payments if missing (temporary row for settle-before-insert races)
+        if !paymentsColNames.contains("is_placeholder") {
+            try rawSQL.execute("ALTER TABLE payments ADD COLUMN is_placeholder INTEGER NOT NULL DEFAULT 0")
+        }
+
+        // Migrate: add backing_applied to payments if missing, with atomic schema change and persisted progress
+        let migrationBackingApplied = "migration_backing_applied_v1"
+        let isBackingMigrationApplied = try !rawSQL.query(
+            "SELECT 1 FROM schema_migrations WHERE name = ?",
+            params: [.text(migrationBackingApplied)]
+        ).isEmpty
+
+        if !isBackingMigrationApplied {
+            try rawSQL.inTransaction(mode: "IMMEDIATE") {
+                let alreadyMarked = try !rawSQL.query(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?",
+                    params: [.text(migrationBackingApplied)]
+                ).isEmpty
+                if alreadyMarked { return }
+
+                let colsNow = Set(try rawSQL.query("PRAGMA table_info(payments)").compactMap { $0[1] as? String })
+                if !colsNow.contains("backing_applied") {
+                    try rawSQL.execute("ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0")
+                    // The only unambiguous legacy state is the column-absent upgrade path: all
+                    // non-placeholder rows just received backing_applied = 0 from ALTER TABLE, so
+                    // mark them applied to prevent old completed stability rows from debiting again.
+                    // If the column already exists, a 0 may be a live owed debit and must be left alone.
+                    try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
+                }
+                try rawSQL.execute(
+                    "INSERT OR REPLACE INTO schema_migrations (name) VALUES (?)",
+                    params: [.text(migrationBackingApplied)]
+                )
+            }
         }
 
         // Must come after the resolution_id ALTER above — on legacy DBs the column

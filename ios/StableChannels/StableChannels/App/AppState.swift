@@ -1158,9 +1158,10 @@ class AppState {
         return Double(sats) / Double(Constants.satsInBTC) * price
     }
 
-    private func sentPaymentStatusMessage(paymentId: PaymentId?) -> String {
+    func sentPaymentStatusMessage(paymentId: PaymentId?) -> String {
         guard let paymentId,
-              let payment = databaseService?.paymentRepo.payment(paymentId: "\(paymentId)") else {
+              let payment = databaseService?.paymentRepo.payment(paymentId: "\(paymentId)", excludePlaceholders: true),
+              payment.amountMsat > 0 else {
             return "Payment sent"
         }
         if let usd = payment.amountUSD {
@@ -3264,6 +3265,14 @@ class AppState {
                 userChannelId: stableChannel.userChannelId,
                 backingDeltaSats: -Int64(pending.amountMsat / 1000)
             )
+            guard let backing = persistence.backingSats else {
+                AuditService.log("STABILITY_PAYMENT_RECONCILE_NO_BACKING", data: [
+                    "payment_id": pending.paymentId,
+                    "amount_msat": "\(pending.amountMsat)"
+                ])
+                return false
+            }
+            stableChannel.backingSats = backing
             // Same rule as runStabilityCheck(): reload books from the DB row rather than
             // overwriting DB state with an in-memory snapshot.
             loadChannelFromDB()

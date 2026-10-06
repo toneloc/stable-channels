@@ -40,48 +40,160 @@ final class PaymentRepository {
         txid: String? = nil,
         address: String? = nil
     ) throws -> Bool {
-        if let pid = paymentId, !pid.isEmpty {
-            let existing = try rawSQL.query(
-                "SELECT id FROM payments WHERE payment_id = ?",
-                params: [.text(pid)]
-            )
-            if !existing.isEmpty {
-                return false
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try rawSQL.query(
+                    "SELECT id FROM payments WHERE payment_id = ?",
+                    params: [.text(pid)]
+                )
+                if !existing.isEmpty {
+                    try backfillPaymentDetails(
+                        paymentId: pid,
+                        paymentType: paymentType,
+                        direction: direction,
+                        amountMsat: amountMsat,
+                        amountUSD: amountUSD,
+                        btcPrice: btcPrice,
+                        counterparty: counterparty,
+                        address: address,
+                        txid: txid,
+                        clearPlaceholder: true
+                    )
+                    return false
+                }
             }
-        }
 
-        // OR IGNORE: this path is not transactional, so the existence check above
-        // can race the NSE. The unique payment_id index turns the losing insert
-        // into a no-op instead of a duplicate row (or, without it, an error).
-        let sql = """
-            INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        let inserted = try rawSQL.executeReturningChanges(sql, params: [
-            paymentId.map { .text($0) } ?? .null,
-            .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
-            amountUSD.map { .real($0) } ?? .null,
-            btcPrice.map { .real($0) } ?? .null,
-            counterparty.map { .text($0) } ?? .null,
-            .text(status),
-            txid.map { .text($0) } ?? .null,
-            address.map { .text($0) } ?? .null
-        ])
-        return inserted > 0
+            // Wrapped in inTransaction to ensure existence check, insert, and backfill are atomic.
+            let sql = """
+                INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, txid, address)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            let inserted = try rawSQL.executeReturningChanges(sql, params: [
+                paymentId.map { .text($0) } ?? .null,
+                .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
+                amountUSD.map { .real($0) } ?? .null,
+                btcPrice.map { .real($0) } ?? .null,
+                counterparty.map { .text($0) } ?? .null,
+                .text(status),
+                txid.map { .text($0) } ?? .null,
+                address.map { .text($0) } ?? .null
+            ])
+            if inserted == 0, let pid = paymentId, !pid.isEmpty {
+                try backfillPaymentDetails(
+                    paymentId: pid,
+                    paymentType: paymentType,
+                    direction: direction,
+                    amountMsat: amountMsat,
+                    amountUSD: amountUSD,
+                    btcPrice: btcPrice,
+                    counterparty: counterparty,
+                    address: address,
+                    txid: txid,
+                    clearPlaceholder: true
+                )
+            }
+            return inserted > 0
+        }
     }
 
     func updatePaymentStatus(paymentId: String, status: String, feeMsat: UInt64? = nil) throws {
-        if let fee = feeMsat {
-            try rawSQL.execute(
-                "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
-                params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
-            )
-        } else {
-            try rawSQL.execute(
-                "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'",
-                params: [.text(status), .text(paymentId)]
-            )
+        do {
+            try rawSQL.inTransaction(mode: "IMMEDIATE") {
+                let updated: Int
+                if let fee = feeMsat {
+                    updated = try rawSQL.executeReturningChanges(
+                        "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
+                        params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
+                    )
+                } else {
+                    updated = try rawSQL.executeReturningChanges(
+                        "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'",
+                        params: [.text(status), .text(paymentId)]
+                    )
+                }
+
+                if updated == 0 {
+                    let existingRows = try rawSQL.query(
+                        "SELECT id, status, fee_msat FROM payments WHERE payment_id = ? ORDER BY id DESC LIMIT 1",
+                        params: [.text(paymentId)]
+                    )
+                    if let existing = existingRows.first {
+                        let existingStatus = existing.string(1)
+                        let existingFee = UInt64(existing.int64(2))
+                        // Terminal status is immutable; only backfill fee if incoming event matches existing status and
+                        // existing fee is zero.
+                        if existingStatus == status, let fee = feeMsat, existingFee == 0 {
+                            try rawSQL.execute(
+                                "UPDATE payments SET fee_msat = ? WHERE payment_id = ?",
+                                params: [.integer(Int64(fee)), .text(paymentId)]
+                            )
+                        }
+                    } else {
+                        // Settle or fail event arrived before recordPayment() inserted the row.
+                        // Insert placeholder with terminal status so recordPayment won't downgrade it.
+                        let sql = """
+                            INSERT OR IGNORE INTO payments (payment_id, payment_type, direction, amount_msat, status, fee_msat, is_placeholder)
+                            VALUES (?, 'lightning', 'sent', 0, ?, ?, 1)
+                        """
+                        try rawSQL.execute(
+                            sql,
+                            params: [
+                                .text(paymentId),
+                                .text(status),
+                                .integer(Int64(feeMsat ?? 0))
+                            ]
+                        )
+                    }
+                }
+            }
+        } catch {
+            AuditService.log("UPDATE_PAYMENT_STATUS_FAILED", data: [
+                "payment_id": paymentId,
+                "status": status,
+                "fee_msat": feeMsat.map { "\($0)" } ?? "nil",
+                "error": error.localizedDescription
+            ])
+            throw error
         }
+    }
+
+    func backfillPaymentDetails(
+        paymentId: String,
+        paymentType: String? = nil,
+        direction: String? = nil,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        counterparty: String?,
+        address: String? = nil,
+        txid: String? = nil,
+        clearPlaceholder: Bool = true
+    ) throws {
+        let sql = """
+            UPDATE payments
+            SET payment_type = CASE WHEN is_placeholder = 1 THEN COALESCE(?, payment_type) ELSE payment_type END,
+                direction = CASE WHEN is_placeholder = 1 THEN COALESCE(?, direction) ELSE direction END,
+                amount_msat = CASE WHEN is_placeholder = 1 OR amount_msat = 0 THEN ? ELSE amount_msat END,
+                amount_usd = COALESCE(amount_usd, ?),
+                btc_price = COALESCE(btc_price, ?),
+                counterparty = COALESCE(counterparty, ?),
+                address = COALESCE(address, ?),
+                txid = COALESCE(txid, ?),
+                is_placeholder = CASE WHEN ? = 1 THEN 0 ELSE is_placeholder END
+            WHERE payment_id = ?
+        """
+        try rawSQL.execute(sql, params: [
+            paymentType.map { .text($0) } ?? .null,
+            direction.map { .text($0) } ?? .null,
+            .integer(Int64(amountMsat)),
+            amountUSD.map { .real($0) } ?? .null,
+            btcPrice.map { .real($0) } ?? .null,
+            counterparty.map { .text($0) } ?? .null,
+            address.map { .text($0) } ?? .null,
+            txid.map { .text($0) } ?? .null,
+            .integer(clearPlaceholder ? 1 : 0),
+            .text(paymentId)
+        ])
     }
 
     @discardableResult
@@ -114,6 +226,7 @@ final class PaymentRepository {
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
         FROM payments
         WHERE direction = "received"
+        AND is_placeholder = 0
         AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
         ORDER BY id DESC LIMIT 1
         """
@@ -121,12 +234,13 @@ final class PaymentRepository {
         return paymentRecord(from: row)
     }
 
-    func payment(paymentId: String) -> PaymentRecord? {
+    func payment(paymentId: String, excludePlaceholders: Bool = false) -> PaymentRecord? {
+        let placeholderClause = excludePlaceholders ? "AND is_placeholder = 0" : ""
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
         counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
         FROM payments
-        WHERE payment_id = ?
+        WHERE payment_id = ? \(placeholderClause)
         ORDER BY id DESC LIMIT 1
         """
         guard let row = try? rawSQL.query(sql, params: [.text(paymentId)]).first else { return nil }
@@ -301,7 +415,8 @@ final class PaymentRepository {
             SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
                    counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
             FROM payments
-            WHERE NOT (payment_type = 'lightning' AND amount_msat < 1000)
+            WHERE is_placeholder = 0
+            AND NOT (payment_type = 'lightning' AND amount_msat < 1000)
             ORDER BY id DESC LIMIT ?
         """
         let rows = try rawSQL.query(sql, params: [.integer(Int64(limit))])
@@ -331,6 +446,13 @@ final class PaymentRepository {
         }
     }
 
+    private func burnSettlement(settlementId: String) throws {
+        try rawSQL.execute(
+            "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)",
+            params: [.text(settlementId)]
+        )
+    }
+
     func recordPaymentAndMaybeUpdateBacking(
         paymentId: String?,
         paymentType: String,
@@ -344,19 +466,6 @@ final class PaymentRepository {
         settlementId: String? = nil
     ) throws -> PaymentPersistenceResult {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            if let pid = paymentId, !pid.isEmpty {
-                let existing = try rawSQL.query(
-                    "SELECT id FROM payments WHERE payment_id = ?",
-                    params: [.text(pid)]
-                )
-                if !existing.isEmpty {
-                    let backing = try authoritativeBacking(
-                        userChannelId: userChannelId,
-                        required: backingDeltaSats != nil
-                    )
-                    return PaymentPersistenceResult(isNewPayment: false, backingSats: backing)
-                }
-            }
             // Replay guard inside the transaction that credits backing, so a crash can never leave
             // backing credited with the settlement id still replayable.
             if let sid = settlementId {
@@ -373,21 +482,92 @@ final class PaymentRepository {
                 }
             }
 
+            if let pid = paymentId, !pid.isEmpty {
+                let existing = try rawSQL.query(
+                    "SELECT id, is_placeholder, backing_applied, payment_type FROM payments WHERE payment_id = ?",
+                    params: [.text(pid)]
+                )
+                if let firstRow = existing.first {
+                    let isPlaceholder = (firstRow.int64(1)) == 1
+                    let alreadyApplied = (firstRow.int64(2)) != 0
+                    let existingType = firstRow.string(3) ?? ""
+
+                    var resultingBacking: UInt64?
+                    let isOwedDebit = (isPlaceholder || existingType == "stability") && !alreadyApplied
+                    if let delta = backingDeltaSats, isOwedDebit {
+                        guard let ucid = userChannelId, !ucid.isEmpty else {
+                            throw DatabaseError.executeFailed("userChannelId required for backing update")
+                        }
+                        let rows = try rawSQL.query(
+                            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+                            params: [.text(ucid)]
+                        )
+                        guard let current = rows.first?.int64(0) else {
+                            throw DatabaseError.missingChannelRow(ucid)
+                        }
+                        let newBacking = max(0, current + delta)
+                        if current + delta < 0 {
+                            AuditService.log("BACKING_CLAMPED", data: [
+                                "user_channel_id": ucid,
+                                "current_backing_sats": "\(current)",
+                                "delta_sats": "\(delta)"
+                            ])
+                        }
+                        try rawSQL.execute(
+                            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
+                            params: [.integer(newBacking), .text(ucid)]
+                        )
+                        let changedRows = rawSQL.changes
+                        if changedRows != 1 {
+                            throw DatabaseError.executeFailed(
+                                "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
+                            )
+                        }
+                        try rawSQL.execute(
+                            "UPDATE payments SET backing_applied = 1 WHERE payment_id = ?",
+                            params: [.text(pid)]
+                        )
+                        if let sid = settlementId {
+                            try burnSettlement(settlementId: sid)
+                        }
+                        resultingBacking = UInt64(newBacking)
+                    } else if backingDeltaSats != nil {
+                        resultingBacking = try authoritativeBacking(
+                            userChannelId: userChannelId,
+                            required: true
+                        )
+                    }
+
+                    try backfillPaymentDetails(
+                        paymentId: pid,
+                        paymentType: paymentType,
+                        direction: direction,
+                        amountMsat: amountMsat,
+                        amountUSD: amountUSD,
+                        btcPrice: btcPrice,
+                        counterparty: nil,
+                        address: nil,
+                        txid: nil,
+                        clearPlaceholder: true
+                    )
+                    return PaymentPersistenceResult(isNewPayment: false, backingSats: resultingBacking)
+                }
+            }
+
+            let backingAppliedValue: Int64 = (backingDeltaSats != nil) ? 1 : 0
             try rawSQL.execute(
-                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO payments (payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, backing_applied) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 params: [
                     paymentId.map { .text($0) } ?? .null,
                     .text(paymentType), .text(direction), .integer(Int64(amountMsat)),
                     amountUSD.map { .real($0) } ?? .null,
                     btcPrice.map { .real($0) } ?? .null,
-                    .text(status)
+                    .text(status),
+                    .integer(backingAppliedValue)
                 ]
             )
             if let sid = settlementId {
-                try rawSQL.execute(
-                    "INSERT INTO seen_stability_settlements (settlement_id) VALUES (?)",
-                    params: [.text(sid)]
-                )
+                try burnSettlement(settlementId: sid)
             }
             var resultingBacking: UInt64?
             if let delta = backingDeltaSats {

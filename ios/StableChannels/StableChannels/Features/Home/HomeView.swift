@@ -29,9 +29,8 @@ struct HomeView: View {
 
                     HomeSyncSpinnerView()
 
-                    if appState.lightningBalanceSats > 0 {
-                        balanceBarSection
-                    }
+                    balanceBarSection
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
 
                     if appState.onchainBalanceSats > 0 {
                         HomeSavingsSectionView(showBTC: showBTC)
@@ -41,12 +40,14 @@ struct HomeView: View {
                         .equatable()
                         .padding(.bottom, 8)
 
-                    if !appState.hasReadyChannel {
+                    if !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState.isOpeningChannel {
                         receiveHintText
                     }
 
                     HomeActionButtonsView(
                         hasReadyChannel: appState.hasReadyChannel,
+                        pulseReceive: !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState
+                            .isOpeningChannel,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
                         onBuy: { showBuySheet = true },
@@ -117,9 +118,13 @@ struct HomeView: View {
                     sc: appState.stableChannel,
                     price: appState.accountingBTCPrice
                 ) ?? 0) / 100,
+                isTrading: tradeRequest != nil,
                 onDragStarted: { appState.ensureLSPConnected() },
-                onTradeRequest: { direction, amountUSD in
-                    tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
+                onTradeRequest: appState.hasReadyChannel ? { request in
+                    tradeRequest = request
+                } : nil,
+                onEmptyInteraction: {
+                    showReceiveSheet = true
                 }
             )
             .padding(.horizontal, 24)
