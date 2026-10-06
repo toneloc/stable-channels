@@ -24,11 +24,12 @@ private enum IncomingSettlementResult {
 class AppState {
     // MARK: - App Lifecycle
 
-    enum Phase {
+    enum Phase: Equatable {
         case loading
         case onboarding
         case syncing
         case wallet
+        case offline
         case error(String)
     }
 
@@ -106,18 +107,30 @@ class AppState {
     let spliceBroadcastChecker: SpliceBroadcastChecking
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
     private let customRepairBooksUseCase: RepairBooksUseCase?
+    let networkMonitor: any NetworkMonitoring
 
     init(
         nodeService: NodeService = NodeService(),
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
-        repairBooksUseCase: RepairBooksUseCase? = nil
+        repairBooksUseCase: RepairBooksUseCase? = nil,
+        networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared
     ) {
         self.nodeService = nodeService
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
         self.customRepairBooksUseCase = repairBooksUseCase
+        self.networkMonitor = networkMonitor
+
+        self.networkMonitor.onStatusChange = { [weak self] status in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if status == .online && self.phase == .offline {
+                    await self.retryConnection()
+                }
+            }
+        }
     }
 
     // MARK: - State
@@ -143,10 +156,26 @@ class AppState {
     var isChannelClosing: Bool = false
     var isOpeningChannel: Bool = false
     var isSyncing: Bool = false
+    var hasCompletedInitialSync: Bool = false
+    var isOfflineBlocked: Bool {
+        get { phase == .offline }
+        set { phase = newValue ? .offline : .wallet }
+    }
+
+    var showOfflineNotice: Bool {
+        get { isOfflineBlocked }
+        set { isOfflineBlocked = newValue }
+    }
+
+    var isRetryingConnection: Bool = false
+    var isOnline: Bool { networkMonitor.isOnline }
+
     private enum BalanceCacheKey {
         static let lightning = "cached_lightning_sats"
         static let onchain = "cached_onchain_sats"
         static let spendable = "cached_spendable_onchain_sats"
+        static let hasReadyChannel = "cached_has_ready_channel"
+        static let btcPrice = "cached_btc_price"
         static let pendingAmount = "pending_outbound_onchain_sats"
         static let pendingIsSendAll = "pending_outbound_is_send_all"
         static let pendingBaseline = "pending_outbound_baseline_sats"
@@ -175,7 +204,10 @@ class AppState {
         return UInt64(bitPattern: Int64(ud?.integer(forKey: BalanceCacheKey.onchain) ?? 0))
     }()
 
-    var hasReadyChannel: Bool = false
+    var hasReadyChannel: Bool = {
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        return ud?.bool(forKey: BalanceCacheKey.hasReadyChannel) ?? false
+    }()
 
     var pendingOutboundSend: BalanceCalculator.PendingOutboundSend = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -188,11 +220,15 @@ class AppState {
     var activeLSP: LSPConfig { lspService.activeLSP }
 
     var totalBalanceSats: UInt64 {
-        AppState.calculateTotalBalance(
+        let hasAny = !nodeService.channels.isEmpty
+            || !stableChannel.channelId.isEmpty
+            || !stableChannel.userChannelId.isEmpty
+            || hasReadyChannel
+        return AppState.calculateTotalBalance(
             lightning: lightningBalanceSats,
             onchain: onchainBalanceSats,
             hasReadyChannel: hasReadyChannel,
-            hasAnyChannel: !nodeService.channels.isEmpty,
+            hasAnyChannel: hasAny,
             isChannelClosing: isChannelClosing,
             isOpeningChannel: isOpeningChannel,
             isSweeping: isSweeping,
@@ -329,8 +365,17 @@ class AppState {
     }
 
     var totalBalanceUSD: Double {
-        guard btcPrice > 0 else { return 0 }
-        return Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
+        guard btcPrice > 0 else {
+            return stableUSD
+        }
+        let btcUSD = Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
+        if btcUSD > 0 {
+            return btcUSD
+        }
+        if stableChannel.stableReceiverBTC.sats > 0 {
+            return Double(stableChannel.stableReceiverBTC.sats) / Double(Constants.satsInBTC) * btcPrice
+        }
+        return stableUSD
     }
 
     var stableUSD: Double { stableChannel.expectedUSD.amount }
@@ -677,6 +722,7 @@ class AppState {
         shared?.set(Int64(0), forKey: BalanceCacheKey.lightning)
         shared?.set(Int64(0), forKey: BalanceCacheKey.onchain)
         shared?.set(Int64(0), forKey: BalanceCacheKey.spendable)
+        shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
     }
@@ -763,6 +809,8 @@ class AppState {
     // MARK: - Startup
 
     func start() async {
+        networkMonitor.start()
+
         // Guard the whole flow: performBackgroundStop must not release the
         // wallet-dir lock while this startup is still live (there is a window
         // between our acquire and NodeService.start setting isStarting).
@@ -862,13 +910,15 @@ class AppState {
         let seedPhrasePath = Constants.userDataDir.appendingPathComponent("seed_phrase")
         if FileManager.default.fileExists(atPath: seedPath.path)
             || FileManager.default.fileExists(atPath: seedPhrasePath.path) {
-            // Show wallet immediately with cached data from DB
-            let hasCachedData = !stableChannel.userChannelId.isEmpty
+            if !networkMonitor.isOnline {
+                AuditService.log("STARTUP_ALREADY_OFFLINE", data: [:])
+                await transitionToOfflineAfterSplash(since: prologueStart)
+                return
+            }
+
             await MainActor.run {
-                phase = hasCachedData ? .wallet : .syncing
-                if hasCachedData {
-                    isSyncing = true
-                }
+                phase = .syncing
+                isSyncing = true
             }
 
             // Purge empty network graph from DB to force fresh RGS sync
@@ -884,8 +934,11 @@ class AppState {
                 }
 
                 await MainActor.run {
-                    phase = .wallet
                     isSyncing = false
+                    hasCompletedInitialSync = true
+                    if isTestingEnvironment {
+                        phase = .wallet
+                    }
                     refreshBalances()
                     updateStableBalances()
                     // Restore fundingTxid from UserDefaults
@@ -895,6 +948,16 @@ class AppState {
                     blockHeightService.start()
                     mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await MainActor.run {
+                        if phase == .syncing {
+                            withAnimation(.easeInOut(duration: 0.35)) {
+                                phase = .wallet
+                            }
+                        }
+                    }
                 }
                 startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
@@ -909,11 +972,28 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
-                await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
+                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                    error: error,
+                    isNetworkOffline: !networkMonitor.isOnline
+                ) {
+                    AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
+                    await transitionToOfflineAfterSplash(since: prologueStart)
+                } else {
+                    await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
+                }
             }
         } else {
             // New wallet — auto-create
-            await MainActor.run { phase = .syncing }
+            if !networkMonitor.isOnline {
+                AuditService.log("WALLET_CREATE_ALREADY_OFFLINE", data: [:])
+                await transitionToOfflineAfterSplash(since: prologueStart)
+                return
+            }
+
+            await MainActor.run {
+                phase = .syncing
+                isSyncing = true
+            }
             do {
                 try await startNodeWithFailover(mnemonic: "")
                 let nodeId = nodeService.nodeId
@@ -922,20 +1002,120 @@ class AppState {
                         .set(nodeId, forKey: "node_id")
                 }
                 await MainActor.run {
-                    phase = .wallet
+                    isSyncing = false
+                    hasCompletedInitialSync = true
+                    if isTestingEnvironment {
+                        phase = .wallet
+                    }
                     blockHeightService.start()
                     mempoolWebSocketService.connect()
                     Task { await confirmationPollingService?.pollOnce() }
                     refreshBalances()
                     updateStableBalances()
                 }
+                Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    await MainActor.run {
+                        if phase == .syncing {
+                            withAnimation(.easeInOut(duration: 0.35)) {
+                                phase = .wallet
+                            }
+                        }
+                    }
+                }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
-                await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
+                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                    error: error,
+                    isNetworkOffline: !networkMonitor.isOnline
+                ) {
+                    AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
+                    await transitionToOfflineAfterSplash(since: prologueStart)
+                } else {
+                    await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
+                }
             }
+        }
+    }
+
+    private var isTestingEnvironment: Bool {
+        NSClassFromString("XCTestCase") != nil
+    }
+
+    private func ensureMinimumSplashDuration(since startTime: Date, minDuration: TimeInterval = 1.6) async {
+        guard !isTestingEnvironment else { return }
+        let elapsed = Date().timeIntervalSince(startTime)
+        if elapsed < minDuration {
+            let remaining = minDuration - elapsed
+            try? await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+        }
+    }
+
+    private func transitionToOfflineAfterSplash(since startTime: Date) async {
+        await ensureMinimumSplashDuration(since: startTime)
+        await MainActor.run {
+            withAnimation(.easeInOut(duration: 0.35)) {
+                phase = .offline
+                isSyncing = false
+            }
+        }
+    }
+
+    /// Retries connection to the network and node services after an offline condition.
+    func retryConnection() async {
+        guard !isRetryingConnection else { return }
+        isRetryingConnection = true
+        defer { isRetryingConnection = false }
+
+        if !networkMonitor.isOnline {
+            AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
+            phase = .offline
+            return
+        }
+
+        if !nodeService.isRunning {
+            isSyncing = true
+            defer { isSyncing = false }
+            do {
+                try await startNodeWithFailover(mnemonic: "")
+                let nodeId = nodeService.nodeId
+                if !nodeId.isEmpty {
+                    UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                        .set(nodeId, forKey: "node_id")
+                }
+                phase = .wallet
+                hasCompletedInitialSync = true
+                refreshBalances()
+                updateStableBalances()
+                blockHeightService.start()
+                mempoolWebSocketService.connect()
+                Task { await confirmationPollingService?.pollOnce() }
+                startStabilityTimer()
+                ensureLSPConnected()
+                reregisterPushTokenIfNeeded()
+                await processPendingPushPayment()
+                txidResolutionService.replayPendingChannelCloses()
+                txidResolutionService.replayPendingOnchainReceives()
+            } catch {
+                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                    error: error,
+                    isNetworkOffline: !networkMonitor.isOnline
+                ) {
+                    phase = .offline
+                } else {
+                    phase = .error("Node start failed: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            phase = .wallet
+            hasCompletedInitialSync = true
+            refreshBalances()
+            await priceService.fetchPrice()
+            recordCurrentPrice()
+            ensureLSPConnected()
         }
     }
 
@@ -3800,6 +3980,10 @@ class AppState {
         ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
         ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
         ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
+        ud?.set(hasReadyChannel, forKey: BalanceCacheKey.hasReadyChannel)
+        if btcPrice > 0 {
+            ud?.set(btcPrice, forKey: BalanceCacheKey.btcPrice)
+        }
         persistPendingOutboundSend(to: ud)
     }
 
@@ -3958,8 +4142,18 @@ class AppState {
                     )
                     StabilityService.recomputeNative(&stableChannel)
                 }
+                if record.receiverSats > 0 || record.backingSats > 0 || record.nativeSats > 0 {
+                    if !hasReadyChannel {
+                        hasReadyChannel = true
+                        UserDefaults(suiteName: Constants.appGroupIdentifier)?.set(
+                            true,
+                            forKey: BalanceCacheKey.hasReadyChannel
+                        )
+                    }
+                }
                 if record.latestPrice > 0 {
                     stableChannel.latestPrice = record.latestPrice
+                    priceService.seedDisplayPrice(record.latestPrice)
                 }
                 return true
             }
