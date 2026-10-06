@@ -1898,7 +1898,10 @@ impl StableChannelManager {
             stable.backing_sats = backing_after;
             stable.native_sats = native_after;
             stable_channels::stable::recompute_native(stable);
-            self.spend_debounce.remove(&stable.user_channel_id);
+            // A gap this payment left behind is still the backstop's to count.
+            if backing_after <= their_sats {
+                self.spend_debounce.remove(&stable.user_channel_id);
+            }
         }
         stable_channels::audit::audit_event(
             "STABILITY_PAYMENT_V1_APPLIED",
@@ -2039,7 +2042,7 @@ impl StableChannelManager {
         // carries no proof of the amount owed, so a token 1-sat payment must settle only
         // 1 sat of drift, not erase the entire above-par surplus and reclassify it as the
         // user's own native BTC. Floor at equilibrium so a (rounding) overpayment cannot
-        // drive backing below the peg; clamp to the live balance so backing never exceeds it.
+        // drive backing below the peg; clamp to the live balance only for the drop this payment explains.
         let Some(settled_backing) = stable_channels::stable::backing_after_user_to_lsp_stability(
             sc.backing_sats,
             sc.expected_usd.0,
@@ -2060,8 +2063,10 @@ impl StableChannelManager {
         sc.backing_sats = settled_backing;
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
-        // The drop is settled; make sure the backstop forgets any ticks it counted.
-        self.spend_debounce.remove(&uid);
+        // Once the drop is settled the backstop forgets any ticks it counted. A gap left behind keeps its count.
+        if settled_backing <= their_sats {
+            self.spend_debounce.remove(&uid);
+        }
 
         if let Err(e) = self.db.save_channel(
             &channel_id,
@@ -2652,7 +2657,10 @@ impl StableChannelManager {
         ldk: &dyn LdkServerCalls,
         btc_price: f64,
     ) {
-        let total_sats = outbound_amount_forwarded_msat.saturating_add(fee_msat) / 1000;
+        let total_msat = outbound_amount_forwarded_msat.saturating_add(fee_msat);
+        let total_sats = total_msat / 1000;
+        // A fractional sat still comes off the floored live balance, so the books charge it. The charge never exceeds what that balance shows.
+        let spend_sats = total_msat.div_ceil(1000);
         let forward_detail = serde_json::json!({
             "prev_user_channel_id": prev_user_channel_id,
             "next_user_channel_id": next_user_channel_id,
@@ -2731,25 +2739,27 @@ impl StableChannelManager {
             sc.stable_receiver_btc = Bitcoin::from_sats(post_user_sats);
             sc.stable_receiver_usd = USD::from_bitcoin(sc.stable_receiver_btc, btc_price);
 
-            let native_before = sc.native_sats;
+            let backing_before = sc.backing_sats;
             let old_expected = sc.expected_usd.0;
-            let user_sats_before = post_user_sats.saturating_add(total_sats);
+            let user_sats_before = post_user_sats.saturating_add(spend_sats);
             let counterparty_hex = sc.counterparty.to_string();
 
             let deducted = if let Some(usd_deducted) = stable_channels::stable::reconcile_forwarded(
                 sc,
                 user_sats_before,
-                total_sats,
+                spend_sats,
                 btc_price,
             ) {
-                let stable_sats_spent = total_sats.saturating_sub(native_before);
+                // Report the split this forward was actually charged, not the last saved native allocation.
+                let stable_sats_spent = backing_before.saturating_sub(sc.backing_sats).min(spend_sats);
+                let native_sats_spent = spend_sats - stable_sats_spent;
                 stable_channels::audit::audit_event(
                     "STABLE_SPEND_DEDUCTED",
                     serde_json::json!({
                         "channel_id": channel_id_hex,
                         "user_channel_id": format!("{}", sc.user_channel_id),
-                        "total_sats_spent": total_sats,
-                        "native_sats_spent": native_before,
+                        "total_sats_spent": spend_sats,
+                        "native_sats_spent": native_sats_spent,
                         "stable_sats_spent": stable_sats_spent,
                         "usd_deducted": usd_deducted,
                         "old_expected_usd": old_expected,
@@ -2759,7 +2769,7 @@ impl StableChannelManager {
                 );
                 info!(
                     "[forwarded] channel user_id={} spent {} sats ({} native, {} stable), expected_usd ${:.2} -> ${:.2}",
-                    sc.user_channel_id, total_sats, native_before, stable_sats_spent,
+                    sc.user_channel_id, spend_sats, native_sats_spent, stable_sats_spent,
                     old_expected, sc.expected_usd.0
                 );
                 true
@@ -2783,7 +2793,8 @@ impl StableChannelManager {
 
         let (ucid_str, expected_usd_f, backing_sats, native_sats, note, counterparty_hex, deducted) =
             persisted;
-        if let Err(e) = self.db.save_channel(
+        // A top-up still in flight must stay undoable after this spend.
+        if let Err(e) = self.db.save_channel_after_spend(
             &channel_id_hex,
             &ucid_str,
             expected_usd_f,
@@ -2798,16 +2809,18 @@ impl StableChannelManager {
             );
         }
         if deducted {
-            let sent = self
-                .send_sync_message(
-                    ldk,
-                    target_uid,
-                    &channel_id_hex,
-                    expected_usd_f,
-                    backing_sats,
-                    &counterparty_hex,
-                )
-                .await;
+            // Backing above the live balance still holds an unreconciled spend. Publish once the books match it.
+            let sent = backing_sats <= post_user_sats
+                && self
+                    .send_sync_message(
+                        ldk,
+                        target_uid,
+                        &channel_id_hex,
+                        expected_usd_f,
+                        backing_sats,
+                        &counterparty_hex,
+                    )
+                    .await;
             if !sent {
                 self.startup_sync_pending.insert(target_uid);
             }
@@ -4436,6 +4449,261 @@ mod tests {
             sends[0].custom_tlvs[0].type_num,
             stable_channels::constants::STABLE_CHANNEL_TLV_TYPE
         );
+    }
+
+    // A $50 position on 50k backing plus `native_sats`, with the user side of the 100k channel already at `live_sats`.
+    fn settled_forwards_fixture(native_sats: u64, live_sats: u64) -> (StableChannelManager, FakeLdkServer) {
+        let mut mgr = make_manager();
+        seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, native_sats, 50_000 + native_sats, 100_000.0);
+        let fake = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, (100_000 - live_sats) * 1000, true,
+        )]);
+        (mgr, fake)
+    }
+
+    async fn forward_out(mgr: &mut StableChannelManager, fake: &FakeLdkServer, sats: u64) {
+        forward_out_msat(mgr, fake, sats * 1000).await;
+    }
+
+    async fn forward_out_msat(mgr: &mut StableChannelManager, fake: &FakeLdkServer, msat: u64) {
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.to_string(), Some("next-ucid".to_string()),
+            CHANNEL_ID_HEX.to_string(), "next-channel".to_string(),
+            COUNTERPARTY_HEX.to_string(), "next-node".to_string(),
+            msat, 0, None, fake as &dyn LdkServerCalls, 100_000.0,
+        ).await;
+    }
+
+    fn test_push(mgr: &StableChannelManager) -> std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
+            &crate::config::PushConfig::default(), mgr.data_dir(),
+        )))
+    }
+
+    fn assert_books(mgr: &StableChannelManager, expected_usd: f64, backing_sats: u64, native_sats: u64) {
+        let sc = &mgr.stable_channels[0];
+        assert!((sc.expected_usd.0 - expected_usd).abs() < 1e-9, "expected_usd {}", sc.expected_usd.0);
+        assert_eq!((sc.backing_sats, sc.native_sats), (backing_sats, native_sats));
+    }
+
+    // SYNC keysends carry 1 msat, so anything larger is a stability payment.
+    fn top_ups_sent(fake: &FakeLdkServer) -> usize {
+        fake.sends.lock().unwrap().iter().filter(|send| send.amount_msat > 1).count()
+    }
+
+    #[tokio::test]
+    async fn two_forwards_settled_before_the_first_event_are_both_deducted() {
+        // Both 10,000-sat payments have settled, so the user side is 30,000 before either event is handled.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 30_000);
+
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty(), "books that still hold the other spend are not published");
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+
+        let saved = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert_eq!((saved.expected_usd, saved.backing_sats, saved.native_sats), (30.0, 30_000, 0));
+
+        // With the cooldown out of the way a tick must find the books at par.
+        mgr.stable_channels[0].last_stability_payment = 0;
+        let push = test_push(&mgr);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert_eq!(top_ups_sent(&fake), 0, "the LSP must not pay for a spend it has not deducted");
+    }
+
+    #[tokio::test]
+    async fn tick_between_overlapping_forward_events_sends_no_top_up() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 30_000);
+        let push = test_push(&mgr);
+
+        forward_out(&mut mgr, &fake, 10_000).await;
+        mgr.stable_channels[0].last_stability_payment = 0;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert_eq!(top_ups_sent(&fake), 0, "the second spend is still unreconciled, not a shortfall to top up");
+
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+    }
+
+    #[tokio::test]
+    async fn late_second_forward_event_is_counted_exactly_once() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 30_000);
+        let push = test_push(&mgr);
+
+        forward_out(&mut mgr, &fake, 10_000).await;
+        // The second event is delayed across several ticks, each past the cooldown. Whatever they do, its spend counts once.
+        for _ in 0..3 {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        }
+        forward_out(&mut mgr, &fake, 10_000).await;
+
+        assert_eq!(top_ups_sent(&fake), 0);
+        assert_books(&mgr, 30.0, 30_000, 0);
+    }
+
+    #[tokio::test]
+    async fn sync_held_back_for_a_pending_htlc_is_sent_once_the_htlc_fails() {
+        // One 10,000-sat forward has settled and a second 10,000-sat HTLC is still in flight.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 30_000);
+        let push = test_push(&mgr);
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        // The HTLC fails, so the live balance returns to the books and the next ticks publish them.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true,
+        )];
+        for _ in 0..2 {
+            mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 100_000.0).await;
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        }
+
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert_book_sync(&fake, 40.0, 40_000);
+    }
+
+    #[tokio::test]
+    async fn overlapping_forwards_spend_native_before_stable() {
+        // 5,000 native sats cover part of the 20,000 spent, so $15 comes out of the stable position.
+        let (mut mgr, fake) = settled_forwards_fixture(5_000, 35_000);
+
+        forward_out(&mut mgr, &fake, 10_000).await;
+        forward_out(&mut mgr, &fake, 10_000).await;
+
+        assert_books(&mgr, 35.0, 35_000, 0);
+    }
+
+    #[tokio::test]
+    async fn forward_event_the_live_balance_does_not_show_deducts_nothing() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 40_000);
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+
+        // The books already match the live balance, so a repeat of the same event has nothing left to take.
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+    }
+
+    #[tokio::test]
+    async fn fractional_forward_is_charged_the_sat_the_live_balance_lost() {
+        // A 10,000.5-sat spend takes 10,001 sats off the floored live balance, and the target follows it.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 39_999);
+        let push = test_push(&mgr);
+
+        forward_out_msat(&mut mgr, &fake, 10_000_500).await;
+        let sends_after_forward = fake.sends.lock().unwrap().len();
+        for _ in 0..3 {
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        }
+
+        assert_books(&mgr, 39.999, 39_999, 0);
+        assert_eq!(fake.sends.lock().unwrap().len(), sends_after_forward, "no later correction or SYNC");
+    }
+
+    #[tokio::test]
+    async fn overlapping_fractional_forwards_leave_no_gap() {
+        // Two 10,000.999-sat spends take 20,002 sats off the floored live balance before either event is handled.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 29_998);
+        let push = test_push(&mgr);
+
+        forward_out_msat(&mut mgr, &fake, 10_000_999).await;
+        forward_out_msat(&mut mgr, &fake, 10_000_999).await;
+        assert_books(&mgr, 29.998, 29_998, 0);
+        assert_eq!(fake.sends.lock().unwrap().len(), 1, "the final books are published once they match the live balance");
+
+        // Nothing is left above the live balance, so a later price drop is topped up as usual.
+        mgr.stable_channels[0].last_stability_payment = 0;
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 90_000.0).await;
+        assert_eq!(top_ups_sent(&fake), 1);
+    }
+
+    #[tokio::test]
+    async fn forward_fee_counts_as_part_of_the_spend() {
+        // 9,990 sats forwarded plus a 10-sat fee left the user side, 10,000 in total.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 40_000);
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.to_string(), Some("next-ucid".to_string()),
+            CHANNEL_ID_HEX.to_string(), "next-channel".to_string(),
+            COUNTERPARTY_HEX.to_string(), "next-node".to_string(),
+            9_990_000, 10_000, None, &fake as &dyn LdkServerCalls, 100_000.0,
+        ).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+    }
+
+    fn set_user_side_sats(fake: &FakeLdkServer, sats: u64) {
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, (100_000 - sats) * 1000, true,
+        )];
+    }
+
+    // $50 on 50,000 sats. At $80k a 12,500-sat top-up goes out, and the user forwards 10,000 sats before claiming it.
+    async fn forward_before_claiming_top_up() -> (StableChannelManager, FakeLdkServer, std::sync::Arc<tokio::sync::Mutex<crate::push::PushService>>) {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        let push = test_push(&mgr);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_books(&mgr, 50.0, 62_500, 0);
+
+        set_user_side_sats(&fake, 40_000);
+        mgr.handle_payment_forwarded(
+            USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
+            CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
+            "next-peer".into(), 10_000_000, 0, None, &fake, 80_000.0,
+        ).await;
+        assert_books(&mgr, 42.0, 52_500, 0);
+        (mgr, fake, push)
+    }
+
+    #[tokio::test]
+    async fn failed_top_up_is_undone_and_resent_after_a_forwarded_spend() {
+        let (mut mgr, fake, push) = forward_before_claiming_top_up().await;
+
+        let rollback = mgr.handle_failed_stability_payment("fake-payment-id").expect("rollback metadata");
+        assert!(rollback.applied, "the spend must not strand the failed top-up in backing");
+        assert_books(&mgr, 42.0, 40_000, 0);
+
+        // The books match the live balance again, so the shortfall at $80k is paid afresh and the target is kept.
+        for _ in 0..2 {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        }
+        assert_eq!(top_ups_sent(&fake), 2);
+        assert!((mgr.stable_channels[0].expected_usd.0 - 42.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn claimed_top_up_after_a_forwarded_spend_is_paid_once() {
+        let (mut mgr, fake, push) = forward_before_claiming_top_up().await;
+        assert!(mgr.db.mark_settlement_succeeded("fake-payment-id", Some(12_500_000), None, Some("lsp_to_user")).unwrap());
+        set_user_side_sats(&fake, 52_500);
+
+        for _ in 0..2 {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        }
+        assert_eq!(top_ups_sent(&fake), 1);
+        assert_books(&mgr, 42.0, 52_500, 0);
+    }
+
+    #[tokio::test]
+    async fn failed_top_up_is_undone_after_a_spend_from_native_sats() {
+        // $10 on 10,000 backing with 40,000 native. At $80k a 2,500-sat top-up goes out and stays unclaimed.
+        let (mut mgr, fake) = seed_forwarded_fixture().await;
+        let push = test_push(&mgr);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
+        assert_books(&mgr, 10.0, 12_500, 40_000);
+
+        // 20,000 native sats leave before the top-up fails.
+        set_user_side_sats(&fake, 30_000);
+        forward_out(&mut mgr, &fake, 20_000).await;
+        assert_books(&mgr, 10.0, 12_500, 17_500);
+
+        let rollback = mgr.handle_failed_stability_payment("fake-payment-id").expect("rollback metadata");
+        assert!(rollback.applied);
+        assert_books(&mgr, 10.0, 10_000, 17_500);
     }
 
     #[tokio::test]
@@ -7903,6 +8171,76 @@ mod tests {
             mgr.stable_channels[0].backing_sats, 9_091,
             "replaying the event must not apply the amount twice"
         );
+    }
+
+    // Deliver a signed 1-sat wallet-to-LSP stability payment on the $50 fixture channel.
+    async fn receive_one_sat_stability(mgr: &mut StableChannelManager, fake: &FakeLdkServer) {
+        let record = signed_stability_record(
+            &"22".repeat(32), CHANNEL_ID_HEX, 1_000,
+            stable_channels::stable::StabilityPaymentDirection::UserToLsp, 50.0,
+        );
+        mgr.handle_payment_received(
+            vec![stability_marker(), record], Some("one-sat-stability".to_owned()), Some(1_000),
+            fake as &dyn LdkServerCalls, 100_000.0,
+        ).await;
+    }
+
+    #[tokio::test]
+    async fn stability_payment_does_not_write_off_an_unreconciled_forward() {
+        // A 10,000-sat forward and the 1-sat payment have both settled, and the payment's event is handled first.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 39_999);
+
+        receive_one_sat_stability(&mut mgr, &fake).await;
+        assert_books(&mgr, 50.0, 49_999, 0);
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 39_999, 0);
+
+        mgr.stable_channels[0].last_stability_payment = 0;
+        let push = test_push(&mgr);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        assert_eq!(top_ups_sent(&fake), 0);
+    }
+
+    #[tokio::test]
+    async fn stability_payment_does_not_write_off_an_htlc_in_flight() {
+        // A 10,000-sat outbound HTLC is pending when the 1-sat payment arrives.
+        let (mut mgr, fake) = settled_forwards_fixture(0, 39_999);
+        receive_one_sat_stability(&mut mgr, &fake).await;
+
+        // The HTLC then fails and its sats return to the user side.
+        *fake.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_001_000, true,
+        )];
+        mgr.stable_channels[0].last_stability_payment = 0;
+        let push = test_push(&mgr);
+        mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+        assert_eq!(top_ups_sent(&fake), 0, "sats that only left for a failed payment are not a shortfall to top up");
+        assert_books(&mgr, 50.0, 49_999, 0);
+    }
+
+    #[tokio::test]
+    async fn stability_payment_keeps_the_backstop_count_for_a_gap_it_left() {
+        for signed in [true, false] {
+            // A 10,000-sat spend never produced an event, so only the tick backstop can deduct it.
+            let (mut mgr, fake) = settled_forwards_fixture(0, 40_000);
+            let push = test_push(&mgr);
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+            // A 1-sat payment between the two low ticks leaves that gap in place.
+            set_user_side_sats(&fake, 39_999);
+            if signed {
+                receive_one_sat_stability(&mut mgr, &fake).await;
+            } else {
+                mgr.handle_payment_received(
+                    vec![stability_marker()], Some("one-sat-marker".to_owned()), Some(1_000),
+                    &fake as &dyn LdkServerCalls, 100_000.0,
+                ).await;
+            }
+            mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+
+            assert_books(&mgr, 40.0, 39_999, 0);
+        }
     }
 
     #[tokio::test]
