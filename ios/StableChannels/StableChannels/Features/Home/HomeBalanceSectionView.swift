@@ -6,13 +6,27 @@ struct HomeBalanceSectionView: View {
     let flashScale: CGFloat
 
     private var displaySats: UInt64 {
-        appState.totalBalanceSats > 0
-            ? appState.totalBalanceSats
-            : appState.stableChannel.stableReceiverBTC.sats
+        if appState.totalBalanceSats > 0 {
+            return appState.totalBalanceSats
+        }
+        if appState.stableChannel.stableReceiverBTC.sats > 0 {
+            return appState.stableChannel.stableReceiverBTC.sats
+        }
+        return appState.lightningBalanceSats + appState.onchainBalanceSats
+    }
+
+    private var displayUSD: Double {
+        if appState.totalBalanceUSD > 0 {
+            return appState.totalBalanceUSD
+        }
+        if appState.btcPrice > 0 && displaySats > 0 {
+            return Double(displaySats) / Double(Constants.satsInBTC) * appState.btcPrice
+        }
+        return appState.stableUSD
     }
 
     private var hasBalance: Bool {
-        appState.totalBalanceUSD > 0 || displaySats > 0
+        displayUSD > 0 || displaySats > 0
     }
 
     var body: some View {
@@ -43,16 +57,16 @@ struct HomeBalanceSectionView: View {
                 }
 
                 RollingDigitLabel(
-                    text: appState.totalBalanceUSD.usdFormatted,
-                    value: appState.totalBalanceUSD,
+                    text: displayUSD.usdFormatted,
+                    value: displayUSD,
                     font: .caption,
                     baseColor: .secondary
                 )
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     RollingDigitLabel(
-                        text: appState.totalBalanceUSD.usdFormatted,
-                        value: appState.totalBalanceUSD,
+                        text: displayUSD.usdFormatted,
+                        value: displayUSD,
                         font: .system(size: 42, weight: .bold, design: .rounded),
                         baseColor: appState.paymentFlash ? .green : .primary
                     )

@@ -48,6 +48,7 @@ struct HomeView: View {
                         hasReadyChannel: appState.hasReadyChannel,
                         pulseReceive: !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState
                             .isOpeningChannel,
+                        isOffline: !appState.networkMonitor.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
                         onBuy: { showBuySheet = true },
@@ -63,9 +64,16 @@ struct HomeView: View {
             .scrollBounceBehavior(.basedOnSize)
             .navigationBarHidden(true)
             .refreshable {
+                if !appState.networkMonitor.isOnline {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        appState.phase = .offline
+                    }
+                    return
+                }
                 appState.refreshBalances()
                 await appState.priceService.fetchPrice()
                 appState.recordCurrentPrice()
+                appState.ensureLSPConnected()
             }
         }
         .onAppear {
@@ -120,13 +128,15 @@ struct HomeView: View {
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
                 onDragStarted: { appState.ensureLSPConnected() },
-                onTradeRequest: appState.hasReadyChannel ? { request in
+                onTradeRequest: (appState.hasReadyChannel && appState.networkMonitor.isOnline) ? { request in
                     tradeRequest = request
                 } : nil,
                 onEmptyInteraction: {
                     showReceiveSheet = true
                 }
             )
+            .disabled(!appState.networkMonitor.isOnline)
+            .opacity(appState.networkMonitor.isOnline ? 1.0 : 0.85)
             .padding(.horizontal, 24)
 
             HStack(alignment: .top) {

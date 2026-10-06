@@ -274,6 +274,13 @@ struct BuyView: View {
     }
 
     private func executeTrade() {
+        guard appState.networkMonitor.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_trade",
+                defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
+            )
+            return
+        }
         isExecuting = true
         errorMessage = nil
         appState.ensureLSPConnected()
