@@ -26,6 +26,8 @@ import com.stablechannels.app.ui.home.HomeScreen
 import com.stablechannels.app.ui.settings.SettingsNavHost
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 
+private const val HISTORY_PAYMENTS_SEGMENT = 1
+
 enum class Tab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Default.Home),
     HISTORY("History", Icons.Default.AccessTime),
@@ -36,6 +38,7 @@ enum class Tab(val label: String, val icon: ImageVector) {
 fun MainTabView(appState: AppState) {
     var selectedTab by remember { mutableStateOf(Tab.HOME) }
     var showBottomBar by remember { mutableStateOf(true) }
+    var historySegment by remember { mutableIntStateOf(0) }
     val systemBarsPadding = WindowInsets.systemBars.asPaddingValues()
 
     LaunchedEffect(selectedTab) {
@@ -46,14 +49,24 @@ fun MainTabView(appState: AppState) {
 
     Box(modifier = Modifier.fillMaxSize().padding(systemBarsPadding)) {
         when (selectedTab) {
-            Tab.HOME -> HomeScreen(appState)
-            Tab.HISTORY -> HistoryScreen(appState)
+            Tab.HOME ->
+                HomeScreen(
+                    appState,
+                    onViewAllPayments = {
+                        historySegment = HISTORY_PAYMENTS_SEGMENT
+                        selectedTab = Tab.HISTORY
+                    },
+                )
+            Tab.HISTORY -> HistoryScreen(appState, initialSegment = historySegment)
             Tab.SETTINGS -> SettingsNavHost(appState, onShowBottomBar = { showBottomBar = it })
         }
         if (showBottomBar) {
             ModernBottomNavBar(
                 selectedTab = selectedTab,
-                onTabSelected = { selectedTab = it },
+                onTabSelected = {
+                    if (it == Tab.HISTORY) historySegment = 0
+                    selectedTab = it
+                },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
         }

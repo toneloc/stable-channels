@@ -6,6 +6,8 @@ import SwiftUI
 @Observable
 final class PaymentDetailCoordinator {
     var paymentId: Int64?
+    /// Set by Home's "View all"; MainTabView switches to History and HistoryView shows Payments.
+    var showPaymentsRequested = false
 
     func open(_ payment: PaymentRecord) {
         paymentId = payment.id
