@@ -3424,7 +3424,7 @@ mod tests {
                     .lock()
                     .unwrap()
                     .iter()
-                    .find(|payment| payment.id == req.payment_id)
+                    .find(|payment| payment.payment_id == req.payment_id)
                     .cloned(),
             })
         }
@@ -4043,7 +4043,7 @@ mod tests {
             USER_CHANNEL_ID_DECIMAL.to_string(), Some("next-ucid".to_string()),
             CHANNEL_ID_HEX.to_string(), "next-channel".to_string(),
             COUNTERPARTY_HEX.to_string(), "next-node".to_string(),
-            msat, 0, None, fake as &dyn LdkServerCalls, 100_000.0,
+            msat, 0, fake as &dyn LdkServerCalls, 100_000.0,
         ).await;
     }
 
@@ -4051,6 +4051,18 @@ mod tests {
         std::sync::Arc::new(tokio::sync::Mutex::new(crate::push::PushService::new(
             &crate::config::PushConfig::default(), mgr.data_dir(),
         )))
+    }
+
+    fn assert_book_sync(fake: &FakeLdkServer, expected: f64, backing: u64) {
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&sends[0].custom_tlvs[0].value).unwrap();
+        let payload: serde_json::Value =
+            serde_json::from_str(envelope["payload"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["type"], "SYNC_V1");
+        assert_eq!(payload["expected_usd"], expected);
+        assert_eq!(payload["backing_sats"], backing);
     }
 
     fn assert_books(mgr: &StableChannelManager, expected_usd: f64, backing_sats: u64, native_sats: u64) {
@@ -4202,7 +4214,7 @@ mod tests {
             USER_CHANNEL_ID_DECIMAL.to_string(), Some("next-ucid".to_string()),
             CHANNEL_ID_HEX.to_string(), "next-channel".to_string(),
             COUNTERPARTY_HEX.to_string(), "next-node".to_string(),
-            9_990_000, 10_000, None, &fake as &dyn LdkServerCalls, 100_000.0,
+            9_990_000, 10_000, &fake as &dyn LdkServerCalls, 100_000.0,
         ).await;
         assert_books(&mgr, 40.0, 40_000, 0);
     }
@@ -4224,7 +4236,7 @@ mod tests {
         mgr.handle_payment_forwarded(
             USER_CHANNEL_ID_DECIMAL.into(), Some("next-ucid".into()),
             CHANNEL_ID_HEX.into(), "next-channel".into(), COUNTERPARTY_HEX.into(),
-            "next-peer".into(), 10_000_000, 0, None, &fake, 80_000.0,
+            "next-peer".into(), 10_000_000, 0, &fake, 80_000.0,
         ).await;
         assert_books(&mgr, 42.0, 52_500, 0);
         (mgr, fake, push)
@@ -5239,7 +5251,7 @@ mod tests {
             vec!["fake-payment-id".to_string()]
         );
         fake.payments.lock().unwrap().push(GrpcPayment {
-            id: "fake-payment-id".to_string(),
+            payment_id: "fake-payment-id".to_string(),
             status: PaymentStatus::Succeeded as i32,
             ..Default::default()
         });
@@ -6211,11 +6223,13 @@ mod tests {
                 channel_id: prev.into(),
                 user_channel_id: Some("10".into()),
                 node_id: Some("02aa".into()),
+                amount_msat: None,
             }],
             next_htlcs: vec![HtlcLocator {
                 channel_id: next.into(),
                 user_channel_id: Some("20".into()),
                 node_id: Some("02bb".into()),
+                amount_msat: None,
             }],
             total_fee_earned_msat: Some(7),
             skimmed_fee_msat: None,
@@ -6269,7 +6283,7 @@ mod tests {
             true,
         )])
         .with_payments(vec![GrpcPayment {
-            id: "payment-no-channel".into(),
+            payment_id: "payment-no-channel".into(),
             amount_msat: Some(21_000),
             fee_paid_msat: Some(10),
             direction: 1,
@@ -6352,7 +6366,7 @@ mod tests {
         )
         .unwrap();
         let fake = FakeLdkServer::new(vec![]).with_payments(vec![GrpcPayment {
-            id: "successful-payment".into(),
+            payment_id: "successful-payment".into(),
             amount_msat: Some(1_000_000),
             fee_paid_msat: Some(25),
             direction: 1,
