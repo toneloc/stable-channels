@@ -238,6 +238,7 @@
 		49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E033073A92D00217838 /* SendPaymentExecutor.swift */; };
 		49206E073073A92D00217838 /* SendFlowStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E023073A92D00217838 /* SendFlowStep.swift */; };
 		49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E043073A92D00217838 /* SlideToSendButton.swift */; };
+		49206E063073A92D00217838 /* SendFlowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E013073A92D00217838 /* SendFlowModel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -500,6 +501,7 @@
 		49206E023073A92D00217838 /* SendFlowStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowStep.swift; sourceTree = "<group>"; };
 		49206E033073A92D00217838 /* SendPaymentExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPaymentExecutor.swift; sourceTree = "<group>"; };
 		49206E043073A92D00217838 /* SlideToSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideToSendButton.swift; sourceTree = "<group>"; };
+		49206E013073A92D00217838 /* SendFlowModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -953,6 +955,7 @@
 		49206E003073A91800217838 /* Send */ = {
 			isa = PBXGroup;
 			children = (
+				49206E013073A92D00217838 /* SendFlowModel.swift */,
 				49206E023073A92D00217838 /* SendFlowStep.swift */,
 				49206E033073A92D00217838 /* SendPaymentExecutor.swift */,
 				49206E043073A92D00217838 /* SlideToSendButton.swift */,
@@ -1269,6 +1272,7 @@
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */,
+				49206E063073A92D00217838 /* SendFlowModel.swift in Sources */,
 				49206E073073A92D00217838 /* SendFlowStep.swift in Sources */,
 				49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */,
 				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
