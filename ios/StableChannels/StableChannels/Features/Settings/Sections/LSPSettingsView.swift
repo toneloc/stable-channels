@@ -260,15 +260,22 @@ struct LSPSettingsView: View {
                     Spacer()
                 }
             }
-            .disabled(isRestarting)
+            .disabled(!appState.networkMonitor.isOnline || isRestarting)
             .padding(.vertical, 4)
         } header: {
             Text(String(localized: "section_custom_lsp", defaultValue: "Connect to a Custom LSP"))
         } footer: {
-            Text(String(
-                localized: "info_custom_lsp",
-                defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
-            ))
+            if !appState.networkMonitor.isOnline {
+                Text(String(
+                    localized: "info_custom_lsp_offline",
+                    defaultValue: "Internet connection required to connect to a new LSP."
+                ))
+            } else {
+                Text(String(
+                    localized: "info_custom_lsp",
+                    defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
+                ))
+            }
         }
     }
 
@@ -284,25 +291,27 @@ struct LSPSettingsView: View {
                     Text(String(localized: "button_reset_lsp", defaultValue: "Reset LSP"))
                 }
             }
-            .disabled(appState.activeLSP.isDefault || isRestarting)
+            .disabled(!appState.networkMonitor.isOnline || appState.activeLSP.isDefault || isRestarting)
         }
     }
 
     // MARK: - Helpers
 
     private var connectionColor: Color {
+        guard appState.networkMonitor.isOnline else { return .orange }
         guard appState.nodeService.isRunning else { return .red }
         let isConnected = appState.nodeService.channels.contains {
             $0.counterpartyNodeId == appState.activeLSP.pubkey
         }
-        // If the node is running we consider it "connected" to the LSP for
-        // visual purposes. Peer-level connectivity is managed by LDK internally.
         return isConnected || appState.nodeService.isRunning ? .green : .orange
     }
 
     private var connectionLabel: String {
-        guard appState.nodeService.isRunning else {
+        guard appState.networkMonitor.isOnline else {
             return String(localized: "status_offline", defaultValue: "Offline")
+        }
+        guard appState.nodeService.isRunning else {
+            return String(localized: "status_disconnected", defaultValue: "Disconnected")
         }
         return String(localized: "status_connected", defaultValue: "Connected")
     }

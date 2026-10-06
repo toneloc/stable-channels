@@ -96,6 +96,14 @@ struct ChannelSettingsView: View {
                         ) {
                             showCloseChannelAlert = true
                         }
+                        .disabled(!appState.networkMonitor.isOnline)
+                    } footer: {
+                        if !appState.networkMonitor.isOnline {
+                            Text(String(
+                                localized: "info_close_channel_offline",
+                                defaultValue: "Internet connection required to close channel."
+                            ))
+                        }
                     }
                 } else {
                     Section {
@@ -115,6 +123,56 @@ struct ChannelSettingsView: View {
                         Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
                             .foregroundStyle(.secondary)
                     }
+                }
+            } else if appState.hasReadyChannel || appState.lightningBalanceSats > 0 {
+                Section {
+                    HStack {
+                        Text(String(localized: "label_capacity", defaultValue: "Capacity"))
+                        Spacer()
+                        Text(appState.lightningBalanceSats.satsFormatted)
+                    }
+                    HStack {
+                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Spacer()
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(appState.networkMonitor.isOnline ? .green : .orange)
+                                .frame(width: 8, height: 8)
+                            Text(appState.networkMonitor.isOnline
+                                ? String(localized: "channel_status_ready", defaultValue: "Ready")
+                                : String(localized: "channel_status_offline", defaultValue: "Offline"))
+                        }
+                    }
+                    if let txid = appState.fundingTxid, !txid.isEmpty {
+                        HStack {
+                            Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } footer: {
+                    Text(String(
+                        localized: "info_channel_offline_note",
+                        defaultValue: "Channel metrics cached. Reconnect to the internet for live balance synchronization."
+                    ))
+                }
+
+                Section {
+                    Button(
+                        String(localized: "button_close_channel", defaultValue: "Close channel"),
+                        role: .destructive
+                    ) {
+                        showCloseChannelAlert = true
+                    }
+                    .disabled(true)
+                } footer: {
+                    Text(String(
+                        localized: "info_close_channel_offline",
+                        defaultValue: "Internet connection required to close channel."
+                    ))
                 }
             } else {
                 Section {
