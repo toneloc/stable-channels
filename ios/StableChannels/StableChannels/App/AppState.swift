@@ -126,7 +126,7 @@ class AppState {
         self.networkMonitor.onStatusChange = { [weak self] status in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if status == .online && self.phase == .offline {
+                if status == .online {
                     await self.retryConnection()
                 }
             }
@@ -1072,12 +1072,18 @@ class AppState {
 
         if !networkMonitor.isOnline {
             AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
-            phase = .offline
+            if phase == .offline {
+                phase = .offline
+            }
             return
         }
 
+        let previousPhase = phase
+
         if !nodeService.isRunning {
-            isSyncing = true
+            if previousPhase == .offline {
+                isSyncing = true
+            }
             defer { isSyncing = false }
             do {
                 try await startNodeWithFailover(mnemonic: "")
@@ -1090,6 +1096,9 @@ class AppState {
                 hasCompletedInitialSync = true
                 refreshBalances()
                 updateStableBalances()
+                await priceService.fetchPrice()
+                recordCurrentPrice()
+                priceService.startAutoRefresh()
                 blockHeightService.start()
                 mempoolWebSocketService.connect()
                 Task { await confirmationPollingService?.pollOnce() }
@@ -1100,22 +1109,31 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
-                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                    error: error,
-                    isNetworkOffline: !networkMonitor.isOnline
-                ) {
-                    phase = .offline
+                if previousPhase == .offline {
+                    if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                        error: error,
+                        isNetworkOffline: !networkMonitor.isOnline
+                    ) {
+                        phase = .offline
+                    } else {
+                        phase = .error("Node start failed: \(error.localizedDescription)")
+                    }
                 } else {
-                    phase = .error("Node start failed: \(error.localizedDescription)")
+                    AuditService.log("RETRY_CONNECTION_WALLET_FAILED", data: [
+                        "error": error.localizedDescription
+                    ])
                 }
             }
         } else {
             phase = .wallet
             hasCompletedInitialSync = true
             refreshBalances()
+            updateStableBalances()
             await priceService.fetchPrice()
             recordCurrentPrice()
             ensureLSPConnected()
+            mempoolWebSocketService.connect()
+            priceService.startAutoRefresh()
         }
     }
 
