@@ -28,6 +28,16 @@
 		490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */; };
 		490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */; };
 		491D2E883008F96B0009FADF /* PaymentDetailCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */; };
+		49206DF53073A8A200217838 /* SendAmountCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF43073A8A200217838 /* SendAmountCalculator.swift */; };
+		49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */; };
+		49206DFC3073A90200217838 /* SlideToSendButtonTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DFB3073A90200217838 /* SlideToSendButtonTests.swift */; };
+		49206DFD3073A90200217838 /* SendFlowModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DFA3073A90200217838 /* SendFlowModelTests.swift */; };
+		49206DFE3073A90200217838 /* CurveGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF83073A90200217838 /* CurveGeometryTests.swift */; };
+		49206DFF3073A90200217838 /* SendAmountCalculatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */; };
+		49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E033073A92D00217838 /* SendPaymentExecutor.swift */; };
+		49206E063073A92D00217838 /* SendFlowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E013073A92D00217838 /* SendFlowModel.swift */; };
+		49206E073073A92D00217838 /* SendFlowStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E023073A92D00217838 /* SendFlowStep.swift */; };
+		49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E043073A92D00217838 /* SlideToSendButton.swift */; };
 		4923802D2FB51864007D9419 /* InvoiceScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4923802C2FB51864007D9419 /* InvoiceScanView.swift */; };
 		492B54AD300CC81D003EC383 /* TxConfirmationResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AC300CC81D003EC383 /* TxConfirmationResolver.swift */; };
 		492B54AE300CC81D003EC383 /* BlockHeightResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */; };
@@ -233,12 +243,6 @@
 		E8C9430FF8920728747EF550 /* SendView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E0FAABBD08BCBF20220C850 /* SendView.swift */; };
 		F54F1E51D4AF15D8700AB399 /* NotificationService.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = A2BA7D52F62DF17EFF532635 /* NotificationService.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E44DC584AB4E87B5F6A2921 /* BackupPromptView.swift */; };
-		49206DF53073A8A200217838 /* SendAmountCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF43073A8A200217838 /* SendAmountCalculator.swift */; };
-		49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */; };
-		49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E033073A92D00217838 /* SendPaymentExecutor.swift */; };
-		49206E073073A92D00217838 /* SendFlowStep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E023073A92D00217838 /* SendFlowStep.swift */; };
-		49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E043073A92D00217838 /* SlideToSendButton.swift */; };
-		49206E063073A92D00217838 /* SendFlowModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206E013073A92D00217838 /* SendFlowModel.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -289,6 +293,16 @@
 		490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastCheckerTests.swift; sourceTree = "<group>"; };
 		490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeSyncParityTests.swift; sourceTree = "<group>"; };
 		491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailCoordinator.swift; sourceTree = "<group>"; };
+		49206DF43073A8A200217838 /* SendAmountCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculator.swift; sourceTree = "<group>"; };
+		49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LemniscateBloomIcon.swift; sourceTree = "<group>"; };
+		49206DF83073A90200217838 /* CurveGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveGeometryTests.swift; sourceTree = "<group>"; };
+		49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculatorTests.swift; sourceTree = "<group>"; };
+		49206DFA3073A90200217838 /* SendFlowModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowModelTests.swift; sourceTree = "<group>"; };
+		49206DFB3073A90200217838 /* SlideToSendButtonTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideToSendButtonTests.swift; sourceTree = "<group>"; };
+		49206E013073A92D00217838 /* SendFlowModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowModel.swift; sourceTree = "<group>"; };
+		49206E023073A92D00217838 /* SendFlowStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowStep.swift; sourceTree = "<group>"; };
+		49206E033073A92D00217838 /* SendPaymentExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPaymentExecutor.swift; sourceTree = "<group>"; };
+		49206E043073A92D00217838 /* SlideToSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideToSendButton.swift; sourceTree = "<group>"; };
 		4923802C2FB51864007D9419 /* InvoiceScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoiceScanView.swift; sourceTree = "<group>"; };
 		492B54AA300CC81D003EC383 /* BlockHeightResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlockHeightResolver.swift; sourceTree = "<group>"; };
 		492B54AB300CC81D003EC383 /* EsploraError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraError.swift; sourceTree = "<group>"; };
@@ -496,12 +510,6 @@
 		E9358B0D20BFCDFAF7128834 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F7A322E98DBC403722CD1C6A /* RestoreBackupSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RestoreBackupSheet.swift; sourceTree = "<group>"; };
 		FFC40949E35E9317ACA30E35 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
-		49206DF43073A8A200217838 /* SendAmountCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculator.swift; sourceTree = "<group>"; };
-		49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LemniscateBloomIcon.swift; sourceTree = "<group>"; };
-		49206E023073A92D00217838 /* SendFlowStep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowStep.swift; sourceTree = "<group>"; };
-		49206E033073A92D00217838 /* SendPaymentExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPaymentExecutor.swift; sourceTree = "<group>"; };
-		49206E043073A92D00217838 /* SlideToSendButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SlideToSendButton.swift; sourceTree = "<group>"; };
-		49206E013073A92D00217838 /* SendFlowModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowModel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -563,6 +571,17 @@
 				F11CF0F21D3319E86AF791B6 /* StableChannelsTests */,
 				052E4A6FC61BFB06E0A2A974 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		49206E003073A91800217838 /* Send */ = {
+			isa = PBXGroup;
+			children = (
+				49206E013073A92D00217838 /* SendFlowModel.swift */,
+				49206E023073A92D00217838 /* SendFlowStep.swift */,
+				49206E033073A92D00217838 /* SendPaymentExecutor.swift */,
+				49206E043073A92D00217838 /* SlideToSendButton.swift */,
+			);
+			path = Send;
 			sourceTree = "<group>";
 		};
 		4944457E3053E42800B5A146 /* Price */ = {
@@ -952,17 +971,6 @@
 			path = LNURL;
 			sourceTree = "<group>";
 		};
-		49206E003073A91800217838 /* Send */ = {
-			isa = PBXGroup;
-			children = (
-				49206E013073A92D00217838 /* SendFlowModel.swift */,
-				49206E023073A92D00217838 /* SendFlowStep.swift */,
-				49206E033073A92D00217838 /* SendPaymentExecutor.swift */,
-				49206E043073A92D00217838 /* SlideToSendButton.swift */,
-			);
-			path = Send;
-			sourceTree = "<group>";
-		};
 		DD0CC2D41227228C216D4BE8 /* Transfer */ = {
 			isa = PBXGroup;
 			children = (
@@ -1017,6 +1025,7 @@
 				49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */,
 				DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
+				49206DF83073A90200217838 /* CurveGeometryTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
@@ -1036,6 +1045,9 @@
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
+				49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */,
+				49206DFA3073A90200217838 /* SendFlowModelTests.swift */,
+				49206DFB3073A90200217838 /* SlideToSendButtonTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
 				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
@@ -1201,6 +1213,10 @@
 				499B40AC2F9D46C70004CB73 /* PendingPushPaymentTests.swift in Sources */,
 				4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */,
 				49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */,
+				49206DFC3073A90200217838 /* SlideToSendButtonTests.swift in Sources */,
+				49206DFD3073A90200217838 /* SendFlowModelTests.swift in Sources */,
+				49206DFE3073A90200217838 /* CurveGeometryTests.swift in Sources */,
+				49206DFF3073A90200217838 /* SendAmountCalculatorTests.swift in Sources */,
 				4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */,
 				4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */,
 				49D997493074F5D10024B3A7 /* NetworkReachabilityTests.swift in Sources */,
