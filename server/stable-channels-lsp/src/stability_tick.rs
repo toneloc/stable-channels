@@ -139,6 +139,8 @@ impl WakeWatcher {
         let mut accepted = Vec::new();
         for wake in group_by_peer(notifications) {
             if self.watching.contains_key(&wake.node_id) {
+                // No wake is lost, whatever its direction: the push that started the watch holds the peer's push cooldown.
+                info!("[stability_tick] {} is already being watched; wake skipped", wake.node_id);
                 continue;
             }
             if self.dispatching.insert(wake.node_id.clone()) {
@@ -239,7 +241,8 @@ async fn watch_wakes(
                 continue;
             }
             _ = poll.tick(), if !watcher.watching.is_empty() => {
-                settle_reconnected(&state, &mut watcher).await
+                settle_reconnected(&state, &mut watcher).await;
+                continue;
             }
         };
         for wake in watcher.accept(notifications) {
@@ -254,12 +257,8 @@ async fn watch_wakes(
     }
 }
 
-/// One poll of the watched peers. Each peer found usable gets a settlement pass over its
-/// channels; any wake that pass still asks for is returned to go through the normal push rules.
-async fn settle_reconnected(
-    state: &AppState,
-    watcher: &mut WakeWatcher,
-) -> Vec<WakeNotificationRequest> {
+/// One poll of the watched peers. Each peer found usable gets one settlement pass over its channels.
+async fn settle_reconnected(state: &AppState, watcher: &mut WakeWatcher) {
     let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
     let rpc_timeout = Duration::from_secs(WAKE_WATCH_RPC_TIMEOUT_SECS);
     let channels = match timeout(rpc_timeout, ldk.list_channels(ListChannelsRequest {})).await {
@@ -273,7 +272,6 @@ async fn settle_reconnected(
             Vec::new()
         }
     };
-    let mut follow_ups = Vec::new();
     for outcome in watcher.poll(&channels, Instant::now()) {
         let watch = match outcome {
             WakeOutcome::TimedOut(watch) => {
@@ -296,13 +294,10 @@ async fn settle_reconnected(
             warn!("[stability_tick] {} reconnected but the price cache is cold", peer);
             continue;
         }
-        let plan = {
-            let mut mgr = state.stable_manager.lock().await;
-            mgr.run_tick_plan(ldk, btc_price, TickScope::WokenPeer(peer)).await
-        };
-        follow_ups.extend(plan.notifications);
+        let mut mgr = state.stable_manager.lock().await;
+        // Wakes this pass asks for are dropped: the push that started the watch holds the peer's cooldown, and the regular tick asks again.
+        mgr.run_tick_plan(ldk, btc_price, TickScope::WokenPeer(peer)).await;
     }
-    follow_ups
 }
 
 #[cfg(test)]

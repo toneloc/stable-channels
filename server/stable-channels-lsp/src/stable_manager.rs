@@ -2159,6 +2159,7 @@ impl StableChannelManager {
                 return plan;
             }
         };
+        // One snapshot per logical channel: LDK draws user_channel_id at random per channel, and a splice keeps the same channel entry.
         let mut by_user_channel_id: std::collections::HashMap<u128, Channel> =
             std::collections::HashMap::new();
         for c in &channels {
@@ -5676,6 +5677,27 @@ mod tests {
         mgr.run_tick_plan(&restored, 80_000.0, TickScope::All).await;
         assert!((mgr.stable_channels[0].expected_usd.0 - 50.0).abs() < 1e-6, "the unclaimed top-up must not be deducted as a spend");
         assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+    }
+
+    #[tokio::test]
+    async fn wake_pass_pays_only_the_woken_peer() {
+        let mut mgr = make_manager();
+        let (woken_uid, other_uid) = (189476124653200987495269098788434301048u128, 271828182845904523536028747135266249775u128);
+        seed_channel(&mut mgr, woken_uid, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 50.0, 50_000, 0, 50_000, 100_000.0);
+        seed_channel(&mut mgr, other_uid, ROUTING_PEER_HEX, ROUTING_CHANNEL_HEX, 50.0, 50_000, 0, 50_000, 100_000.0);
+        // Both channels are usable and equally below target, so only the scope keeps the other peer unpaid.
+        let ldk = FakeLdkServer::new(vec![
+            make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true),
+            make_channel(ROUTING_CHANNEL_HEX, &other_uid.to_string(), ROUTING_PEER_HEX, 100_000, 50_000_000, true),
+        ]);
+
+        mgr.run_tick_plan(&ldk, 80_000.0, TickScope::WokenPeer(COUNTERPARTY_HEX)).await;
+
+        let sends = ldk.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1, "a wake pass pays the woken peer only");
+        assert_eq!(sends[0].node_id, COUNTERPARTY_HEX);
+        assert_eq!(mgr.stable_channels[0].backing_sats, 62_500);
+        assert_eq!(mgr.stable_channels[1].backing_sats, 50_000, "the other peer is left to the regular tick");
     }
 
     #[tokio::test]
