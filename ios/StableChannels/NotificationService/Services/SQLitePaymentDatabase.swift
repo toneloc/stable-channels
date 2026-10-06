@@ -104,7 +104,31 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         if !isMigrationApplied {
             if sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK {
                 var migrationFailed = false
-                if !existingCols.contains("backing_applied") {
+                var alreadyMarkedInTransaction = false
+                var markerStmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, checkSQL, -1, &markerStmt, nil) == SQLITE_OK {
+                    alreadyMarkedInTransaction = sqlite3_step(markerStmt) == SQLITE_ROW
+                    sqlite3_finalize(markerStmt)
+                } else {
+                    migrationFailed = true
+                }
+
+                var colsNow = Set<String>()
+                if !migrationFailed && !alreadyMarkedInTransaction {
+                    var colsStmt: OpaquePointer?
+                    if sqlite3_prepare_v2(db, "PRAGMA table_info(payments)", -1, &colsStmt, nil) == SQLITE_OK {
+                        while sqlite3_step(colsStmt) == SQLITE_ROW {
+                            if let namePtr = sqlite3_column_text(colsStmt, 1) {
+                                colsNow.insert(String(cString: namePtr))
+                            }
+                        }
+                        sqlite3_finalize(colsStmt)
+                    } else {
+                        migrationFailed = true
+                    }
+                }
+
+                if !migrationFailed && !alreadyMarkedInTransaction && !colsNow.contains("backing_applied") {
                     let alterSQL = "ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0;"
                     var errMsg: UnsafeMutablePointer<CChar>?
                     let rc = sqlite3_exec(db, alterSQL, nil, nil, &errMsg)
@@ -119,24 +143,25 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                             migrationFailed = true
                         }
                     }
-                }
 
-                if !migrationFailed {
-                    // Backfill legacy completed rows as already applied so existing stability records
-                    // are not debited a second time upon node upgrade, while preserving genuinely
-                    // unapplied placeholder rows for recovery.
-                    var backfillErr: UnsafeMutablePointer<CChar>?
-                    let backfillSQL = "UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0;"
-                    let backfillRc = sqlite3_exec(db, backfillSQL, nil, nil, &backfillErr)
-                    if backfillRc != SQLITE_OK {
-                        if backfillErr != nil {
-                            sqlite3_free(backfillErr)
+                    if !migrationFailed {
+                        // The only unambiguous legacy state is the column-absent upgrade path: all
+                        // non-placeholder rows just received backing_applied = 0 from ALTER TABLE, so
+                        // mark them applied to prevent old completed stability rows from debiting again.
+                        // If the column already exists, a 0 may be a live owed debit and must be left alone.
+                        var backfillErr: UnsafeMutablePointer<CChar>?
+                        let backfillSQL = "UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0;"
+                        let backfillRc = sqlite3_exec(db, backfillSQL, nil, nil, &backfillErr)
+                        if backfillRc != SQLITE_OK {
+                            if backfillErr != nil {
+                                sqlite3_free(backfillErr)
+                            }
+                            migrationFailed = true
                         }
-                        migrationFailed = true
                     }
                 }
 
-                if !migrationFailed {
+                if !migrationFailed && !alreadyMarkedInTransaction {
                     var markErr: UnsafeMutablePointer<CChar>?
                     let markSQL = "INSERT OR REPLACE INTO schema_migrations (name) VALUES ('migration_backing_applied_v1');"
                     let markRc = sqlite3_exec(db, markSQL, nil, nil, &markErr)

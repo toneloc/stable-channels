@@ -438,8 +438,8 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
         }
     }
 
-    func testMigration_interruptedBetweenDDLAndBackfill_resumesAndRecovers() throws {
-        let interruptedSchema = """
+    func testMigration_markerMissingWithExistingColumnPreservesOwedStabilityDebitFlag() throws {
+        let schema = """
         CREATE TABLE payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             payment_id TEXT UNIQUE,
@@ -460,19 +460,20 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
         INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, is_placeholder, backing_applied)
-        VALUES ('interrupted-completed-1', 'stability', 'sent', 10000000, 'completed', 0, 0);
+        VALUES ('owed-debit-1', 'stability', 'sent', 10000000, 'completed', 0, 0);
         INSERT INTO channels (channel_id, user_channel_id, stable_sats)
-        VALUES ('chan-1', 'ucid-interrupted-1', 40000);
+        VALUES ('chan-1', 'ucid-owed-1', 50000);
         """
 
-        try executeRawSQL(path: tempDBPath, sql: interruptedSchema)
+        try executeRawSQL(path: tempDBPath, sql: schema)
 
         SQLitePaymentDatabase.didEnsureColumns = false
         let db = SQLitePaymentDatabase(dbPath: tempDBPath)
 
-        // Trigger openDB and migration check
+        // Trigger openDB and the marker-only migration path. Because backing_applied already
+        // exists, a 0 may be an owed debit and must not be blanket-stamped as applied.
         _ = db.recordPayment(
-            paymentId: "trigger-recovery-1",
+            paymentId: "trigger-marker-only-1",
             paymentType: "lightning",
             direction: "received",
             amountMsat: 1000,
@@ -493,13 +494,13 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
         var stmt: OpaquePointer?
         if sqlite3_prepare_v2(
             sqlite,
-            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = 'interrupted-completed-1'",
+            "SELECT backing_applied, is_placeholder FROM payments WHERE payment_id = 'owed-debit-1'",
             -1,
             &stmt,
             nil
         ) == SQLITE_OK {
             XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW)
-            XCTAssertEqual(sqlite3_column_int64(stmt, 0), 1)
+            XCTAssertEqual(sqlite3_column_int64(stmt, 0), 0)
             XCTAssertEqual(sqlite3_column_int64(stmt, 1), 0)
             sqlite3_finalize(stmt)
         } else {

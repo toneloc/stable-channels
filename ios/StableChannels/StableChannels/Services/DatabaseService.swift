@@ -330,13 +330,21 @@ final class DatabaseService {
 
         if !isBackingMigrationApplied {
             try rawSQL.inTransaction(mode: "IMMEDIATE") {
-                if !paymentsColNames.contains("backing_applied") {
+                let alreadyMarked = try !rawSQL.query(
+                    "SELECT 1 FROM schema_migrations WHERE name = ?",
+                    params: [.text(migrationBackingApplied)]
+                ).isEmpty
+                if alreadyMarked { return }
+
+                let colsNow = Set(try rawSQL.query("PRAGMA table_info(payments)").compactMap { $0[1] as? String })
+                if !colsNow.contains("backing_applied") {
                     try rawSQL.execute("ALTER TABLE payments ADD COLUMN backing_applied INTEGER NOT NULL DEFAULT 0")
+                    // The only unambiguous legacy state is the column-absent upgrade path: all
+                    // non-placeholder rows just received backing_applied = 0 from ALTER TABLE, so
+                    // mark them applied to prevent old completed stability rows from debiting again.
+                    // If the column already exists, a 0 may be a live owed debit and must be left alone.
+                    try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
                 }
-                // Backfill legacy completed rows as already applied so existing stability records
-                // are not debited a second time upon node upgrade, while preserving genuinely
-                // unapplied placeholder rows for recovery.
-                try rawSQL.execute("UPDATE payments SET backing_applied = 1 WHERE is_placeholder = 0")
                 try rawSQL.execute(
                     "INSERT OR REPLACE INTO schema_migrations (name) VALUES (?)",
                     params: [.text(migrationBackingApplied)]
