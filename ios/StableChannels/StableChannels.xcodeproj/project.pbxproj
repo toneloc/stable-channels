@@ -124,6 +124,13 @@
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
+		49D997493074F5D10024B3A7 /* NetworkReachabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */; };
+		49D9974A3074F5D10024B3A7 /* OfflineHandlingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */; };
+		49D9974F3074F6090024B3A7 /* NetworkStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9974E3074F6090024B3A7 /* NetworkStatus.swift */; };
+		49D997503074F6090024B3A7 /* NetworkMonitoring.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9974C3074F6090024B3A7 /* NetworkMonitoring.swift */; };
+		49D997513074F6090024B3A7 /* NetworkReachabilityEvaluator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9974D3074F6090024B3A7 /* NetworkReachabilityEvaluator.swift */; };
+		49D997533074F6490024B3A7 /* OfflineNoticeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997523074F6490024B3A7 /* OfflineNoticeSheet.swift */; };
+		49D997563074F6E40024B3A7 /* NWPathNetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997553074F6E40024B3A7 /* NWPathNetworkMonitor.swift */; };
 		49D9C2E22FB6E52E00133509 /* BiometricService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E12FB6E52E00133509 /* BiometricService.swift */; };
 		49D9C2E42FB6F45600133509 /* AppAccessSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */; };
 		49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */; };
@@ -369,6 +376,13 @@
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
+		49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityTests.swift; sourceTree = "<group>"; };
+		49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineHandlingTests.swift; sourceTree = "<group>"; };
+		49D9974C3074F6090024B3A7 /* NetworkMonitoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitoring.swift; sourceTree = "<group>"; };
+		49D9974D3074F6090024B3A7 /* NetworkReachabilityEvaluator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityEvaluator.swift; sourceTree = "<group>"; };
+		49D9974E3074F6090024B3A7 /* NetworkStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkStatus.swift; sourceTree = "<group>"; };
+		49D997523074F6490024B3A7 /* OfflineNoticeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineNoticeSheet.swift; sourceTree = "<group>"; };
+		49D997553074F6E40024B3A7 /* NWPathNetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWPathNetworkMonitor.swift; sourceTree = "<group>"; };
 		49D9C2E12FB6E52E00133509 /* BiometricService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricService.swift; sourceTree = "<group>"; };
 		49D9C2E32FB6F45600133509 /* AppAccessSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAccessSettingsView.swift; sourceTree = "<group>"; };
 		49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeeRateService.swift; sourceTree = "<group>"; };
@@ -523,6 +537,7 @@
 				49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
+				49D9974B3074F5F00024B3A7 /* Network */,
 				D20000000000000000000001 /* Send */,
 			);
 			path = Domain;
@@ -703,6 +718,24 @@
 			path = BalanceBar;
 			sourceTree = "<group>";
 		};
+		49D9974B3074F5F00024B3A7 /* Network */ = {
+			isa = PBXGroup;
+			children = (
+				49D9974C3074F6090024B3A7 /* NetworkMonitoring.swift */,
+				49D9974D3074F6090024B3A7 /* NetworkReachabilityEvaluator.swift */,
+				49D9974E3074F6090024B3A7 /* NetworkStatus.swift */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
+		49D997543074F6820024B3A7 /* Network */ = {
+			isa = PBXGroup;
+			children = (
+				49D997553074F6E40024B3A7 /* NWPathNetworkMonitor.swift */,
+			);
+			path = Network;
+			sourceTree = "<group>";
+		};
 		49DDB0002FF0000000000001 /* Repositories */ = {
 			isa = PBXGroup;
 			children = (
@@ -737,6 +770,7 @@
 				4904A08B3055544100582069 /* BalanceScaleKinematics.swift */,
 				49BB390B0000000000000001 /* CurveProgressIndicator.swift */,
 				49E4567F2FCC596F00B0CA85 /* FullscreenQRZoomView.swift */,
+				49D997523074F6490024B3A7 /* OfflineNoticeSheet.swift */,
 				496A44412FCD4F75005AF12F /* QRCodeExtractor.swift */,
 				49E456802FCC596F00B0CA85 /* QRCodeUtility.swift */,
 				496A44422FCD4F75005AF12F /* QRInputToolbar.swift */,
@@ -814,6 +848,7 @@
 				498244AC3022718B0086BDB6 /* Biometric */,
 				495CB4023017AD1800560837 /* Confirmation */,
 				D20000000000000000000002 /* LNURL */,
+				49D997543074F6820024B3A7 /* Network */,
 				4944457E3053E42800B5A146 /* Price */,
 				49DDB0002FF0000000000001 /* Repositories */,
 				495CB4013017917400560837 /* WebSocket */,
@@ -954,6 +989,7 @@
 				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
 				49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */,
 				49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */,
+				DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -961,17 +997,18 @@
 				4944458330540C3500B5A146 /* InputSanitizerTests.swift */,
 				D20000000000000000000042 /* LNURLServiceTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
+				49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
+				49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
 				4993591630712D1500D6B50E /* PaymentDestinationClassifierTests.swift */,
+				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				499B40AB2F9D46C70004CB73 /* PendingPushPaymentTests.swift */,
 				4944457F3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift */,
 				490224CB302F90A500DF84AA /* PriceServiceTests.swift */,
-				D2000000000000000000004C /* PaymentFeeEstimatorTests.swift */,
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
-				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
 				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
@@ -979,10 +1016,10 @@
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				8ABF9700FAF2E4B9C85D8CB7 /* StabilityServiceTests.swift */,
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
+				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
 				490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */,
 				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
-				DF83E9374F720B69A8635A4F /* ChannelSweepTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
@@ -1140,6 +1177,8 @@
 				49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */,
 				4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */,
 				4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */,
+				49D997493074F5D10024B3A7 /* NetworkReachabilityTests.swift in Sources */,
+				49D9974A3074F5D10024B3A7 /* OfflineHandlingTests.swift in Sources */,
 				70CCF0022F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift in Sources */,
 				1B87226F9DC3AC6D3362D0CB /* StabilityServiceTests.swift in Sources */,
 				D1A60F120000000000000011 /* NodeStartupFailoverTests.swift in Sources */,
@@ -1161,6 +1200,9 @@
 				D2000000000000000000001B /* LNURLModels.swift in Sources */,
 				D2000000000000000000001D /* SecureEndpointValidator.swift in Sources */,
 				D2000000000000000000001F /* SecureHTTPTransport.swift in Sources */,
+				49D9974F3074F6090024B3A7 /* NetworkStatus.swift in Sources */,
+				49D997503074F6090024B3A7 /* NetworkMonitoring.swift in Sources */,
+				49D997513074F6090024B3A7 /* NetworkReachabilityEvaluator.swift in Sources */,
 				D20000000000000000000021 /* HTTPResponseParser.swift in Sources */,
 				D20000000000000000000023 /* URLSessionTransport.swift in Sources */,
 				D20000000000000000000011 /* Bech32.swift in Sources */,
@@ -1302,9 +1344,11 @@
 				1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */,
 				8C6EB05C5C93E0A887851D5D /* RateLimitService.swift in Sources */,
 				6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */,
+				49D997563074F6E40024B3A7 /* NWPathNetworkMonitor.swift in Sources */,
 				FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */,
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */,
+				49D997533074F6490024B3A7 /* OfflineNoticeSheet.swift in Sources */,
 				9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */,
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
 				495CB3FF3017724E00560837 /* ReconnectionManager.swift in Sources */,
