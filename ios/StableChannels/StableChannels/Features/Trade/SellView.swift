@@ -23,7 +23,9 @@ struct SellView: View {
         case done
     }
 
-    private var tradePrice: Double { appState.accountingBTCPrice }
+    private var tradePrice: Double {
+        appState.accountingBTCPrice > 0 ? appState.accountingBTCPrice : appState.btcPrice
+    }
 
     private var maxSellUSD: Double {
         Double(appState.tradeService?.maxSellCents(sc: appState.stableChannel, price: tradePrice) ?? 0) / 100

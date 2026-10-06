@@ -124,11 +124,12 @@ struct HomeView: View {
                 allocation: allocation,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
                     sc: appState.stableChannel,
-                    price: appState.accountingBTCPrice
+                    price: appState.accountingBTCPrice > 0 ? appState.accountingBTCPrice : appState.btcPrice
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
                 onDragStarted: { appState.ensureLSPConnected() },
-                onTradeRequest: (appState.hasReadyChannel && appState.networkMonitor.isOnline) ? { request in
+                onTradeRequest: appState.hasReadyChannel ? { request in
+                    guard appState.networkMonitor.isOnline else { return }
                     tradeRequest = request
                 } : nil,
                 onEmptyInteraction: {

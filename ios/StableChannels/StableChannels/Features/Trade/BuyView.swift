@@ -27,7 +27,9 @@ struct BuyView: View {
         BuyAmountPolicy.maximumUsd(appState.stableChannel.expectedUSD.amount)
     }
 
-    private var tradePrice: Double { appState.accountingBTCPrice }
+    private var tradePrice: Double {
+        appState.accountingBTCPrice > 0 ? appState.accountingBTCPrice : appState.btcPrice
+    }
 
     private var amountUSD: Double {
         Double(amountStr) ?? 0
