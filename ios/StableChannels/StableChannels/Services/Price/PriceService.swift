@@ -2,7 +2,17 @@ import Foundation
 
 @Observable
 class PriceService {
-    var currentPrice: Double = 0.0
+    private static let cachedPriceKey = "cached_btc_price"
+
+    var currentPrice: Double = {
+        if let price = PriceOracleAnchorStore.lastKnownPrice(suiteName: Constants.appGroupIdentifier) {
+            return price
+        }
+        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let fallback = ud?.double(forKey: cachedPriceKey) ?? 0.0
+        return PriceOracle.isPlausibleBitcoinPrice(fallback) ? fallback : 0.0
+    }()
+
     private(set) var lastUpdate: Date = .distantPast
     private(set) var isUpdating = false
     private(set) var isTrustedForAccounting = false
@@ -53,9 +63,16 @@ class PriceService {
     }
 
     func seedDisplayPrice(_ price: Double) {
-        guard currentPrice <= 0, PriceOracle.isPlausibleBitcoinPrice(price) else { return }
-        currentPrice = price
-        isTrustedForAccounting = false
+        guard PriceOracle.isPlausibleBitcoinPrice(price) else { return }
+        if currentPrice <= 0 {
+            currentPrice = price
+            isTrustedForAccounting = false
+        }
+        PriceOracleAnchorStore.save(
+            price: price,
+            suiteName: Constants.appGroupIdentifier
+        )
+        UserDefaults(suiteName: Constants.appGroupIdentifier)?.set(price, forKey: Self.cachedPriceKey)
     }
 
     #if DEBUG

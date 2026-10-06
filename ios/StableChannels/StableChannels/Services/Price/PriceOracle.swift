@@ -73,6 +73,16 @@ enum PriceOracleAnchorStore {
         guard age >= 0, age <= PriceOracle.maximumTrustedPriceAge else { return nil }
         return anchor.price
     }
+
+    static func lastKnownPrice(suiteName: String) -> Double? {
+        guard let defaults = UserDefaults(suiteName: suiteName),
+              let values = defaults.dictionary(forKey: defaultsKey),
+              let price = (values[priceKey] as? NSNumber)?.doubleValue else {
+            return nil
+        }
+        guard PriceOracle.isPlausibleBitcoinPrice(price) else { return nil }
+        return price
+    }
 }
 
 enum PriceOracleFailure: Error, Equatable, CustomStringConvertible {
