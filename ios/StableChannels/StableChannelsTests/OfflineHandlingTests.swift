@@ -168,4 +168,35 @@ final class OfflineHandlingTests: XCTestCase {
         mockMonitor.setStatus(.online)
         await fulfillment(of: [expectation], timeout: 1.0)
     }
+
+    func testEffectiveTradePriceFallback() {
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        // When accounting price is 0, effectiveTradePrice falls back to btcPrice
+        XCTAssertEqual(appState.accountingBTCPrice, 0.0)
+        XCTAssertGreaterThan(appState.btcPrice, 0.0)
+        XCTAssertEqual(appState.effectiveTradePrice, appState.btcPrice)
+
+        #if DEBUG
+            // When accounting price is trusted and positive, effectiveTradePrice uses accounting price
+            appState.priceService.setPriceForTesting(68_500)
+            XCTAssertEqual(appState.accountingBTCPrice, 68_500)
+            XCTAssertEqual(appState.effectiveTradePrice, 68_500)
+        #endif
+    }
+
+    func testOfflineCachedNodeIdAvailableWhenNodeNotRunning() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        let expectedNodeId = "02710b5069e90a44deadbeef"
+        ud?.set(expectedNodeId, forKey: "node_id")
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        XCTAssertFalse(appState.nodeService.isRunning)
+        let cachedNodeId = UserDefaults(suiteName: suite)?.string(forKey: "node_id")
+        XCTAssertEqual(cachedNodeId, expectedNodeId)
+    }
 }
