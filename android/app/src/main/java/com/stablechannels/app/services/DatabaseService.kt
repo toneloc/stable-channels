@@ -2215,13 +2215,44 @@ class DatabaseService(context: Context) :
             )
             .use { it.moveToFirst() }
 
+    data class TxidlessReceive(val id: Long, val address: String?)
+
     /**
-     * Attaches [txid] to the oldest txid-less pending receive with exactly [amountMsat], whatever
-     * its address. For placeholders the websocket never resolved (e.g. the deposit arrived while
-     * the app was closed), using a txid the wallet itself reports. Does nothing if any row already
-     * carries the txid. Returns true when a row was updated.
+     * Txid-less pending receives with exactly [amountMsat], oldest first. Empty when a row already
+     * carries [txid]. The caller checks the address before calling [adoptTxidForRow].
      */
-    fun adoptTxidForPlaceholder(txid: String, amountMsat: Long): Boolean {
+    fun findTxidlessReceives(txid: String, amountMsat: Long): List<TxidlessReceive> {
+        val db = readableDatabase
+        val tracked =
+            db.rawQuery("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)).use {
+                it.moveToFirst()
+            }
+        if (tracked) return emptyList()
+        return db.rawQuery(
+                """
+                SELECT id, address FROM payments
+                WHERE payment_type = 'onchain' AND direction = 'received'
+                  AND status = 'pending' AND (txid IS NULL OR txid = '')
+                  AND amount_msat = ?
+                ORDER BY created_at ASC
+                """
+                    .trimIndent(),
+                arrayOf(amountMsat.toString()),
+            )
+            .use {
+                buildList {
+                    while (it.moveToNext()) {
+                        add(TxidlessReceive(it.getLong(0), it.getString(1)))
+                    }
+                }
+            }
+    }
+
+    /**
+     * Attaches [txid] to the txid-less pending receive [rowId]. Does nothing if the row got a txid
+     * meanwhile or any row already carries [txid]. Returns true when the row was updated.
+     */
+    fun adoptTxidForRow(rowId: Long, txid: String): Boolean {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -2230,25 +2261,18 @@ class DatabaseService(context: Context) :
                     it.moveToFirst()
                 }
             if (tracked) return false
-            val rowId =
-                db.rawQuery(
-                        """
-                        SELECT id FROM payments
-                        WHERE payment_type = 'onchain' AND direction = 'received'
-                          AND status = 'pending' AND (txid IS NULL OR txid = '')
-                          AND amount_msat = ?
-                        ORDER BY created_at ASC LIMIT 1
-                        """
-                            .trimIndent(),
-                        arrayOf(amountMsat.toString()),
-                    )
-                    .use { if (it.moveToFirst()) it.getLong(0) else null } ?: return false
             val cv =
                 ContentValues().apply {
                     put("payment_id", "onchain_receive_$txid")
                     put("txid", txid)
                 }
-            val updated = db.update("payments", cv, "id = ?", arrayOf(rowId.toString())) > 0
+            val updated =
+                db.update(
+                    "payments",
+                    cv,
+                    "id = ? AND status = 'pending' AND (txid IS NULL OR txid = '')",
+                    arrayOf(rowId.toString()),
+                ) > 0
             db.setTransactionSuccessful()
             return updated
         } finally {

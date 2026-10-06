@@ -3833,8 +3833,6 @@ class AppState(private val context: Context) : ViewModel() {
 
     internal fun detectOnchainDeposit() {
         val db = databaseService
-        recoverMissedReceive()
-        resolveTxidlessReceives()
         // Use already-updated value — refreshBalances() was just called before this
         val currentSats = _onchainBalanceSats.value
         // Deposits are deferred (not dropped) while a splice/close is in flight, since the
@@ -3846,6 +3844,10 @@ class AppState(private val context: Context) : ViewModel() {
         if (isSweeping || pendingSplice != null) {
             return
         }
+        // Both only attach txids or add rows for deposits already received, so they wait for the
+        // same splice/close guard; they are retried on every tick.
+        recoverMissedReceive()
+        resolveTxidlessReceives()
         if (currentSats > prevOnchainSats) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
@@ -3952,6 +3954,9 @@ class AppState(private val context: Context) : ViewModel() {
      * on exact amount. Covers deposits that arrived while the app was closed, which would otherwise
      * stay at 0 confirmations forever because the confirmation poller only tracks rows with a txid.
      */
+    private val rejectedTxidAdoptions: MutableSet<Pair<Long, String>> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     private fun resolveTxidlessReceives() {
         val db = databaseService ?: return
         if (!db.hasTxidlessPendingReceive()) return
@@ -3970,12 +3975,31 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             var resolved = false
             inbound.forEach { (txid, msat) ->
-                if (db.adoptTxidForPlaceholder(txid, msat)) {
-                    resolved = true
-                    AuditService.log(
-                        "ONCHAIN_RECEIVE_TXID_RESOLVED",
-                        mapOf("txid" to txid, "sats" to msat / 1000),
-                    )
+                for (candidate in db.findTxidlessReceives(txid, msat)) {
+                    val rejection = candidate.id to txid
+                    if (rejection in rejectedTxidAdoptions) continue
+                    // Amount alone is ambiguous (the wallet history can hold old transactions of
+                    // the same size), so a row with a known address only adopts a txid that pays
+                    // it.
+                    val address = candidate.address?.trim().orEmpty()
+                    if (address.isNotEmpty()) {
+                        when (fetchTxPaysToAddress(txid, address)) {
+                            true -> {}
+                            false -> {
+                                rejectedTxidAdoptions.add(rejection)
+                                continue
+                            }
+                            null -> continue
+                        }
+                    }
+                    if (db.adoptTxidForRow(candidate.id, txid)) {
+                        resolved = true
+                        AuditService.log(
+                            "ONCHAIN_RECEIVE_TXID_RESOLVED",
+                            mapOf("txid" to txid, "sats" to msat / 1000),
+                        )
+                        break
+                    }
                 }
             }
             if (resolved) notifyPaymentRecorded()

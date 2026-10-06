@@ -535,7 +535,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 }
                             }
                         } else if (onchainSats == 0L) {
-                            // Only a pending send is left to show; its row is rendered below.
+                            // A pending send keeps the box up; show any deposit still confirming.
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(10.dp))

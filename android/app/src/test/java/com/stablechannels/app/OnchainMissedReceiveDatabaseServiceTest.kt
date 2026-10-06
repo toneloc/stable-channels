@@ -92,8 +92,10 @@ class OnchainMissedReceiveDatabaseServiceTest {
         )
 
         assertTrue(service.hasTxidlessPendingReceive())
-        assertEquals(false, service.adoptTxidForPlaceholder("tx9", 5_000_000))
-        assertTrue(service.adoptTxidForPlaceholder("tx1", 2_323_000))
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx9", 5_000_000))
+        val candidate = service.findTxidlessReceives("tx1", 2_323_000).single()
+        assertEquals(null, candidate.address)
+        assertTrue(service.adoptTxidForRow(candidate.id, "tx1"))
 
         assertEquals(listOf("tx1"), service.getPendingOnchainReceives().map { it.txid })
         assertEquals(false, service.hasTxidlessPendingReceive())
@@ -112,7 +114,56 @@ class OnchainMissedReceiveDatabaseServiceTest {
             status = "pending",
         )
 
-        assertEquals(false, service.adoptTxidForPlaceholder("tx1", 2_323_000))
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000))
+        service.close()
+    }
+
+    @Test
+    fun findReturnsAddressSoCallerCanRejectMismatch() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+            address = "addrA",
+        )
+
+        assertEquals("addrA", service.findTxidlessReceives("tx1", 2_323_000).single().address)
+        service.close()
+    }
+
+    @Test
+    fun adoptDoesNotOverwriteATxidSetMeanwhile() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+        )
+        val id = service.findTxidlessReceives("tx1", 2_323_000).single().id
+
+        assertTrue(service.adoptTxidForRow(id, "tx1"))
+        assertEquals(false, service.adoptTxidForRow(id, "tx2"))
+        assertEquals(listOf("tx1"), service.getPendingOnchainReceives().map { it.txid })
+        service.close()
+    }
+
+    @Test
+    fun recordsDepositWhenTxidlessRowOfSameAmountFailed() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "failed_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 11_732_000,
+            status = "failed",
+        )
+
+        assertNotEquals(-1L, service.recordMissedReceive("tx2", 11_732, null, null, "addr", since))
         service.close()
     }
 
