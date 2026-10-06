@@ -111,4 +111,61 @@ final class OfflineHandlingTests: XCTestCase {
         XCTAssertGreaterThan(appState.btcPrice, 0)
         XCTAssertGreaterThan(appState.totalBalanceUSD, 0)
     }
+
+    func testBalanceBarAllocationRemainsValidWhenOffline() {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(Int64(20_000), forKey: "cached_lightning_sats")
+        ud?.set(Int64(0), forKey: "cached_onchain_sats")
+        ud?.set(true, forKey: "cached_has_ready_channel")
+        PriceOracleAnchorStore.save(price: 80_000, suiteName: suite)
+
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+
+        let allocation = ChannelAllocation(
+            stableUSD: appState.stableUSD,
+            lightningBalanceSats: appState.lightningBalanceSats,
+            btcPrice: appState.btcPrice,
+            backingSatsOverride: appState.stableChannel.backingSats
+        )
+
+        XCTAssertFalse(allocation.isEmpty)
+        XCTAssertGreaterThan(allocation.btcPrice, 0)
+        XCTAssertEqual(allocation.stableFraction, 0.0, accuracy: 0.01)
+    }
+
+    func testTradeServiceMaxSellCentsUsesCachedChannelWhenNodeNotRunning() throws {
+        let suite = Constants.appGroupIdentifier
+        let ud = UserDefaults(suiteName: suite)
+        ud?.set(Int64(50_000), forKey: "cached_lightning_sats")
+        ud?.set(true, forKey: "cached_has_ready_channel")
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let db = try DatabaseService(dataDir: tempDir)
+        let tradeService = TradeService(nodeService: NodeService(), databaseService: db)
+        let sc = StableChannel.default
+
+        let maxSell = tradeService.maxSellCents(sc: sc, price: 60_000)
+        XCTAssertGreaterThan(maxSell, 0, "maxSellCents should compute positive limit from cached channel capacity")
+    }
+
+    func testNetworkStatusChangeRetriesConnectionWhileInWalletPhase() async {
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = AppState(networkMonitor: mockMonitor)
+        appState.phase = .wallet
+
+        let expectation = expectation(description: "Status change handler triggers retry")
+        mockMonitor.onStatusChange = { status in
+            if status == .online {
+                expectation.fulfill()
+            }
+        }
+
+        mockMonitor.setStatus(.online)
+        await fulfillment(of: [expectation], timeout: 1.0)
+    }
 }
