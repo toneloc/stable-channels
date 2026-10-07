@@ -17,6 +17,8 @@ struct CurveProgressIndicator: View {
     var duration: Double = 4.6
     var pulseDuration: Double = 4.2
     var showTrack: Bool = true
+    var enablesPulse: Bool = true
+    var enablesRotation: Bool = true
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -34,7 +36,7 @@ struct CurveProgressIndicator: View {
 
         let activePulseDuration = (curve == .roseCurve) ? 4.6 : (curve == .lemniscateBloom ? 5.0 : pulseDuration)
         let pulseAngle = (time.truncatingRemainder(dividingBy: activePulseDuration) / activePulseDuration) * (2.0 * .pi)
-        let detailScale = 0.52 + ((sin(pulseAngle + 0.55) + 1.0) / 2.0) * 0.48
+        let detailScale = enablesPulse ? (0.52 + ((sin(pulseAngle + 0.55) + 1.0) / 2.0) * 0.48) : 1.0
 
         let activeDuration = curve == .spiralSearch ? 7.8 :
             (curve == .roseCurve ? 5.4 : (curve == .lemniscateBloom ? 5.6 : duration))
@@ -43,7 +45,7 @@ struct CurveProgressIndicator: View {
         let activeParticles = curve == .roseCurve ? 64 : (curve == .lemniscateBloom ? 70 : particleCount)
         let progress = time.truncatingRemainder(dividingBy: activeDuration) / activeDuration
 
-        if curve == .roseCurve {
+        if enablesRotation && curve == .roseCurve {
             let rotationDuration = 28.0
             let rotationAngle = -(time.truncatingRemainder(dividingBy: rotationDuration) / rotationDuration) *
                 (2.0 * .pi)
