@@ -42,7 +42,7 @@ struct ContentView: View {
                 OfflinePageView(
                     isRetrying: appState.isRetryingConnection,
                     onRetry: {
-                        Task { await appState.retryConnection() }
+                        await appState.retryConnection()
                     },
                     onGoToHome: {
                         withAnimation(.easeInOut(duration: 0.35)) {

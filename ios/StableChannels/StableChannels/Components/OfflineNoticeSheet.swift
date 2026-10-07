@@ -2,7 +2,7 @@ import SwiftUI
 
 struct OfflinePageView: View {
     var isRetrying: Bool = false
-    var onRetry: () -> Void
+    var onRetry: () async -> Void
     var onGoToHome: (() -> Void)?
 
     @State private var isSpinning: Bool = false
@@ -57,7 +57,7 @@ struct OfflinePageView: View {
                             .animation(
                                 isSpinning
                                     ? .linear(duration: 0.85).repeatForever(autoreverses: false)
-                                    : .easeInOut(duration: 0.2),
+                                    : .easeInOut(duration: 0.25),
                                 value: isSpinning
                             )
 
@@ -71,19 +71,21 @@ struct OfflinePageView: View {
                 .buttonStyle(.bordered)
                 .tint(.primary)
                 .clipShape(Capsule())
-                .blur(radius: isRetrying ? 1.2 : 0)
-                .opacity(isRetrying ? 0.65 : 1.0)
-                .disabled(isRetrying)
-                .animation(.easeInOut(duration: 0.25), value: isRetrying)
+                .blur(radius: (isRetrying || isSpinning) ? 1.2 : 0)
+                .opacity((isRetrying || isSpinning) ? 0.65 : 1.0)
+                .disabled(isRetrying || isSpinning)
+                .animation(.easeInOut(duration: 0.25), value: isRetrying || isSpinning)
                 .onAppear {
                     if isRetrying {
                         isSpinning = true
                     }
                 }
                 .onChange(of: isRetrying) { _, retrying in
-                    isSpinning = retrying
                     if retrying {
+                        isSpinning = true
                         iconBounceTrigger += 1
+                    } else {
+                        isSpinning = false
                     }
                 }
 
@@ -110,11 +112,18 @@ struct OfflinePageView: View {
     }
 
     private func triggerRetry() {
-        guard !isRetrying else { return }
+        guard !isRetrying && !isSpinning else { return }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         iconBounceTrigger += 1
         isSpinning = true
-        onRetry()
+
+        Task { @MainActor in
+            async let minSpinDelay: Void = Task.sleep(nanoseconds: 850_000_000)
+            async let retryAction: Void = onRetry()
+            _ = try? await (minSpinDelay, retryAction)
+
+            isSpinning = false
+        }
     }
 }
 
