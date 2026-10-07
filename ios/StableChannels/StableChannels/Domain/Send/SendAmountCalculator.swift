@@ -109,8 +109,20 @@ enum SendAmountCalculator {
         unit: SendAmountUnit,
         btcPrice: Double
     ) -> UInt64 {
-        if let dest = destination, case .bolt11(_, _, let msat) = dest, let msat, msat > 0 {
-            return msat / 1000
+        if let dest = destination {
+            switch dest {
+            case .bolt11(_, _, let msat):
+                if let msat, msat > 0 {
+                    return msat / 1000
+                }
+            case .onchain(_, let amountSats):
+                let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty, let amountSats, amountSats > 0 {
+                    return amountSats
+                }
+            default:
+                break
+            }
         }
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let val = Double(trimmed), val > 0, !trimmed.starts(with: "-") else { return 0 }

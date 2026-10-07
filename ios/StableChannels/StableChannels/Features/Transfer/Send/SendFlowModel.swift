@@ -50,10 +50,34 @@ final class SendFlowModel {
         return true
     }
 
-    let lnurlService: LNURLServiceProtocol
+    let expectedNetwork: Network?
+    let customLNURLService: LNURLServiceProtocol?
 
-    init(expectedNetwork: Network = .signet, lnurlService: LNURLServiceProtocol? = nil) {
-        self.lnurlService = lnurlService ?? LNURLService(expectedNetwork: expectedNetwork)
+    var lnurlService: LNURLServiceProtocol? {
+        customLNURLService ?? expectedNetwork.map { LNURLService(expectedNetwork: $0) }
+    }
+
+    init(expectedNetwork: Network? = nil, lnurlService: LNURLServiceProtocol? = nil) {
+        self.expectedNetwork = expectedNetwork
+        self.customLNURLService = lnurlService
+    }
+
+    convenience init(appState: AppState, lnurlService: LNURLServiceProtocol? = nil) {
+        self.init(expectedNetwork: appState.nodeService.activeNetwork, lnurlService: lnurlService)
+    }
+
+    convenience init(nodeService: NodeService, lnurlService: LNURLServiceProtocol? = nil) {
+        self.init(expectedNetwork: nodeService.activeNetwork, lnurlService: lnurlService)
+    }
+
+    func resolvedLNURLService(appState: AppState) -> LNURLServiceProtocol? {
+        if let customLNURLService {
+            return customLNURLService
+        }
+        guard let net = expectedNetwork ?? appState.nodeService.activeNetwork else {
+            return nil
+        }
+        return LNURLService(expectedNetwork: net)
     }
 
     func onInputChanged() {
@@ -65,7 +89,15 @@ final class SendFlowModel {
                 destination = target
                 lnurlParams = nil
                 lnurlComment = ""
-                amountInputText = ""
+                if case .onchain(_, let amountSats) = target, let amountSats, amountSats > 0 {
+                    amountUnit = .sats
+                    amountInputText = "\(amountSats)"
+                } else if case .bolt11(_, _, let msat) = target, let msat, msat > 0 {
+                    amountUnit = .sats
+                    amountInputText = "\(msat / 1000)"
+                } else {
+                    amountInputText = ""
+                }
             }
         case .invalid, .empty:
             destination = nil
@@ -81,10 +113,14 @@ final class SendFlowModel {
 
         switch dest {
         case .lightningAddress(_, _, let url), .lnurlPay(let url):
+            guard let service = resolvedLNURLService(appState: appState) else {
+                errorMessage = "Wallet network is not initialized. Please wait until connected."
+                return
+            }
             isFetchingLNURL = true
             defer { isFetchingLNURL = false }
             do {
-                let params = try await lnurlService.fetchPayParams(from: url)
+                let params = try await service.fetchPayParams(from: url)
                 self.lnurlParams = params
                 self.step = .amount
             } catch {
@@ -102,7 +138,13 @@ final class SendFlowModel {
             } else {
                 self.step = .amount
             }
-        case .bolt12, .onchain:
+        case .bolt12:
+            self.step = .amount
+        case .onchain(_, let amountSats):
+            if let amountSats, amountSats > 0, amountInputText.isEmpty {
+                amountUnit = .sats
+                amountInputText = "\(amountSats)"
+            }
             self.step = .amount
         }
     }
@@ -252,7 +294,7 @@ final class SendFlowModel {
         destination = nil
         classification = .empty
         amountInputText = ""
-        amountUnit = .sats
+        amountUnit = .usd
         lnurlParams = nil
         lnurlComment = ""
         errorMessage = nil
@@ -277,6 +319,17 @@ final class SendFlowModel {
             errorMessage = "Waiting for network fee rate. Please wait a moment."
             resetToken += 1
             return
+        }
+
+        switch dest {
+        case .lightningAddress, .lnurlPay:
+            guard resolvedLNURLService(appState: appState) != nil else {
+                errorMessage = "Wallet network is not initialized. Please wait until connected."
+                resetToken += 1
+                return
+            }
+        default:
+            break
         }
 
         let authReason = "Confirm payment to \(dest.displayTitle)"
@@ -312,6 +365,8 @@ final class SendFlowModel {
         }
 
         do {
+            let service = resolvedLNURLService(appState: appState)
+                ?? LNURLService(expectedNetwork: appState.nodeService.activeNetwork ?? .bitcoin)
             let result = try await SendPaymentExecutor.execute(
                 destination: dest,
                 effectiveSats: sats,
@@ -319,7 +374,7 @@ final class SendFlowModel {
                 lnurlParams: lnurlParams,
                 lnurlComment: lnurlComment,
                 appState: appState,
-                lnurlService: lnurlService
+                lnurlService: service
             )
 
             // Onchain broadcasts immediately into mempool

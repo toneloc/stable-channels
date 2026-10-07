@@ -146,4 +146,32 @@ final class SendAmountCalculatorTests: XCTestCase {
         XCTAssertEqual(SendAmountUnit.sats.menuTitle, "Satoshis (sats)")
         XCTAssertEqual(SendAmountUnit.btc.menuTitle, "Bitcoin (BTC)")
     }
+
+    func testComputeEffectiveSats_readsDestinationOnchainAmountWhenInputEmpty() {
+        let dest = SendDestination.onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: 2500)
+        XCTAssertEqual(
+            SendAmountCalculator.computeEffectiveSats(destination: dest, inputText: "", unit: .sats, btcPrice: 50_000),
+            2500
+        )
+        XCTAssertEqual(
+            SendAmountCalculator.computeEffectiveSats(
+                destination: dest,
+                inputText: "   ",
+                unit: .usd,
+                btcPrice: 50_000
+            ),
+            2500
+        )
+
+        // When user explicitly enters an amount, the entered amount takes precedence
+        XCTAssertEqual(
+            SendAmountCalculator.computeEffectiveSats(
+                destination: dest,
+                inputText: "5000",
+                unit: .sats,
+                btcPrice: 50_000
+            ),
+            5000
+        )
+    }
 }

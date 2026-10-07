@@ -318,6 +318,7 @@ final class SendFlowModelTests: XCTestCase {
         model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
         model.onInputChanged()
         model.amountInputText = "5000"
+        model.amountUnit = .sats
         model.errorMessage = "Some error"
 
         model.resetFlow()
@@ -326,6 +327,7 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertEqual(model.inputText, "")
         XCTAssertNil(model.destination)
         XCTAssertEqual(model.amountInputText, "")
+        XCTAssertEqual(model.amountUnit, .usd)
         XCTAssertNil(model.errorMessage)
     }
 
@@ -337,5 +339,77 @@ final class SendFlowModelTests: XCTestCase {
 
         await model.executeSend(appState: appState)
         XCTAssertEqual(model.resetToken, initialToken + 1)
+    }
+
+    func testProceedFromAmount_preservesBIP21OnchainAmount() async {
+        let appState = AppState()
+        appState.spendableOnchainSats = 50_000
+        let model = SendFlowModel()
+
+        // URI specifying 1,000 sats (0.00001000 BTC)
+        model.inputText = "bitcoin:bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq?amount=0.00001000"
+        model.onInputChanged()
+
+        guard case .onchain(let addr, let amountSats) = model.destination else {
+            XCTFail("Expected .onchain destination")
+            return
+        }
+        XCTAssertEqual(addr, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+        XCTAssertEqual(amountSats, 1_000)
+        XCTAssertEqual(model.amountInputText, "1000")
+        XCTAssertEqual(model.amountUnit, .sats)
+
+        // Effective sats computed correctly from the model
+        let btcPrice: Double = 50_000
+        XCTAssertEqual(model.computeEffectiveSats(btcPrice: btcPrice), 1_000)
+
+        // Switch to USD unit preserves effective value ($0.50 at $50k/BTC)
+        model.switchUnit(to: .usd, btcPrice: btcPrice)
+        XCTAssertEqual(model.amountUnit, .usd)
+        XCTAssertEqual(model.amountInputText, "0.50")
+        XCTAssertEqual(model.computeEffectiveSats(btcPrice: btcPrice), 1_000)
+
+        // Switch back to sats preserves 1000 sats
+        model.switchUnit(to: .sats, btcPrice: btcPrice)
+        XCTAssertEqual(model.amountUnit, .sats)
+        XCTAssertEqual(model.amountInputText, "1000")
+
+        // Advancing from recipient step moves to amount step
+        await model.proceedFromRecipient(appState: appState)
+        XCTAssertEqual(model.step, .amount)
+
+        // Advancing from amount proceeds to confirm step
+        model.proceedFromAmount(appState: appState)
+        XCTAssertEqual(model.step, .confirm)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testProceedFromRecipient_failsClosedWhenNetworkUnknownForLNURL() async throws {
+        let appState = AppState()
+        let model = SendFlowModel() // expectedNetwork is nil by default
+        model.destination = .lnurlPay(url: try XCTUnwrap(URL(string: "https://ln.tips/user")))
+
+        await model.proceedFromRecipient(appState: appState)
+
+        XCTAssertEqual(model.step, .recipient)
+        XCTAssertEqual(model.errorMessage, "Wallet network is not initialized. Please wait until connected.")
+    }
+
+    func testExecuteSend_failsClosedWhenNetworkUnknownForLNURL() async throws {
+        let appState = AppState()
+        let model = SendFlowModel() // expectedNetwork is nil by default
+        model.destination = .lightningAddress(
+            handle: "alice",
+            domain: "tips.net",
+            url: try XCTUnwrap(URL(string: "https://tips.net"))
+        )
+        model.step = .confirm
+        model.amountInputText = "1000"
+        model.amountUnit = .sats
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(model.errorMessage, "Wallet network is not initialized. Please wait until connected.")
+        XCTAssertEqual(model.resetToken, 1)
     }
 }
