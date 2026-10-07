@@ -68,6 +68,8 @@ class DatabaseService(context: Context) :
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
+        // Nodes drop unconfirmed transactions after about two weeks.
+        internal const val STALE_PENDING_ONCHAIN_SECS = 14 * 86400L
         internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
@@ -2201,6 +2203,10 @@ class DatabaseService(context: Context) :
         )
     }
 
+    /**
+     * Whether a txid-less pending receive could adopt a txid. Rows without an address never can: an
+     * amount match alone doesn't prove which transaction paid them.
+     */
     fun hasTxidlessPendingReceive(): Boolean =
         readableDatabase
             .rawQuery(
@@ -2208,6 +2214,7 @@ class DatabaseService(context: Context) :
                 SELECT 1 FROM payments
                 WHERE payment_type = 'onchain' AND direction = 'received'
                   AND status = 'pending' AND (txid IS NULL OR txid = '')
+                  AND address IS NOT NULL AND address != ''
                 LIMIT 1
                 """
                     .trimIndent(),
@@ -2215,11 +2222,12 @@ class DatabaseService(context: Context) :
             )
             .use { it.moveToFirst() }
 
-    data class TxidlessReceive(val id: Long, val address: String?)
+    data class TxidlessReceive(val id: Long, val address: String)
 
     /**
-     * Txid-less pending receives with exactly [amountMsat], oldest first. Empty when a row already
-     * carries [txid]. The caller checks the address before calling [adoptTxidForRow].
+     * Txid-less pending receives that have an address and exactly [amountMsat], oldest first. Empty
+     * when a row already carries [txid]. The caller checks that [txid] pays the address before
+     * calling [adoptTxidForRow].
      */
     fun findTxidlessReceives(txid: String, amountMsat: Long): List<TxidlessReceive> {
         val db = readableDatabase
@@ -2233,6 +2241,7 @@ class DatabaseService(context: Context) :
                 SELECT id, address FROM payments
                 WHERE payment_type = 'onchain' AND direction = 'received'
                   AND status = 'pending' AND (txid IS NULL OR txid = '')
+                  AND address IS NOT NULL AND address != ''
                   AND amount_msat = ?
                 ORDER BY created_at ASC
                 """
@@ -2516,6 +2525,19 @@ class DatabaseService(context: Context) :
             null
         }
     }
+
+    /**
+     * Fails on-chain rows still unconfirmed after [STALE_PENDING_ONCHAIN_SECS]: a dropped send
+     * would otherwise read "Sending onchain…" forever, and a receive that never got a txid would
+     * stay pending. Returns how many rows changed.
+     */
+    fun failStalePendingOnchain(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Int =
+        writableDatabase.update(
+            "payments",
+            ContentValues().apply { put("status", "failed") },
+            "payment_type = 'onchain' AND status = 'pending' AND confirmations = 0 AND created_at < ?",
+            arrayOf((nowEpochSecs - STALE_PENDING_ONCHAIN_SECS).toString()),
+        )
 
     /** Marks one pre-negotiation splice failed. Failed rows are terminal. */
     fun failPendingSplice(

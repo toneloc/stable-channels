@@ -81,7 +81,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
     }
 
     @Test
-    fun adoptsTxidForAddresslessPlaceholderWithMatchingAmount() {
+    fun addresslessPlaceholderIsNeverACandidateForTxidAdoption() {
         val service = DatabaseService(context)
         service.recordPayment(
             paymentId = "onchain_deposit_x",
@@ -91,10 +91,27 @@ class OnchainMissedReceiveDatabaseServiceTest {
             status = "pending",
         )
 
+        assertEquals(false, service.hasTxidlessPendingReceive())
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000))
+        service.close()
+    }
+
+    @Test
+    fun adoptsTxidForAddressedPlaceholderWithMatchingAmount() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+            address = "addrA",
+        )
+
         assertTrue(service.hasTxidlessPendingReceive())
         assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx9", 5_000_000))
         val candidate = service.findTxidlessReceives("tx1", 2_323_000).single()
-        assertEquals(null, candidate.address)
+        assertEquals("addrA", candidate.address)
         assertTrue(service.adoptTxidForRow(candidate.id, "tx1"))
 
         assertEquals(listOf("tx1"), service.getPendingOnchainReceives().map { it.txid })
@@ -112,6 +129,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
             direction = "received",
             amountMsat = 2_323_000,
             status = "pending",
+            address = "addr",
         )
 
         assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000))
@@ -143,6 +161,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
             direction = "received",
             amountMsat = 2_323_000,
             status = "pending",
+            address = "addr",
         )
         val id = service.findTxidlessReceives("tx1", 2_323_000).single().id
 
@@ -187,6 +206,49 @@ class OnchainMissedReceiveDatabaseServiceTest {
         assertEquals(
             setOf("tx1", "tx2"),
             service.getPendingOnchainReceives().map { it.txid }.toSet(),
+        )
+        service.close()
+    }
+
+    @Test
+    fun failsOnlyOldUnconfirmedPendingOnchainRows() {
+        val service = DatabaseService(context)
+        fun insert(id: String, status: String = "pending", direction: String = "sent") =
+            service.recordPayment(
+                paymentId = id,
+                paymentType = "onchain",
+                direction = direction,
+                amountMsat = 1_000_000,
+                status = status,
+                txid = "tx_$id",
+            )
+        val old = insert("old")
+        val oldReceive = insert("oldReceive", direction = "received")
+        val oldConfirming = insert("oldConfirming")
+        val oldCompleted = insert("oldCompleted", status = "completed")
+        val recent = insert("recent")
+        val db = service.writableDatabase
+        val twentyDays = 20 * 86400L
+        listOf(old, oldReceive, oldConfirming, oldCompleted).forEach {
+            db.execSQL("UPDATE payments SET created_at = created_at - $twentyDays WHERE id = $it")
+        }
+        db.execSQL("UPDATE payments SET confirmations = 2 WHERE id = $oldConfirming")
+
+        assertEquals(2, service.failStalePendingOnchain())
+
+        fun statusOf(id: Long) =
+            db.rawQuery("SELECT status FROM payments WHERE id = ?", arrayOf(id.toString())).use {
+                it.moveToFirst()
+                it.getString(0)
+            }
+        assertEquals("failed", statusOf(old))
+        assertEquals("failed", statusOf(oldReceive))
+        assertEquals("pending", statusOf(oldConfirming))
+        assertEquals("completed", statusOf(oldCompleted))
+        assertEquals("pending", statusOf(recent))
+        assertEquals(
+            setOf("tx_recent", "tx_oldConfirming"),
+            service.getPendingOnchainSends().map { it.txid }.toSet(),
         )
         service.close()
     }

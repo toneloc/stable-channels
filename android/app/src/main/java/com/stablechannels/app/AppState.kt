@@ -3405,6 +3405,9 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService ?: return
         isConfirmationPolling = true
         try {
+            if (db.failStalePendingOnchain() > 0) {
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+            }
             val tipHeight = fetchChainTipHeight() ?: return
             val pending = db.getPaymentsNeedingConfirmation(limit = 100)
             var anyUpdated = false
@@ -3949,14 +3952,15 @@ class AppState(private val context: Context) : ViewModel() {
         prevOnchainSats = currentSats
     }
 
-    /**
-     * Gives txid-less pending receive rows their txid from the wallet's own payment list, matching
-     * on exact amount. Covers deposits that arrived while the app was closed, which would otherwise
-     * stay at 0 confirmations forever because the confirmation poller only tracks rows with a txid.
-     */
     private val rejectedTxidAdoptions: MutableSet<Pair<Long, String>> =
         java.util.concurrent.ConcurrentHashMap.newKeySet()
 
+    /**
+     * Gives txid-less pending receive rows their txid from the wallet's own payment list, matching
+     * on exact amount and confirming the transaction pays the row's address. Covers deposits that
+     * arrived while the app was closed, which would otherwise stay at 0 confirmations forever
+     * because the confirmation poller only tracks rows with a txid.
+     */
     private fun resolveTxidlessReceives() {
         val db = databaseService ?: return
         if (!db.hasTxidlessPendingReceive()) return
@@ -3979,18 +3983,14 @@ class AppState(private val context: Context) : ViewModel() {
                     val rejection = candidate.id to txid
                     if (rejection in rejectedTxidAdoptions) continue
                     // Amount alone is ambiguous (the wallet history can hold old transactions of
-                    // the same size), so a row with a known address only adopts a txid that pays
-                    // it.
-                    val address = candidate.address?.trim().orEmpty()
-                    if (address.isNotEmpty()) {
-                        when (fetchTxPaysToAddress(txid, address)) {
-                            true -> {}
-                            false -> {
-                                rejectedTxidAdoptions.add(rejection)
-                                continue
-                            }
-                            null -> continue
+                    // the same size), so only a txid that pays the row's address is adopted.
+                    when (fetchTxPaysToAddress(txid, candidate.address.trim())) {
+                        true -> {}
+                        false -> {
+                            rejectedTxidAdoptions.add(rejection)
+                            continue
                         }
+                        null -> continue
                     }
                     if (db.adoptTxidForRow(candidate.id, txid)) {
                         resolved = true
