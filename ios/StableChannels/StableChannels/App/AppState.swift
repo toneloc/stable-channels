@@ -125,28 +125,25 @@ class AppState {
         self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
-            let newOnline = (status == .online)
+            let handleStatus: @MainActor (AppState) -> Void = { appState in
+                let newOnline = (status == .online)
+                if appState.isOnline != newOnline {
+                    appState.isOnline = newOnline
+                }
+                if status == .online {
+                    Task { @MainActor [weak appState] in
+                        await appState?.retryConnection()
+                    }
+                }
+            }
+
             if Thread.isMainThread {
                 MainActor.assumeIsolated {
-                    guard let self else { return }
-                    if self.isOnline != newOnline {
-                        self.isOnline = newOnline
-                    }
-                    if status == .online {
-                        Task { @MainActor [weak self] in
-                            await self?.retryConnection()
-                        }
-                    }
+                    if let self { handleStatus(self) }
                 }
             } else {
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    if self.isOnline != newOnline {
-                        self.isOnline = newOnline
-                    }
-                    if status == .online {
-                        await self.retryConnection()
-                    }
+                    if let self { handleStatus(self) }
                 }
             }
         }
@@ -621,7 +618,7 @@ class AppState {
         nodeFlowInProgress = true
         defer {
             isSyncing = false
-            nodeFlowInProgress = false
+            finishNodeFlow()
         }
 
         // Restore-divergence guard: a seed-only restore wipes LDK channel
@@ -855,7 +852,7 @@ class AppState {
         // wallet-dir lock while this startup is still live (there is a window
         // between our acquire and NodeService.start setting isStarting).
         nodeFlowInProgress = true
-        defer { nodeFlowInProgress = false }
+        defer { finishNodeFlow() }
 
         // Logging must be live before the startup prologue: chain resolution and
         // the wallet-dir lock both emit audit events, and both run before
@@ -1107,6 +1104,10 @@ class AppState {
     /// Retries connection to the network and node services after an offline condition.
     func retryConnection() async {
         guard !isRetryingConnection else { return }
+        guard !nodeFlowInProgress, !nodeService.isStarting else {
+            pendingOnlineRetry = true
+            return
+        }
         isRetryingConnection = true
         defer { isRetryingConnection = false }
 
@@ -1114,9 +1115,6 @@ class AppState {
 
         if !networkMonitor.isOnline {
             AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", data: [:])
-            if phase == .offline {
-                phase = .offline
-            }
             return
         }
 
@@ -1134,18 +1132,10 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(nodeId, forKey: "node_id")
                 }
-                phase = .wallet
-                hasCompletedInitialSync = true
-                refreshBalances()
-                updateStableBalances()
-                await priceService.fetchPrice()
-                recordCurrentPrice()
-                priceService.startAutoRefresh()
+                await synchronizeActiveWalletState()
                 blockHeightService.start()
-                mempoolWebSocketService.connect()
                 Task { await confirmationPollingService?.pollOnce() }
                 startStabilityTimer()
-                ensureLSPConnected()
                 reregisterPushTokenIfNeeded()
                 await processPendingPushPayment()
                 txidResolutionService.replayPendingChannelCloses()
@@ -1167,16 +1157,21 @@ class AppState {
                 }
             }
         } else {
-            phase = .wallet
-            hasCompletedInitialSync = true
-            refreshBalances()
-            updateStableBalances()
-            await priceService.fetchPrice()
-            recordCurrentPrice()
-            ensureLSPConnected()
-            mempoolWebSocketService.connect()
-            priceService.startAutoRefresh()
+            await synchronizeActiveWalletState()
         }
+    }
+
+    @MainActor
+    private func synchronizeActiveWalletState() async {
+        phase = .wallet
+        hasCompletedInitialSync = true
+        refreshBalances()
+        updateStableBalances()
+        await priceService.fetchPrice()
+        recordCurrentPrice()
+        ensureLSPConnected()
+        mempoolWebSocketService.connect()
+        priceService.startAutoRefresh()
     }
 
     /// Coordinates user-initiated pull-to-refresh across balances, price, and connectivity.
@@ -1260,6 +1255,18 @@ class AppState {
     /// isStarting. performBackgroundStop must not release the wallet-dir lock
     /// out from under such a flow.
     private var nodeFlowInProgress = false
+    private var pendingOnlineRetry = false
+
+    private func finishNodeFlow() {
+        nodeFlowInProgress = false
+        if pendingOnlineRetry {
+            pendingOnlineRetry = false
+            Task { @MainActor [weak self] in
+                await self?.retryConnection()
+            }
+        }
+    }
+
     private var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
 
     /// Stop the node and extract gossip data so the NSE can open the lightweight DB.
@@ -1332,7 +1339,7 @@ class AppState {
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
         nodeFlowInProgress = true
-        defer { nodeFlowInProgress = false }
+        defer { finishNodeFlow() }
         cancelBackgroundStop()
         loadChannelFromDB()
         // Payments received while backgrounded are recorded by the NSE, not the foreground
@@ -4216,7 +4223,8 @@ class AppState {
                     )
                     StabilityService.recomputeNative(&stableChannel)
                 }
-                if record.receiverSats > 0 || record.backingSats > 0 || record.nativeSats > 0 {
+                if !nodeService
+                    .isRunning && (record.receiverSats > 0 || record.backingSats > 0 || record.nativeSats > 0) {
                     if !hasReadyChannel {
                         hasReadyChannel = true
                         UserDefaults(suiteName: Constants.appGroupIdentifier)?.set(

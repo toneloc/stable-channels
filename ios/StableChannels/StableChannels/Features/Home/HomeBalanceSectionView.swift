@@ -6,13 +6,9 @@ struct HomeBalanceSectionView: View {
     let flashScale: CGFloat
 
     private var displaySats: UInt64 {
-        if appState.totalBalanceSats > 0 {
-            return appState.totalBalanceSats
-        }
-        if appState.stableChannel.stableReceiverBTC.sats > 0 {
-            return appState.stableChannel.stableReceiverBTC.sats
-        }
-        return appState.lightningBalanceSats + appState.onchainBalanceSats
+        appState.totalBalanceSats > 0
+            ? appState.totalBalanceSats
+            : appState.stableChannel.stableReceiverBTC.sats
     }
 
     private var displayUSD: Double {

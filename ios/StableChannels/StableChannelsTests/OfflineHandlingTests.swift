@@ -312,4 +312,14 @@ final class OfflineHandlingTests: XCTestCase {
         XCTAssertFalse(result, "switchLSP must be rejected when offline")
         XCTAssertEqual(appState.activeLSP, initialLSP, "Active LSP must remain unchanged after rejected switch")
     }
+
+    func testRetryConnectionDoesNotReenterWhenAlreadyRetrying() async {
+        let mockMonitor = MockNetworkMonitor(initialStatus: .online)
+        let appState = AppState(networkMonitor: mockMonitor)
+        appState.isRetryingConnection = true
+
+        await appState.retryConnection()
+
+        XCTAssertFalse(appState.hasCompletedInitialSync, "retryConnection must no-op when already retrying")
+    }
 }
