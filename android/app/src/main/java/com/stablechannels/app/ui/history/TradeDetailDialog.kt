@@ -18,6 +18,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.TradeOutcome
+import com.stablechannels.app.ui.components.DoneButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -44,7 +46,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
         ) {
             // Header Row (Item 32: cancel button in bottomsheet, Item 12: title at center)
             Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-                TextButton(
+                NeutralTextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
                     colors =
@@ -54,7 +56,8 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
                                     MaterialTheme.colorScheme.surfaceVariant
                                 } else {
                                     Color(0xFFE5E5EA)
-                                }
+                                },
+                            contentColor = MaterialTheme.colorScheme.onSurface,
                         ),
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -157,13 +160,7 @@ fun OrderDetailBottomSheet(trade: TradeRecord, onDismiss: () -> Unit) {
             Spacer(Modifier.height(24.dp))
 
             // Action Button (Item 33: button should be below and center where thumb is)
-            Button(
-                onClick = onDismiss,
-                modifier = Modifier.fillMaxWidth(0.6f),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Text("Done", fontWeight = FontWeight.Bold)
-            }
+            DoneButton(onClick = onDismiss)
         }
     }
 }

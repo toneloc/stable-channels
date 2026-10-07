@@ -15,6 +15,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.util.LspPreferencesManager
 import kotlinx.coroutines.launch
 
@@ -88,7 +91,7 @@ fun LspSettingsView(appState: AppState) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("Node ID", style = MaterialTheme.typography.bodyLarge)
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             clipboardManager.setText(AnnotatedString(activePubkey))
                             copiedNodeId = true
@@ -123,7 +126,7 @@ fun LspSettingsView(appState: AppState) {
                 )
             }
         } else {
-            Button(
+            InkButton(
                 onClick = { showSwitchDialog = true },
                 enabled = !isBusy,
                 modifier = Modifier.fillMaxWidth(),
@@ -133,7 +136,7 @@ fun LspSettingsView(appState: AppState) {
 
             Spacer(Modifier.height(12.dp))
 
-            OutlinedButton(
+            NeutralOutlinedButton(
                 onClick = {
                     isBusy = true
                     resultMessage = null
@@ -242,15 +245,15 @@ private fun SwitchLspDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            NeutralTextButton(
                 onClick = {
                     if (!LspPreferencesManager.isValidPubkey(pubkey)) {
                         error = "Pubkey must start with 02 or 03 and be exactly 66 hex characters."
-                        return@TextButton
+                        return@NeutralTextButton
                     }
                     if (!LspPreferencesManager.isValidAddress(address)) {
                         error = "Address must be in host:port format (e.g. domain.com:9735)."
-                        return@TextButton
+                        return@NeutralTextButton
                     }
                     onSubmit(pubkey.trim(), address.trim())
                 }
@@ -259,7 +262,7 @@ private fun SwitchLspDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            NeutralTextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
 }
