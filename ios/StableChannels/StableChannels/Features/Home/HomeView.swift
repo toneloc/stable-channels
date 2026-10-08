@@ -29,9 +29,8 @@ struct HomeView: View {
 
                     HomeSyncSpinnerView()
 
-                    if appState.lightningBalanceSats > 0 {
-                        balanceBarSection
-                    }
+                    balanceBarSection
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
 
                     if appState.onchainBalanceSats > 0 {
                         HomeSavingsSectionView(showBTC: showBTC)
@@ -41,12 +40,15 @@ struct HomeView: View {
                         .equatable()
                         .padding(.bottom, 8)
 
-                    if !appState.hasReadyChannel {
+                    if !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState.isOpeningChannel {
                         receiveHintText
                     }
 
                     HomeActionButtonsView(
                         hasReadyChannel: appState.hasReadyChannel,
+                        pulseReceive: !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState
+                            .isOpeningChannel,
+                        isOffline: !appState.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
                         onBuy: { showBuySheet = true },
@@ -59,12 +61,10 @@ struct HomeView: View {
                 .padding(.horizontal)
                 .padding(.bottom)
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .scrollBounceBehavior(.always)
             .navigationBarHidden(true)
             .refreshable {
-                appState.refreshBalances()
-                await appState.priceService.fetchPrice()
-                appState.recordCurrentPrice()
+                await appState.userInitiatedRefresh()
             }
         }
         .onAppear {
@@ -115,13 +115,20 @@ struct HomeView: View {
                 allocation: allocation,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
                     sc: appState.stableChannel,
-                    price: appState.accountingBTCPrice
+                    price: appState.effectiveTradePrice
                 ) ?? 0) / 100,
+                isTrading: tradeRequest != nil,
+                isOnline: appState.isOnline,
                 onDragStarted: { appState.ensureLSPConnected() },
-                onTradeRequest: { direction, amountUSD in
-                    tradeRequest = TradeRequest(direction: direction, amountUSD: amountUSD)
+                onTradeRequest: appState.hasReadyChannel ? { request in
+                    guard appState.isOnline else { return }
+                    tradeRequest = request
+                } : nil,
+                onEmptyInteraction: {
+                    showReceiveSheet = true
                 }
             )
+            .opacity(appState.isOnline ? 1.0 : 0.85)
             .padding(.horizontal, 24)
 
             HStack(alignment: .top) {

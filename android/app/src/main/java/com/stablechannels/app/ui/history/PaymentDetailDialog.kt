@@ -16,8 +16,8 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
-import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.shortString
 import com.stablechannels.app.util.usdFormatted
 
@@ -121,7 +121,7 @@ fun PaymentDetailBottomSheet(
                                 }
                             }
                     val amountStr =
-                        usdVal?.usdFormatted() ?: "${payment.amountSats.satsFormatted()} sats"
+                        usdVal?.usdFormatted() ?: "${payment.amountSats.btcSpacedFormatted()} BTC"
                     DetailRow("Amount", amountStr)
 
                     payment.btcPrice?.let {
@@ -137,7 +137,7 @@ fun PaymentDetailBottomSheet(
                             modifier = Modifier.padding(vertical = 8.dp),
                             color = MaterialTheme.colorScheme.outlineVariant,
                         )
-                        DetailRow("Fee", "${payment.feeMsat / 1000} sats")
+                        DetailRow("Fee", "${(payment.feeMsat / 1000).btcSpacedFormatted()} BTC")
                     }
 
                     HorizontalDivider(

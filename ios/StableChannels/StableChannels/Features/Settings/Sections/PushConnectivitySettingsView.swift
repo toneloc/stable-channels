@@ -18,12 +18,16 @@ struct PushConnectivitySettingsView: View {
                         .foregroundStyle(.secondary)
                     }
                     Spacer()
-                    if appState.nodeService.isRunning {
-                        Label("Active", systemImage: "bolt.fill")
+                    if !appState.isOnline {
+                        Label(String(localized: "status_offline", defaultValue: "Offline"), systemImage: "bolt.slash")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    } else if appState.nodeService.isRunning {
+                        Label(String(localized: "status_active", defaultValue: "Active"), systemImage: "bolt.fill")
                             .font(.caption)
                             .foregroundStyle(.green)
                     } else {
-                        Label("Inactive", systemImage: "bolt.slash")
+                        Label(String(localized: "status_inactive", defaultValue: "Inactive"), systemImage: "bolt.slash")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -48,10 +52,17 @@ struct PushConnectivitySettingsView: View {
             } header: {
                 Text(String(localized: "label_channel_info", defaultValue: "Channel Info"))
             } footer: {
-                Text(String(
-                    localized: "info_push_connectivity",
-                    defaultValue: "Your device maintains a persistent connection to receive incoming payments and stability updates."
-                ))
+                if !appState.isOnline {
+                    Text(String(
+                        localized: "info_push_connectivity_offline",
+                        defaultValue: "Background connection paused until an internet connection is restored."
+                    ))
+                } else {
+                    Text(String(
+                        localized: "info_push_connectivity",
+                        defaultValue: "Your device maintains a persistent connection to receive incoming payments and stability updates."
+                    ))
+                }
             }
         }
         .navigationTitle(String(localized: "title_push_connectivity", defaultValue: "Push Connectivity"))

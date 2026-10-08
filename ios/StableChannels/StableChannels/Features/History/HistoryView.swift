@@ -43,6 +43,7 @@ struct HistoryView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollBounceBehavior(.always)
                 .overlay {
                     Group {
                         if selectedSegment == 0 && trades.isEmpty {
@@ -144,7 +145,7 @@ struct HistoryView: View {
     }
 
     private func performRefreshHistory() async {
-        appState.refreshBalances()
+        await appState.userInitiatedRefresh()
         do {
             let result = try await appState.refreshPaymentConfirmations()
             history.apply(refreshResult: result)
@@ -279,7 +280,7 @@ struct PaymentRowView: View {
                     Text(usd.usdFormatted)
                         .fontWeight(.medium)
                 } else {
-                    Text(payment.amountSats.satsFormatted)
+                    Text("\(payment.amountSats.btcSpacedFormatted) BTC")
                         .fontWeight(.medium)
                 }
                 Text(statusLabel)

@@ -61,7 +61,10 @@ struct PaymentDetailView: View {
                         ? String(localized: "payment_received", defaultValue: "Received")
                         : String(localized: "payment_sent", defaultValue: "Sent"))
                 row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
-                row(String(localized: "label_amount", defaultValue: "Amount"), "\(payment.amountSats) sats")
+                row(
+                    String(localized: "label_amount", defaultValue: "Amount"),
+                    "\(payment.amountSats.btcSpacedFormatted) BTC"
+                )
                 if let usd = displayUSD {
                     row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
                 }
@@ -69,7 +72,10 @@ struct PaymentDetailView: View {
                     row(String(localized: "label_btc_price", defaultValue: "BTC Price"), price.usdFormatted)
                 }
                 if payment.feeMsat > 0 {
-                    row(String(localized: "label_fee", defaultValue: "Fee"), "\(payment.feeMsat) msat")
+                    row(
+                        String(localized: "label_fee", defaultValue: "Fee"),
+                        "\((payment.feeMsat / 1000).btcSpacedFormatted) BTC"
+                    )
                 }
                 row(String(localized: "label_status", defaultValue: "Status"), statusLabel(for: payment))
                 if payment.shouldShowConfirmationProgress {
