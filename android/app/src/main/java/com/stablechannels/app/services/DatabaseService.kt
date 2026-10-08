@@ -70,6 +70,12 @@ class DatabaseService(context: Context) :
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
         // Nodes drop unconfirmed transactions after about two weeks.
         internal const val STALE_PENDING_ONCHAIN_SECS = 14 * 86400L
+
+        /**
+         * How far before a placeholder's creation the wallet may first have seen its deposit: the
+         * wallet learns of a transaction, then the balance change creates the placeholder.
+         */
+        internal const val RECEIVE_ADOPTION_SLACK_SECS = 600L
         internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
@@ -2226,10 +2232,16 @@ class DatabaseService(context: Context) :
 
     /**
      * Txid-less pending receives that have an address and exactly [amountMsat], oldest first. Empty
-     * when a row already carries [txid]. The caller checks that [txid] pays the address before
-     * calling [adoptTxidForRow].
+     * when a row already carries [txid]. [seenAtSecs] is when the wallet last updated that
+     * transaction; a row created more than [RECEIVE_ADOPTION_SLACK_SECS] after that cannot be this
+     * deposit (an older payment to a reused address), so it is skipped. The caller checks that
+     * [txid] pays the address before calling [adoptTxidForRow].
      */
-    fun findTxidlessReceives(txid: String, amountMsat: Long): List<TxidlessReceive> {
+    fun findTxidlessReceives(
+        txid: String,
+        amountMsat: Long,
+        seenAtSecs: Long,
+    ): List<TxidlessReceive> {
         val db = readableDatabase
         val tracked =
             db.rawQuery("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)).use {
@@ -2243,10 +2255,14 @@ class DatabaseService(context: Context) :
                   AND status = 'pending' AND (txid IS NULL OR txid = '')
                   AND address IS NOT NULL AND address != ''
                   AND amount_msat = ?
+                  AND created_at <= ?
                 ORDER BY created_at ASC
                 """
                     .trimIndent(),
-                arrayOf(amountMsat.toString()),
+                arrayOf(
+                    amountMsat.toString(),
+                    (seenAtSecs + RECEIVE_ADOPTION_SLACK_SECS).toString(),
+                ),
             )
             .use {
                 buildList {

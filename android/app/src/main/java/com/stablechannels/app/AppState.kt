@@ -3332,12 +3332,24 @@ class AppState(private val context: Context) : ViewModel() {
         return null
     }
 
-    private fun fetchTxConfirmationStatus(txid: String): TxConfirmationStatus? {
+    private sealed interface TxStatusLookup {
+        data class Found(val status: TxConfirmationStatus) : TxStatusLookup
+
+        /** Every explorer answered 404: the transaction is unknown to them. */
+        data object NotFound : TxStatusLookup
+
+        /** Outage, error response or unreadable body: says nothing about the transaction. */
+        data object Unavailable : TxStatusLookup
+    }
+
+    private fun lookupTxConfirmationStatus(txid: String): TxStatusLookup {
         val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty()) return null
+        if (normalizedTxid.isEmpty()) return TxStatusLookup.Unavailable
 
         val urls =
             listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
+        var notFound = 0
+        var otherFailure = false
         for (baseUrl in urls) {
             try {
                 val request =
@@ -3345,8 +3357,19 @@ class AppState(private val context: Context) : ViewModel() {
                         .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
                         .build()
                 httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string() ?: return@use
+                    if (response.code == 404) {
+                        notFound++
+                        return@use
+                    }
+                    if (!response.isSuccessful) {
+                        otherFailure = true
+                        return@use
+                    }
+                    val body = response.body?.string()
+                    if (body == null) {
+                        otherFailure = true
+                        return@use
+                    }
                     val json = JSONObject(body)
                     val confirmed = json.optBoolean("confirmed", false)
                     val blockHeight =
@@ -3355,11 +3378,14 @@ class AppState(private val context: Context) : ViewModel() {
                         } else {
                             null
                         }
-                    return TxConfirmationStatus(confirmed = confirmed, blockHeight = blockHeight)
+                    return TxStatusLookup.Found(TxConfirmationStatus(confirmed, blockHeight))
                 }
-            } catch (_: Exception) {}
+            } catch (_: Exception) {
+                otherFailure = true
+            }
         }
-        return null
+        return if (notFound > 0 && !otherFailure) TxStatusLookup.NotFound
+        else TxStatusLookup.Unavailable
     }
 
     private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
@@ -3441,11 +3467,17 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
 
-                val txStatus = fetchTxConfirmationStatus(txid)
-                if (txStatus == null) {
-                    anyUpdated = db.failStaleOnchainRow(payment.id) || anyUpdated
-                    return@forEach
-                }
+                val txStatus =
+                    when (val lookup = lookupTxConfirmationStatus(txid)) {
+                        is TxStatusLookup.Found -> lookup.status
+                        // Only an authoritative "not found" may retire an old row; an outage must
+                        // leave it pollable so a later recovery can still confirm it.
+                        TxStatusLookup.NotFound -> {
+                            anyUpdated = db.failStaleOnchainRow(payment.id) || anyUpdated
+                            return@forEach
+                        }
+                        TxStatusLookup.Unavailable -> return@forEach
+                    }
                 val required = requiredConfirmationsForType(payment.paymentType)
 
                 val (newConfirmations, newStatus) =
@@ -3975,15 +4007,15 @@ class AppState(private val context: Context) : ViewModel() {
                         val kind = p.kind as? PaymentKind.Onchain ?: return@mapNotNull null
                         val msat = p.amountMsat?.toLong() ?: return@mapNotNull null
                         if (p.direction != PaymentDirection.INBOUND) return@mapNotNull null
-                        kind.txid to msat
+                        Triple(kind.txid, msat, p.latestUpdateTimestamp.toLong())
                     }
                 } catch (e: Exception) {
                     Log.w("AppState", "listPayments failed resolving receive txids: ${e.message}")
                     return@launch
                 }
             val paying = mutableMapOf<Long, MutableList<String>>()
-            inbound.forEach { (txid, msat) ->
-                for (candidate in db.findTxidlessReceives(txid, msat)) {
+            inbound.forEach { (txid, msat, seenAtSecs) ->
+                for (candidate in db.findTxidlessReceives(txid, msat, seenAtSecs)) {
                     val rejection = candidate.id to txid
                     if (rejection in rejectedTxidAdoptions) continue
                     // Amount alone is ambiguous (the wallet history can hold old transactions of

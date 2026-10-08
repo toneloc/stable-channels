@@ -92,7 +92,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
         )
 
         assertEquals(false, service.hasTxidlessPendingReceive())
-        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000))
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000, nowSecs()))
         service.close()
     }
 
@@ -109,8 +109,8 @@ class OnchainMissedReceiveDatabaseServiceTest {
         )
 
         assertTrue(service.hasTxidlessPendingReceive())
-        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx9", 5_000_000))
-        val candidate = service.findTxidlessReceives("tx1", 2_323_000).single()
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx9", 5_000_000, nowSecs()))
+        val candidate = service.findTxidlessReceives("tx1", 2_323_000, nowSecs()).single()
         assertEquals("addrA", candidate.address)
         assertTrue(service.adoptTxidForRow(candidate.id, "tx1"))
 
@@ -132,7 +132,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
             address = "addr",
         )
 
-        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000))
+        assertEquals(emptyList<Any>(), service.findTxidlessReceives("tx1", 2_323_000, nowSecs()))
         service.close()
     }
 
@@ -148,7 +148,10 @@ class OnchainMissedReceiveDatabaseServiceTest {
             address = "addrA",
         )
 
-        assertEquals("addrA", service.findTxidlessReceives("tx1", 2_323_000).single().address)
+        assertEquals(
+            "addrA",
+            service.findTxidlessReceives("tx1", 2_323_000, nowSecs()).single().address,
+        )
         service.close()
     }
 
@@ -163,7 +166,7 @@ class OnchainMissedReceiveDatabaseServiceTest {
             status = "pending",
             address = "addr",
         )
-        val id = service.findTxidlessReceives("tx1", 2_323_000).single().id
+        val id = service.findTxidlessReceives("tx1", 2_323_000, nowSecs()).single().id
 
         assertTrue(service.adoptTxidForRow(id, "tx1"))
         assertEquals(false, service.adoptTxidForRow(id, "tx2"))
@@ -207,6 +210,46 @@ class OnchainMissedReceiveDatabaseServiceTest {
             setOf("tx1", "tx2"),
             service.getPendingOnchainReceives().map { it.txid }.toSet(),
         )
+        service.close()
+    }
+
+    private fun nowSecs() = System.currentTimeMillis() / 1000
+
+    @Test
+    fun rejectsTxidWalletLastUpdatedLongBeforePlaceholderWasCreated() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+            address = "addr",
+        )
+        val staleSeenAt = nowSecs() - DatabaseService.RECEIVE_ADOPTION_SLACK_SECS - 3600
+
+        assertEquals(
+            emptyList<Any>(),
+            service.findTxidlessReceives("oldTx", 2_323_000, staleSeenAt),
+        )
+        assertEquals(1, service.findTxidlessReceives("newTx", 2_323_000, nowSecs()).size)
+        service.close()
+    }
+
+    @Test
+    fun acceptsTxidSeenJustBeforePlaceholderWasCreated() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "onchain_deposit_x",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 2_323_000,
+            status = "pending",
+            address = "addr",
+        )
+        val seenAt = nowSecs() - DatabaseService.RECEIVE_ADOPTION_SLACK_SECS + 60
+
+        assertEquals(1, service.findTxidlessReceives("tx1", 2_323_000, seenAt).size)
         service.close()
     }
 
