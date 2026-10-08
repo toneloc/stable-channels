@@ -163,7 +163,7 @@ class NodeService: NodeServiceProtocol {
     // MARK: - Lifecycle
 
     func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig = .default) async throws {
-        guard !isRunning else { throw NodeServiceError.alreadyRunning }
+        guard !isRunning, !isStarting else { throw NodeServiceError.alreadyRunning }
         isStarting = true
         defer { isStarting = false }
 

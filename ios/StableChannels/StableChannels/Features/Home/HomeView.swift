@@ -48,6 +48,7 @@ struct HomeView: View {
                         hasReadyChannel: appState.hasReadyChannel,
                         pulseReceive: !appState.hasReadyChannel && appState.totalBalanceSats == 0 && !appState
                             .isOpeningChannel,
+                        isOffline: !appState.isOnline,
                         onSend: { showSendSheet = true },
                         onReceive: { showReceiveSheet = true },
                         onBuy: { showBuySheet = true },
@@ -60,12 +61,10 @@ struct HomeView: View {
                 .padding(.horizontal)
                 .padding(.bottom)
             }
-            .scrollBounceBehavior(.basedOnSize)
+            .scrollBounceBehavior(.always)
             .navigationBarHidden(true)
             .refreshable {
-                appState.refreshBalances()
-                await appState.priceService.fetchPrice()
-                appState.recordCurrentPrice()
+                await appState.userInitiatedRefresh()
             }
         }
         .onAppear {
@@ -116,17 +115,20 @@ struct HomeView: View {
                 allocation: allocation,
                 maxSellUSD: Double(appState.tradeService?.maxSellCents(
                     sc: appState.stableChannel,
-                    price: appState.accountingBTCPrice
+                    price: appState.effectiveTradePrice
                 ) ?? 0) / 100,
                 isTrading: tradeRequest != nil,
+                isOnline: appState.isOnline,
                 onDragStarted: { appState.ensureLSPConnected() },
                 onTradeRequest: appState.hasReadyChannel ? { request in
+                    guard appState.isOnline else { return }
                     tradeRequest = request
                 } : nil,
                 onEmptyInteraction: {
                     showReceiveSheet = true
                 }
             )
+            .opacity(appState.isOnline ? 1.0 : 0.85)
             .padding(.horizontal, 24)
 
             HStack(alignment: .top) {

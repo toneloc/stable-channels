@@ -27,7 +27,9 @@ struct BuyView: View {
         BuyAmountPolicy.maximumUsd(appState.stableChannel.expectedUSD.amount)
     }
 
-    private var tradePrice: Double { appState.accountingBTCPrice }
+    private var tradePrice: Double {
+        appState.effectiveTradePrice
+    }
 
     private var amountUSD: Double {
         Double(amountStr) ?? 0
@@ -111,10 +113,14 @@ struct BuyView: View {
                     .foregroundStyle(.secondary)
             }
 
-            let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
-                .usdFormatted
-            Text(availableStr)
-                .foregroundStyle(.secondary)
+            if !appState.isOnline {
+                OfflineBadgeView()
+            } else {
+                let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
+                    .usdFormatted
+                Text(availableStr)
+                    .foregroundStyle(.secondary)
+            }
 
             if amountUSD > maxBuyUSD && amountUSD > 0 {
                 Text(String(localized: "error_exceeds_balance", defaultValue: "Exceeds available stable balance"))
@@ -133,7 +139,9 @@ struct BuyView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(!BuyAmountPolicy.accepts(amountUsd: amountUSD, balanceUsd: maxBuyUSD) || tradePrice <= 0)
+                .disabled(!BuyAmountPolicy
+                    .accepts(amountUsd: amountUSD, balanceUsd: maxBuyUSD) || tradePrice <= 0 || !appState
+                    .isOnline)
         }
     }
 
@@ -274,6 +282,13 @@ struct BuyView: View {
     }
 
     private func executeTrade() {
+        guard appState.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_trade",
+                defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
+            )
+            return
+        }
         isExecuting = true
         errorMessage = nil
         appState.ensureLSPConnected()

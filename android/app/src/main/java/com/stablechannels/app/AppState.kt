@@ -965,6 +965,8 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _confirmationUpdateEpoch = MutableStateFlow(0)
     val confirmationUpdateEpoch: StateFlow<Int> = _confirmationUpdateEpoch
+    private val _confirmationPollUpdate = MutableStateFlow<ConfirmationPollUpdate?>(null)
+    val confirmationPollUpdate: StateFlow<ConfirmationPollUpdate?> = _confirmationPollUpdate
 
     private val _isSpliceInFlight = MutableStateFlow(false)
     val isSpliceInFlightFlow: StateFlow<Boolean>
@@ -1012,8 +1014,16 @@ class AppState(private val context: Context) : ViewModel() {
     private var nodeStartRetryAttempts: Int = 0
     private var spliceConfirmationJob: Job? = null
     private var monitoredSpliceTxid: String? = null
-    @Volatile private var isConfirmationPolling = false
-    @Volatile private var lastConfirmationPollAtMs = 0L
+    private val confirmationRefreshCoordinator =
+        ConfirmationRefreshCoordinator(
+            onResult = { result ->
+                _confirmationPollUpdate.update { previous ->
+                    ConfirmationPollUpdate((previous?.sequence ?: 0L) + 1, result)
+                }
+            }
+        ) { manual ->
+            paymentConfirmationPass.run(manual)
+        }
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set
@@ -1032,6 +1042,30 @@ class AppState(private val context: Context) : ViewModel() {
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
     private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
+    private val paymentConfirmationPass =
+        PaymentConfirmationPass(
+            httpClient = httpClient,
+            chainUrls = {
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            },
+            database = { databaseService },
+            onReceiveTxidMismatch = { txid ->
+                if (_lastReceiveTxid.value == txid) {
+                    setLastReceiveTxid(null, null)
+                }
+            },
+            onRowsUpdated = { syncInline ->
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                if (syncInline) {
+                    syncWalletsAndRefreshBalances()
+                } else {
+                    // The native wallet sync can outlast a manual refresh's deadline, so a manual
+                    // or cancelled pass returns its result without waiting for it.
+                    viewModelScope.launch(Dispatchers.IO) { syncWalletsAndRefreshBalances() }
+                }
+            },
+        )
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -3308,216 +3342,24 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private data class TxConfirmationStatus(
-        val confirmed: Boolean,
-        val blockHeight: Int?,
-    )
-
-    private fun fetchChainTipHeight(): Int? {
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder().url("${baseUrl.trimEnd('/')}/blocks/tip/height").build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string()?.trim() ?: return@use
-                    body.toIntOrNull()?.let {
-                        return it
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        return null
-    }
-
-    private sealed interface TxStatusLookup {
-        data class Found(val status: TxConfirmationStatus) : TxStatusLookup
-
-        /** Every explorer answered 404: the transaction is unknown to them. */
-        data object NotFound : TxStatusLookup
-
-        /** Outage, error response or unreadable body: says nothing about the transaction. */
-        data object Unavailable : TxStatusLookup
-    }
-
-    private fun lookupTxConfirmationStatus(txid: String): TxStatusLookup {
-        val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty()) return TxStatusLookup.Unavailable
-
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        var notFound = 0
-        var otherFailure = false
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder()
-                        .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
-                        .build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (response.code == 404) {
-                        notFound++
-                        return@use
-                    }
-                    if (!response.isSuccessful) {
-                        otherFailure = true
-                        return@use
-                    }
-                    val body = response.body?.string()
-                    if (body == null) {
-                        otherFailure = true
-                        return@use
-                    }
-                    val json = JSONObject(body)
-                    val confirmed = json.optBoolean("confirmed", false)
-                    val blockHeight =
-                        if (json.has("block_height") && !json.isNull("block_height")) {
-                            json.optInt("block_height", 0).takeIf { it > 0 }
-                        } else {
-                            null
-                        }
-                    return TxStatusLookup.Found(TxConfirmationStatus(confirmed, blockHeight))
-                }
-            } catch (_: Exception) {
-                otherFailure = true
-            }
-        }
-        return if (notFound > 0 && !otherFailure) TxStatusLookup.NotFound
-        else TxStatusLookup.Unavailable
-    }
-
-    private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
-        val normalizedTxid = txid.substringBefore(":").trim()
-        val targetAddress = QRCodeUtils.normalizeAddress(address)
-        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
-
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder().url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid").build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string() ?: return@use
-                    val txJson = JSONObject(body)
-                    val vouts = txJson.optJSONArray("vout") ?: return@use
-                    for (i in 0 until vouts.length()) {
-                        val vout = vouts.optJSONObject(i) ?: continue
-                        val voutAddress =
-                            QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
-                        if (voutAddress == targetAddress) {
-                            return true
-                        }
-                    }
-                    return false
-                }
-            } catch (_: Exception) {}
-        }
-        return null
-    }
+    /**
+     * Manual (pull-to-refresh) confirmation check. Waits for any in-flight pass, then runs a fresh
+     * one and suspends until it completes, returning whether the chain lookups succeeded. Bounded
+     * by [ConfirmationRefreshCoordinator.MANUAL_REFRESH_DEADLINE_MS] end to end, after which it
+     * returns [ConfirmationPollResult.TimedOut].
+     */
+    suspend fun refreshPaymentConfirmations(): ConfirmationPollResult =
+        withContext(Dispatchers.IO) { confirmationRefreshCoordinator.refresh() }
 
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
-        val now = System.currentTimeMillis()
-        if (!force && (now - lastConfirmationPollAtMs) < 15_000) {
-            return
-        }
-        if (isConfirmationPolling) {
-            return
-        }
+        confirmationRefreshCoordinator.pollIfIdle(force)
+    }
 
-        val db = databaseService ?: return
-        isConfirmationPolling = true
+    private fun syncWalletsAndRefreshBalances() {
         try {
-            if (db.failStaleTxidlessOnchain() > 0) {
-                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-            }
-            val tipHeight = fetchChainTipHeight() ?: return
-            val pending = db.getPaymentsNeedingConfirmation(limit = 100)
-            var anyUpdated = false
-
-            pending.forEach { payment ->
-                val txid = payment.txid ?: return@forEach
-
-                if (payment.paymentType == "onchain" && payment.direction == "received") {
-                    val expectedAddress = payment.address?.trim().orEmpty()
-                    if (expectedAddress.isNotEmpty()) {
-                        when (fetchTxPaysToAddress(txid, expectedAddress)) {
-                            false -> {
-                                val cleared = db.clearPaymentTxidForRow(payment.id)
-                                anyUpdated = anyUpdated || cleared
-                                if (_lastReceiveTxid.value == txid) {
-                                    setLastReceiveTxid(null, null)
-                                }
-                                AuditService.log(
-                                    "ONCHAIN_TXID_ADDRESS_MISMATCH",
-                                    mapOf(
-                                        "payment_id" to payment.id,
-                                        "txid" to txid,
-                                        "address" to expectedAddress,
-                                    ),
-                                )
-                                return@forEach
-                            }
-                            null -> return@forEach
-                            true -> {}
-                        }
-                    }
-                }
-
-                val txStatus =
-                    when (val lookup = lookupTxConfirmationStatus(txid)) {
-                        is TxStatusLookup.Found -> lookup.status
-                        // Only an authoritative "not found" may retire an old row; an outage must
-                        // leave it pollable so a later recovery can still confirm it.
-                        TxStatusLookup.NotFound -> {
-                            anyUpdated = db.failStaleOnchainRow(payment.id) || anyUpdated
-                            return@forEach
-                        }
-                        TxStatusLookup.Unavailable -> return@forEach
-                    }
-                val required = requiredConfirmationsForType(payment.paymentType)
-
-                val (newConfirmations, newStatus) =
-                    if (!txStatus.confirmed) {
-                        0 to "pending"
-                    } else {
-                        val blockHeight = txStatus.blockHeight
-                        val confs =
-                            if (blockHeight != null) {
-                                (tipHeight - blockHeight + 1)
-                                    .coerceAtLeast(0)
-                                    .coerceAtMost(required)
-                            } else {
-                                payment.confirmations.coerceAtLeast(1).coerceAtMost(required)
-                            }
-                        confs to if (confs >= required) "completed" else "pending"
-                    }
-
-                if (payment.confirmations != newConfirmations || payment.status != newStatus) {
-                    val updated =
-                        db.updatePaymentConfirmationState(
-                            paymentRowId = payment.id,
-                            confirmations = newConfirmations,
-                            status = newStatus,
-                        )
-                    anyUpdated = anyUpdated || updated
-                }
-            }
-
-            if (anyUpdated) {
-                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-                try {
-                    nodeService.syncWallets()
-                } catch (_: Exception) {}
-                refreshBalances()
-            }
-            lastConfirmationPollAtMs = now
-        } finally {
-            isConfirmationPolling = false
-        }
+            nodeService.syncWallets()
+        } catch (_: Exception) {}
+        refreshBalances()
     }
 
     private fun runStabilityCheck() {
@@ -4020,7 +3862,7 @@ class AppState(private val context: Context) : ViewModel() {
                     if (rejection in rejectedTxidAdoptions) continue
                     // Amount alone is ambiguous (the wallet history can hold old transactions of
                     // the same size), so only a txid that pays the row's address qualifies.
-                    when (fetchTxPaysToAddress(txid, candidate.address.trim())) {
+                    when (paymentConfirmationPass.paysToAddress(txid, candidate.address.trim())) {
                         true -> paying.getOrPut(candidate.id) { mutableListOf() }.add(txid)
                         false -> rejectedTxidAdoptions.add(rejection)
                         null -> {}
