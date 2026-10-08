@@ -105,6 +105,7 @@ class AppState {
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
     let lspService = LSPService()
     let spliceBroadcastChecker: SpliceBroadcastChecking
+    private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
     private let customRepairBooksUseCase: RepairBooksUseCase?
     let networkMonitor: any NetworkMonitoring
     let lifecycleManager: WalletLifecycleManager
@@ -124,6 +125,19 @@ class AppState {
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
         self.isOnline = networkMonitor.isOnline
+
+        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
+        AuditService.setLogPath(auditPath)
+
+        self.lifecycleManager = lifecycleManager ?? WalletLifecycleManager(
+            validator: { mnemonic in
+                AppState.deriveNodeId(mnemonic: mnemonic) != nil
+            }
+        )
+
+        WalletKeychainService.onLog = { event, data in
+            AuditService.log(event, data: data)
+        }
 
         self.networkMonitor.onStatusChange = { [weak self] status in
             let handleStatus: @MainActor (AppState) -> Void = { appState in
@@ -147,19 +161,6 @@ class AppState {
                     if let self { handleStatus(self) }
                 }
             }
-        }
-
-        let auditPath = Constants.userDataDir.appendingPathComponent("audit_log.txt").path
-        AuditService.setLogPath(auditPath)
-
-        self.lifecycleManager = lifecycleManager ?? WalletLifecycleManager(
-            validator: { mnemonic in
-                AppState.deriveNodeId(mnemonic: mnemonic) != nil
-            }
-        )
-
-        WalletKeychainService.onLog = { event, data in
-            AuditService.log(event, data: data)
         }
     }
 

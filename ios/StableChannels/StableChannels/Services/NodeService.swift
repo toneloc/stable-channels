@@ -746,6 +746,7 @@ enum NodeServiceError: LocalizedError {
     case notRunning
     case alreadyRunning
     case dataDirLocked
+    case staleLightningSync
     case invalidFeeRate
     case invalidStoredMnemonic
     case walletStateMismatch
