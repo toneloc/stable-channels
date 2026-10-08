@@ -2,10 +2,10 @@ import SwiftUI
 
 struct HistoryView: View {
     @Environment(AppState.self) private var appState
-    @State private var trades: [TradeRecord] = []
-    @State private var payments: [PaymentRecord] = []
+    @State private var history = HistoryContent()
     @State private var selectedSegment = 0
     @State private var selectedTrade: TradeRecord?
+    @State private var refreshTask: Task<Void, Never>?
     @Environment(PaymentDetailCoordinator.self) private var paymentCoordinator
 
     var body: some View {
@@ -24,6 +24,16 @@ struct HistoryView: View {
                     }
                 }
 
+                if let refreshError = history.errorMessage {
+                    Text(refreshError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal)
+                        .padding(.bottom, 8)
+                }
+
                 // List
                 List {
                     if selectedSegment == 0 {
@@ -35,25 +45,29 @@ struct HistoryView: View {
                 .listStyle(.plain)
                 .scrollBounceBehavior(.always)
                 .overlay {
-                    if selectedSegment == 0 && trades.isEmpty {
-                        ContentUnavailableView(
-                            String(localized: "empty_trades_title", defaultValue: "No Trades"),
-                            systemImage: "arrow.left.arrow.right",
-                            description: Text(String(
-                                localized: "empty_trades_desc",
-                                defaultValue: "Convert BTC to see orders here."
-                            ))
-                        )
-                    } else if selectedSegment == 1 && payments.isEmpty {
-                        ContentUnavailableView(
-                            String(localized: "empty_payments_title", defaultValue: "No Payments"),
-                            systemImage: "bolt.fill",
-                            description: Text(String(
-                                localized: "empty_payments_desc",
-                                defaultValue: "Send or receive payments to see history here."
-                            ))
-                        )
+                    Group {
+                        if selectedSegment == 0 && trades.isEmpty {
+                            ContentUnavailableView(
+                                String(localized: "empty_trades_title", defaultValue: "No Trades"),
+                                systemImage: "arrow.left.arrow.right",
+                                description: Text(String(
+                                    localized: "empty_trades_desc",
+                                    defaultValue: "Convert BTC to see orders here."
+                                ))
+                            )
+                        } else if selectedSegment == 1 && payments.isEmpty {
+                            ContentUnavailableView(
+                                String(localized: "empty_payments_title", defaultValue: "No Payments"),
+                                systemImage: "bolt.fill",
+                                description: Text(String(
+                                    localized: "empty_payments_desc",
+                                    defaultValue: "Send or receive payments to see history here."
+                                ))
+                            )
+                        }
                     }
+                    // Let pull-to-refresh drags reach the empty List underneath.
+                    .allowsHitTesting(false)
                 }
             }
             .navigationTitle(String(localized: "title_history", defaultValue: "History"))
@@ -61,7 +75,17 @@ struct HistoryView: View {
             .onAppear {
                 loadHistory()
             }
+            .onDisappear {
+                refreshTask?.cancel()
+            }
             .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
+                loadHistory()
+            }
+            .onChange(of: appState.confirmationRefreshResultVersion) { _, _ in
+                history.apply(refreshResult: appState.confirmationRefreshResult)
+            }
+            .onChange(of: selectedSegment) { _, _ in
+                history.clearErrors()
                 loadHistory()
             }
             .onChange(of: appState.paymentFlash) { _, isFlashing in
@@ -70,8 +94,7 @@ struct HistoryView: View {
                 }
             }
             .refreshable {
-                await appState.userInitiatedRefresh()
-                loadHistory()
+                await refreshHistory()
             }
             .sheet(item: $selectedTrade) { trade in
                 TradeDetailView(trade: trade)
@@ -82,6 +105,9 @@ struct HistoryView: View {
     private var historyDisplayPrice: Double {
         appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
     }
+
+    private var trades: [TradeRecord] { history.trades }
+    private var payments: [PaymentRecord] { history.payments }
 
     // MARK: - Trades List
 
@@ -105,9 +131,79 @@ struct HistoryView: View {
         }
     }
 
+    /// Waits for a fresh confirmation check before reloading, so the spinner stays up until done.
+    private func refreshHistory() async {
+        guard refreshTask == nil else { return }
+        let task = Task { await performRefreshHistory() }
+        refreshTask = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        refreshTask = nil
+    }
+
+    private func performRefreshHistory() async {
+        await appState.userInitiatedRefresh()
+        do {
+            let result = try await appState.refreshPaymentConfirmations()
+            history.apply(refreshResult: result)
+        } catch is CancellationError {
+            return // Only thrown on cancellation (the view went away).
+        } catch {
+            history.networkError = error.localizedDescription
+        }
+        loadHistory()
+    }
+
     private func loadHistory() {
-        trades = (try? appState.databaseService?.channelRepo.getRecentTrades(limit: 50)) ?? []
-        payments = (try? appState.databaseService?.paymentRepo.getRecentPayments(limit: 50)) ?? []
+        history.reload(database: appState.databaseService)
+    }
+}
+
+/// Keeps the last good snapshot and independent network/database errors.
+struct HistoryContent {
+    private(set) var trades: [TradeRecord] = []
+    private(set) var payments: [PaymentRecord] = []
+    var networkError: String?
+    private(set) var loadError: String?
+    var errorMessage: String? { loadError ?? networkError }
+
+    /// Every result replaces the network error; only a clean result clears it.
+    mutating func apply(refreshResult: ConfirmationRefreshResult?) {
+        networkError = refreshResult?.errorMessage
+    }
+
+    mutating func clearErrors() {
+        networkError = nil
+        loadError = nil
+    }
+
+    mutating func reload(database: DatabaseService?) {
+        guard let database else {
+            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
+            return
+        }
+        reload(
+            loadTrades: { try database.channelRepo.getRecentTrades(limit: 50) },
+            loadPayments: { try database.paymentRepo.getRecentPayments(limit: 50) }
+        )
+    }
+
+    mutating func reload(
+        loadTrades: () throws -> [TradeRecord],
+        loadPayments: () throws -> [PaymentRecord]
+    ) {
+        do {
+            let newTrades = try loadTrades()
+            let newPayments = try loadPayments()
+            trades = newTrades
+            payments = newPayments
+            loadError = nil
+        } catch {
+            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
+        }
     }
 }
 

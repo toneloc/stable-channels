@@ -88,6 +88,16 @@ The debug APK will be at `app/build/outputs/apk/debug/app-debug.apk`.
 
 Or open the `android/` directory in Android Studio and run on a device/emulator.
 
+## History refresh
+
+Pull-to-refresh on History (Orders and Payments) runs a fresh payment-confirmation pass with a
+20-second deadline that covers the whole pass, including waiting for an in-flight automatic poll.
+On expiry the in-flight block-explorer requests are cancelled, remaining payments are skipped, and
+an error is shown. A manual refresh never waits for the native wallet sync: after updating rows it
+returns its result and the sync and balance refresh run in the background (automatic polls still
+sync inline). Leaving History cancels a manual refresh. Database load failures keep the last good
+rows and show an error; a successful database reload does not dismiss a network error.
+
 ## Key Constants
 
 | Constant | Value | Description |
