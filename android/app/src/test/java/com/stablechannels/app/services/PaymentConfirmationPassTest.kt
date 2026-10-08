@@ -136,6 +136,72 @@ class PaymentConfirmationPassTest {
         assertEquals(listOf(true), rowsUpdatedCalls)
     }
 
+    private fun recordReceived(paymentId: String, txid: String, address: String): Long =
+        db.recordPayment(
+            paymentId = paymentId,
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 100_000,
+            status = "pending",
+            txid = txid,
+            address = address,
+        )
+
+    private fun txBody(address: String, status: String? = null) =
+        """{"vout":[{"scriptpubkey_address":"$address"}]""" +
+            (status?.let { ""","status":$it""" } ?: "") +
+            "}"
+
+    private fun requestedPaths(): List<String> =
+        (1..server.requestCount).map { server.takeRequest().path.orEmpty() }
+
+    @Test
+    fun `receive row uses the status from the single tx request`() = runBlocking {
+        val rowId = recordReceived("r1", "tx1", "bc1qrecv")
+        routes["/blocks/tip/height"] = ok("105")
+        routes["/tx/tx1"] = ok(txBody("bc1qrecv", """{"confirmed":true,"block_height":100}"""))
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 0), pass().run())
+
+        assertEquals(6, payment(rowId).confirmations)
+        assertEquals("completed", payment(rowId).status)
+        assertEquals(listOf("/blocks/tip/height", "/tx/tx1"), requestedPaths())
+    }
+
+    @Test
+    fun `receive row falls back to the status request when the tx has no status`() = runBlocking {
+        val rowId = recordReceived("r1", "tx1", "bc1qrecv")
+        routes["/blocks/tip/height"] = ok("105")
+        routes["/tx/tx1"] = ok(txBody("bc1qrecv"))
+        routes["/tx/tx1/status"] = ok("""{"confirmed":true,"block_height":104}""")
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 0), pass().run())
+
+        assertEquals(2, payment(rowId).confirmations)
+        assertEquals(listOf("/blocks/tip/height", "/tx/tx1", "/tx/tx1/status"), requestedPaths())
+    }
+
+    @Test
+    fun `receive tx paying a different address is cleared and not confirmed`() = runBlocking {
+        val rowId = recordReceived("r1", "tx1", "bc1qrecv")
+        routes["/blocks/tip/height"] = ok("105")
+        routes["/tx/tx1"] = ok(txBody("bc1qother", """{"confirmed":true,"block_height":100}"""))
+        val mismatches = mutableListOf<String>()
+        val pass =
+            PaymentConfirmationPass(
+                httpClient = httpClient,
+                chainUrls = { listOf(server.url("/").toString()) },
+                database = { db },
+                onReceiveTxidMismatch = { mismatches += it },
+            )
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 0), pass.run())
+
+        assertEquals(listOf("tx1"), mismatches)
+        assertEquals("pending", payment(rowId).status)
+        assertEquals(listOf("/blocks/tip/height", "/tx/tx1"), requestedPaths())
+    }
+
     @Test
     fun `manual refresh returns without waiting for the wallet sync`() = runBlocking {
         val rowId = recordSent("p1", "tx1")

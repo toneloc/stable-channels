@@ -36,6 +36,12 @@ class PaymentConfirmationPass(
 ) {
     private data class TxConfirmationStatus(val confirmed: Boolean, val blockHeight: Int?)
 
+    /** [status] is the explorer's own status for the same transaction; null if it was missing. */
+    private data class ReceiveTxLookup(
+        val paysToAddress: Boolean,
+        val status: TxConfirmationStatus?,
+    )
+
     /** [manual] marks a user-initiated, deadline-bounded pass that must never block on sync. */
     suspend fun run(manual: Boolean = false): ConfirmationPollResult {
         val db = database() ?: return ConfirmationPollResult.DatabaseUnavailable
@@ -49,35 +55,35 @@ class PaymentConfirmationPass(
             for (payment in pending) {
                 currentCoroutineContext().ensureActive()
                 val txid = payment.txid ?: continue
+                var receiveStatus: TxConfirmationStatus? = null
 
                 if (payment.paymentType == "onchain" && payment.direction == "received") {
                     val expectedAddress = payment.address?.trim().orEmpty()
                     if (expectedAddress.isNotEmpty()) {
-                        when (fetchTxPaysToAddress(txid, expectedAddress)) {
-                            false -> {
-                                val cleared = db.clearPaymentTxidForRow(payment.id)
-                                anyUpdated = anyUpdated || cleared
-                                onReceiveTxidMismatch(txid)
-                                AuditService.log(
-                                    "ONCHAIN_TXID_ADDRESS_MISMATCH",
-                                    mapOf(
-                                        "payment_id" to payment.id,
-                                        "txid" to txid,
-                                        "address" to expectedAddress,
-                                    ),
-                                )
-                                continue
-                            }
-                            null -> {
-                                failedLookups++
-                                continue
-                            }
-                            true -> {}
+                        val lookup = fetchReceiveTx(txid, expectedAddress)
+                        if (lookup == null) {
+                            failedLookups++
+                            continue
                         }
+                        if (!lookup.paysToAddress) {
+                            val cleared = db.clearPaymentTxidForRow(payment.id)
+                            anyUpdated = anyUpdated || cleared
+                            onReceiveTxidMismatch(txid)
+                            AuditService.log(
+                                "ONCHAIN_TXID_ADDRESS_MISMATCH",
+                                mapOf(
+                                    "payment_id" to payment.id,
+                                    "txid" to txid,
+                                    "address" to expectedAddress,
+                                ),
+                            )
+                            continue
+                        }
+                        receiveStatus = lookup.status
                     }
                 }
 
-                val txStatus = fetchTxConfirmationStatus(txid)
+                val txStatus = receiveStatus ?: fetchTxConfirmationStatus(txid)
                 if (txStatus == null) {
                     failedLookups++
                     continue
@@ -135,21 +141,18 @@ class PaymentConfirmationPass(
         for (baseUrl in chainUrls()) {
             val body = fetchBody("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status") ?: continue
             try {
-                val json = JSONObject(body)
-                val confirmed = json.optBoolean("confirmed", false)
-                val blockHeight =
-                    if (json.has("block_height") && !json.isNull("block_height")) {
-                        json.optInt("block_height", 0).takeIf { it > 0 }
-                    } else {
-                        null
-                    }
-                return TxConfirmationStatus(confirmed = confirmed, blockHeight = blockHeight)
+                return parseStatus(JSONObject(body))
             } catch (_: Exception) {}
         }
         return null
     }
 
-    private suspend fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
+    /**
+     * One `/tx/:txid` request answers both "does it pay [address]" and its confirmation status (the
+     * response embeds the same `status` object as `/tx/:txid/status`), so receives need no second
+     * request.
+     */
+    private suspend fun fetchReceiveTx(txid: String, address: String): ReceiveTxLookup? {
         val normalizedTxid = txid.substringBefore(":").trim()
         val targetAddress = QRCodeUtils.normalizeAddress(address)
         if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
@@ -157,17 +160,35 @@ class PaymentConfirmationPass(
         for (baseUrl in chainUrls()) {
             val body = fetchBody("${baseUrl.trimEnd('/')}/tx/$normalizedTxid") ?: continue
             try {
-                val vouts = JSONObject(body).optJSONArray("vout") ?: continue
+                val tx = JSONObject(body)
+                val vouts = tx.optJSONArray("vout") ?: continue
+                var paysToAddress = false
                 for (i in 0 until vouts.length()) {
                     val vout = vouts.optJSONObject(i) ?: continue
                     val voutAddress =
                         QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
-                    if (voutAddress == targetAddress) return true
+                    if (voutAddress == targetAddress) {
+                        paysToAddress = true
+                        break
+                    }
                 }
-                return false
+                return ReceiveTxLookup(
+                    paysToAddress,
+                    tx.optJSONObject("status")?.let(::parseStatus),
+                )
             } catch (_: Exception) {}
         }
         return null
+    }
+
+    private fun parseStatus(json: JSONObject): TxConfirmationStatus {
+        val blockHeight =
+            if (json.has("block_height") && !json.isNull("block_height")) {
+                json.optInt("block_height", 0).takeIf { it > 0 }
+            } else {
+                null
+            }
+        return TxConfirmationStatus(json.optBoolean("confirmed", false), blockHeight)
     }
 
     /** Body of a successful response, or null on any failure. Rethrows cancellation. */
