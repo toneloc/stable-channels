@@ -998,8 +998,9 @@ class AppState(private val context: Context) : ViewModel() {
     private val confirmationRefreshCoordinator =
         ConfirmationRefreshCoordinator(
             onResult = { result ->
-                val sequence = (_confirmationPollUpdate.value?.sequence ?: 0L) + 1
-                _confirmationPollUpdate.value = ConfirmationPollUpdate(sequence, result)
+                _confirmationPollUpdate.update { previous ->
+                    ConfirmationPollUpdate((previous?.sequence ?: 0L) + 1, result)
+                }
             }
         ) { manual ->
             paymentConfirmationPass.run(manual)

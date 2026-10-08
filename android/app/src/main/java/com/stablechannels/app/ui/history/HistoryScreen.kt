@@ -31,7 +31,6 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.services.DatabaseService
-import com.stablechannels.app.services.refreshErrorMessage
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.satsFormatted
@@ -83,8 +82,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     var isRefreshing by remember { mutableStateOf(false) }
     // Network (manual refresh) and database (load) errors are tracked separately so a successful
     // database reload never hides a failed confirmation check.
-    var refreshError by remember { mutableStateOf<String?>(null) }
-    var loadError by remember { mutableStateOf<String?>(null) }
+    val errors = remember { HistoryErrorState() }
     val scope = rememberCoroutineScope()
     val pullRefreshState = rememberPullToRefreshState()
     val loadMutex = remember { Mutex() }
@@ -94,11 +92,11 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     suspend fun loadHistory() = loadMutex.withLock {
         when (val result = withContext(Dispatchers.IO) { readHistory(appState.databaseService) }) {
             is HistoryLoad.Failed -> {
-                loadError = result.message
+                errors.onLoadFailed(result.message)
                 return@withLock
             }
             is HistoryLoad.Loaded -> {
-                loadError = null
+                errors.onLoadSucceeded()
                 trades = result.trades
                 payments = result.payments
             }
@@ -117,12 +115,9 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
     }
     LaunchedEffect(confirmationUpdateEpoch) { loadHistory() }
     LaunchedEffect(confirmationPollUpdate?.sequence) {
-        confirmationPollUpdate?.let { refreshError = it.result.refreshErrorMessage() }
+        confirmationPollUpdate?.let { errors.onConfirmationResult(it.result) }
     }
-    LaunchedEffect(selectedSegment) {
-        refreshError = null
-        loadError = null
-    }
+    LaunchedEffect(selectedSegment) { errors.clear() }
     LaunchedEffect(isFlashing) {
         if (isFlashing) {
             loadHistory()
@@ -202,7 +197,7 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
 
         Spacer(Modifier.height(16.dp))
 
-        val visibleError = listOfNotNull(refreshError, loadError).distinct()
+        val visibleError = errors.visibleErrors
         if (visibleError.isNotEmpty()) {
             Text(
                 visibleError.joinToString("\n"),
@@ -220,13 +215,13 @@ fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
                 isRefreshing = true
                 scope.launch {
                     try {
-                        val result = appState.refreshPaymentConfirmations()
-                        refreshError = result.refreshErrorMessage()
+                        // The result reaches the banner via confirmationPollUpdate.
+                        appState.refreshPaymentConfirmations()
                         loadHistory()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
-                        refreshError = "Couldn't refresh history. Pull to try again."
+                        errors.onRefreshFailed()
                     } finally {
                         isRefreshing = false
                     }

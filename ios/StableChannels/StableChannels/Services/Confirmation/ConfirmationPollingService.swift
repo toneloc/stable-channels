@@ -119,6 +119,9 @@ final class ConfirmationPollingService {
         if anyUpdated {
             onUpdate?()
         }
+        // With nothing pending no request was made and the tip is only cached, so there is no
+        // evidence to report; staying silent keeps an existing "chain tip unavailable" banner.
+        guard !pending.isEmpty else { return }
         onRefreshResult?(.completed(failedLookups: failedLookups))
     }
 

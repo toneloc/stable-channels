@@ -81,7 +81,7 @@ struct HistoryView: View {
                 loadHistory()
             }
             .onChange(of: appState.confirmationRefreshResultVersion) { _, _ in
-                history.networkError = appState.confirmationRefreshResult?.errorMessage
+                history.apply(refreshResult: appState.confirmationRefreshResult)
             }
             .onChange(of: selectedSegment) { _, _ in
                 history.clearErrors()
@@ -147,7 +147,7 @@ struct HistoryView: View {
         appState.refreshBalances()
         do {
             let result = try await appState.refreshPaymentConfirmations()
-            history.networkError = result.errorMessage
+            history.apply(refreshResult: result)
         } catch is CancellationError {
             return // Only thrown on cancellation (the view went away).
         } catch {
@@ -168,6 +168,11 @@ struct HistoryContent {
     var networkError: String?
     private(set) var loadError: String?
     var errorMessage: String? { loadError ?? networkError }
+
+    /// Every result replaces the network error; only a clean result clears it.
+    mutating func apply(refreshResult: ConfirmationRefreshResult?) {
+        networkError = refreshResult?.errorMessage
+    }
 
     mutating func clearErrors() {
         networkError = nil

@@ -567,6 +567,32 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(results, [.completed(failedLookups: 1), .completed(failedLookups: 0)])
     }
 
+    func testAutomaticPollWithNothingPendingPublishesNothing() async {
+        blockHeightService.setHeightSilently(105)
+        var results: [ConfirmationRefreshResult] = []
+        pollingService.onRefreshResult = { results.append($0) }
+
+        await pollingService.pollOnce()
+
+        XCTAssertTrue(results.isEmpty)
+        XCTAssertEqual(mockProvider.lookupCount, 0)
+    }
+
+    func testHistoryBannerSetByTipFailureAndKeptUntilCleanResult() {
+        var history = HistoryContent()
+        history.apply(refreshResult: .chainTipUnavailable)
+        XCTAssertEqual(history.errorMessage, ConfirmationRefreshResult.chainTipUnavailable.errorMessage)
+        XCTAssertNotNil(history.errorMessage)
+
+        history.apply(refreshResult: .timedOut)
+        XCTAssertNotNil(history.errorMessage)
+        history.apply(refreshResult: .completed(failedLookups: 1))
+        XCTAssertNotNil(history.errorMessage)
+
+        history.apply(refreshResult: .completed(failedLookups: 0))
+        XCTAssertNil(history.errorMessage)
+    }
+
     func testRevalidationDoesNotReportSuccessWhenTipRefreshFails() async {
         blockHeightService.setHeightSilently(105)
         mockProvider.currentHeightFails = true
