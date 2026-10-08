@@ -2527,17 +2527,34 @@ class DatabaseService(context: Context) :
     }
 
     /**
-     * Fails on-chain rows still unconfirmed after [STALE_PENDING_ONCHAIN_SECS]: a dropped send
-     * would otherwise read "Sending onchain…" forever, and a receive that never got a txid would
-     * stay pending. Returns how many rows changed.
+     * Fails txid-less on-chain rows still pending after [STALE_PENDING_ONCHAIN_SECS]: nothing can
+     * ever resolve them. Returns how many rows changed.
      */
-    fun failStalePendingOnchain(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Int =
+    fun failStaleTxidlessOnchain(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Int =
         writableDatabase.update(
             "payments",
             ContentValues().apply { put("status", "failed") },
-            "payment_type = 'onchain' AND status = 'pending' AND confirmations = 0 AND created_at < ?",
+            "payment_type = 'onchain' AND status = 'pending' AND (txid IS NULL OR txid = '') " +
+                "AND created_at < ?",
             arrayOf((nowEpochSecs - STALE_PENDING_ONCHAIN_SECS).toString()),
         )
+
+    /**
+     * Fails one on-chain row that is still unconfirmed after [STALE_PENDING_ONCHAIN_SECS]. Call it
+     * only after the block explorer failed to find the row's transaction, so a dropped send doesn't
+     * read "Sending onchain…" forever while a confirmed one is never failed.
+     */
+    fun failStaleOnchainRow(
+        rowId: Long,
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L,
+    ): Boolean =
+        writableDatabase.update(
+            "payments",
+            ContentValues().apply { put("status", "failed") },
+            "id = ? AND payment_type = 'onchain' AND status = 'pending' AND confirmations = 0 " +
+                "AND created_at < ?",
+            arrayOf(rowId.toString(), (nowEpochSecs - STALE_PENDING_ONCHAIN_SECS).toString()),
+        ) > 0
 
     /** Marks one pre-negotiation splice failed. Failed rows are terminal. */
     fun failPendingSplice(

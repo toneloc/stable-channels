@@ -3405,7 +3405,7 @@ class AppState(private val context: Context) : ViewModel() {
         val db = databaseService ?: return
         isConfirmationPolling = true
         try {
-            if (db.failStalePendingOnchain() > 0) {
+            if (db.failStaleTxidlessOnchain() > 0) {
                 _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
             }
             val tipHeight = fetchChainTipHeight() ?: return
@@ -3441,7 +3441,11 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
 
-                val txStatus = fetchTxConfirmationStatus(txid) ?: return@forEach
+                val txStatus = fetchTxConfirmationStatus(txid)
+                if (txStatus == null) {
+                    anyUpdated = db.failStaleOnchainRow(payment.id) || anyUpdated
+                    return@forEach
+                }
                 val required = requiredConfirmationsForType(payment.paymentType)
 
                 val (newConfirmations, newStatus) =
@@ -3977,29 +3981,31 @@ class AppState(private val context: Context) : ViewModel() {
                     Log.w("AppState", "listPayments failed resolving receive txids: ${e.message}")
                     return@launch
                 }
-            var resolved = false
+            val paying = mutableMapOf<Long, MutableList<String>>()
             inbound.forEach { (txid, msat) ->
                 for (candidate in db.findTxidlessReceives(txid, msat)) {
                     val rejection = candidate.id to txid
                     if (rejection in rejectedTxidAdoptions) continue
                     // Amount alone is ambiguous (the wallet history can hold old transactions of
-                    // the same size), so only a txid that pays the row's address is adopted.
+                    // the same size), so only a txid that pays the row's address qualifies.
                     when (fetchTxPaysToAddress(txid, candidate.address.trim())) {
-                        true -> {}
-                        false -> {
-                            rejectedTxidAdoptions.add(rejection)
-                            continue
-                        }
-                        null -> continue
+                        true -> paying.getOrPut(candidate.id) { mutableListOf() }.add(txid)
+                        false -> rejectedTxidAdoptions.add(rejection)
+                        null -> {}
                     }
-                    if (db.adoptTxidForRow(candidate.id, txid)) {
-                        resolved = true
-                        AuditService.log(
-                            "ONCHAIN_RECEIVE_TXID_RESOLVED",
-                            mapOf("txid" to txid, "sats" to msat / 1000),
-                        )
-                        break
-                    }
+                }
+            }
+            var resolved = false
+            paying.forEach { (rowId, txids) ->
+                // A reused address can hold several same-amount payments; without a way to tell
+                // them apart, leave the row unresolved rather than guess.
+                val txid = txids.distinct().singleOrNull() ?: return@forEach
+                if (db.adoptTxidForRow(rowId, txid)) {
+                    resolved = true
+                    AuditService.log(
+                        "ONCHAIN_RECEIVE_TXID_RESOLVED",
+                        mapOf("txid" to txid, "row" to rowId),
+                    )
                 }
             }
             if (resolved) notifyPaymentRecorded()

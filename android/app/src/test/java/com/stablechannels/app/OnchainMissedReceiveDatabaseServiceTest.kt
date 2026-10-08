@@ -210,46 +210,71 @@ class OnchainMissedReceiveDatabaseServiceTest {
         service.close()
     }
 
-    @Test
-    fun failsOnlyOldUnconfirmedPendingOnchainRows() {
-        val service = DatabaseService(context)
-        fun insert(id: String, status: String = "pending", direction: String = "sent") =
-            service.recordPayment(
+    private fun DatabaseService.insertOnchain(
+        id: String,
+        direction: String = "sent",
+        status: String = "pending",
+        txid: String? = "tx_$id",
+        ageDays: Long = 0,
+        confirmations: Int = 0,
+    ): Long {
+        val rowId =
+            recordPayment(
                 paymentId = id,
                 paymentType = "onchain",
                 direction = direction,
                 amountMsat = 1_000_000,
                 status = status,
-                txid = "tx_$id",
+                txid = txid,
             )
-        val old = insert("old")
-        val oldReceive = insert("oldReceive", direction = "received")
-        val oldConfirming = insert("oldConfirming")
-        val oldCompleted = insert("oldCompleted", status = "completed")
-        val recent = insert("recent")
-        val db = service.writableDatabase
-        val twentyDays = 20 * 86400L
-        listOf(old, oldReceive, oldConfirming, oldCompleted).forEach {
-            db.execSQL("UPDATE payments SET created_at = created_at - $twentyDays WHERE id = $it")
-        }
-        db.execSQL("UPDATE payments SET confirmations = 2 WHERE id = $oldConfirming")
+        writableDatabase.execSQL(
+            "UPDATE payments SET created_at = created_at - ?, confirmations = ? WHERE id = ?",
+            arrayOf(ageDays * 86400L, confirmations, rowId),
+        )
+        return rowId
+    }
 
-        assertEquals(2, service.failStalePendingOnchain())
-
-        fun statusOf(id: Long) =
-            db.rawQuery("SELECT status FROM payments WHERE id = ?", arrayOf(id.toString())).use {
+    private fun DatabaseService.statusOf(rowId: Long): String =
+        readableDatabase
+            .rawQuery("SELECT status FROM payments WHERE id = ?", arrayOf(rowId.toString()))
+            .use {
                 it.moveToFirst()
                 it.getString(0)
             }
-        assertEquals("failed", statusOf(old))
-        assertEquals("failed", statusOf(oldReceive))
-        assertEquals("pending", statusOf(oldConfirming))
-        assertEquals("completed", statusOf(oldCompleted))
-        assertEquals("pending", statusOf(recent))
-        assertEquals(
-            setOf("tx_recent", "tx_oldConfirming"),
-            service.getPendingOnchainSends().map { it.txid }.toSet(),
-        )
+
+    @Test
+    fun failsOnlyOldTxidlessPendingOnchainRows() {
+        val service = DatabaseService(context)
+        val oldTxidless =
+            service.insertOnchain("a", direction = "received", txid = null, ageDays = 20)
+        val oldWithTxid = service.insertOnchain("b", ageDays = 20)
+        val recentTxidless = service.insertOnchain("c", direction = "received", txid = null)
+
+        assertEquals(1, service.failStaleTxidlessOnchain())
+
+        assertEquals("failed", service.statusOf(oldTxidless))
+        assertEquals("pending", service.statusOf(oldWithTxid))
+        assertEquals("pending", service.statusOf(recentTxidless))
+        service.close()
+    }
+
+    @Test
+    fun failsStaleRowOnlyWhenOldPendingAndUnconfirmed() {
+        val service = DatabaseService(context)
+        val old = service.insertOnchain("a", ageDays = 20)
+        val oldConfirming = service.insertOnchain("b", ageDays = 20, confirmations = 2)
+        val oldCompleted = service.insertOnchain("c", ageDays = 20, status = "completed")
+        val recent = service.insertOnchain("d")
+
+        assertEquals(false, service.failStaleOnchainRow(oldConfirming))
+        assertEquals(false, service.failStaleOnchainRow(oldCompleted))
+        assertEquals(false, service.failStaleOnchainRow(recent))
+        assertTrue(service.failStaleOnchainRow(old))
+
+        assertEquals("failed", service.statusOf(old))
+        assertEquals("pending", service.statusOf(oldConfirming))
+        assertEquals("completed", service.statusOf(oldCompleted))
+        assertEquals("pending", service.statusOf(recent))
         service.close()
     }
 
