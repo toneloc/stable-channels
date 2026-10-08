@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeActionButtonsView: View {
     let hasReadyChannel: Bool
     var pulseReceive: Bool = false
+    var isOffline: Bool = false
     let onSend: () -> Void
     let onReceive: () -> Void
     let onBuy: () -> Void
@@ -29,7 +30,7 @@ struct HomeActionButtonsView: View {
                     icon: "arrow.down",
                     color: receiveGreen,
                     textColor: .primary,
-                    pulse: pulseReceive,
+                    pulse: pulseReceive && !isOffline,
                     action: onReceive
                 )
             }
@@ -51,5 +52,7 @@ struct HomeActionButtonsView: View {
                 )
             }
         }
+        .opacity(isOffline ? 0.45 : 1.0)
+        .disabled(isOffline)
     }
 }

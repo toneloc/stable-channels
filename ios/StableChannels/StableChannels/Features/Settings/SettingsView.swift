@@ -199,7 +199,7 @@ struct SettingsView: View {
             .navigationTitle(String(localized: "title_settings", defaultValue: "Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
-                appState.refreshBalances()
+                await appState.userInitiatedRefresh()
             }
             .onAppear {
                 UNUserNotificationCenter.current().getNotificationSettings { settings in

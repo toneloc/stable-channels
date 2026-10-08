@@ -4,15 +4,18 @@ struct BalanceBarView: View {
     let allocation: ChannelAllocation
     var maxSellUSD: Double = 0
     var isTrading: Bool = false
+    var isOnline: Bool = true
     var onDragStarted: (() -> Void)?
     var onTradeRequest: ((TradeRequest) -> Void)?
     var onEmptyInteraction: (() -> Void)?
 
+    @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var state = BalanceBarState()
     @State private var animator = BalanceBarAnimationCoordinator()
     @State private var pulseScale: CGFloat = 1.0
+    @State private var hasHaptickedOfflineDrag: Bool = false
 
     static let defaultThumbDiameter: CGFloat = BalanceBarTradeCalculator.defaultThumbDiameter
     private let thumbDiameter: CGFloat = Self.defaultThumbDiameter
@@ -25,6 +28,7 @@ struct BalanceBarView: View {
     }
 
     private var interactive: Bool {
+        guard isOnline else { return false }
         if allocation.isEmpty {
             return onEmptyInteraction != nil
         } else {
@@ -33,7 +37,7 @@ struct BalanceBarView: View {
     }
 
     private var totalHeight: CGFloat {
-        interactive ? (headerHeight + verticalSpacing + thumbDiameter) : barHeight
+        headerHeight + verticalSpacing + thumbDiameter
     }
 
     private var currentBarHeight: CGFloat {
@@ -51,19 +55,18 @@ struct BalanceBarView: View {
             let thumbX = thumbPosition(barWidth: barWidth, visFrac: visFrac)
 
             VStack(spacing: verticalSpacing) {
-                if interactive {
-                    BalanceBarHeaderView(
-                        visFrac: visFrac,
-                        isPressing: state.isPressing,
-                        hasSelectedFraction: state.userSelectedFraction != nil,
-                        isAwakening: animator.isAwakening,
-                        atSellLimit: state.atSellLimit,
-                        maxSellUSD: maxSellUSD,
-                        showDepositPrompt: state.showDepositPrompt,
-                        onEmptyInteraction: onEmptyInteraction
-                    )
-                    .frame(height: headerHeight)
-                }
+                BalanceBarHeaderView(
+                    visFrac: visFrac,
+                    isPressing: state.isPressing,
+                    hasSelectedFraction: state.userSelectedFraction != nil,
+                    isAwakening: animator.isAwakening,
+                    atSellLimit: state.atSellLimit,
+                    maxSellUSD: maxSellUSD,
+                    showDepositPrompt: state.showDepositPrompt,
+                    isOnline: isOnline,
+                    onEmptyInteraction: onEmptyInteraction
+                )
+                .frame(height: headerHeight)
 
                 ZStack {
                     BalanceBarTrackView(
@@ -77,16 +80,21 @@ struct BalanceBarView: View {
                         floodOpacity: animator.radialFloodOpacity
                     )
 
-                    if interactive {
-                        thumbView(thumbX: thumbX)
-                    }
+                    thumbView(thumbX: thumbX)
                 }
-                .frame(width: barWidth, height: interactive ? thumbDiameter : barHeight)
+                .frame(width: barWidth, height: thumbDiameter)
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { gesture in
-                            guard interactive else { return }
+                            if !isOnline {
+                                if !hasHaptickedOfflineDrag {
+                                    UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                                    hasHaptickedOfflineDrag = true
+                                }
+                                return
+                            }
+                            guard interactive, isEnabled else { return }
                             state.handleDragChange(
                                 touchStartX: gesture.startLocation.x,
                                 translationX: gesture.translation.width,
@@ -101,8 +109,10 @@ struct BalanceBarView: View {
                             )
                         }
                         .onEnded { gesture in
+                            hasHaptickedOfflineDrag = false
+                            guard isOnline else { return }
                             state.acknowledgeGestureEnd()
-                            guard interactive else { return }
+                            guard interactive, isEnabled else { return }
                             state.handleDragEnd(
                                 translationX: gesture.translation.width,
                                 translationY: gesture.translation.height,
@@ -155,7 +165,7 @@ struct BalanceBarView: View {
                     .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
             )
             .scaleEffect(animator.isAwakening ? animator
-                .thumbAwakenScale : (state.isPressing ? 1.15 : (allocation.isEmpty ? 1.0 : pulseScale)))
+                .thumbAwakenScale : (state.isPressing ? 1.15 : ((allocation.isEmpty || !isOnline) ? 1.0 : pulseScale)))
             .position(x: thumbX, y: thumbDiameter / 2)
             .animation(.easeOut(duration: 0.15), value: state.isPressing)
             .onAppear {

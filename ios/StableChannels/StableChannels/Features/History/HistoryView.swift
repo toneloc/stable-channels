@@ -33,6 +33,7 @@ struct HistoryView: View {
                     }
                 }
                 .listStyle(.plain)
+                .scrollBounceBehavior(.always)
                 .overlay {
                     if selectedSegment == 0 && trades.isEmpty {
                         ContentUnavailableView(
@@ -69,7 +70,7 @@ struct HistoryView: View {
                 }
             }
             .refreshable {
-                appState.refreshBalances()
+                await appState.userInitiatedRefresh()
                 loadHistory()
             }
             .sheet(item: $selectedTrade) { trade in

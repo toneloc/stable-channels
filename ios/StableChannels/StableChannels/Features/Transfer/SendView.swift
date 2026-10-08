@@ -420,6 +420,14 @@ struct SendView: View {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        guard appState.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_send",
+                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
+            )
+            return
+        }
+
         // Dismiss any active keyboard to avoid blocking system auth dialogs
         UIApplication.shared.sendAction(
             Selector(("resignFirstResponder")),

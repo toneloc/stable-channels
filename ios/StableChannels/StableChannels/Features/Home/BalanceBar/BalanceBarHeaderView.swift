@@ -8,7 +8,10 @@ struct BalanceBarHeaderView: View {
     let atSellLimit: Bool
     let maxSellUSD: Double
     let showDepositPrompt: Bool
+    var isOnline: Bool = true
     var onEmptyInteraction: (() -> Void)?
+
+    @State private var offlinePulse: Bool = false
 
     private var usdPct: Int {
         Int(round(visFrac * 100))
@@ -19,7 +22,7 @@ struct BalanceBarHeaderView: View {
     }
 
     private var showConversion: Bool {
-        isPressing || hasSelectedFraction || isAwakening || showDepositPrompt
+        !isOnline || isPressing || hasSelectedFraction || isAwakening || showDepositPrompt
     }
 
     var body: some View {
@@ -35,12 +38,58 @@ struct BalanceBarHeaderView: View {
 
     @ViewBuilder
     private var pillContent: some View {
-        if showDepositPrompt {
+        if !isOnline {
+            offlinePill
+        } else if showDepositPrompt {
             depositPromptPill
         } else if atSellLimit {
             sellLimitPill
         } else {
             conversionPill
+        }
+    }
+
+    private var offlinePill: some View {
+        VStack(spacing: 1) {
+            HStack(spacing: 5) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .symbolEffect(.pulse.byLayer, options: .repeating)
+
+                Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                    .font(.caption2.bold())
+                    .foregroundStyle(.red)
+
+                Circle()
+                    .fill(Color.red)
+                    .frame(width: 4, height: 4)
+                    .scaleEffect(offlinePulse ? 1.3 : 0.8)
+                    .opacity(offlinePulse ? 1.0 : 0.5)
+            }
+
+            Text(String(
+                localized: "offline_check_network",
+                defaultValue: "Please check your network connection"
+            ))
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 3)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color.red.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: Color.red.opacity(0.18), radius: 4, x: 0, y: 1)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                offlinePulse = true
+            }
         }
     }
 
@@ -58,9 +107,9 @@ struct BalanceBarHeaderView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 6)
                     .strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
             )
         }
@@ -86,9 +135,9 @@ struct BalanceBarHeaderView: View {
         .multilineTextAlignment(.center)
         .padding(.horizontal, 10)
         .padding(.vertical, 2)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color.red.opacity(0.35), lineWidth: 1)
         )
     }
@@ -112,9 +161,9 @@ struct BalanceBarHeaderView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 6)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
