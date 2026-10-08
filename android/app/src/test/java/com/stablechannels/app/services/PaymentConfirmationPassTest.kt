@@ -136,6 +136,46 @@ class PaymentConfirmationPassTest {
         assertEquals(listOf(true), rowsUpdatedCalls)
     }
 
+    private fun age(rowId: Long, days: Long) =
+        db.writableDatabase.execSQL(
+            "UPDATE payments SET created_at = created_at - ? WHERE id = ?",
+            arrayOf(days * 86400L, rowId),
+        )
+
+    @Test
+    fun `old row is failed only when every explorer says not found`() = runBlocking {
+        val notFoundRow = recordSent("p1", "tx1").also { age(it, 20) }
+        val outageRow = recordSent("p2", "tx2").also { age(it, 20) }
+        routes["/blocks/tip/height"] = ok("105")
+        routes["/tx/tx2/status"] = serverError
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 1), pass().run())
+
+        assertEquals("failed", payment(notFoundRow).status)
+        assertEquals("pending", payment(outageRow).status)
+    }
+
+    @Test
+    fun `recent row the explorer does not know stays pending`() = runBlocking {
+        val rowId = recordSent("p1", "tx1")
+        routes["/blocks/tip/height"] = ok("105")
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 1), pass().run())
+
+        assertEquals("pending", payment(rowId).status)
+    }
+
+    @Test
+    fun `old receive row the explorer does not know is failed`() = runBlocking {
+        val rowId = recordReceived("p1", "tx1", "bc1qexampleaddress").also { age(it, 20) }
+        routes["/blocks/tip/height"] = ok("105")
+
+        assertEquals(ConfirmationPollResult.Completed(failedLookups = 0), pass().run())
+
+        assertEquals("failed", payment(rowId).status)
+        assertEquals(listOf(true), rowsUpdatedCalls)
+    }
+
     private fun recordReceived(paymentId: String, txid: String, address: String): Long =
         db.recordPayment(
             paymentId = paymentId,

@@ -42,12 +42,29 @@ class PaymentConfirmationPass(
         val status: TxConfirmationStatus?,
     )
 
+    /** Outcome of a per-transaction explorer lookup. */
+    private sealed interface TxLookup<out T> {
+        data class Found<T>(val value: T) : TxLookup<T>
+
+        /** Every explorer answered 404: the transaction is unknown to them. */
+        data object NotFound : TxLookup<Nothing>
+
+        /** Outage, error response or unreadable body: says nothing about the transaction. */
+        data object Unavailable : TxLookup<Nothing>
+    }
+
     /** [manual] marks a user-initiated, deadline-bounded pass that must never block on sync. */
     suspend fun run(manual: Boolean = false): ConfirmationPollResult {
         val db = database() ?: return ConfirmationPollResult.DatabaseUnavailable
-        val tipHeight = fetchChainTipHeight() ?: return ConfirmationPollResult.ChainTipUnavailable
+        val staleFailed = db.failStaleTxidlessOnchain() > 0
+        val tipHeight =
+            fetchChainTipHeight()
+                ?: run {
+                    if (staleFailed) onRowsUpdated(false)
+                    return ConfirmationPollResult.ChainTipUnavailable
+                }
         val pending = db.getPaymentsNeedingConfirmation(limit = 100)
-        var anyUpdated = false
+        var anyUpdated = staleFailed
         var failedLookups = 0
         var finished = false
 
@@ -60,11 +77,19 @@ class PaymentConfirmationPass(
                 if (payment.paymentType == "onchain" && payment.direction == "received") {
                     val expectedAddress = payment.address?.trim().orEmpty()
                     if (expectedAddress.isNotEmpty()) {
-                        val lookup = fetchReceiveTx(txid, expectedAddress)
-                        if (lookup == null) {
-                            failedLookups++
-                            continue
-                        }
+                        val lookup =
+                            when (val result = fetchReceiveTx(txid, expectedAddress)) {
+                                is TxLookup.Found -> result.value
+                                TxLookup.NotFound -> {
+                                    if (db.failStaleOnchainRow(payment.id)) anyUpdated = true
+                                    else failedLookups++
+                                    continue
+                                }
+                                TxLookup.Unavailable -> {
+                                    failedLookups++
+                                    continue
+                                }
+                            }
                         if (!lookup.paysToAddress) {
                             val cleared = db.clearPaymentTxidForRow(payment.id)
                             anyUpdated = anyUpdated || cleared
@@ -83,11 +108,22 @@ class PaymentConfirmationPass(
                     }
                 }
 
-                val txStatus = receiveStatus ?: fetchTxConfirmationStatus(txid)
-                if (txStatus == null) {
-                    failedLookups++
-                    continue
-                }
+                val txStatus =
+                    receiveStatus
+                        ?: when (val result = fetchTxConfirmationStatus(txid)) {
+                            is TxLookup.Found -> result.value
+                            // Only an authoritative "not found" may retire an old row; an outage
+                            // must leave it pollable so a later recovery can still confirm it.
+                            TxLookup.NotFound -> {
+                                if (db.failStaleOnchainRow(payment.id)) anyUpdated = true
+                                else failedLookups++
+                                continue
+                            }
+                            TxLookup.Unavailable -> {
+                                failedLookups++
+                                continue
+                            }
+                        }
                 val required = AppState.requiredConfirmationsForType(payment.paymentType)
 
                 val (newConfirmations, newStatus) =
@@ -134,51 +170,76 @@ class PaymentConfirmationPass(
         return null
     }
 
-    private suspend fun fetchTxConfirmationStatus(txid: String): TxConfirmationStatus? {
+    private suspend fun fetchTxConfirmationStatus(txid: String): TxLookup<TxConfirmationStatus> {
         val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty()) return null
+        if (normalizedTxid.isEmpty()) return TxLookup.Unavailable
 
-        for (baseUrl in chainUrls()) {
-            val body = fetchBody("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status") ?: continue
-            try {
-                return parseStatus(JSONObject(body))
-            } catch (_: Exception) {}
+        return lookupAcrossExplorers("/tx/$normalizedTxid/status") { body ->
+            parseStatus(JSONObject(body))
         }
-        return null
     }
+
+    /**
+     * Whether [txid] pays [address], or null if that could not be established. Used to confirm a
+     * transaction belongs to a pending receive row before attaching it.
+     */
+    suspend fun paysToAddress(txid: String, address: String): Boolean? =
+        (fetchReceiveTx(txid, address) as? TxLookup.Found)?.value?.paysToAddress
 
     /**
      * One `/tx/:txid` request answers both "does it pay [address]" and its confirmation status (the
      * response embeds the same `status` object as `/tx/:txid/status`), so receives need no second
      * request.
      */
-    private suspend fun fetchReceiveTx(txid: String, address: String): ReceiveTxLookup? {
+    private suspend fun fetchReceiveTx(txid: String, address: String): TxLookup<ReceiveTxLookup> {
         val normalizedTxid = txid.substringBefore(":").trim()
         val targetAddress = QRCodeUtils.normalizeAddress(address)
-        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
+        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return TxLookup.Unavailable
 
-        for (baseUrl in chainUrls()) {
-            val body = fetchBody("${baseUrl.trimEnd('/')}/tx/$normalizedTxid") ?: continue
-            try {
-                val tx = JSONObject(body)
-                val vouts = tx.optJSONArray("vout") ?: continue
-                var paysToAddress = false
-                for (i in 0 until vouts.length()) {
-                    val vout = vouts.optJSONObject(i) ?: continue
-                    val voutAddress =
-                        QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
-                    if (voutAddress == targetAddress) {
-                        paysToAddress = true
-                        break
-                    }
+        return lookupAcrossExplorers("/tx/$normalizedTxid") { body ->
+            val tx = JSONObject(body)
+            val vouts = tx.optJSONArray("vout") ?: return@lookupAcrossExplorers null
+            var paysToAddress = false
+            for (i in 0 until vouts.length()) {
+                val vout = vouts.optJSONObject(i) ?: continue
+                val voutAddress =
+                    QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
+                if (voutAddress == targetAddress) {
+                    paysToAddress = true
+                    break
                 }
-                return ReceiveTxLookup(
-                    paysToAddress,
-                    tx.optJSONObject("status")?.let(::parseStatus),
-                )
-            } catch (_: Exception) {}
+            }
+            ReceiveTxLookup(paysToAddress, tx.optJSONObject("status")?.let(::parseStatus))
         }
-        return null
+    }
+
+    /**
+     * Tries each explorer in turn and returns the first body [parse] accepts. [TxLookup.NotFound]
+     * only if every explorer answered 404; any other failure makes the result unavailable.
+     */
+    private suspend fun <T> lookupAcrossExplorers(
+        path: String,
+        parse: (String) -> T?,
+    ): TxLookup<T> {
+        var notFound = 0
+        var otherFailure = false
+        for (baseUrl in chainUrls()) {
+            when (val response = fetchResponse("${baseUrl.trimEnd('/')}$path")) {
+                is HttpBody.NotFound -> notFound++
+                is HttpBody.Failed -> otherFailure = true
+                is HttpBody.Ok -> {
+                    val parsed =
+                        try {
+                            parse(response.body)
+                        } catch (_: Exception) {
+                            null
+                        }
+                    if (parsed != null) return TxLookup.Found(parsed)
+                    otherFailure = true
+                }
+            }
+        }
+        return if (notFound > 0 && !otherFailure) TxLookup.NotFound else TxLookup.Unavailable
     }
 
     private fun parseStatus(json: JSONObject): TxConfirmationStatus {
@@ -192,14 +253,26 @@ class PaymentConfirmationPass(
     }
 
     /** Body of a successful response, or null on any failure. Rethrows cancellation. */
-    private suspend fun fetchBody(url: String): String? =
+    private suspend fun fetchBody(url: String): String? = (fetchResponse(url) as? HttpBody.Ok)?.body
+
+    /** Rethrows cancellation; every other failure is [HttpBody.Failed]. */
+    private suspend fun fetchResponse(url: String): HttpBody =
         try {
-            httpClient.awaitSuccessfulBody(Request.Builder().url(url).build())
+            httpClient.awaitBody(Request.Builder().url(url).build())
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            null
+            HttpBody.Failed
         }
+}
+
+internal sealed interface HttpBody {
+    data class Ok(val body: String) : HttpBody
+
+    data object NotFound : HttpBody
+
+    /** Non-success status other than 404, or a missing body. */
+    data object Failed : HttpBody
 }
 
 /**
@@ -208,6 +281,9 @@ class PaymentConfirmationPass(
  * pending connection and a stalled body read instead of leaving a blocked thread behind.
  */
 internal suspend fun OkHttpClient.awaitSuccessfulBody(request: Request): String? =
+    (awaitBody(request) as? HttpBody.Ok)?.body
+
+internal suspend fun OkHttpClient.awaitBody(request: Request): HttpBody =
     suspendCancellableCoroutine { continuation ->
         val call = newCall(request)
         continuation.invokeOnCancellation { call.cancel() }
@@ -218,14 +294,20 @@ internal suspend fun OkHttpClient.awaitSuccessfulBody(request: Request): String?
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    val body =
+                    val result =
                         try {
-                            response.use { if (it.isSuccessful) it.body?.string() else null }
+                            response.use {
+                                when {
+                                    it.code == 404 -> HttpBody.NotFound
+                                    !it.isSuccessful -> HttpBody.Failed
+                                    else -> it.body?.string()?.let(HttpBody::Ok) ?: HttpBody.Failed
+                                }
+                            }
                         } catch (e: IOException) {
                             continuation.resumeWithException(e)
                             return
                         }
-                    continuation.resume(body)
+                    continuation.resume(result)
                 }
             }
         )

@@ -885,9 +885,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                     (sats.toDouble() / Constants.SATS_IN_BTC) *
                                                         accountingPrice,
                                                 btcPrice = accountingPrice,
+                                                status = "pending",
                                                 txid = txid,
                                                 address = trimmed,
                                             )
+                                            appState.notifyPaymentRecorded()
                                             result = "Onchain tx sent: $txid"
                                         }
                                     }
