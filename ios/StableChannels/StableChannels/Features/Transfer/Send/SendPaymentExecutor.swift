@@ -187,19 +187,22 @@ struct SendPaymentExecutor {
         return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
-    private static func sendOnchain(
+    static func sendOnchain(
         address: String,
         effectiveSats: UInt64,
         price: Double,
         feeRateSatVb: Double?,
         appState: AppState
     ) async throws -> SendPaymentResult {
-        guard effectiveSats > 0 else { throw NSError(
-            domain: "Send",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: "Invalid amount"]
-        ) }
-        if let channel = appState.nodeService.channels.first(where: \.isChannelReady) {
+        guard effectiveSats > 0 else {
+            throw NSError(
+                domain: "Send",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid amount"]
+            )
+        }
+        if SendChannelSpendPolicy.isSpliceOut(channels: appState.nodeService.channels, isSweeping: appState.isSweeping),
+           let channel = appState.nodeService.channels.first(where: \.isChannelReady) {
             guard !appState.isSweeping else {
                 throw NSError(
                     domain: "Send",
