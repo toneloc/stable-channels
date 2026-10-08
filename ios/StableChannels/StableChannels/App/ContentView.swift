@@ -267,7 +267,8 @@ struct ErrorDisplayView: View {
     @State private var isResetting = false
 
     private var isMismatchError: Bool {
-        message.contains("Mismatched state")
+        appState.isStartupMismatch
+            || message.contains("Mismatched state")
             || message.contains("Wallet state is inconsistent")
             || message.contains("Restore with your recovery phrase")
             || message.contains("Please restore using your backup seed words")

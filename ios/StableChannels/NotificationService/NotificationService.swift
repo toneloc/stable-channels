@@ -489,14 +489,8 @@ class NotificationService: UNNotificationServiceExtension {
             .isEmpty
 
         // Check for mismatch between Keychain and plaintext seed
-        if let kcSeed = keychainSeed, let plaintext = plaintextWords, hasPlaintext {
-            let canonicalPlaintext = BIP39.validatedCanonicalMnemonic(plaintext) ?? plaintext
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let canonicalKeychain = BIP39.validatedCanonicalMnemonic(kcSeed) ?? kcSeed
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !canonicalPlaintext.isEmpty && !canonicalKeychain.isEmpty && canonicalPlaintext != canonicalKeychain {
-                return .seedStorageMismatch
-            }
+        if hasPlaintext, BIP39.isStorageMismatch(plaintextWords, keychainSeed) {
+            return .seedStorageMismatch
         }
 
         let keySeedPath = dataDir.appendingPathComponent("keys_seed")

@@ -34,6 +34,16 @@ class AppState {
     }
 
     var phase: Phase = .loading
+    private(set) var startupState: StartupState?
+
+    var isStartupMismatch: Bool {
+        switch startupState {
+        case .seedOnlyMismatch, .dbOnlyMismatch, .seedStorageMismatch:
+            return true
+        default:
+            return false
+        }
+    }
 
     // MARK: - Authentication
 
@@ -758,6 +768,7 @@ class AppState {
     }
 
     func resetInMemoryWalletState() {
+        startupState = nil
         stableChannel = .default
         statusMessage = ""
         paymentFlash = false
@@ -1040,7 +1051,9 @@ class AppState {
         subscribeToPushNotifications()
 
         // Evaluate startup state using WalletLifecycleManager (Issue 13 / SOLID cleanup)
-        switch lifecycleManager.detectStartupState() {
+        let detectedStartup = lifecycleManager.detectStartupState()
+        self.startupState = detectedStartup
+        switch detectedStartup {
         case .ready:
             // Safe state: Both seed and database present. Start node.
             if !networkMonitor.isOnline {

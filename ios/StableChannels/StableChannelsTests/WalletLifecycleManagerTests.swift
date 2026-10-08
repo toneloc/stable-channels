@@ -463,24 +463,26 @@ final class WalletLifecycleManagerTests: XCTestCase {
         XCTAssertEqual(manager.detectStartupState(), .ready)
     }
 
-    func testMarkerlessRecoveryActiveMatchesPendingBlockedIfLegacyArtifactsRemain() throws {
-        // If active matches pending but legacy artifacts exist, must fail closed.
+    func testMarkerlessRecoveryActiveMatchesPendingCleansPendingEvenWithDatabase() throws {
+        // If active matches pending, promotion already succeeded. Pending must be
+        // cleaned up even if the database already exists so background services (NSE)
+        // are not stranded in .restoreInProgress.
         let ud = UserDefaults(suiteName: testAppGroup)
         mockStorage.mockMnemonic = otherMnemonic
         mockStorage.mockPendingMnemonic = otherMnemonic
 
         let sqlitePath = tempDirURL.appendingPathComponent("ldk_node_data.sqlite")
-        try "legacy sqlite data".write(to: sqlitePath, atomically: true, encoding: .utf8)
+        try "active sqlite data".write(to: sqlitePath, atomically: true, encoding: .utf8)
 
         let didRecover = try manager.runRecoveryIfNeeded(onWipePersistence: {})
 
-        XCTAssertFalse(didRecover)
-        XCTAssertEqual(
+        XCTAssertTrue(didRecover)
+        XCTAssertNil(
             mockStorage.mockPendingMnemonic,
-            otherMnemonic,
-            "Pending slot must not be deleted when blocked by legacy artifacts"
+            "Pending slot must be deleted on recovery when active matches pending"
         )
-        XCTAssertFalse(ud?.bool(forKey: "recovered_restore_pending") ?? false)
+        XCTAssertTrue(ud?.bool(forKey: "recovered_restore_pending") == true)
+        XCTAssertEqual(manager.detectStartupState(), .ready)
     }
 
     func testMarkerlessRecoveryActiveDiffersFromPendingClearsPendingAsAbandoned() throws {

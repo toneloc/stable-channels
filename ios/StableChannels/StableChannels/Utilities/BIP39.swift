@@ -19,9 +19,18 @@ enum BIP39 {
     /// For full validation, use ``validatedCanonicalMnemonic(_:)`` instead.
     static func canonicalize(_ mnemonic: String) -> String {
         mnemonic
-            .lowercased()
             .split(whereSeparator: \.isWhitespace)
+            .map { $0.lowercased() }
             .joined(separator: " ")
+    }
+
+    /// Evaluates whether two mnemonic strings represent differing, non-empty phrases.
+    /// Returns true when both are provided, neither is empty, and their canonical forms differ.
+    static func isStorageMismatch(_ first: String?, _ second: String?) -> Bool {
+        guard let first, let second else { return false }
+        let canonicalFirst = canonicalize(first)
+        let canonicalSecond = canonicalize(second)
+        return !canonicalFirst.isEmpty && !canonicalSecond.isEmpty && canonicalFirst != canonicalSecond
     }
 
     /// Returns the lowercase, single-spaced mnemonic after full BIP-39
@@ -31,9 +40,9 @@ enum BIP39 {
     /// rust-bip39's parser is case-sensitive, while accepting mixed-case input is
     /// useful at the UI/storage boundary.
     static func validatedCanonicalMnemonic(_ mnemonic: String) -> String? {
-        let words = canonicalize(mnemonic)
-            .split(separator: " ")
-            .map(String.init)
+        let words = mnemonic
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.lowercased() }
         guard [12, 15, 18, 21, 24].contains(words.count) else { return nil }
 
         // Concatenate the 11-bit word indices.

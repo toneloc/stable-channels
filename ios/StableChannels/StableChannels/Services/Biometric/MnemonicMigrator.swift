@@ -31,8 +31,7 @@ enum MnemonicMigrator {
             let canonicalKeychain = BIP39.canonicalize(keychainMnemonic)
             // Reconcile lingering legacy plaintext file if present
             if let plaintext = try? String(contentsOfFile: legacyPath.path, encoding: .utf8) {
-                let canonicalPlaintext = BIP39.canonicalize(plaintext)
-                if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
+                if BIP39.isStorageMismatch(plaintext, canonicalKeychain) {
                     logError?("KEYCHAIN_PLAINTEXT_MISMATCH", [:])
                     throw MnemonicMigrationError.seedMismatch
                 }

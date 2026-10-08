@@ -67,13 +67,9 @@ final class WalletLifecycleManager {
         if FileManager.default.fileExists(atPath: seedPhrasePath.path) {
             do {
                 let plaintext = try String(contentsOfFile: seedPhrasePath.path, encoding: .utf8)
-                if let kcSeed = keychainSeed {
-                    let canonicalPlaintext = BIP39.canonicalize(plaintext)
-                    let canonicalKeychain = BIP39.canonicalize(kcSeed)
-                    if !canonicalPlaintext.isEmpty, canonicalPlaintext != canonicalKeychain {
-                        AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
-                        return .seedStorageMismatch
-                    }
+                if BIP39.isStorageMismatch(plaintext, keychainSeed) {
+                    AuditService.log("STARTUP_SEED_STORAGE_MISMATCH", data: [:])
+                    return .seedStorageMismatch
                 }
             } catch {
                 AuditService.log("STARTUP_PLAINTEXT_READ_ERROR", data: ["error": error.localizedDescription])
@@ -292,27 +288,13 @@ final class WalletLifecycleManager {
         if hasActive {
             // If the active seed already matches pending:
             if let active = try? keychain.loadMnemonic(), active == pending {
-                let legacyArtifacts = ["keys_seed", "seed_phrase", "ldk_node_data.sqlite"]
-                    .filter { name in
-                        FileManager.default.fileExists(
-                            atPath: userDataDir.appendingPathComponent(name).path
-                        )
-                    }
-                if legacyArtifacts.isEmpty {
-                    // Promotion was committed to the active slot before process termination,
-                    // but pending deletion was interrupted. Confirm recovery and clean up pending.
-                    restoreStateStore.setRecoveredRestorePending(true)
-                    try? keychain.deletePendingMnemonic()
-                    AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
-                    return true
-                } else {
-                    // Legacy artifacts remain: fail closed, do not delete evidence.
-                    AuditService.log(
-                        "RESTORE_MARKERLESS_PENDING_BLOCKED_BY_LEGACY",
-                        data: ["artifacts": legacyArtifacts.joined(separator: ",")]
-                    )
-                    return false
-                }
+                // Promotion was committed to the active slot before process termination.
+                // Clean up the pending slot and confirm recovery so that background
+                // services (NSE) are not permanently blocked in .restoreInProgress.
+                restoreStateStore.setRecoveredRestorePending(true)
+                try? keychain.deletePendingMnemonic()
+                AuditService.log("RESTORE_MARKERLESS_PENDING_PROMOTED", data: [:])
+                return true
             }
 
             // The active seed survived and differs from pending, so the staged restore never

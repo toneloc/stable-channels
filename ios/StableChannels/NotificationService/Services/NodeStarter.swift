@@ -102,13 +102,9 @@ final class DefaultNodeStarter: NodeStarter {
             // Check if plaintext seed exists and disagrees with Keychain (storage mismatch)
             let seedPhrasePath = dataDir.appendingPathComponent("seed_phrase")
             if let plaintextWords = try? String(contentsOfFile: seedPhrasePath.path, encoding: .utf8),
-               !plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let canonicalPlaintext = BIP39.validatedCanonicalMnemonic(plaintextWords)
-                    ?? plaintextWords.trimmingCharacters(in: .whitespacesAndNewlines)
-                if canonicalPlaintext != canonicalWords {
-                    logger.log("ERROR: SEED_STORAGE_MISMATCH - keychain and plaintext disagree")
-                    throw NodeStarterError.seedStorageMismatch
-                }
+               BIP39.isStorageMismatch(plaintextWords, canonicalWords) {
+                logger.log("ERROR: SEED_STORAGE_MISMATCH - keychain and plaintext disagree")
+                throw NodeStarterError.seedStorageMismatch
             }
 
             nodeEntropy = NodeEntropy.fromBip39Mnemonic(mnemonic: canonicalWords, passphrase: nil)
