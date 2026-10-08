@@ -21,7 +21,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -48,13 +52,21 @@ import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.usdFormatted
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+// Space taken by the floating bottom bar, which overlays the scrolling content.
+private const val HOME_BOTTOM_RESERVE_DP = 70f
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
+fun HomeScreen(
+    appState: AppState,
+    modifier: Modifier = Modifier,
+    onViewAllPayments: () -> Unit = {},
+) {
     val totalSats by appState.totalBalanceSats.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
@@ -75,6 +87,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
     var selectedPayment by remember { mutableStateOf<PaymentRecord?>(null) }
+    var viewportPx by remember { mutableIntStateOf(0) }
+    var recentTopPx by remember { mutableIntStateOf(0) }
+    val density = LocalDensity.current
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
@@ -163,6 +178,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
         Column(
             modifier =
                 Modifier.fillMaxSize()
+                    .onSizeChanged { viewportPx = it.height }
                     .verticalScroll(scrollState)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -633,6 +649,32 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     },
                 )
             }
+            Spacer(Modifier.height(16.dp))
+            Box(
+                modifier =
+                    Modifier.fillMaxWidth().onGloballyPositioned {
+                        recentTopPx = it.positionInParent().y.roundToInt()
+                    }
+            ) {
+                RecentActivity(
+                    appState = appState,
+                    reloadKey =
+                        listOf(showSend, showReceive, showBuy, showSell, totalSats, onchainSats),
+                    maxRows =
+                        recentActivityRowCount(
+                            with(density) { (viewportPx - recentTopPx).toDp().value } -
+                                HOME_BOTTOM_RESERVE_DP
+                        ),
+                    onViewAll = onViewAllPayments,
+                    onPaymentClick = { selectedPayment = it },
+                    onLoaded = { loaded ->
+                        selectedPayment = selectedPayment?.let { open ->
+                            loaded.firstOrNull { it.id == open.id } ?: open
+                        }
+                    },
+                )
+            }
+
             // Bottom padding for nav bar
             Spacer(Modifier.height(80.dp))
         }

@@ -37,6 +37,11 @@ struct MainTabView: View {
                 selectedTab = .history
             }
         }
+        .onChange(of: coordinator.showPaymentsRequested) { _, newValue in
+            if newValue, selectedTab != .history {
+                selectedTab = .history
+            }
+        }
         .sheet(item: Binding(
             get: { coordinator.paymentId.map(PaymentIdentifier.init) },
             set: { coordinator.paymentId = $0?.id }

@@ -120,6 +120,7 @@
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
 		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
 		49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */; };
+		7359CDBAEFEA47ECA31E85E9 /* RecentActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62D77A07F775486184FB0F61 /* RecentActivityView.swift */; };
 		49D1E98B36290E1046BCBD0C /* ActionButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2229F078D1812443B9072 /* ActionButton.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
@@ -144,6 +145,7 @@
 		49DDD00A3054000100B5A146 /* HomeBalanceSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */; };
 		49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */; };
 		49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */; };
+		06B208D84A7C4D57AC33EBF0 /* PaymentRowAmountTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11D42FAC099C49C0B96F543B /* PaymentRowAmountTests.swift */; };
 		49DDD0103054000100B5A146 /* BookRepairPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */; };
 		49DDD0123054000100B5A146 /* StabilityRepairProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */; };
 		49DDD0143054000100B5A146 /* RepairBooksUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */; };
@@ -365,6 +367,7 @@
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
 		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
 		49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNotificationBannerView.swift; sourceTree = "<group>"; };
+		62D77A07F775486184FB0F61 /* RecentActivityView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentActivityView.swift; sourceTree = "<group>"; };
 		49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeActionButtonsView.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
@@ -389,6 +392,7 @@
 		49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeBalanceSectionView.swift; sourceTree = "<group>"; };
 		49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSyncStatusSectionView.swift; sourceTree = "<group>"; };
 		49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelAllocationTests.swift; sourceTree = "<group>"; };
+		11D42FAC099C49C0B96F543B /* PaymentRowAmountTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentRowAmountTests.swift; sourceTree = "<group>"; };
 		49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepairPolicy.swift; sourceTree = "<group>"; };
 		49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityRepairProtocols.swift; sourceTree = "<group>"; };
 		49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepairBooksUseCase.swift; sourceTree = "<group>"; };
@@ -932,6 +936,7 @@
 				49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */,
 				49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */,
 				49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */,
+				62D77A07F775486184FB0F61 /* RecentActivityView.swift */,
 				49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */,
 				49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */,
 				95055FDBC76859CB74803660 /* HomeView.swift */,
@@ -954,6 +959,7 @@
 				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
 				49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */,
 				49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */,
+				11D42FAC099C49C0B96F543B /* PaymentRowAmountTests.swift */,
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
@@ -1147,6 +1153,7 @@
 				49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */,
 				49DDD0223054000100B5A146 /* BalanceBarStateTests.swift in Sources */,
 				49DDD0243054000100B5A146 /* BalanceBarTradeCalculatorTests.swift in Sources */,
+				06B208D84A7C4D57AC33EBF0 /* PaymentRowAmountTests.swift in Sources */,
 				49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */,
 				49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */,
 				49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */,
@@ -1233,6 +1240,7 @@
 				49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */,
 				49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */,
 				49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */,
+				7359CDBAEFEA47ECA31E85E9 /* RecentActivityView.swift in Sources */,
 				3DBEBB9A611388A35C38F1D2 /* MainTabView.swift in Sources */,
 				8173B7F0205744685F9E67E6 /* NodeService.swift in Sources */,
 				C1911B3A7E4C92444F07A5C6 /* OnChainView.swift in Sources */,

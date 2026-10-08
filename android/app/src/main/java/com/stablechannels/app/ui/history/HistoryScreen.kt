@@ -8,8 +8,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowCircleDown
-import androidx.compose.material.icons.filled.ArrowCircleUp
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.TrendingDown
@@ -27,15 +25,17 @@ import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
-import com.stablechannels.app.util.Constants
-import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.relativeString
 import com.stablechannels.app.util.usdFormatted
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HistoryScreen(appState: AppState, modifier: Modifier = Modifier) {
-    var selectedSegment by remember { mutableIntStateOf(0) }
+fun HistoryScreen(
+    appState: AppState,
+    modifier: Modifier = Modifier,
+    initialSegment: Int = 0,
+) {
+    var selectedSegment by remember { mutableIntStateOf(initialSegment) }
     var trades by remember { mutableStateOf<List<TradeRecord>>(emptyList()) }
     var payments by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -246,156 +246,6 @@ private fun TradeRow(trade: TradeRecord, onClick: () -> Unit) {
             StatusBadge(trade.status)
         }
     }
-}
-
-@Composable
-private fun PaymentRow(payment: PaymentRecord, currentPrice: Double, onClick: () -> Unit) {
-    val isIncoming = payment.isIncoming
-    val icon = if (isIncoming) Icons.Default.ArrowCircleDown else Icons.Default.ArrowCircleUp
-    val iconColor = if (isIncoming) Color(0xFF10B981) else Color(0xFF3B82F6)
-    val typeLabel =
-        when (payment.paymentType) {
-            "stability" -> "Settlement"
-            "lightning" -> "Lightning"
-            "splice_in" -> "Splice In"
-            "splice_out" -> "Splice Out"
-            "onchain" -> "Onchain"
-            "channel_close" -> "Channel Close"
-            "bolt12" -> "Bolt12"
-            else -> payment.paymentType
-        }
-
-    Row(
-        modifier =
-            Modifier.fillMaxWidth()
-                .clickable(onClick = onClick)
-                .padding(vertical = 12.dp, horizontal = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // Icon with colored background
-        Surface(
-            shape = RoundedCornerShape(10.dp),
-            color = iconColor.copy(alpha = 0.12f),
-            modifier = Modifier.size(40.dp),
-        ) {
-            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                Icon(
-                    icon,
-                    contentDescription = null,
-                    tint = iconColor,
-                    modifier = Modifier.size(22.dp),
-                )
-            }
-        }
-
-        Spacer(Modifier.width(12.dp))
-
-        // Title + type + time
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = if (isIncoming) "Received" else "Sent",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = "$typeLabel · ${payment.date.relativeString()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        // Amount + status
-        Column(horizontalAlignment = Alignment.End) {
-            val displayUsd =
-                payment.amountUSD
-                    ?: run {
-                        val price =
-                            payment.btcPrice?.takeIf { it > 0.0 }
-                                ?: currentPrice.takeIf { it > 0.0 }
-                        price?.let { (payment.amountSats.toDouble() / Constants.SATS_IN_BTC) * it }
-                    }
-            val amountText =
-                displayUsd?.usdFormatted() ?: "${payment.amountSats.btcSpacedFormatted()} BTC"
-            Text(
-                text = (if (isIncoming) "+" else "-") + amountText,
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.Medium,
-                color = if (isIncoming) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface,
-            )
-            val statusLabel = payment.historyStatusLabel()
-            val statusColor = payment.historyStatusColor()
-            StatusBadge(statusLabel, statusColor)
-        }
-    }
-}
-
-@Composable
-private fun StatusBadge(status: String, color: Color? = null) {
-    val resolvedColor =
-        color
-            ?: when (status.lowercase()) {
-                "completed",
-                "accepted" -> Color(0xFF10B981)
-                "pending",
-                "prepared",
-                "sent",
-                "fee_paid",
-                "uncertain" -> Color(0xFFF59E0B)
-                "failed",
-                "send_failed",
-                "rejected" -> Color(0xFFEF4444)
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            }
-    Text(
-        text =
-            when (status) {
-                "send_failed" -> "Failed"
-                "fee_paid" -> "Awaiting result"
-                "uncertain" -> "Result delayed"
-                else -> status
-            },
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Medium,
-        color = resolvedColor,
-    )
-}
-
-private fun PaymentRecord.shouldShowConfirmationProgress(): Boolean {
-    val onchainTypes = setOf("onchain", "channel_close", "splice_in", "splice_out")
-    val hasProgressSignal = status == "pending" || confirmations > 0
-    return paymentType in onchainTypes && hasProgressSignal
-}
-
-private fun PaymentRecord.historyStatusLabel(): String {
-    if (!shouldShowConfirmationProgress()) {
-        return status.replaceFirstChar { it.uppercase() }
-    }
-    val required = requiredConfirmationsForDisplay()
-    return if (confirmations >= required) {
-        "Confirmed"
-    } else {
-        "${confirmations}/${required} confirmed"
-    }
-}
-
-private fun PaymentRecord.historyStatusColor(): Color {
-    if (!shouldShowConfirmationProgress()) {
-        return when (status) {
-            "completed" -> Color(0xFF10B981)
-            "pending" -> Color(0xFFF59E0B)
-            "failed" -> Color(0xFFEF4444)
-            else -> Color(0xFF6B7280)
-        }
-    }
-    return when {
-        confirmations >= requiredConfirmationsForDisplay() -> Color(0xFF10B981)
-        confirmations > 0 -> Color(0xFF3B82F6)
-        else -> Color(0xFFF59E0B)
-    }
-}
-
-private fun PaymentRecord.requiredConfirmationsForDisplay(): Int {
-    return AppState.requiredConfirmationsForType(paymentType)
 }
 
 @Composable

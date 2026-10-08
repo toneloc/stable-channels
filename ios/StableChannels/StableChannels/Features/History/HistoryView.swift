@@ -23,6 +23,9 @@ struct HistoryView: View {
                         selectedSegment = 1
                     }
                 }
+                .onChange(of: paymentCoordinator.showPaymentsRequested) { _, _ in
+                    consumePaymentsRequest()
+                }
 
                 // List
                 List {
@@ -58,6 +61,7 @@ struct HistoryView: View {
             .navigationTitle(String(localized: "title_history", defaultValue: "History"))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
+                consumePaymentsRequest()
                 loadHistory()
             }
             .onChange(of: appState.confirmationUpdateEpoch) { _, _ in
@@ -102,6 +106,12 @@ struct HistoryView: View {
             }
             .tint(.primary)
         }
+    }
+
+    private func consumePaymentsRequest() {
+        guard paymentCoordinator.showPaymentsRequested else { return }
+        selectedSegment = 1
+        paymentCoordinator.showPaymentsRequested = false
     }
 
     private func loadHistory() {
@@ -159,39 +169,43 @@ struct TradeRowView: View {
 struct PaymentRowView: View {
     let payment: PaymentRecord
     let displayPrice: Double
+    var compact = false
 
     var body: some View {
         HStack {
             Image(systemName: payment.isIncoming ? "arrow.down.circle.fill" : "arrow.up.circle.fill")
                 .foregroundStyle(payment.isIncoming ? .green : .blue)
-                .font(.title3)
+                .font(compact ? .body : .title3)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(payment.isIncoming
                     ? String(localized: "payment_received", defaultValue: "Received")
                     : String(localized: "payment_sent", defaultValue: "Sent"))
+                    .font(compact ? .subheadline : .body)
                     .fontWeight(.medium)
                 Text(paymentTypeLabel)
-                    .font(.caption)
+                    .font(compact ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                if let usd = payment.displayUSD(fallbackPrice: displayPrice) {
-                    Text(usd.usdFormatted)
-                        .fontWeight(.medium)
-                } else {
-                    Text("\(payment.amountSats.btcSpacedFormatted) BTC")
-                        .fontWeight(.medium)
-                }
+                Text(payment.signedAmountText(fallbackPrice: displayPrice))
+                    .font(compact ? .subheadline : .body)
+                    .fontWeight(.medium)
+                    .foregroundStyle(amountColor)
                 Text(statusLabel)
-                    .font(.caption)
+                    .font(compact ? .caption2 : .caption)
                     .foregroundStyle(statusColor)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, compact ? 2 : 4)
+    }
+
+    private var amountColor: Color {
+        if payment.status == "failed" || payment.status == "expired" { return .secondary }
+        return payment.isIncoming ? .green : .red
     }
 
     private var paymentTypeLabel: String {
@@ -240,7 +254,7 @@ struct PaymentRowView: View {
     }
 }
 
-private extension PaymentRecord {
+extension PaymentRecord {
     var shouldPreferUSDDisplay: Bool {
         switch paymentType {
         case "splice_in", "splice_out", "onchain", "channel_close":
@@ -258,6 +272,14 @@ private extension PaymentRecord {
         let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
         guard price > 0 else { return nil }
         return Double(amountSats) / Double(Constants.satsInBTC) * price
+    }
+
+    func signedAmountText(fallbackPrice: Double) -> String {
+        let sign = isIncoming ? "+" : "-"
+        if let usd = displayUSD(fallbackPrice: fallbackPrice) {
+            return sign + usd.usdFormatted
+        }
+        return "\(sign)\(amountSats.btcSpacedFormatted) BTC"
     }
 }
 

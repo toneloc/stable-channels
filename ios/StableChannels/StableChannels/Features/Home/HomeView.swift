@@ -12,6 +12,9 @@ struct HomeView: View {
     @State private var showSellSheet = false
     @State private var prefillTradeAmount: Double = 0
     @State private var tradeRequest: TradeRequest?
+    @State private var viewportHeight: CGFloat = 0
+    @State private var recentActivityTop: CGFloat = 0
+    @State private var selectedPayment: PaymentRecord?
 
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
@@ -55,11 +58,30 @@ struct HomeView: View {
                     )
 
                     HomeSyncStatusSectionView(onOpenPaymentDetail: { openPaymentDetail() })
+
+                    RecentActivityView(
+                        reloadToken: showSendSheet || showReceiveSheet || showBuySheet || showSellSheet
+                            || tradeRequest != nil,
+                        maxRows: RecentActivityView.rowCount(spaceBelow: viewportHeight - recentActivityTop),
+                        onSelect: { selectedPayment = $0 }
+                    )
+                    .background(GeometryReader { proxy in
+                        Color.clear.preference(
+                            key: RecentActivityTopKey.self,
+                            value: proxy.frame(in: .named("homeContent")).minY
+                        )
+                    })
                 }
                 .animation(.easeInOut(duration: 0.3), value: appState.statusMessage)
                 .padding(.horizontal)
                 .padding(.bottom)
+                .coordinateSpace(name: "homeContent")
             }
+            .background(GeometryReader { proxy in
+                Color.clear.preference(key: HomeViewportHeightKey.self, value: proxy.size.height)
+            })
+            .onPreferenceChange(RecentActivityTopKey.self) { recentActivityTop = $0 }
+            .onPreferenceChange(HomeViewportHeightKey.self) { viewportHeight = $0 }
             .scrollBounceBehavior(.basedOnSize)
             .navigationBarHidden(true)
             .refreshable {
@@ -82,6 +104,9 @@ struct HomeView: View {
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
         .sheet(isPresented: $showBuySheet) { BuyView(prefillAmountUSD: prefillTradeAmount) }
         .sheet(isPresented: $showSellSheet) { SellView(prefillAmountUSD: prefillTradeAmount) }
+        .sheet(item: $selectedPayment) { payment in
+            PaymentDetailView(paymentId: payment.id, displayPrice: displayPrice)
+        }
         .sheet(item: $tradeRequest) { request in
             if request.direction == .buy {
                 BuyView(prefillAmountUSD: request.amountUSD)
@@ -186,6 +211,10 @@ struct HomeView: View {
         .padding(.bottom, 4)
     }
 
+    private var displayPrice: Double {
+        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
+    }
+
     private func checkNotifications() {
         UNUserNotificationCenter.current().getNotificationSettings { settings in
             DispatchQueue.main.async {
@@ -198,4 +227,14 @@ struct HomeView: View {
         guard let payment = appState.databaseService?.paymentRepo.latestReceivedPayment() else { return }
         paymentCoordinator.open(payment)
     }
+}
+
+private struct RecentActivityTopKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+private struct HomeViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
