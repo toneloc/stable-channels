@@ -1152,6 +1152,7 @@ class AppState {
                         .set(nodeId, forKey: "node_id")
                 }
                 lifecycleManager.clearRecoveredRestorePending()
+                self.startupState = .ready
                 await MainActor.run {
                     isSyncing = false
                     hasCompletedInitialSync = true
@@ -1280,7 +1281,12 @@ class AppState {
             }
             defer { isSyncing = false }
             do {
-                try await startNodeWithFailover(mnemonic: "")
+                let allowCreate = (startupState == .newWallet) || (lifecycleManager.detectStartupState() == .newWallet)
+                try await startNodeWithFailover(mnemonic: "", allowCreate: allowCreate)
+                if allowCreate {
+                    self.startupState = .ready
+                    lifecycleManager.clearRecoveredRestorePending()
+                }
                 let nodeId = nodeService.nodeId
                 if !nodeId.isEmpty {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?

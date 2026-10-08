@@ -111,6 +111,23 @@ final class OfflineHandlingTests: XCTestCase {
         XCTAssertTrue(appState.isOfflineBlocked)
     }
 
+    func testRetryConnectionAfterOfflineStartupPreservesNewWalletCreation() async {
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = makeIsolatedAppState(networkMonitor: mockMonitor)
+
+        await appState.start()
+        XCTAssertEqual(appState.phase, .offline)
+        XCTAssertEqual(appState.startupState, .newWallet)
+
+        mockMonitor.setStatus(.online)
+        await appState.retryConnection()
+
+        XCTAssertFalse(appState.showOfflineNotice, "Offline notice must be dismissed after online retry")
+        XCTAssertFalse(appState.isRetryingConnection)
+        XCTAssertEqual(appState.phase, .wallet)
+        XCTAssertEqual(appState.startupState, .ready)
+    }
+
     func testCachedBalancesAndPricePreservedWhenOffline() {
         let suite = Constants.appGroupIdentifier
         let ud = UserDefaults(suiteName: suite)
