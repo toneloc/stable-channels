@@ -68,8 +68,7 @@ enum SendAmountUnit: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// Pure domain calculations for amount inputs, unit conversions, and balance percentages.
-/// Zero UI framework dependencies (Functional Core).
+/// Calculates amount inputs, unit conversions, and balance allocations.
 ///
 /// All text <-> sats conversions go through `Decimal`, never `Double`: a binary double cannot
 /// represent most decimal inputs exactly ("0.0003" * 1e8 is 29999.999999999996), so flooring a

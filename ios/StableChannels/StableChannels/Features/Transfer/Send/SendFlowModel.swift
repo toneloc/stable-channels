@@ -150,28 +150,14 @@ final class SendFlowModel {
     }
 
     func availableSpendableSats(appState: AppState) -> UInt64 {
-        guard let dest = destination else { return appState.totalBalanceSats }
-        switch dest {
-        case .bolt11, .bolt12, .lightningAddress, .lnurlPay:
-            let readyChannels = appState.nodeService.channels.filter(\.isChannelReady)
-            if !readyChannels.isEmpty {
-                let channelOutbound = readyChannels.map(\.outboundCapacityMsat).reduce(0, +) / 1000
-                return min(channelOutbound, appState.lightningBalanceSats)
-            } else {
-                return appState.lightningBalanceSats
-            }
-        case .onchain:
-            // Mirror SendPaymentExecutor.sendOnchain: with a ready channel the send is a
-            // splice-out funded from the channel, so only the channel's outbound balance is
-            // spendable — not the combined lightning + on-chain total. Keyed on the live channel
-            // list, not the cached hasReadyChannel flag, so the guard and the executor agree.
-            let readyChannels = appState.nodeService.channels.filter(\.isChannelReady)
-            if !readyChannels.isEmpty && !appState.isSweeping {
-                let channelOutbound = readyChannels.map(\.outboundCapacityMsat).reduce(0, +) / 1000
-                return min(channelOutbound, appState.lightningBalanceSats)
-            }
-            return appState.spendableOnchainSats
-        }
+        SendChannelSpendPolicy.availableSpendableSats(
+            destination: destination,
+            channels: appState.nodeService.channels,
+            lightningBalanceSats: appState.lightningBalanceSats,
+            onchainBalanceSats: appState.spendableOnchainSats,
+            totalBalanceSats: appState.totalBalanceSats,
+            isSweeping: appState.isSweeping
+        )
     }
 
     func estimatedFeeSats(appState: AppState) -> UInt64 {
@@ -182,17 +168,20 @@ final class SendFlowModel {
     func estimatedFeeSatsForAmount(sats: UInt64, appState: AppState) -> UInt64 {
         switch destination {
         case .bolt11, .bolt12, .lightningAddress, .lnurlPay:
-            let readyChannel = appState.nodeService.channels.first(where: \.isChannelReady)
-            let base = readyChannel?.counterpartyForwardingInfoFeeBaseMsat
-                .map { UInt64($0) }
-                ?? UInt64(Constants.lightningDefaultForwardingFeeBaseMsat)
-            let prop = readyChannel?.counterpartyForwardingInfoFeeProportionalMillionths
-                .map { UInt64($0) }
-                ?? UInt64(Constants.lightningDefaultForwardingFeeProportionalMillionths)
-            return PaymentFeeEstimator.estimateLightningFee(sats: sats, baseMsat: base, proportionalMillionths: prop)
+            let (base, prop) = SendChannelSpendPolicy.forwardingFeeParameters(
+                channels: appState.nodeService.channels
+            )
+            return PaymentFeeEstimator.estimateLightningFee(
+                sats: sats,
+                baseMsat: base,
+                proportionalMillionths: prop
+            )
         case .onchain:
-            let isSpliceOut = appState.nodeService.channels.contains { $0.isChannelReady } && !appState.isSweeping
-            if isSpliceOut {
+            let isSplice = SendChannelSpendPolicy.isSpliceOut(
+                channels: appState.nodeService.channels,
+                isSweeping: appState.isSweeping
+            )
+            if isSplice {
                 return 0
             }
             let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10.0)
