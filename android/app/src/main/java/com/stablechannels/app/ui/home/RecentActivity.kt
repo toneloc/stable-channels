@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -85,14 +84,8 @@ fun RecentActivity(
                 modifier = Modifier.clickable(onClick = onViewAll).padding(vertical = 4.dp),
             )
         }
-        shown.forEachIndexed { index, payment ->
+        shown.forEach { payment ->
             PaymentRow(payment, currentPrice, compact = true) { onPaymentClick(payment) }
-            if (index < shown.lastIndex) {
-                HorizontalDivider(
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                    thickness = 0.5.dp,
-                )
-            }
         }
     }
 }

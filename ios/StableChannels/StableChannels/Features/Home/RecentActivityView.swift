@@ -52,16 +52,13 @@ struct RecentActivityView: View {
                     .padding(.horizontal, 4)
                     .padding(.bottom, 2)
 
-                    ForEach(Array(shown.enumerated()), id: \.element.id) { index, payment in
+                    ForEach(shown, id: \.id) { payment in
                         Button { onSelect(payment) } label: {
                             PaymentRowView(payment: payment, displayPrice: displayPrice, compact: true)
                                 .padding(.horizontal, 4)
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        if index < shown.count - 1 {
-                            Divider().padding(.leading, 34)
-                        }
                     }
                     .padding(.bottom, 4)
                 }
