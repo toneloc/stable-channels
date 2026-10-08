@@ -16,6 +16,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.push.FCMService
+import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.util.relativeString
 import java.util.Date
 import kotlinx.coroutines.launch
@@ -144,7 +145,7 @@ fun PushConnectivityView() {
         Spacer(Modifier.height(24.dp))
 
         // Retry button — green to match app branding
-        Button(
+        InkButton(
             onClick = {
                 isRetrying = true
                 retryError = null

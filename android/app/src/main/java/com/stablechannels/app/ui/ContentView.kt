@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -31,6 +30,7 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.Phase
 import com.stablechannels.app.ui.components.BalanceScaleKinematics
 import com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage
+import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.UnifiedBalanceLaunchView
 
 @Composable
@@ -160,7 +160,7 @@ private fun ErrorView(message: String, onRetry: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             Text(message, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(16.dp))
-            Button(onClick = onRetry) { Text("Retry") }
+            InkButton(onClick = onRetry) { Text("Retry") }
         }
     }
 }
