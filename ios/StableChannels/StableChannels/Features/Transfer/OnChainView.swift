@@ -11,6 +11,8 @@ struct OnChainSendView: View {
     @State private var txid: String?
     @State private var spliceSuccess = false
     @State private var feeRateSatVb: Double?
+    @State private var showReviewSheet = false
+    @State private var selectedFeeTier: NetworkFeeSpeedTier = .standard
 
     private var amountSats: UInt64? {
         convertedSats(price: appState.accountingBTCPrice)
@@ -52,7 +54,12 @@ struct OnChainSendView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     addressCard
-                    amountCard
+                    OnChainAmountCard(
+                        hasReadyChannel: hasReadyChannel,
+                        sendAll: $sendAll,
+                        amountUSDStr: $amountUSDStr,
+                        amountSats: amountSats
+                    )
                     infoCard(icon: "bitcoinsign.circle", text: feeEstimateText)
                     if hasReadyChannel {
                         infoCard(
@@ -86,7 +93,7 @@ struct OnChainSendView: View {
                     if let error = errorMessage {
                         errorCard(error)
                     }
-                    sendButton
+                    reviewButton
                     Spacer(minLength: 12)
                 }
                 .padding(20)
@@ -96,6 +103,23 @@ struct OnChainSendView: View {
             .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send Onchain"))
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
+            .sheet(isPresented: $showReviewSheet) {
+                OnChainReviewSheet(
+                    address: address,
+                    sendAll: sendAll,
+                    amountSats: amountSats,
+                    feeRateSatVb: feeRateSatVb,
+                    selectedFeeTier: $selectedFeeTier
+                ) { sentTxid, isSplice in
+                    if let sentTxid {
+                        self.txid = sentTxid
+                        self.spliceSuccess = false
+                    } else if isSplice {
+                        self.spliceSuccess = true
+                        self.txid = nil
+                    }
+                }
+            }
             .task {
                 feeRateSatVb = await appState.feeRateService.currentRate()
             }
@@ -126,68 +150,6 @@ struct OnChainSendView: View {
                 .onChange(of: address) { _, new in
                     address = QRCodeExtractor.sanitizeAddress(new)
                 }
-        }
-        .padding(16)
-        .glassCard()
-    }
-
-    private var amountCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Image(systemName: "dollarsign.circle")
-                    .foregroundStyle(.secondary)
-                Text(String(localized: "header_amount", defaultValue: "Amount"))
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-            }
-
-            if sendAll {
-                Label(
-                    String(localized: "label_all_available_funds", defaultValue: "All available funds"),
-                    systemImage: "infinity"
-                )
-                .font(.headline)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 8)
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(String(localized: "label_dollar_sign", defaultValue: "$"))
-                        .font(.system(size: 36, weight: .semibold, design: .rounded))
-                        .foregroundStyle(.secondary)
-                    TextField(
-                        String(localized: "placeholder_amount_usd", defaultValue: "0.00"),
-                        text: $amountUSDStr
-                    )
-                    .keyboardType(.decimalPad)
-                    .font(.system(size: 36, weight: .semibold, design: .rounded))
-                    .onChange(of: amountUSDStr) { _, new in
-                        amountUSDStr = InputSanitizer.decimal(new)
-                    }
-                }
-                if let sats = amountSats, sats > 0 {
-                    HStack(spacing: 6) {
-                        Image(systemName: "bitcoinsign.circle.fill")
-                            .foregroundStyle(.primary)
-                        Text("\(sats.btcSpacedFormatted) BTC")
-                            .font(.subheadline.weight(.medium))
-                            .contentTransition(.numericText())
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .animation(.snappy, value: sats)
-                }
-            }
-
-            Toggle(isOn: $sendAll) {
-                Label(
-                    String(localized: "toggle_send_all", defaultValue: "Send All"),
-                    systemImage: "infinity.circle"
-                )
-                .font(.subheadline)
-            }
-            .tint(.green)
         }
         .padding(16)
         .glassCard()
@@ -263,29 +225,23 @@ struct OnChainSendView: View {
         )
     }
 
-    private var sendButton: some View {
+    private var reviewButton: some View {
         Button {
-            Task { await send() }
+            errorMessage = nil
+            showReviewSheet = true
         } label: {
             HStack(spacing: 8) {
-                if isSending {
-                    ProgressView()
-                        .tint(.white)
-                } else {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.body.weight(.semibold))
-                    Text(String(localized: "button_send_payment", defaultValue: "Send"))
-                        .fontWeight(.semibold)
-                }
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.body.weight(.semibold))
+                Text(String(localized: "button_review_transfer", defaultValue: "Review Transfer"))
+                    .fontWeight(.semibold)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 14)
         }
         .buttonStyle(.borderedProminent)
         .tint(.blue)
-        .disabled(address.isEmpty || (!sendAll && (amountSats ?? 0) == 0) || isSending)
-        .scaleEffect(isSending ? 0.97 : 1.0)
-        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isSending)
+        .disabled(address.isEmpty || (!sendAll && (amountSats ?? 0) == 0))
         .animation(.easeInOut(duration: 0.2), value: address.isEmpty)
         .animation(.easeInOut(duration: 0.2), value: amountSats)
     }
@@ -298,110 +254,6 @@ struct OnChainSendView: View {
         t.underlineStyle = .single
         t.link = Constants.txExplorerLink(for: txid)
         return s + t
-    }
-
-    private func send() async {
-        // Dismiss any active keyboard to avoid blocking system auth dialogs
-        UIApplication.shared.sendAction(
-            Selector(("resignFirstResponder")),
-            to: nil,
-            from: nil,
-            for: nil
-        )
-
-        let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-        if transactionAuth {
-            let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
-            let authPassed = await appState.authenticate(reason: authReason)
-            guard authPassed else {
-                errorMessage = appState.authError ?? "Authentication required to send."
-                return
-            }
-        }
-
-        isSending = true
-        errorMessage = nil
-        defer { isSending = false }
-
-        let conversionPrice = sendAll ? nil : appState.accountingBTCPrice
-        let sats: UInt64
-        if sendAll {
-            sats = 0
-        } else if let price = conversionPrice, let converted = convertedSats(price: price) {
-            sats = converted
-        } else {
-            errorMessage = String(
-                localized: "error_price_unavailable",
-                defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
-            )
-            return
-        }
-
-        do {
-            // If channel exists, route through splice-out
-            if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }), !sendAll {
-                guard !appState.isSweeping else {
-                    throw NSError(
-                        domain: "",
-                        code: 0,
-                        userInfo: [NSLocalizedDescriptionKey: String(
-                            localized: "error_splice_in_progress",
-                            defaultValue: "A splice is already in progress — try again shortly"
-                        )]
-                    )
-                }
-                try appState.beginSpliceOut(amountSats: sats, address: address)
-                do {
-                    try appState.nodeService.spliceOut(
-                        userChannelId: channel.userChannelId,
-                        counterpartyNodeId: channel.counterpartyNodeId,
-                        address: address,
-                        amountSats: sats
-                    )
-                } catch {
-                    appState.cancelPendingSpliceStart()
-                    throw error
-                }
-                spliceSuccess = true
-            } else if sendAll {
-                let result = try appState.nodeService.sendAllOnchain(address: address)
-                txid = result
-                let price = appState.btcPrice
-                let onchainSats = appState.onchainBalanceSats
-                _ = try? appState.databaseService?.paymentRepo.recordPayment(
-                    paymentId: result,
-                    paymentType: "onchain",
-                    direction: "sent",
-                    amountMsat: onchainSats * 1000,
-                    amountUSD: price > 0 ? Double(onchainSats) / Double(Constants.satsInBTC) * price : nil,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending",
-                    txid: result,
-                    address: address
-                )
-                appState.onchainSendBroadcasted(amountSats: onchainSats, isSendAll: true, txid: result)
-            } else {
-                let result = try appState.nodeService.sendOnchain(address: address, amountSats: sats)
-                txid = result
-                let price = conversionPrice ?? 0
-                _ = try? appState.databaseService?.paymentRepo.recordPayment(
-                    paymentId: result,
-                    paymentType: "onchain",
-                    direction: "sent",
-                    amountMsat: sats * 1000,
-                    amountUSD: price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending",
-                    txid: result,
-                    address: address
-                )
-                appState.onchainSendBroadcasted(amountSats: sats, isSendAll: false, txid: result)
-            }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
     }
 }
 
