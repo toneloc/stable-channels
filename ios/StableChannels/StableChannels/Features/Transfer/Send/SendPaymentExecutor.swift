@@ -201,13 +201,28 @@ struct SendPaymentExecutor {
                 userInfo: [NSLocalizedDescriptionKey: "Invalid amount"]
             )
         }
-        if SendChannelSpendPolicy.isSpliceOut(channels: appState.nodeService.channels, isSweeping: appState.isSweeping),
-           let channel = appState.nodeService.channels.first(where: \.isChannelReady) {
+        if SendChannelSpendPolicy
+            .isSpliceOut(channels: appState.nodeService.channels, isSweeping: appState.isSweeping) {
             guard !appState.isSweeping else {
                 throw NSError(
                     domain: "Send",
                     code: 2,
                     userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress"]
+                )
+            }
+            let rate = feeRateSatVb ?? 10.0
+            let estimatedFee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
+            let requiredTotal = effectiveSats + estimatedFee
+            guard let channel = SendChannelSpendPolicy.selectSpliceChannel(
+                channels: appState.nodeService.channels,
+                requiredSats: requiredTotal
+            ) else {
+                throw NSError(
+                    domain: "Send",
+                    code: 3,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "No active channel has sufficient capacity to fund this on-chain splice."
+                    ]
                 )
             }
             try appState.beginSpliceOut(amountSats: effectiveSats, address: address)
@@ -310,87 +325,17 @@ struct SendPaymentExecutor {
         )
     }
 
-    enum SettlementOutcome: Sendable {
-        case settled(paymentHash: String?)
-        case failed(reason: String)
-        case timedOut
-    }
+    typealias SettlementOutcome = PaymentSettlementOutcome
 
     static func awaitPaymentSettlement(
         paymentId: String,
         timeoutSeconds: TimeInterval,
         appState: AppState? = nil
     ) async -> SettlementOutcome {
-        // Fast-path: check if payment settled or failed before observer was attached
-        if let record = appState?.databaseService?.paymentRepo.payment(paymentId: paymentId) {
-            if record.status == "completed" || record.status == "succeeded" {
-                return .settled(paymentHash: record.paymentId)
-            } else if record.status == "failed" {
-                return .failed(reason: "The payment did not complete. Check its status in History before trying again.")
-            }
-        }
-
-        var settledObserver: (any NSObjectProtocol)?
-        var failedObserver: (any NSObjectProtocol)?
-
-        let stream = AsyncStream<SettlementOutcome> { continuation in
-            settledObserver = NotificationCenter.default.addObserver(
-                forName: .paymentSettled,
-                object: nil,
-                queue: .main
-            ) { note in
-                guard let pid = note.userInfo?["paymentId"] as? String, pid == paymentId else { return }
-                let hash = note.userInfo?["paymentHash"] as? String
-                continuation.yield(.settled(paymentHash: hash))
-                continuation.finish()
-            }
-
-            failedObserver = NotificationCenter.default.addObserver(
-                forName: .paymentFailed,
-                object: nil,
-                queue: .main
-            ) { note in
-                guard let pid = note.userInfo?["paymentId"] as? String, pid == paymentId else { return }
-                let reason = note.userInfo?["errorMessage"] as? String
-                    ?? note.userInfo?["reason"] as? String
-                    ?? "The payment did not complete. Check its status in History before trying again."
-                continuation.yield(.failed(reason: reason))
-                continuation.finish()
-            }
-
-            continuation.onTermination = { @Sendable _ in }
-        }
-
-        defer {
-            if let obs = settledObserver { NotificationCenter.default.removeObserver(obs) }
-            if let obs = failedObserver { NotificationCenter.default.removeObserver(obs) }
-        }
-
-        // Check DB once more now that observers are registered (avoids race between DB check and observer setup)
-        if let record = appState?.databaseService?.paymentRepo.payment(paymentId: paymentId) {
-            if record.status == "completed" || record.status == "succeeded" {
-                return .settled(paymentHash: record.paymentId)
-            } else if record.status == "failed" {
-                return .failed(reason: "The payment did not complete. Check its status in History before trying again.")
-            }
-        }
-
-        return await withTaskGroup(of: SettlementOutcome.self) { group in
-            group.addTask {
-                for await outcome in stream {
-                    return outcome
-                }
-                return .timedOut
-            }
-
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(timeoutSeconds * 1_000_000_000))
-                return .timedOut
-            }
-
-            let result = await group.next() ?? .timedOut
-            group.cancelAll()
-            return result
-        }
+        await PaymentSettlementObserver.awaitSettlement(
+            paymentId: paymentId,
+            timeoutSeconds: timeoutSeconds,
+            appState: appState
+        )
     }
 }

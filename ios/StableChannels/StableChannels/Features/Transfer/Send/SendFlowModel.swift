@@ -8,7 +8,10 @@ import SwiftUI
 final class SendFlowModel {
     var step: SendFlowStep = .recipient
     var inputText: String = "" {
-        didSet { onInputChanged() }
+        didSet {
+            guard inputText != oldValue else { return }
+            onInputChanged()
+        }
     }
 
     var destination: SendDestination?
@@ -150,7 +153,7 @@ final class SendFlowModel {
     }
 
     func availableSpendableSats(appState: AppState) -> UInt64 {
-        SendChannelSpendPolicy.availableSpendableSats(
+        let balance = SendChannelSpendPolicy.availableSpendableSats(
             destination: destination,
             channels: appState.nodeService.channels,
             lightningBalanceSats: appState.lightningBalanceSats,
@@ -158,6 +161,10 @@ final class SendFlowModel {
             totalBalanceSats: appState.totalBalanceSats,
             isSweeping: appState.isSweeping
         )
+        if let params = lnurlParams {
+            return min(balance, params.maxSats)
+        }
+        return balance
     }
 
     func estimatedFeeSats(appState: AppState) -> UInt64 {
@@ -177,14 +184,14 @@ final class SendFlowModel {
                 proportionalMillionths: prop
             )
         case .onchain:
+            let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10.0)
             let isSplice = SendChannelSpendPolicy.isSpliceOut(
                 channels: appState.nodeService.channels,
                 isSweeping: appState.isSweeping
             )
             if isSplice {
-                return 0
+                return PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
             }
-            let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10.0)
             return PaymentFeeEstimator.estimateOnchainFee(
                 feeRateSatVb: rate,
                 isSendAll: false
@@ -195,31 +202,15 @@ final class SendFlowModel {
     }
 
     /// Largest amount such that amount + fee(amount) fits inside the available balance.
-    /// A proportional routing fee makes the fee depend on the amount, so a fixed number of
-    /// passes can land on a candidate whose own fee no longer fits; iterate to a fixed point and
-    /// then step down until the candidate provably fits.
     func calculateMaxSendableSats(appState: AppState) -> UInt64 {
         let available = availableSpendableSats(appState: appState)
-        guard available > 0 else { return 0 }
-
-        func fits(_ amount: UInt64) -> Bool {
-            let fee = estimatedFeeSatsForAmount(sats: amount, appState: appState)
-            return fee <= available && amount <= available - fee
+        let rawMax = SendChannelSpendPolicy.calculateMaxSendable(available: available) { [weak self] amount in
+            self?.estimatedFeeSatsForAmount(sats: amount, appState: appState) ?? 0
         }
-
-        var candidate = available
-        for _ in 0..<8 {
-            let fee = estimatedFeeSatsForAmount(sats: candidate, appState: appState)
-            let next = available > fee ? (available - fee) : 0
-            if next == candidate { break }
-            candidate = next
+        if let params = lnurlParams {
+            return min(rawMax, params.maxSats)
         }
-        var steps = 0
-        while candidate > 0 && !fits(candidate) && steps < 64 {
-            candidate -= 1
-            steps += 1
-        }
-        return fits(candidate) ? candidate : 0
+        return rawMax
     }
 
     func isInsufficientBalance(appState: AppState) -> Bool {
@@ -316,137 +307,5 @@ final class SendFlowModel {
         isPendingSettlement = false
         isSending = false
         isFetchingLNURL = false
-    }
-
-    func executeSend(appState: AppState) async {
-        guard let dest = destination else {
-            resetToken += 1
-            return
-        }
-        guard !isSending else { return }
-        errorMessage = nil
-
-        guard appState.isOnline else {
-            errorMessage = String(
-                localized: "error_offline_send",
-                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
-            )
-            resetToken += 1
-            return
-        }
-
-        // For onchain sends, block if fee rate has not loaded (non-standard tier)
-        if case .onchain = dest, !isFeeRateReady {
-            errorMessage = "Waiting for network fee rate. Please wait a moment."
-            resetToken += 1
-            return
-        }
-
-        switch dest {
-        case .lightningAddress, .lnurlPay:
-            guard resolvedLNURLService(appState: appState) != nil else {
-                errorMessage = "Wallet network is not initialized. Please wait until connected."
-                resetToken += 1
-                return
-            }
-        default:
-            break
-        }
-
-        let authReason = "Confirm payment to \(dest.displayTitle)"
-        let authEnabled = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-        if authEnabled {
-            let passed = await appState.authenticate(reason: authReason)
-            guard passed else {
-                errorMessage = appState.authError ?? "Authentication required to send."
-                resetToken += 1
-                return
-            }
-        }
-
-        isSending = true
-        defer {
-            isSending = false
-            resetToken += 1
-        }
-
-        appState.ensureLSPConnected()
-        let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        guard sats > 0 else {
-            errorMessage = "Invalid amount."
-            resetToken += 1
-            return
-        }
-        let available = availableSpendableSats(appState: appState)
-        let totalDebit = sats + estimatedFeeSats(appState: appState)
-        guard totalDebit <= available, available > 0 else {
-            errorMessage = "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
-            resetToken += 1
-            return
-        }
-
-        do {
-            let service = resolvedLNURLService(appState: appState)
-            let result = try await SendPaymentExecutor.execute(
-                destination: dest,
-                effectiveSats: sats,
-                feeRateSatVb: effectiveFeeRateSatVb,
-                lnurlParams: lnurlParams,
-                lnurlComment: lnurlComment,
-                appState: appState,
-                lnurlService: service
-            )
-
-            switch result.outcome {
-            case .onchain(let txid):
-                // Already broadcast into the mempool.
-                sentAmountSats = result.sentAmountSats
-                successTxid = txid
-                successPaymentId = nil
-                isPendingSettlement = false
-                step = .success
-
-            case .spliceOut:
-                // The splice confirms on-chain; there is no payment to await and no txid until
-                // negotiation completes. Home shows it as a pending move meanwhile.
-                sentAmountSats = result.sentAmountSats
-                successTxid = nil
-                successPaymentId = nil
-                isPendingSettlement = true
-                step = .success
-
-            case .lightning(let pid):
-                let timeout: TimeInterval
-                if case .bolt12 = dest {
-                    timeout = 10.0
-                } else {
-                    timeout = 7.0
-                }
-
-                let outcome = await SendPaymentExecutor.awaitPaymentSettlement(
-                    paymentId: pid,
-                    timeoutSeconds: timeout,
-                    appState: appState
-                )
-                switch outcome {
-                case .settled:
-                    sentAmountSats = result.sentAmountSats
-                    successPaymentId = pid
-                    successTxid = nil
-                    isPendingSettlement = false
-                    step = .success
-                case .failed(let reason):
-                    errorMessage = reason
-                case .timedOut:
-                    sentAmountSats = result.sentAmountSats
-                    successPaymentId = pid
-                    successTxid = nil
-                    isPendingSettlement = true
-                    step = .success
-                }
-            }
-        } catch {
-            errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
-        }
     }
 }
