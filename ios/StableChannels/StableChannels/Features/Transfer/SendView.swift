@@ -124,3 +124,47 @@ struct SendView: View {
         }
     }
 }
+
+#Preview("Send View - Recipient Step") {
+    SendView()
+        .environment(AppState())
+}
+
+#Preview("Send View - Amount Step") {
+    let model = SendFlowModel()
+    model.step = .amount
+    model.destination = .lightningAddress(
+        handle: "prabal",
+        domain: "0xprabal.com",
+        url: URL(string: "https://0xprabal.com/.well-known/lnurlp/prabal")!
+    )
+    return SendView(model: model)
+        .environment(AppState())
+}
+
+#Preview("Send View - Confirm Step") {
+    let model = SendFlowModel()
+    model.step = .confirm
+    model.amountInputText = "21.00"
+    model.destination = .lightningAddress(
+        handle: "prabal",
+        domain: "0xprabal.com",
+        url: URL(string: "https://0xprabal.com/.well-known/lnurlp/prabal")!
+    )
+    return SendView(model: model)
+        .environment(AppState())
+}
+
+#Preview("Send View - Success Step") {
+    let model = SendFlowModel()
+    model.step = .success
+    model.destination = .lightningAddress(
+        handle: "prabal",
+        domain: "0xprabal.com",
+        url: URL(string: "https://0xprabal.com/.well-known/lnurlp/prabal")!
+    )
+    model.sentAmountSats = 35_000
+    model.successPaymentId = "483dc85d1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d"
+    return SendView(model: model)
+        .environment(AppState())
+}
