@@ -58,6 +58,11 @@ final class PaymentFeeEstimatorTests: XCTestCase {
         XCTAssertEqual(fee, 10 * Constants.estimatedOnchainSendAllVBytes)
     }
 
+    func testEstimateSpliceOutFee_usesSpliceConstantsVBytes() {
+        let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: 10.0)
+        XCTAssertEqual(fee, 10 * Constants.estimatedSpliceOutVBytes)
+    }
+
     func testEstimateOnchainFee_customVBytes() {
         let fee = PaymentFeeEstimator.estimateOnchainFee(
             feeRateSatVb: 12.0,

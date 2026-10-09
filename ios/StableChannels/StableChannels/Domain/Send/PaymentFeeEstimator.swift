@@ -29,6 +29,19 @@ enum PaymentFeeEstimator {
         return UInt64(ceil(rawFee))
     }
 
+    /// Estimates the expected onchain transaction fee for a splice-out operation.
+    /// LDK constructs a 2-of-2 multisig spend transaction with new channel and destination outputs (~180 vB).
+    static func estimateSpliceOutFee(
+        feeRateSatVb: Double,
+        vbytes: UInt64 = Constants.estimatedSpliceOutVBytes
+    ) -> UInt64 {
+        estimateOnchainFee(
+            feeRateSatVb: feeRateSatVb,
+            isSendAll: false,
+            sendVBytes: vbytes
+        )
+    }
+
     // MARK: - Overflow-Safe Arithmetic
 
     static func saturatingMultiply(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
