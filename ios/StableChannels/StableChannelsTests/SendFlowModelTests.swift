@@ -297,6 +297,24 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertEqual(maxSats + fee, 10_000)
     }
 
+    func testCalculateMaxSendableSats_spliceOutDeductsSpliceFee() {
+        let appState = AppState()
+        appState.hasReadyChannel = true
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50_000)]
+        appState.lightningBalanceSats = 50_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.feeRateSatVb = 10
+        model.selectedFeeTier = .standard
+
+        let maxSats = model.calculateMaxSendableSats(appState: appState)
+        let fee = model.estimatedFeeSatsForAmount(sats: maxSats, appState: appState)
+        XCTAssertGreaterThan(fee, 0)
+        XCTAssertEqual(fee, 10 * Constants.estimatedSpliceOutVBytes)
+        XCTAssertEqual(maxSats + fee, 50_000)
+    }
+
     func testCalculateMaxSendableSats_lightningDeductsRoutingFee() throws {
         let appState = AppState()
         appState.lightningBalanceSats = 50_000
@@ -500,7 +518,8 @@ final class SendFlowModelTests: XCTestCase {
         model.onInputChanged()
 
         XCTAssertEqual(model.availableSpendableSats(appState: appState), 20_000)
-        XCTAssertEqual(model.calculateMaxSendableSats(appState: appState), 20_000)
+        let spliceFee = model.estimatedFeeSatsForAmount(sats: 20_000, appState: appState)
+        XCTAssertEqual(model.calculateMaxSendableSats(appState: appState) + spliceFee, 20_000)
 
         model.amountUnit = .sats
         model.amountInputText = "25000"
