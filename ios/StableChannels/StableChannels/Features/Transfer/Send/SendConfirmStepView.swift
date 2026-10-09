@@ -39,7 +39,7 @@ struct SendConfirmStepView: View {
                     SendConfirmFeeTotalCard(
                         feeLabel: feeCardLabel,
                         estimatedFeeSats: model.estimatedFeeSats(appState: appState),
-                        rateSatVb: isLightning || isSpliceOut ? nil : model.effectiveFeeRateSatVb,
+                        rateSatVb: isLightning ? nil : model.effectiveFeeRateSatVb,
                         totalDebitSats: sats + model.estimatedFeeSats(appState: appState),
                         btcPrice: appState.accountingBTCPrice
                     )
@@ -97,17 +97,21 @@ struct SendConfirmStepView: View {
         }
     }
 
+    private var isSpliceOut: Bool {
+        guard case .onchain = model.destination else { return false }
+        return SendChannelSpendPolicy.isSpliceOut(
+            channels: appState.nodeService.channels,
+            isSweeping: appState.isSweeping
+        )
+    }
+
     private var feeCardLabel: String {
         if isSpliceOut {
-            return String(localized: "label_routing_fee", defaultValue: "Routing Fee")
+            return String(localized: "label_splice_fee", defaultValue: "Splice Fee")
         }
         return isLightning
             ? String(localized: "label_routing_fee", defaultValue: "Routing Fee")
             : String(localized: "label_total_fees", defaultValue: "Network Fee")
-    }
-
-    private var isSpliceOut: Bool {
-        appState.hasReadyChannel && !appState.isSweeping
     }
 
     private var isInsufficientBalance: Bool {
