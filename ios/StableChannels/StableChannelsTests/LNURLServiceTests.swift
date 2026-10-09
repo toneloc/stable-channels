@@ -78,6 +78,21 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(params.metadataHashHex, expectedDigest)
     }
 
+    func testAvatarImageDataDecoding() {
+        let sampleData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let base64 = sampleData.base64EncodedString()
+        let metadataJSON = "[[\"text/plain\",\"Coffee Tip\"],[\"image/png;base64\",\"\(base64)\"]]"
+        let params = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/callback",
+            minSendable: 1000,
+            maxSendable: 2_100_000_000_000_000_000,
+            metadata: metadataJSON,
+            commentAllowed: 140
+        )
+        XCTAssertEqual(params.avatarImageData, sampleData)
+    }
+
     func testCustomBoundsDetectionAndValidation() {
         let restrictedParams = LNURLPayParams(
             tag: "payRequest",
