@@ -24,6 +24,7 @@ struct BlockHeightResolver: BlockHeightProvider {
     }
 
     func currentHeight() async throws -> UInt32 {
+        try Task.checkCancellation()
         if let height = await client.fetch(
             endpointBuilder: { base in
                 ["\(ResilientEsploraClient.trimSlash(base))/blocks/tip/height"]
@@ -35,8 +36,10 @@ struct BlockHeightResolver: BlockHeightProvider {
                 return h
             }
         ) {
+            try Task.checkCancellation()
             return height
         } else {
+            try Task.checkCancellation()
             throw EsploraError.invalidResponse
         }
     }

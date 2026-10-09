@@ -14,9 +14,12 @@ final class LSPService {
         to newConfig: LSPConfig,
         nodeService: NodeServiceProtocol,
         chainURL: String,
+        hasActiveChannel: Bool = false,
         onSuccess: @MainActor () -> Void = {}
     ) async -> Bool {
-        guard !nodeService.channels.contains(where: { $0.isChannelReady || $0.isUsable }) else {
+        guard !hasActiveChannel,
+              !nodeService.channels.contains(where: { $0.isChannelReady || $0.isUsable })
+        else {
             return false
         }
 

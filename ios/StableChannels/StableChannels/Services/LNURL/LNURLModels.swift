@@ -208,9 +208,9 @@ enum LNURLError: Swift.Error, LocalizedError, Equatable {
         case let .unsupportedTag(tag):
             return "Unsupported LNURL tag: \(tag). Only LNURL-pay is supported."
         case let .amountOutOfBounds(minSats, maxSats):
-            return "Amount must be between \(minSats) and \(maxSats) sats."
+            return "Amount must be between \(minSats.btcSpacedFormatted) and \(maxSats.btcSpacedFormatted) BTC."
         case let .invoiceAmountMismatch(expected, actual):
-            return "Invoice amount (\(actual / 1000) sats) does not match requested amount (\(expected / 1000) sats)."
+            return "Invoice amount (\((actual / 1000).btcSpacedFormatted) BTC) does not match requested amount (\((expected / 1000).btcSpacedFormatted) BTC)."
         case .invalidMetadata:
             return "LNURL metadata is invalid or missing required description."
         case .insecureEndpoint:

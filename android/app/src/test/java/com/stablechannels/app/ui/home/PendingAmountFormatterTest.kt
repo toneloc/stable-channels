@@ -36,6 +36,14 @@ class PendingAmountFormatterTest {
     }
 
     @Test
+    fun prefixesSignOnUsdAndBtcAmounts() {
+        assertTrue(
+            PendingAmountFormatter.amountText(100_000L, 50_000.0, sign = "-")!!.startsWith("-$")
+        )
+        assertTrue(PendingAmountFormatter.amountText(100_000L, 0.0, sign = "+")!!.startsWith("+0."))
+    }
+
+    @Test
     fun nullAmountSatsReturnsNull() {
         assertNull(PendingAmountFormatter.amountText(amountSats = null, btcPrice = 50_000.0))
     }

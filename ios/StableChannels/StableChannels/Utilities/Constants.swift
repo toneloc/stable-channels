@@ -25,6 +25,9 @@ enum Constants {
     static let feeRateBlockstreamURL = primaryChainURL
     static let feeRateMempoolURL = "https://mempool.space"
 
+    static let minAllowedFeeRateSatVb: Double = 1.0
+    static let maxAllowedFeeRateSatVb: Double = 10_000.0
+
     // MARK: - Service Endpoints
 
     static let lspPushRegisterURL = "https://stablechannels.com/api/register-push"

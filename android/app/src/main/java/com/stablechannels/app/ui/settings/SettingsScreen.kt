@@ -18,12 +18,15 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.StabilityService
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.transfer.OnChainSendScreen
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
-import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -117,7 +120,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Spacer(Modifier.height(4.dp))
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             clipboardManager.setText(AnnotatedString(nodeId))
                         }
@@ -125,7 +128,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                         Text("Copy Node ID")
                     }
                 } else {
-                    TextButton(onClick = { showNodeId = true }) { Text("Show Node ID") }
+                    NeutralTextButton(onClick = { showNodeId = true }) { Text("Show Node ID") }
                 }
             }
         }
@@ -139,16 +142,25 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
 
                     val ch = channels.first()
-                    DetailRow("Capacity", ch.channelValueSats.toLong().satsFormatted())
+                    DetailRow(
+                        "Capacity",
+                        "${ch.channelValueSats.toLong().btcSpacedFormatted()} BTC",
+                    )
                     DetailRow("Status", if (ch.isChannelReady) "Ready" else "Pending")
-                    DetailRow("Outbound", (ch.outboundCapacityMsat.toLong() / 1000).satsFormatted())
-                    DetailRow("Inbound", (ch.inboundCapacityMsat.toLong() / 1000).satsFormatted())
+                    DetailRow(
+                        "Outbound",
+                        "${(ch.outboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+                    )
+                    DetailRow(
+                        "Inbound",
+                        "${(ch.inboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+                    )
 
                     appState.fundingTxid?.let { txid ->
                         if (txid.isNotEmpty()) {
                             Spacer(Modifier.height(4.dp))
                             DetailRow("Funding Tx", "${txid.take(8)}...${txid.takeLast(8)}")
-                            TextButton(
+                            NeutralTextButton(
                                 onClick = {
                                     context.openInAppBrowser(
                                         "https://mempool.space/tx/${txid.substringBefore(":")}"
@@ -172,7 +184,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     Spacer(Modifier.height(8.dp))
 
                     DetailRow("Expected USD", sc.expectedUSD.formatted)
-                    DetailRow("Backing Sats", sc.backingSats.satsFormatted())
+                    DetailRow("Backing BTC", "${sc.backingSats.btcSpacedFormatted()} BTC")
                     DetailRow("Native BTC", sc.nativeChannelBTC.formatted)
                     DetailRow("Stability", stabilityResult.action.value)
                     if (stabilityResult.percentFromPar > 0) {
@@ -196,7 +208,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
         // Close channel
         if (hasReadyChannel) {
             Spacer(Modifier.height(12.dp))
-            OutlinedButton(
+            NeutralOutlinedButton(
                 onClick = { showCloseConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
                 colors =
@@ -214,9 +226,9 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             Column(Modifier.padding(16.dp)) {
                 Text("Onchain", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
-                DetailRow("Balance", onchainSats.satsFormatted())
+                DetailRow("Balance", "${onchainSats.btcSpacedFormatted()} BTC")
 
-                TextButton(onClick = { showOnchainSend = true }) { Text("Send Onchain") }
+                NeutralTextButton(onClick = { showOnchainSend = true }) { Text("Send Onchain") }
             }
         }
 
@@ -253,7 +265,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
 
                 if (!notifEnabled) {
                     Spacer(Modifier.height(8.dp))
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             val intent =
                                 android.content
@@ -286,7 +298,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
             Column(Modifier.padding(16.dp)) {
                 Text("Backup", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
-                Button(
+                InkButton(
                     onClick = { showSeedWords = !showSeedWords },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -310,7 +322,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                             )
                         }
                         Spacer(Modifier.height(8.dp))
-                        OutlinedButton(
+                        NeutralOutlinedButton(
                             onClick = {
                                 showClipboardWarning = true
                             },
@@ -328,7 +340,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                     }
                 }
                 Spacer(Modifier.height(8.dp))
-                OutlinedButton(
+                NeutralOutlinedButton(
                     onClick = { showRestore = true },
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -370,7 +382,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showCloseConfirm = false
                         appState.isChannelClosing = true
@@ -391,7 +403,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
+                NeutralTextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
             },
         )
     }
@@ -433,13 +445,13 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         val input = restoreMnemonic.trim()
                         val wordCount = input.split("\\s+".toRegex()).size
                         if (wordCount != 12 && wordCount != 24) {
                             restoreError = "Seed phrase must be 12 or 24 words"
-                            return@TextButton
+                            return@NeutralTextButton
                         }
                         // Restore guard: a seed-only restore wipes LDK state;
                         // if this seed's node still has an LSP channel it will
@@ -484,7 +496,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             },
             dismissButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestore = false
                         restoreMnemonic = ""
@@ -526,7 +538,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestoreForceCloseConfirm = false
                         performRestore(restoreMnemonic.trim())
@@ -539,7 +551,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             },
             dismissButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestoreForceCloseConfirm = false
                     }
@@ -564,7 +576,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showClipboardWarning = false
                         if (!words.isNullOrEmpty()) {
@@ -577,7 +589,7 @@ fun SettingsScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showClipboardWarning = false }) { Text("Cancel") }
+                NeutralTextButton(onClick = { showClipboardWarning = false }) { Text("Cancel") }
             },
         )
     }

@@ -87,7 +87,7 @@ impl ApnsService {
 
     /// Send a wake-up notification to the device token, routed to the APNs endpoint
     /// matching the environment the token was registered under.
-    pub async fn send(&self, device_token: &str, direction: &str, environment: &str) {
+    pub async fn send(&self, device_token: &str, direction: &str, environment: &str) -> bool {
         let env = if environment.is_empty() {
             self.default_environment.as_str()
         } else {
@@ -106,7 +106,7 @@ impl ApnsService {
                     env,
                     &device_token[..device_token.len().min(16)]
                 );
-                return;
+                return false;
             }
         };
         let body = match direction {
@@ -132,17 +132,33 @@ impl ApnsService {
         stability_data.insert("direction", direction);
         let _ = payload.add_custom_data("stability", &stability_data);
         match client.send(payload).await {
-            Ok(resp) => info!(
-                "[apns] Sent push to {} ({}, code={})",
-                &device_token[..device_token.len().min(16)],
-                env,
-                resp.code,
-            ),
-            Err(e) => warn!(
-                "[apns] Send failed for {}: {}",
-                &device_token[..device_token.len().min(16)],
-                e
-            ),
+            Ok(resp) => {
+                let delivered = resp.code < 300;
+                if delivered {
+                    info!(
+                        "[apns] Sent push to {} ({}, code={})",
+                        &device_token[..device_token.len().min(16)],
+                        env,
+                        resp.code,
+                    );
+                } else {
+                    warn!(
+                        "[apns] Send rejected for {} ({}, code={})",
+                        &device_token[..device_token.len().min(16)],
+                        env,
+                        resp.code,
+                    );
+                }
+                delivered
+            }
+            Err(e) => {
+                warn!(
+                    "[apns] Send failed for {}: {}",
+                    &device_token[..device_token.len().min(16)],
+                    e
+                );
+                false
+            }
         }
     }
 }

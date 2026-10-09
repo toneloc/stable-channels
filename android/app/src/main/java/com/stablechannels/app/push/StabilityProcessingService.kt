@@ -143,6 +143,9 @@ class StabilityProcessingService : Service() {
     companion object {
         private const val TAG = "StabilityBgService"
         private const val POLL_TIMEOUT_SECS = 25
+        // Matches the LSP's wake watch, so a receiver is still up when the top-up follows a slow
+        // reconnect. Only the lsp_to_user wait uses it: that loop returns once the payment lands.
+        private const val LSP_TO_USER_POLL_TIMEOUT_SECS = 60
         private const val DB_RETRY_BACKOFF_MS = 500L
         private const val SYNC_FRESHNESS_POLL_MS = 500L
 
@@ -436,7 +439,7 @@ class StabilityProcessingService : Service() {
     private fun handleLspToUser(node: Node, dbPath: String) {
         // Price dropped — LSP sends us sats. Just poll for incoming payment.
         Log.d(TAG, "Polling for incoming payment...")
-        val deadline = System.currentTimeMillis() + POLL_TIMEOUT_SECS * 1000L
+        val deadline = System.currentTimeMillis() + LSP_TO_USER_POLL_TIMEOUT_SECS * 1000L
         var hasUnpersistedEvent = false
         var price = 0.0
 

@@ -24,11 +24,13 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.components.DoneButton
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.btcSpacedFormatted
-import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -76,7 +78,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
         // Toolbar (Cancel button, centered title)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             if (result == null) {
-                TextButton(
+                NeutralTextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
                     colors =
@@ -87,7 +89,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 } else {
                                     Color(0xFFE5E5EA)
                                 },
-                            contentColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
                         ),
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -156,9 +158,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 }
             }
             Spacer(Modifier.weight(1f))
-            Button(onClick = onDismiss) {
-                Text("Done")
-            }
+            DoneButton(onClick = onDismiss)
         } else {
             if (hasChannel && !sendAll) {
                 Card(
@@ -218,7 +218,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(
+                NeutralTextButton(
                     onClick = { sendAll = !sendAll },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
@@ -280,7 +280,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                 if (satsFromUSD > 0) {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        "~ ${satsFromUSD.satsFormatted()} sats",
+                        "~ ${satsFromUSD.btcSpacedFormatted()} BTC",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -325,7 +325,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             Spacer(Modifier.weight(1f))
-            Button(
+            InkButton(
                 onClick = {
                     isSending = true
                     error = null
@@ -380,9 +380,11 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                     price
                                             else null,
                                         btcPrice = if (price > 0) price else null,
+                                        status = "pending",
                                         txid = txid,
                                         address = addr,
                                     )
+                                    appState.notifyPaymentRecorded()
                                     result = "All funds sent successfully."
                                     successTxid = txid
                                 } else {
@@ -414,7 +416,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                             throw e
                                         }
                                         result =
-                                            "Splice-out initiated for ${sats.satsFormatted()} sats."
+                                            "Splice-out initiated for ${sats.btcSpacedFormatted()} BTC."
                                         successTxid = null
                                     } else {
                                         val txid = appState.nodeService.sendOnchain(addr, sats)
@@ -432,9 +434,11 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 (sats.toDouble() / Constants.SATS_IN_BTC) *
                                                     accountingPrice,
                                             btcPrice = accountingPrice,
+                                            status = "pending",
                                             txid = txid,
                                             address = addr,
                                         )
+                                        appState.notifyPaymentRecorded()
                                         result = "Sent successfully."
                                         successTxid = txid
                                     }

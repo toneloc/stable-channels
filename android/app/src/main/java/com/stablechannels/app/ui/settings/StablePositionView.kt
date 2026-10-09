@@ -15,7 +15,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.StabilityService
-import com.stablechannels.app.util.satsFormatted
+import com.stablechannels.app.util.btcSpacedFormatted
 
 @Composable
 fun StablePositionView(appState: AppState) {
@@ -42,8 +42,8 @@ fun StablePositionView(appState: AppState) {
 
             // Backing Sats
             SettingsDetailRow(
-                label = "Backing Sats",
-                value = sc.backingSats.satsFormatted(),
+                label = "Backing BTC",
+                value = "${sc.backingSats.btcSpacedFormatted()} BTC",
             )
             Spacer(Modifier.height(16.dp))
 

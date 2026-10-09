@@ -68,6 +68,14 @@ class DatabaseService(context: Context) :
         private const val DB_FILENAME = "stablechannels.db"
         internal const val DB_VERSION = 4
         internal const val PENDING_SPLICE_WITHOUT_TXID_TIMEOUT_SECS = 10 * 60L
+        // Nodes drop unconfirmed transactions after about two weeks.
+        internal const val STALE_PENDING_ONCHAIN_SECS = 14 * 86400L
+
+        /**
+         * How far before a placeholder's creation the wallet may first have seen its deposit: the
+         * wallet learns of a transaction, then the balance change creates the placeholder.
+         */
+        internal const val RECEIVE_ADOPTION_SLACK_SECS = 600L
         internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
@@ -1862,7 +1870,14 @@ class DatabaseService(context: Context) :
      * (old stuck ones can't starve out a new deposit); outer query re-sorts them oldest-first for
      * display.
      */
-    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> {
+    fun getPendingOnchainReceives(limit: Int = 25): List<PaymentRecord> =
+        getPendingOnchainRows("received", limit)
+
+    /** Onchain sends still confirming, oldest-first. Home shows them as "-" rows. */
+    fun getPendingOnchainSends(limit: Int = 10): List<PaymentRecord> =
+        getPendingOnchainRows("sent", limit)
+
+    private fun getPendingOnchainRows(direction: String, limit: Int): List<PaymentRecord> {
         val cursor =
             readableDatabase.rawQuery(
                 """
@@ -1870,14 +1885,14 @@ class DatabaseService(context: Context) :
                     SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, counterparty, status, created_at, fee_msat, txid, address, confirmations
                     FROM payments
                     WHERE payment_type = 'onchain'
-                      AND direction = 'received'
+                      AND direction = ?
                       AND status = 'pending'
                     ORDER BY created_at DESC, id DESC
                     LIMIT ?
                 ) ORDER BY created_at ASC, id ASC
                 """
                     .trimIndent(),
-                arrayOf(limit.toString()),
+                arrayOf(direction, limit.toString()),
             )
         return cursor.use { c ->
             buildList {
@@ -2155,6 +2170,142 @@ class DatabaseService(context: Context) :
     }
 
     /**
+     * Records a deposit found by an on-chain address lookup. Skipped when a resolved receive row
+     * for this txid, or a txid-less one with the same amount, already exists in the window (older
+     * rows may lack a txid, so the txid check alone would duplicate them). Txid-less pending
+     * placeholders are adopted instead.
+     */
+    fun recordMissedReceive(
+        txid: String,
+        amountSats: Long,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        address: String,
+        sinceSecs: Long,
+    ): Long {
+        val duplicate =
+            readableDatabase
+                .rawQuery(
+                    """
+                    SELECT 1 FROM payments
+                    WHERE payment_type = 'onchain' AND direction = 'received'
+                      AND amount_msat = ? AND created_at >= ?
+                      AND status != 'failed' AND (txid IS NULL OR txid = ?)
+                      AND NOT (status = 'pending' AND txid IS NULL)
+                    LIMIT 1
+                    """
+                        .trimIndent(),
+                    arrayOf((amountSats * 1000).toString(), sinceSecs.toString(), txid),
+                )
+                .use { it.moveToFirst() }
+        if (duplicate) return -1L
+        return recordWebSocketReceive(
+            paymentId = "onchain_receive_$txid",
+            amountMsat = amountSats * 1000,
+            amountUSD = amountUSD,
+            btcPrice = btcPrice,
+            txid = txid,
+            address = address,
+        )
+    }
+
+    /**
+     * Whether a txid-less pending receive could adopt a txid. Rows without an address never can: an
+     * amount match alone doesn't prove which transaction paid them.
+     */
+    fun hasTxidlessPendingReceive(): Boolean =
+        readableDatabase
+            .rawQuery(
+                """
+                SELECT 1 FROM payments
+                WHERE payment_type = 'onchain' AND direction = 'received'
+                  AND status = 'pending' AND (txid IS NULL OR txid = '')
+                  AND address IS NOT NULL AND address != ''
+                LIMIT 1
+                """
+                    .trimIndent(),
+                null,
+            )
+            .use { it.moveToFirst() }
+
+    data class TxidlessReceive(val id: Long, val address: String)
+
+    /**
+     * Txid-less pending receives that have an address and exactly [amountMsat], oldest first. Empty
+     * when a row already carries [txid]. [seenAtSecs] is when the wallet last updated that
+     * transaction; a row created more than [RECEIVE_ADOPTION_SLACK_SECS] after that cannot be this
+     * deposit (an older payment to a reused address), so it is skipped. The caller checks that
+     * [txid] pays the address before calling [adoptTxidForRow].
+     */
+    fun findTxidlessReceives(
+        txid: String,
+        amountMsat: Long,
+        seenAtSecs: Long,
+    ): List<TxidlessReceive> {
+        val db = readableDatabase
+        val tracked =
+            db.rawQuery("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)).use {
+                it.moveToFirst()
+            }
+        if (tracked) return emptyList()
+        return db.rawQuery(
+                """
+                SELECT id, address FROM payments
+                WHERE payment_type = 'onchain' AND direction = 'received'
+                  AND status = 'pending' AND (txid IS NULL OR txid = '')
+                  AND address IS NOT NULL AND address != ''
+                  AND amount_msat = ?
+                  AND created_at <= ?
+                ORDER BY created_at ASC
+                """
+                    .trimIndent(),
+                arrayOf(
+                    amountMsat.toString(),
+                    (seenAtSecs + RECEIVE_ADOPTION_SLACK_SECS).toString(),
+                ),
+            )
+            .use {
+                buildList {
+                    while (it.moveToNext()) {
+                        add(TxidlessReceive(it.getLong(0), it.getString(1)))
+                    }
+                }
+            }
+    }
+
+    /**
+     * Attaches [txid] to the txid-less pending receive [rowId]. Does nothing if the row got a txid
+     * meanwhile or any row already carries [txid]. Returns true when the row was updated.
+     */
+    fun adoptTxidForRow(rowId: Long, txid: String): Boolean {
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val tracked =
+                db.rawQuery("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", arrayOf(txid)).use {
+                    it.moveToFirst()
+                }
+            if (tracked) return false
+            val cv =
+                ContentValues().apply {
+                    put("payment_id", "onchain_receive_$txid")
+                    put("txid", txid)
+                }
+            val updated =
+                db.update(
+                    "payments",
+                    cv,
+                    "id = ? AND status = 'pending' AND (txid IS NULL OR txid = '')",
+                    arrayOf(rowId.toString()),
+                ) > 0
+            db.setTransactionSuccessful()
+            return updated
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
      * Reconcile an HTTP-resolver-resolved txid against the receive rows, in one transaction. If a
      * row already carries the txid AND its amount matches the placeholder's, the websocket recorded
      * this same deposit first — the placeholder is a duplicate, delete it. On an amount mismatch
@@ -2390,6 +2541,36 @@ class DatabaseService(context: Context) :
             null
         }
     }
+
+    /**
+     * Fails txid-less on-chain rows still pending after [STALE_PENDING_ONCHAIN_SECS]: nothing can
+     * ever resolve them. Returns how many rows changed.
+     */
+    fun failStaleTxidlessOnchain(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Int =
+        writableDatabase.update(
+            "payments",
+            ContentValues().apply { put("status", "failed") },
+            "payment_type = 'onchain' AND status = 'pending' AND (txid IS NULL OR txid = '') " +
+                "AND created_at < ?",
+            arrayOf((nowEpochSecs - STALE_PENDING_ONCHAIN_SECS).toString()),
+        )
+
+    /**
+     * Fails one on-chain row that is still unconfirmed after [STALE_PENDING_ONCHAIN_SECS]. Call it
+     * only after the block explorer failed to find the row's transaction, so a dropped send doesn't
+     * read "Sending onchain…" forever while a confirmed one is never failed.
+     */
+    fun failStaleOnchainRow(
+        rowId: Long,
+        nowEpochSecs: Long = System.currentTimeMillis() / 1000L,
+    ): Boolean =
+        writableDatabase.update(
+            "payments",
+            ContentValues().apply { put("status", "failed") },
+            "id = ? AND payment_type = 'onchain' AND status = 'pending' AND confirmations = 0 " +
+                "AND created_at < ?",
+            arrayOf(rowId.toString(), (nowEpochSecs - STALE_PENDING_ONCHAIN_SECS).toString()),
+        ) > 0
 
     /** Marks one pre-negotiation splice failed. Failed rows are terminal. */
     fun failPendingSplice(

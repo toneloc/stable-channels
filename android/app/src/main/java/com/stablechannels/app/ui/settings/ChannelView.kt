@@ -14,8 +14,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
-import com.stablechannels.app.util.satsFormatted
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
@@ -67,15 +69,21 @@ fun ChannelView(appState: AppState) {
             Spacer(Modifier.height(20.dp))
 
             // Capacity
-            ChannelDetailRow("Capacity", ch.channelValueSats.toLong().satsFormatted())
+            ChannelDetailRow("Capacity", "${ch.channelValueSats.toLong().btcSpacedFormatted()} BTC")
             Spacer(Modifier.height(16.dp))
 
             // Outbound
-            ChannelDetailRow("Outbound", (ch.outboundCapacityMsat.toLong() / 1000).satsFormatted())
+            ChannelDetailRow(
+                "Outbound",
+                "${(ch.outboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+            )
             Spacer(Modifier.height(16.dp))
 
             // Inbound
-            ChannelDetailRow("Inbound", (ch.inboundCapacityMsat.toLong() / 1000).satsFormatted())
+            ChannelDetailRow(
+                "Inbound",
+                "${(ch.inboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
+            )
 
             // Funding Tx
             appState.fundingTxid?.let { txid ->
@@ -99,7 +107,7 @@ fun ChannelView(appState: AppState) {
                                 fontFamily = FontFamily.Monospace,
                             )
                             Spacer(Modifier.height(8.dp))
-                            TextButton(
+                            NeutralTextButton(
                                 onClick = {
                                     context.openInAppBrowser(
                                         "https://mempool.space/tx/${txid.substringBefore(":")}"
@@ -107,7 +115,7 @@ fun ChannelView(appState: AppState) {
                                 },
                                 contentPadding = PaddingValues(0.dp),
                             ) {
-                                Text("View on explorer ↗", color = Color(0xFF3B82F6))
+                                Text("View on explorer ↗")
                             }
                         }
                     }
@@ -116,7 +124,7 @@ fun ChannelView(appState: AppState) {
 
             if (hasReadyChannel) {
                 Spacer(Modifier.height(32.dp))
-                OutlinedButton(
+                NeutralOutlinedButton(
                     onClick = { showCloseConfirm = true },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
@@ -176,7 +184,7 @@ fun ChannelView(appState: AppState) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showCloseConfirm = false
                         appState.isChannelClosing = true
@@ -197,7 +205,7 @@ fun ChannelView(appState: AppState) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
+                NeutralTextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
             },
         )
     }

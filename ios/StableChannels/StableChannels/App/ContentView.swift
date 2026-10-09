@@ -26,11 +26,34 @@ struct ContentView: View {
         ZStack {
             switch appState.phase {
             case .loading, .onboarding, .syncing:
-                SyncingView()
+                SyncingView(
+                    isSyncComplete: appState.hasCompletedInitialSync,
+                    onBalanced: {
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            appState.phase = .wallet
+                        }
+                    }
+                )
+                .transition(.opacity)
             case .wallet:
                 MainTabView()
+                    .transition(.opacity)
+            case .offline:
+                OfflinePageView(
+                    isRetrying: appState.isRetryingConnection,
+                    onRetry: {
+                        await appState.retryConnection()
+                    },
+                    onGoToHome: {
+                        withAnimation(.easeInOut(duration: 0.35)) {
+                            appState.phase = .wallet
+                        }
+                    }
+                )
+                .transition(.opacity)
             case .error(let message):
                 ErrorDisplayView(message: message)
+                    .transition(.opacity)
             }
 
             // Auth overlay: shown only when locked and biometric is enabled
@@ -55,6 +78,7 @@ struct ContentView: View {
                     }
             }
         }
+        .animation(.easeInOut(duration: 0.35), value: appState.phase)
         .preferredColorScheme(colorScheme)
         .onChange(of: scenePhase) { _, newPhase in
             // Lock only on .background. .inactive fires during app switcher and Face ID prompts.

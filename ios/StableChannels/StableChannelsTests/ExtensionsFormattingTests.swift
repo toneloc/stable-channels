@@ -34,6 +34,20 @@ final class ExtensionsFormattingTests: XCTestCase {
         )
     }
 
+    func testBitcoinFormattedUsesSpacedBTC() {
+        XCTAssertEqual(Bitcoin(sats: 123_456_789).formatted, "1.23\u{2009}456\u{2009}789 BTC")
+        XCTAssertEqual(Bitcoin(sats: 0).formatted, "0.00\u{2009}000\u{2009}000 BTC")
+        XCTAssertEqual(Bitcoin.fromBTC(0.00190079).formatted, "0.00\u{2009}190\u{2009}079 BTC")
+    }
+
+    func testLNURLAmountErrorsUseBTC() {
+        let bounds = LNURLError.amountOutOfBounds(minSats: 1_000, maxSats: 123_456_789)
+        XCTAssertEqual(
+            bounds.errorDescription,
+            "Amount must be between 0.00\u{2009}001\u{2009}000 and 1.23\u{2009}456\u{2009}789 BTC."
+        )
+    }
+
     func testUSDFormatted() {
         let cases: [Double] = [0.0, 0.05, 10.5, 1234.56, 1_000_000.0]
         let currencyFormatter = NumberFormatter()

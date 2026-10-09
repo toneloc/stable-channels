@@ -129,6 +129,15 @@ The LSP server uses an APNs authentication key (`.p8` file) to send pushes. This
 
 ## Building
 
+### History refresh
+
+History pull-to-refresh has a 20-second deadline for the entire confirmation pass,
+including waiting for an automatic poll. Timeout shows an error; leaving the view
+cancels the wait and active manual requests without cancelling the automatic poll.
+Stale manual chain tips are rejected without changing confirmations. Database load
+failures retain the last good history rows, and background reloads do not dismiss
+network errors.
+
 ### Prerequisites
 
 - Xcode 16.0+

@@ -25,6 +25,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.components.DoneToolbarButton
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.home.FundWalletScreen
 import com.stablechannels.app.ui.home.generateQRCode
 import com.stablechannels.app.ui.theme.LocalDarkTheme
@@ -73,31 +77,17 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
     ) {
         // Toolbar (Done button, centered title, top-right Onchain button)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            TextButton(
+            DoneToolbarButton(
                 onClick = onDismiss,
                 modifier = Modifier.align(Alignment.CenterStart),
-                colors =
-                    ButtonDefaults.textButtonColors(
-                        containerColor =
-                            if (LocalDarkTheme.current) {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            } else {
-                                Color(0xFFE5E5EA)
-                            },
-                        contentColor = MaterialTheme.colorScheme.primary,
-                    ),
-                shape = RoundedCornerShape(20.dp),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            ) {
-                Text("Done", style = MaterialTheme.typography.bodyMedium)
-            }
+            )
             Text(
                 text = "Receive",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.Center),
             )
-            TextButton(
+            NeutralTextButton(
                 onClick = { showOnChain = true },
                 modifier = Modifier.align(Alignment.CenterEnd),
                 colors =
@@ -108,7 +98,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                             } else {
                                 Color(0xFFE5E5EA)
                             },
-                        contentColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                     ),
                 shape = RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -156,7 +146,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             )
             Spacer(Modifier.height(12.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
+                InkButton(
                     onClick = {
                         clipboardManager.setText(AnnotatedString(inv))
                         isCopied = true
@@ -164,7 +154,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
                 ) {
                     Text(if (isCopied) "Copied!" else "Copy")
                 }
-                OutlinedButton(
+                NeutralOutlinedButton(
                     onClick = {
                         invoice = null
                         invoiceAmountSats = null
@@ -277,7 +267,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
             }
 
             Spacer(Modifier.height(16.dp))
-            Button(
+            InkButton(
                 onClick = {
                     isGenerating = true
                     error = null
@@ -323,7 +313,7 @@ fun ReceiveScreen(appState: AppState, onDismiss: () -> Unit) {
 
             if (hasChannel) {
                 Spacer(Modifier.height(8.dp))
-                OutlinedButton(
+                NeutralOutlinedButton(
                     onClick = {
                         isGenerating = true
                         error = null

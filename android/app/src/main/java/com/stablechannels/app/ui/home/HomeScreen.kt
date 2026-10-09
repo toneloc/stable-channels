@@ -38,6 +38,8 @@ import com.stablechannels.app.models.TradeRecord
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
+import com.stablechannels.app.ui.home.balancebar.BalanceBar
+import com.stablechannels.app.ui.home.balancebar.TradeDirection
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.trade.BuyScreen
 import com.stablechannels.app.ui.trade.SellScreen
@@ -68,6 +70,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isFlashing by appState.paymentFlash.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
+    val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -78,12 +81,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
     var showBTC by remember { mutableStateOf(false) }
     var pendingOnchainReceives by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
+    var pendingOnchainSends by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
+    val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
 
     LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
-        pendingOnchainReceives =
-            withContext(Dispatchers.IO) {
-                appState.databaseService?.getPendingOnchainReceives() ?: emptyList()
-            }
+        withContext(Dispatchers.IO) {
+            val db = appState.databaseService
+            pendingOnchainReceives = db?.getPendingOnchainReceives() ?: emptyList()
+            pendingOnchainSends = db?.getPendingOnchainSends() ?: emptyList()
+        }
     }
 
     // Auto-dismiss receive sheet when payment arrives
@@ -185,31 +191,31 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             Spacer(Modifier.height(8.dp))
 
             // Balance bar
-            if (lightningSats > 0) {
-                BalanceBar(
-                    stableUSD = sc.expectedUSD.amount,
-                    nativeSats = nativeSatsCached,
-                    totalSats = lightningSats,
-                    btcPrice = btcPrice,
-                    maxSellUSD =
-                        (appState.tradeService?.maxSellCents(
-                            sc,
-                            appState.priceService.accountingPrice.value,
-                        ) ?: 0L) / 100.0,
-                    showBtcFormat = showBTC,
-                    modifier = Modifier.padding(horizontal = 18.dp),
-                    onDragStarted = { appState.ensureLSPConnected() },
-                    onTradeRequest =
-                        if (hasReadyChannel)
-                            { direction, amountUSD ->
-                                prefillTradeAmount = amountUSD
-                                if (direction == TradeDirection.BUY) showBuy = true
-                                else showSell = true
-                            }
-                        else null,
-                )
-                Spacer(Modifier.height(12.dp))
-            }
+            BalanceBar(
+                stableUSD = sc.expectedUSD.amount,
+                nativeSats = nativeSatsCached,
+                totalSats = lightningSats,
+                btcPrice = btcPrice,
+                maxSellUSD =
+                    (appState.tradeService?.maxSellCents(
+                        sc,
+                        appState.priceService.accountingPrice.value,
+                    ) ?: 0L) / 100.0,
+                isTrading = showBuy || showSell,
+                showBtcFormat = showBTC,
+                modifier = Modifier.padding(horizontal = 18.dp),
+                onDragStarted = { appState.ensureLSPConnected() },
+                onTradeRequest =
+                    if (hasReadyChannel)
+                        { request ->
+                            prefillTradeAmount = request.amountUSD
+                            if (request.direction == TradeDirection.BUY) showBuy = true
+                            else showSell = true
+                        }
+                    else null,
+                onEmptyInteraction = { showReceive = true },
+            )
+            Spacer(Modifier.height(12.dp))
 
             // Syncing indicator
             if (isSyncing) {
@@ -234,9 +240,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             }
 
             // On-chain section
-            if (onchainSats > 0) {
+            // Stays visible after the balance hits zero while a send or splice is still confirming
+            if (onchainSats > 0 || pendingOnchainSends.isNotEmpty() || isSweeping) {
                 val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
-                val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
+                val pendingSends = pendingOnchainSends
+                val hasPendingOnchainSend = pendingSends.isNotEmpty()
+                val spliceIsOut = appState.pendingSplice?.direction == "out"
+                val spliceLabel = if (spliceIsOut) "Sending onchain..." else "Move pending..."
+                val spliceSummary = if (spliceIsOut) "Send pending" else "Move pending"
+                val spliceSign = if (spliceIsOut) "-" else ""
 
                 val pendingReceives = pendingOnchainReceives
                 val hasPendingOnchainReceive = pendingReceives.isNotEmpty()
@@ -317,7 +329,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             if (!onchainExpanded) {
                                 Spacer(Modifier.height(4.dp))
                                 Text(
-                                    "Move pending \u00b7 Receiving onchain$pendingReceiveSummary",
+                                    "$spliceSummary \u00b7 Receiving onchain$pendingReceiveSummary",
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -336,11 +348,15 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 Column {
                                     Spacer(Modifier.height(10.dp))
                                     PendingRow(
-                                        "Move pending...",
+                                        spliceLabel,
                                         appState.spliceTxid,
                                         context,
                                         amountSats = appState.pendingSplice?.amountSats,
+                                        confirmations = 0,
+                                        requiredConfirmations =
+                                            AppState.requiredConfirmationsForType("splice_out"),
                                         btcPrice = btcPrice,
+                                        sign = spliceSign,
                                     )
                                     pendingReceives.forEach { receive ->
                                         Spacer(Modifier.height(8.dp))
@@ -355,6 +371,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                     receive.paymentType
                                                 ),
                                             btcPrice = btcPrice,
+                                            sign = "+",
                                         )
                                     }
                                 }
@@ -363,16 +380,21 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             // 1. Splice-in in progress
                             Spacer(Modifier.height(10.dp))
                             PendingRow(
-                                "Move pending...",
+                                spliceLabel,
                                 appState.spliceTxid,
                                 context,
                                 amountSats = appState.pendingSplice?.amountSats,
+                                confirmations = 0,
+                                requiredConfirmations =
+                                    AppState.requiredConfirmationsForType("splice_out"),
                                 btcPrice = btcPrice,
+                                sign = spliceSign,
                             )
                         } else if (isChannelClosing) {
                             // 2. Channel closing
                             Spacer(Modifier.height(10.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                         } else if (hasReadyChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             if (hasPendingOnchainReceive) {
@@ -454,6 +476,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                         receive.paymentType
                                                     ),
                                                 btcPrice = btcPrice,
+                                                sign = "+",
                                             )
                                         }
                                     }
@@ -500,6 +523,9 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     }
                                 }
                             }
+                        } else if (onchainSats == 0L) {
+                            // A pending send keeps the box up; show any deposit still confirming.
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                         } else if (spendableOnchainSats == 0L) {
                             // 3. Unconfirmed deposit (with or without channel)
                             Spacer(Modifier.height(10.dp))
@@ -521,6 +547,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     if (effectiveTxid != null) "Channel closing\u2026"
                                     else "Channel closed"
                                 PendingRow(text, effectiveTxid, context)
+                                PendingReceiveRows(pendingReceives, context, btcPrice)
                             } else if (hasPendingOnchainReceive) {
                                 // One row per pending deposit — more than one can be confirming.
                                 pendingReceives.forEachIndexed { index, receive ->
@@ -536,9 +563,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                                 receive.paymentType
                                             ),
                                         btcPrice = btcPrice,
+                                        sign = "+",
                                     )
                                 }
-                            } else {
+                            } else if (!hasPendingOnchainSend) {
+                                // Unconfirmed change from our own send is not a deposit.
                                 PendingRow("Deposit confirming...", effectiveTxid, context)
                             }
                             if (!hasReadyChannel) {
@@ -550,12 +579,28 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 )
                             }
                         } else {
-                            // 4. No channel, confirmed deposit — just needs Lightning
+                            // 4. No channel, confirmed deposit — just needs Lightning.
+                            // A newer deposit can still be confirming alongside it.
+                            PendingReceiveRows(pendingReceives, context, btcPrice)
                             Spacer(Modifier.height(8.dp))
                             Text(
                                 "Receive a payment over Lightning to activate your account.",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        pendingSends.forEach { send ->
+                            Spacer(Modifier.height(10.dp))
+                            PendingRow(
+                                "Sending onchain...",
+                                send.txid,
+                                context,
+                                amountSats = send.amountSats,
+                                confirmations = send.confirmations,
+                                requiredConfirmations =
+                                    AppState.requiredConfirmationsForType(send.paymentType),
+                                btcPrice = btcPrice,
+                                sign = "-",
                             )
                         }
                     }
@@ -573,8 +618,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
 
             Spacer(Modifier.height(16.dp))
 
-            // Hint text when no channel
-            if (!hasReadyChannel) {
+            // Hint text when no channel and no funds
+            if (!hasReadyChannel && totalSats == 0L && !isOpeningChannel) {
                 Text(
                     "Receive BTC to get started",
                     style = MaterialTheme.typography.bodySmall,
@@ -586,6 +631,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Action buttons
             HomeActionButtons(
                 hasReadyChannel = hasReadyChannel,
+                pulseReceive = !hasReadyChannel && totalSats == 0L && !isOpeningChannel,
                 onSend = { showSend = true },
                 onReceive = { showReceive = true },
                 onBuy = { showBuy = true },
@@ -706,6 +752,28 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     }
 }
 
+/** One "+" row per pending onchain deposit. */
+@Composable
+private fun PendingReceiveRows(
+    receives: List<PaymentRecord>,
+    context: android.content.Context,
+    btcPrice: Double,
+) {
+    receives.forEach { receive ->
+        Spacer(Modifier.height(10.dp))
+        PendingRow(
+            "Receiving onchain...",
+            receive.txid,
+            context,
+            amountSats = receive.amountSats,
+            confirmations = receive.confirmations,
+            requiredConfirmations = AppState.requiredConfirmationsForType(receive.paymentType),
+            btcPrice = btcPrice,
+            sign = "+",
+        )
+    }
+}
+
 @Composable
 private fun PendingRow(
     text: String,
@@ -715,6 +783,7 @@ private fun PendingRow(
     confirmations: Int? = null,
     requiredConfirmations: Int? = null,
     btcPrice: Double = 0.0,
+    sign: String = "",
 ) {
     // A real confirmation count gives concrete progress ("2/6 confirmations") instead of
     // a static hourglass that never changes for up to an hour on a fresh onchain deposit.
@@ -753,7 +822,7 @@ private fun PendingRow(
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            val amountText = PendingAmountFormatter.amountText(amountSats, btcPrice)
+            val amountText = PendingAmountFormatter.amountText(amountSats, btcPrice, sign)
             val amountPrefix = if (amountText != null) "$amountText \u00b7 " else ""
             val caption =
                 when {

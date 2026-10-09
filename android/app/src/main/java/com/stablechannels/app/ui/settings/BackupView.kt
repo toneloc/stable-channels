@@ -1,6 +1,5 @@
 package com.stablechannels.app.ui.settings
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +21,9 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.NodeService
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.util.ClipboardUtils
 import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
@@ -71,7 +73,7 @@ fun BackupView(appState: AppState) {
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         // Show/hide seed words
-        Button(
+        InkButton(
             onClick = {
                 if (showSeedWords) {
                     // Hiding seed words — no auth needed
@@ -176,13 +178,11 @@ fun BackupView(appState: AppState) {
                 Spacer(Modifier.height(12.dp))
                 var copied by remember { mutableStateOf(false) }
                 var showClipboardWarning by remember { mutableStateOf(false) }
-                OutlinedButton(
+                InkButton(
                     onClick = {
                         showClipboardWarning = true
                     },
                     modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF3B82F6)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
                 ) {
                     Text(if (copied) "Copied" else "Copy Seed Words")
                 }
@@ -223,23 +223,18 @@ fun BackupView(appState: AppState) {
                             )
                         },
                         confirmButton = {
-                            Button(
+                            InkButton(
                                 onClick = {
                                     showClipboardWarning = false
                                     ClipboardUtils.copySensitive(context, "Seed Phrase", words)
                                     copied = true
-                                },
-                                colors =
-                                    ButtonDefaults.buttonColors(
-                                        containerColor = Color(0xFF10B981),
-                                        contentColor = Color.White,
-                                    ),
+                                }
                             ) {
                                 Text("Copy")
                             }
                         },
                         dismissButton = {
-                            OutlinedButton(onClick = { showClipboardWarning = false }) {
+                            NeutralOutlinedButton(onClick = { showClipboardWarning = false }) {
                                 Text("Cancel")
                             }
                         },
@@ -258,11 +253,9 @@ fun BackupView(appState: AppState) {
         Spacer(Modifier.height(16.dp))
 
         // Restore from seed
-        OutlinedButton(
+        InkButton(
             onClick = { showRestore = true },
             modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF3B82F6)),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
         ) {
             Text("Restore from Seed")
         }
@@ -352,13 +345,13 @@ fun BackupView(appState: AppState) {
                 }
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         val input = restoreMnemonic.trim()
                         val wordCount = input.split("\\s+".toRegex()).size
                         if (wordCount != 12 && wordCount != 24) {
                             restoreError = "Seed phrase must be 12 or 24 words"
-                            return@TextButton
+                            return@NeutralTextButton
                         }
                         // Restore guard: a seed-only restore wipes LDK state;
                         // if this seed's node still has an LSP channel it will
@@ -412,7 +405,7 @@ fun BackupView(appState: AppState) {
                 }
             },
             dismissButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestore = false
                         restoreMnemonic = ""
@@ -456,7 +449,7 @@ fun BackupView(appState: AppState) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestoreForceCloseConfirm = false
                         performRestore(restoreMnemonic.trim())
@@ -469,7 +462,7 @@ fun BackupView(appState: AppState) {
                 }
             },
             dismissButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showRestoreForceCloseConfirm = false
                     }

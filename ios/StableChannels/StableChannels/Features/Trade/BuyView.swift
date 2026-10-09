@@ -27,7 +27,9 @@ struct BuyView: View {
         BuyAmountPolicy.maximumUsd(appState.stableChannel.expectedUSD.amount)
     }
 
-    private var tradePrice: Double { appState.accountingBTCPrice }
+    private var tradePrice: Double {
+        appState.effectiveTradePrice
+    }
 
     private var amountUSD: Double {
         Double(amountStr) ?? 0
@@ -48,6 +50,10 @@ struct BuyView: View {
     private var btcAmount: Double {
         guard tradePrice > 0 else { return 0 }
         return amountUSD / tradePrice
+    }
+
+    private var btcAmountFinalText: String {
+        Bitcoin.fromBTC(btcAmountFinal).formatted
     }
 
     private var btcAmountFinal: Double {
@@ -103,14 +109,18 @@ struct BuyView: View {
                 }
 
             if amountUSD > 0 {
-                Text(String(format: "≈ %.8f BTC", btcAmount))
+                Text("≈ \(Bitcoin.fromBTC(btcAmount).formatted)")
                     .foregroundStyle(.secondary)
             }
 
-            let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
-                .usdFormatted
-            Text(availableStr)
-                .foregroundStyle(.secondary)
+            if !appState.isOnline {
+                OfflineBadgeView()
+            } else {
+                let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
+                    .usdFormatted
+                Text(availableStr)
+                    .foregroundStyle(.secondary)
+            }
 
             if amountUSD > maxBuyUSD && amountUSD > 0 {
                 Text(String(localized: "error_exceeds_balance", defaultValue: "Exceeds available stable balance"))
@@ -129,7 +139,9 @@ struct BuyView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(!BuyAmountPolicy.accepts(amountUsd: amountUSD, balanceUsd: maxBuyUSD) || tradePrice <= 0)
+                .disabled(!BuyAmountPolicy
+                    .accepts(amountUsd: amountUSD, balanceUsd: maxBuyUSD) || tradePrice <= 0 || !appState
+                    .isOnline)
         }
     }
 
@@ -157,7 +169,7 @@ struct BuyView: View {
                 Divider()
                 confirmRow(
                     String(localized: "label_you_receive", defaultValue: "You receive"),
-                    String(format: "%.8f BTC", btcAmountFinal),
+                    btcAmountFinalText,
                     bold: true
                 )
             }
@@ -223,10 +235,8 @@ struct BuyView: View {
                 Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_bought_btc_for", defaultValue: "Converted ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + amountUSD.usdFormatted)
+                Text(String(localized: "trade_bought_btc_for", defaultValue: "Converted ") + btcAmountFinalText +
+                    " for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -236,10 +246,8 @@ struct BuyView: View {
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_buying_btc_for", defaultValue: "Converting ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + amountUSD.usdFormatted)
+                Text(String(localized: "trade_buying_btc_for", defaultValue: "Converting ") + btcAmountFinalText +
+                    " for " + amountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
@@ -274,6 +282,13 @@ struct BuyView: View {
     }
 
     private func executeTrade() {
+        guard appState.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_trade",
+                defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
+            )
+            return
+        }
         isExecuting = true
         errorMessage = nil
         appState.ensureLSPConnected()

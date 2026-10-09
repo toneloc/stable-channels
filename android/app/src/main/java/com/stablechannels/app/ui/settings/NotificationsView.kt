@@ -17,6 +17,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.content.PermissionChecker
+import com.stablechannels.app.ui.components.InkButton
 
 @Composable
 fun NotificationsView() {
@@ -74,7 +75,7 @@ fun NotificationsView() {
 
         if (!notifEnabled) {
             Spacer(Modifier.height(20.dp))
-            Button(
+            InkButton(
                 onClick = {
                     val intent =
                         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {

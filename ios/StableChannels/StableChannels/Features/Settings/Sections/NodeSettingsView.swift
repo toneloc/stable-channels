@@ -14,18 +14,16 @@ struct NodeSettingsView: View {
                             .font(.subheadline)
                         HStack(spacing: 6) {
                             Circle()
-                                .fill(appState.nodeService.isRunning ? .green : .red)
+                                .fill(statusColor)
                                 .frame(width: 8, height: 8)
-                            Text(appState.nodeService.isRunning
-                                ? String(localized: "status_running", defaultValue: "Running")
-                                : String(localized: "status_stopped", defaultValue: "Stopped"))
+                            Text(statusText)
                                 .font(.caption)
-                                .foregroundStyle(appState.nodeService.isRunning ? .green : .red)
+                                .foregroundStyle(statusColor)
                         }
                     }
                     Spacer()
-                    Image(systemName: appState.nodeService.isRunning ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(appState.nodeService.isRunning ? .green : .red)
+                    Image(systemName: statusIcon)
+                        .foregroundStyle(statusColor)
                 }
             } header: {
                 Text(String(localized: "label_node_status", defaultValue: "Node Status"))
@@ -78,9 +76,42 @@ struct NodeSettingsView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
+    private var isOnline: Bool { appState.isOnline }
+    private var isNodeRunning: Bool { appState.nodeService.isRunning }
+
+    private var statusColor: Color {
+        if !isOnline {
+            return .orange
+        }
+        return isNodeRunning ? .green : .red
+    }
+
+    private var statusText: String {
+        if !isOnline {
+            return String(localized: "status_offline_paused", defaultValue: "Offline (Paused)")
+        }
+        return isNodeRunning
+            ? String(localized: "status_running", defaultValue: "Running")
+            : String(localized: "status_stopped", defaultValue: "Stopped")
+    }
+
+    private var statusIcon: String {
+        if !isOnline {
+            return "wifi.slash"
+        }
+        return isNodeRunning ? "checkmark.circle.fill" : "xmark.circle.fill"
+    }
+
+    private var effectiveNodeId: String {
+        if !appState.nodeService.nodeId.isEmpty {
+            return appState.nodeService.nodeId
+        }
+        return UserDefaults(suiteName: Constants.appGroupIdentifier)?.string(forKey: "node_id") ?? ""
+    }
+
     private var nodeIdRow: some View {
         Button {
-            UIPasteboard.general.string = appState.nodeService.nodeId
+            UIPasteboard.general.string = effectiveNodeId
             withAnimation { copiedNodeId = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                 withAnimation { copiedNodeId = false }
@@ -102,7 +133,9 @@ struct NodeSettingsView: View {
                             .foregroundStyle(Color.stablePrimary)
                     }
                 }
-                Text(appState.nodeService.nodeId)
+                Text(effectiveNodeId.isEmpty
+                    ? String(localized: "status_offline_unknown", defaultValue: "Offline — waiting for node start")
+                    : effectiveNodeId)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)

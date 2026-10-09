@@ -1,5 +1,6 @@
 package com.stablechannels.app.util
 
+import com.stablechannels.app.models.Bitcoin
 import java.util.Date
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -31,6 +32,12 @@ class ExtensionsTest {
         assertEquals("1.00\u2009000\u2009000", 100_000_000L.btcSpacedFormatted())
         assertEquals("1.23\u2009456\u2009789", 123_456_789L.btcSpacedFormatted())
         assertEquals("21000000.00\u2009000\u2009000", 2_100_000_000_000_000L.btcSpacedFormatted())
+    }
+
+    @Test
+    fun `Bitcoin formatted uses spaced BTC format`() {
+        assertEquals("1.23\u2009456\u2009789 BTC", Bitcoin(123_456_789L).formatted)
+        assertEquals("0.00\u2009190\u2009079 BTC", Bitcoin.fromBTC(0.00190079).formatted)
     }
 
     @Test

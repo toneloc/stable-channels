@@ -32,8 +32,7 @@ struct Bitcoin: Codable, Equatable {
     }
 
     var formatted: String {
-        let btcValue = toBTC()
-        return String(format: "%.8f BTC", btcValue)
+        "\(sats.btcSpacedFormatted) BTC"
     }
 }
 

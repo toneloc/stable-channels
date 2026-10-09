@@ -23,7 +23,9 @@ struct SellView: View {
         case done
     }
 
-    private var tradePrice: Double { appState.accountingBTCPrice }
+    private var tradePrice: Double {
+        appState.effectiveTradePrice
+    }
 
     private var maxSellUSD: Double {
         Double(appState.tradeService?.maxSellCents(sc: appState.stableChannel, price: tradePrice) ?? 0) / 100
@@ -48,6 +50,10 @@ struct SellView: View {
     private var btcAmount: Double {
         guard tradePrice > 0 else { return 0 }
         return amountUSD / tradePrice
+    }
+
+    private var btcAmountFinalText: String {
+        Bitcoin.fromBTC(btcAmountFinal).formatted
     }
 
     private var btcAmountFinal: Double {
@@ -102,14 +108,18 @@ struct SellView: View {
                 }
 
             if amountUSD > 0 {
-                Text(String(format: "≈ %.8f BTC", btcAmount))
+                Text("≈ \(Bitcoin.fromBTC(btcAmount).formatted)")
                     .foregroundStyle(.secondary)
             }
 
-            Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
-                .foregroundStyle(.secondary)
-            Button(String(localized: "button_max", defaultValue: "Max")) {
-                amountStr = String(format: "%.2f", maxSellUSD)
+            if !appState.isOnline {
+                OfflineBadgeView()
+            } else {
+                Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
+                    .foregroundStyle(.secondary)
+                Button(String(localized: "button_max", defaultValue: "Max")) {
+                    amountStr = String(format: "%.2f", maxSellUSD)
+                }
             }
             if amountUSD > maxSellUSD && amountUSD > 0 {
                 Text(StabilizationPolicy.limitExceededMessage(UInt64(maxSellUSD * 100 + 1e-7)))
@@ -129,7 +139,8 @@ struct SellView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD || tradePrice <= 0)
+                .disabled(amountUSD <= 0 || amountUSD > maxSellUSD || tradePrice <= 0 || !appState
+                    .isOnline)
         }
     }
 
@@ -223,10 +234,9 @@ struct SellView: View {
                 Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + netAmountUSD.usdFormatted)
+                Text(String(localized: "trade_sold_btc_for", defaultValue: "Converted ") + btcAmountFinalText +
+                    " for " +
+                    netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -236,10 +246,8 @@ struct SellView: View {
                 Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + String(
-                    format: "%.8f",
-                    btcAmountFinal
-                ) + " BTC for " + netAmountUSD.usdFormatted)
+                Text(String(localized: "trade_selling_btc_for", defaultValue: "Converting ") + btcAmountFinalText +
+                    " for " + netAmountUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
@@ -274,6 +282,13 @@ struct SellView: View {
     }
 
     private func executeTrade() {
+        guard appState.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_trade",
+                defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
+            )
+            return
+        }
         isExecuting = true
         errorMessage = nil
         appState.ensureLSPConnected()

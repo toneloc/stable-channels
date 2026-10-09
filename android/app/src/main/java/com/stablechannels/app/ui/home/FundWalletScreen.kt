@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.QRCodeUtils
 
@@ -60,7 +61,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
     ) {
         // Toolbar (Back button, centered title)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            TextButton(
+            NeutralTextButton(
                 onClick = onBack,
                 modifier = Modifier.align(Alignment.CenterStart),
                 colors =
@@ -71,7 +72,7 @@ fun FundWalletScreen(appState: AppState, onBack: () -> Unit) {
                             } else {
                                 Color(0xFFE5E5EA)
                             },
-                        contentColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                     ),
                 shape = RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),

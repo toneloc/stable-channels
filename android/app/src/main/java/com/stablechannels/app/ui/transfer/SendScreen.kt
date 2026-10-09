@@ -46,6 +46,10 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.components.DoneButton
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
@@ -156,6 +160,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         pendingPaymentId
             ?.let { paymentOutcomes[it] }
             ?.takeIf { it.belongsToAttempt(attemptStartedAtNanos) }
+    val isPaymentPending =
+        PaymentResultControls.isLightningPending(
+            pendingPaymentId,
+            paymentOutcome,
+            attemptStartedAtNanos,
+        )
 
     LaunchedEffect(pendingPaymentId, attemptStartedAtNanos) {
         val pid = pendingPaymentId ?: return@LaunchedEffect
@@ -402,8 +412,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
     ) {
         // Header row
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            if (result == null) {
-                TextButton(
+            if (result == null || isPaymentPending) {
+                NeutralTextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
                     colors =
@@ -414,12 +424,15 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 } else {
                                     Color(0xFFE5E5EA)
                                 },
-                            contentColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
                         ),
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                 ) {
-                    Text("Cancel", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (result == null) "Cancel" else "Close",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                 }
             }
             Text(
@@ -501,8 +514,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
         if (result != null) {
             Spacer(Modifier.height(40.dp))
-            val isSending = result!!.startsWith("Sending")
-            if (isSending) {
+            if (isPaymentPending) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(64.dp),
                     color = Color(0xFFF59E0B),
@@ -518,7 +530,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             Text(
-                text = if (isSending) "Sending..." else "Sent!",
+                text = if (isPaymentPending) "Sending..." else "Sent!",
                 style = MaterialTheme.typography.headlineMedium,
                 fontWeight = FontWeight.Bold,
             )
@@ -545,9 +557,8 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                 )
             }
             Spacer(Modifier.weight(1f))
-            // Done stays visible while sending: the outcome is durable and lands in History.
-            Button(onClick = onDismiss) {
-                Text("Done")
+            if (!isPaymentPending) {
+                DoneButton(onClick = onDismiss)
             }
         } else {
             // Loading indicator during photo QR extraction
@@ -625,7 +636,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             val maxUSD =
                                 if (inputType == InputType.ONCHAIN) {
@@ -727,7 +738,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             Spacer(Modifier.weight(1f))
-            Button(
+            InkButton(
                 onClick = {
                     isSending = true
                     error = null
@@ -744,7 +755,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 if (isOnChain) {
                                     "Confirm onchain withdrawal"
                                 } else {
-                                    "Confirm payment of $displaySats sats"
+                                    "Confirm payment of ${displaySats.btcSpacedFormatted()} BTC"
                                 }
                             val authResult = BiometricService.authenticate(activity, reason)
                             if (authResult != BiometricService.AuthResult.SUCCESS) {
@@ -874,9 +885,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                     (sats.toDouble() / Constants.SATS_IN_BTC) *
                                                         accountingPrice,
                                                 btcPrice = accountingPrice,
+                                                status = "pending",
                                                 txid = txid,
                                                 address = trimmed,
                                             )
+                                            appState.notifyPaymentRecorded()
                                             result = "Onchain tx sent: $txid"
                                         }
                                     }

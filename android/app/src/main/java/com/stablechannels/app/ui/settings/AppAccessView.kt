@@ -8,10 +8,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.stablechannels.app.ui.components.inkColor
+import com.stablechannels.app.ui.components.onInkColor
 
 @Composable
 fun AppAccessView() {
@@ -85,8 +86,8 @@ fun AppAccessView() {
                     enabled = biometricsAvailable,
                     colors =
                         SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Color(0xFF10B981),
+                            checkedThumbColor = onInkColor(),
+                            checkedTrackColor = inkColor(),
                             uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
                         ),
@@ -134,8 +135,8 @@ fun AppAccessView() {
                     enabled = biometricsAvailable,
                     colors =
                         SwitchDefaults.colors(
-                            checkedThumbColor = Color.White,
-                            checkedTrackColor = Color(0xFF10B981),
+                            checkedThumbColor = onInkColor(),
+                            checkedTrackColor = inkColor(),
                             uncheckedThumbColor = MaterialTheme.colorScheme.onSurfaceVariant,
                             uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant,
                         ),

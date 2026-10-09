@@ -90,13 +90,20 @@ extension [Any?] {
 
 final class RawSQL {
     var getDB: () -> OpaquePointer?
-    private let queue = DispatchQueue(label: "com.stablechannels.rawsql", qos: .userInitiated)
+    private let lock = NSRecursiveLock()
 
     init(getDB: @escaping () -> OpaquePointer?) {
         self.getDB = getDB
     }
 
     private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+    @discardableResult
+    private func synchronized<T>(_ block: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try block()
+    }
 
     func bindParams(_ stmt: OpaquePointer?, params: [SQLValue]) {
         for (i, param) in params.enumerated() {
@@ -114,30 +121,14 @@ final class RawSQL {
     }
 
     func execute(_ sql: String, params: [SQLValue] = []) throws {
-        try queue.sync {
-            guard let db = getDB() else {
-                throw DatabaseError.executeFailed("Database handle is nil")
-            }
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                throw DatabaseError.prepareFailed(String(cString: sqlite3_errmsg(db)))
-            }
-            defer { sqlite3_finalize(stmt) }
-
-            bindParams(stmt, params: params)
-
-            let result = sqlite3_step(stmt)
-            guard result == SQLITE_DONE || result == SQLITE_ROW else {
-                throw DatabaseError.executeFailed(String(cString: sqlite3_errmsg(db)))
-            }
-        }
+        _ = try executeReturningChanges(sql, params: params)
     }
 
     /// Executes a statement and returns how many rows it changed, atomically with
     /// the statement itself (sqlite3_changes is per-connection, so reading it in a
     /// separate call could observe another statement's count).
     func executeReturningChanges(_ sql: String, params: [SQLValue] = []) throws -> Int {
-        try queue.sync {
+        try synchronized {
             guard let db = getDB() else {
                 throw DatabaseError.executeFailed("Database handle is nil")
             }
@@ -158,7 +149,7 @@ final class RawSQL {
     }
 
     func query(_ sql: String, params: [SQLValue] = []) throws -> [[Any?]] {
-        try queue.sync {
+        try synchronized {
             guard let db = getDB() else {
                 throw DatabaseError.executeFailed("Database handle is nil")
             }
@@ -189,29 +180,39 @@ final class RawSQL {
         }
     }
 
+    private var transactionDepth = 0
+
     /// Execute a block within a database transaction.
     /// Rolls back automatically if the block throws an error.
+    /// Note: Re-entrant calls join the existing transaction; the 'mode' argument is ignored on re-entry.
     func inTransaction<T>(mode: String = "IMMEDIATE", _ body: () throws -> T) throws -> T {
-        try execute("BEGIN \(mode)")
-        do {
-            let result = try body()
-            try execute("COMMIT")
-            return result
-        } catch {
-            try? execute("ROLLBACK")
-            throw error
+        try synchronized {
+            if transactionDepth > 0 {
+                return try body()
+            }
+            transactionDepth += 1
+            defer { transactionDepth -= 1 }
+            try execute("BEGIN \(mode)")
+            do {
+                let result = try body()
+                try execute("COMMIT")
+                return result
+            } catch {
+                try? execute("ROLLBACK")
+                throw error
+            }
         }
     }
 
     var changes: Int32 {
-        queue.sync {
+        synchronized {
             guard let db = getDB() else { return 0 }
             return sqlite3_changes(db)
         }
     }
 
     var lastInsertRowId: Int64 {
-        queue.sync {
+        synchronized {
             guard let db = getDB() else { return 0 }
             return Int64(sqlite3_last_insert_rowid(db))
         }
