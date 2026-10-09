@@ -92,6 +92,12 @@ struct LNURLPayParams: Codable, Equatable, Sendable {
         return nil
     }
 
+    /// Decodes the base64 avatar image data if present in metadata.
+    var avatarImageData: Data? {
+        guard let (_, base64Data) = imageDescription else { return nil }
+        return Data(base64Encoded: base64Data, options: [.ignoreUnknownCharacters])
+    }
+
     /// Validates whether a comment satisfies the payee comment character limit per LUD-12.
     func isCommentValid(_ comment: String?) -> Bool {
         guard let comment, !comment.isEmpty else { return true }
