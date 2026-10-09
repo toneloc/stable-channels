@@ -45,9 +45,10 @@ use sc_protos::stable::{
 	EditStableChannelRequest, EditStableChannelResponse, GetPriceRequest, GetPriceResponse,
 	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest,
 	ListSettlementPaymentsResponse, ListStableChannelsRequest, ListStableChannelsResponse,
-	LogRequest, LogResponse, AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
-	LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH,
-	LIST_STABLE_CHANNELS_PATH,
+	LogRequest, LogResponse, ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse,
+	AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
+	LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+	RELEASE_STABILITY_PAYMENT_PATH,
 };
 use sc_protos::revenue::{
 	GetRevenueRequest, GetRevenueResponse, RefundTradeFeeRequest, RefundTradeFeeResponse,
@@ -518,6 +519,14 @@ impl LspRestClient {
 		&self, request: EditStableChannelRequest,
 	) -> Result<EditStableChannelResponse, LspRestError> {
 		let url = self.build_url(EDIT_STABLE_CHANNEL_PATH);
+		self.post_request(&request, &url).await
+	}
+
+	/// Counts a stability payment the node has no record of as arrived or as not arrived; the first call returns the figures to confirm.
+	pub async fn release_stability_payment(
+		&self, request: ReleaseStabilityPaymentRequest,
+	) -> Result<ReleaseStabilityPaymentResponse, LspRestError> {
+		let url = self.build_url(RELEASE_STABILITY_PAYMENT_PATH);
 		self.post_request(&request, &url).await
 	}
 

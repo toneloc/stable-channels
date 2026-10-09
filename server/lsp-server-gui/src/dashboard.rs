@@ -463,13 +463,23 @@ pub fn feed_attention(c: &Ctx, room: Option<&Room>, fmt_sats: &dyn Fn(u64) -> St
 				target: c.target(uid),
 			});
 		}
-		// A top-up raised an alarm that its own payment has not cleared; it is raised once, so it stays until it is.
+		// A top-up raised an alarm that its own payment has not cleared, so it stays until it is.
 		if let Some(f) = c.entries_of(uid).find(|f| history::top_up_alarm(&f.entry.events).is_some()) {
 			let alarm = history::top_up_alarm(&f.entry.events).unwrap_or_default();
+			// Waiting does not clear an urgent alarm; one that can be released holds the channel's stability payments until it is.
+			let release = history::top_up_to_release(&f.entry.events).is_some();
 			items.push(Attention {
-				severity: Severity::Warning,
-				title: format!("Stability payment to {} needs a look", peer_of(f)),
-				detail: format!("Latest alarm: {alarm}. At {}.", clock(f.entry.occurred_at_ms)),
+				severity: if history::top_up_alarm_is_urgent(&f.entry.events) { Severity::Danger } else { Severity::Warning },
+				title: if release {
+					format!("Stability payment to {} needs an operator's release", peer_of(f))
+				} else {
+					format!("Stability payment to {} needs a look", peer_of(f))
+				},
+				detail: if release {
+					format!("Latest alarm: {alarm}. At {}. Release it from the channel's history: as arrived once the balance shows it, as not arrived once it is 14 days old.", clock(f.entry.occurred_at_ms))
+				} else {
+					format!("Latest alarm: {alarm}. At {}.", clock(f.entry.occurred_at_ms))
+				},
 				target: c.target(uid),
 			});
 		}
@@ -801,13 +811,46 @@ mod tests {
 		assert_eq!(items.len(), 1);
 		assert_eq!(items[0].title, "Stability payment to Alice needs a look");
 		assert_eq!(items[0].severity, Severity::Warning);
-		assert!(items[0].detail.contains("still unclaimed"), "{}", items[0].detail);
+		assert!(items[0].detail.contains("no outcome for over an hour"), "{}", items[0].detail);
 		assert_eq!(items[0].target, Target::Channel("a".into()));
 
 		events.push(ev(3, "STABILITY_PAYMENT_SETTLED", "a", 100, serde_json::json!({"direction": "outbound", "amount_msat": 20_000, "payment_id": "p1"})));
 		let feed = self::feed(&events);
 		let c = ctx(Some(&channels), Some(&feed), &aliases);
 		assert!(feed_attention(&c, None, &fmt).is_empty());
+	}
+
+	#[test]
+	fn a_top_up_the_node_cannot_report_on_is_a_danger_until_it_is_released() {
+		let channels = ListChannelsResponse { channels: vec![channel("a", "02aa")] };
+		let mut events = vec![
+			ev(1, "STABILITY_PAYMENT_SENT", "a", 204_000, serde_json::json!({"direction": "lsp_to_user", "amount_msat": 20_000, "payment_id": "p1"})),
+			ev(2, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "a", 200_000, serde_json::json!({"payment_id": "p1"})),
+		];
+		let aliases: HashMap<String, Option<String>> = [("02aa".to_string(), Some("Alice".to_string()))].into();
+		let feed = feed(&events);
+		let c = ctx(Some(&channels), Some(&feed), &aliases);
+		let items = feed_attention(&c, None, &fmt);
+		assert_eq!(items.len(), 1);
+		assert_eq!(items[0].title, "Stability payment to Alice needs an operator's release");
+		assert_eq!(items[0].severity, Severity::Danger);
+		assert!(items[0].detail.contains("Release it from the channel's history") && items[0].detail.contains("14 days old"), "{}", items[0].detail);
+
+		// A release as not arrived ends it with no failure for the node to report.
+		events.push(ev(3, "STABILITY_TOP_UP_RELEASED", "a", 100, serde_json::json!({"decision": "not_arrived", "payment_id": "p1"})));
+		let feed = self::feed(&events);
+		let c = ctx(Some(&channels), Some(&feed), &aliases);
+		assert!(feed_attention(&c, None, &fmt).is_empty());
+
+		// The node reports it claimed after all: that is urgent again, and stays.
+		events.push(ev(4, "STABILITY_PAYMENT_SETTLED", "a", 90, serde_json::json!({"direction": "outbound", "amount_msat": 20_000, "payment_id": "p1"})));
+		events.push(ev(5, "STABILITY_TOP_UP_RELEASE_CONFLICT", "a", 90, serde_json::json!({"payment_id": "p1"})));
+		let feed = self::feed(&events);
+		let c = ctx(Some(&channels), Some(&feed), &aliases);
+		let items = feed_attention(&c, None, &fmt);
+		assert_eq!(items.len(), 1);
+		assert_eq!(items[0].severity, Severity::Danger);
+		assert!(items[0].detail.contains("paid twice"), "{}", items[0].detail);
 	}
 
 	#[test]

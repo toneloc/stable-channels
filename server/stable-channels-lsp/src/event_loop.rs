@@ -511,6 +511,7 @@ pub(crate) async fn dispatch_event(
                         return DispatchOutcome::Reconnect;
                     }
                 }
+                // Safe to book directly: dispatch runs under lock_for_event, which has already saved any correction that would replace these books.
                 match mgr.settle_stability_top_up(payment_id, amount_msat, fee_paid_msat) {
                     Ok(crate::stable_manager::TopUpSettlement::NotOnTheWay) => {}
                     Ok(_) => settlement_handled = true,
@@ -613,6 +614,9 @@ pub(crate) async fn dispatch_event(
                 }
                 None => None,
             };
+            if let (None, Some(payment_id)) = (&top_up_channel, payment_id.as_deref()) {
+                mgr.note_failure_of_booked_top_up(payment_id);
+            }
             // Only a top-up booked when it was sent has anything to roll back; for any other payment this finds nothing.
             let rollback = payment_id
                 .as_deref()

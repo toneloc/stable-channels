@@ -190,19 +190,59 @@ fn has(events: &[ChannelLedgerEvent], names: &[&str]) -> bool {
 pub fn top_up_alarm(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
 	let settled = has(events, &["STABILITY_PAYMENT_SETTLED"]);
 	let over = settled
-		|| has(events, &["STABILITY_PAYMENT_FAILED", "PAYMENT_FAILED", "STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED"]);
-	if has(events, &["STABILITY_TOP_UP_LOOKUP_FAILED"]) {
+		|| has(events, &["STABILITY_PAYMENT_FAILED", "PAYMENT_FAILED", "STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED", "STABILITY_TOP_UP_RELEASED"]);
+	if has(events, &["STABILITY_TOP_UP_RELEASE_CONFLICT"]) {
+		// The node contradicted the operator's release; booking it does not take back what was paid in its place.
+		Some("it was claimed after an operator counted it as not arrived: the user may have been paid twice")
+	} else if has(events, &["STABILITY_TOP_UP_FAILED_AFTER_BOOKING"]) {
+		Some("the node reports it failed after it was booked: verify this channel's books")
+	} else if has(events, &["STABILITY_TOP_UP_LOOKUP_FAILED"]) {
 		// Booking it later does not undo an event handled without knowing its outcome.
 		Some("its outcome could not be checked before another event was handled: verify this channel's books")
 	} else if !settled && has(events, &["STABILITY_TOP_UP_BOOKING_FAILED"]) {
 		Some("it was claimed but not booked: the channel record was not found")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"]) {
-		Some("the node has no record of it: waiting, nothing resent")
+		Some("the node lost its record of it: nothing is resent until an operator releases it")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_STILL_PENDING"]) {
-		Some("it is still unclaimed: waiting, nothing resent")
+		Some("it has had no outcome for over an hour: waiting, nothing resent")
 	} else {
 		None
 	}
+}
+
+/// Whether the top-up's alarm is one that waiting will not clear: the node has no record of it, it was claimed and could not be booked, or the node contradicted what was booked or released.
+pub fn top_up_alarm_is_urgent(events: &[ChannelLedgerEvent]) -> bool {
+	let settled = has(events, &["STABILITY_PAYMENT_SETTLED"]);
+	top_up_to_release(events).is_some()
+		|| (!settled && has(events, &["STABILITY_TOP_UP_BOOKING_FAILED"]))
+		|| has(events, &["STABILITY_TOP_UP_RELEASE_CONFLICT", "STABILITY_TOP_UP_FAILED_AFTER_BOOKING"])
+}
+
+/// The payment id of a top-up the node has no record of, for an operator to release; None once it has an outcome.
+pub fn top_up_to_release(events: &[ChannelLedgerEvent]) -> Option<String> {
+	let over = has(events, &[
+		"STABILITY_PAYMENT_SETTLED",
+		"STABILITY_PAYMENT_FAILED",
+		"PAYMENT_FAILED",
+		"STABILITY_PAYMENT_ROLLED_BACK",
+		"STABILITY_PAYMENT_ROLLBACK_SKIPPED",
+		"STABILITY_TOP_UP_RELEASED",
+	]);
+	if over || !has(events, &["STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"]) {
+		return None;
+	}
+	events.iter().flat_map(|e| e.refs.iter()).find(|r| r.role == "payment_id").map(|r| r.value.clone())
+}
+
+const NOT_ARRIVED_WORDS: &str = "an operator counted it as not arrived";
+
+/// How an operator released the payment, if one did.
+fn release_words(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
+	let released = events.iter().find(|e| e.event_type == "STABILITY_TOP_UP_RELEASED")?;
+	Some(match detail(released).get("decision").and_then(Value::as_str) {
+		Some("arrived") => "an operator counted it as arrived",
+		_ => NOT_ARRIVED_WORDS,
+	})
 }
 
 fn first_u64(events: &[ChannelLedgerEvent], keys: &[&str]) -> Option<u64> {
@@ -306,6 +346,8 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		let why = failure_reason(events);
 		// A retried settlement shares its settlement id, so a later success outranks an earlier failure.
 		let text = match (to_user, settled, failed) {
+			// An operator's "not arrived" ends the flow without the node ever reporting a failure.
+			(true, false, false) if release_words(events) == Some(NOT_ARRIVED_WORDS) => format!("LSP's payment of {amt} to keep the peg was dropped"),
 			(true, true, _) => format!("LSP paid {amt} to keep the peg"),
 			(true, false, true) => format!("LSP's payment of {amt} to keep the peg failed{why}"),
 			(true, false, false) => format!("LSP sent {amt} to keep the peg (not yet confirmed)"),
@@ -316,6 +358,10 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		// An alarm shares the payment's id and so lands in this entry; it must not vanish behind the payment line.
 		let text = match top_up_alarm(events) {
 			Some(alarm) => format!("{text}; {alarm}"),
+			None => text,
+		};
+		let text = match release_words(events) {
+			Some(release) => format!("{text}; {release}"),
 			None => text,
 		};
 		return (EntryKind::Stability, text);
@@ -356,8 +402,11 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		"PEER_DISCONNECTED" => (EntryKind::Peer, "Wallet offline".to_owned()),
 		"STABILITY_PUSH_QUEUED" => (EntryKind::Other, "Wallet above peg: push sent to wake it".to_owned()),
 		"STABILITY_CHECK_ONLY" => (EntryKind::Other, "Wallet above peg: waiting for it to pay".to_owned()),
-		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Stability payment has no known outcome: waiting, nothing resent".to_owned()),
-		"STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => (EntryKind::Other, "Stability payment still unclaimed: waiting, nothing resent".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Node lost its record of a stability payment: nothing is resent until an operator releases it".to_owned()),
+		"STABILITY_TOP_UP_RELEASED" => (EntryKind::Other, "Operator released a stability payment".to_owned()),
+		"STABILITY_TOP_UP_RELEASE_CONFLICT" => (EntryKind::Other, "Released stability payment was claimed after all: the user may have been paid twice".to_owned()),
+		"STABILITY_TOP_UP_FAILED_AFTER_BOOKING" => (EntryKind::Other, "Booked stability payment reported failed: verify this channel's books".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_STILL_PENDING" => (EntryKind::Other, "Stability payment without an outcome for over an hour: waiting, nothing resent".to_owned()),
 		"STABILITY_TOP_UP_BOOKING_FAILED" => (EntryKind::Other, "Claimed stability payment not booked: channel record not found".to_owned()),
 		"STABILITY_TOP_UP_LOOKUP_FAILED" => (EntryKind::Other, "Stability payment outcome could not be checked: verify this channel's books".to_owned()),
 		"SYNC_RETRY_EXHAUSTED" => (EntryKind::Sync, "Stopped retrying the balance sync".to_owned()),
@@ -544,8 +593,8 @@ mod tests {
 			entries[0].summary.clone()
 		};
 		for (alarm, text) in [
-			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it is still unclaimed: waiting, nothing resent"),
-			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node has no record of it: waiting, nothing resent"),
+			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it has had no outcome for over an hour: waiting, nothing resent"),
+			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node lost its record of it: nothing is resent until an operator releases it"),
 			("STABILITY_TOP_UP_BOOKING_FAILED", "it was claimed but not booked: the channel record was not found"),
 			("STABILITY_TOP_UP_LOOKUP_FAILED", "verify this channel's books"),
 		] {
@@ -568,6 +617,56 @@ mod tests {
 		// Without its payment row loaded, the alarm still reads as an alarm.
 		let alone = build_entries(&[ev(1, "STABILITY_TOP_UP_BOOKING_FAILED", serde_json::json!({}), &[("payment_id", "p")])], "uid");
 		assert_eq!(alone[0].summary, "Claimed stability payment not booked: channel record not found");
+	}
+
+	#[test]
+	fn a_top_up_waiting_will_not_settle_is_offered_for_release_until_it_has_an_outcome() {
+		let sent = ev(1, "STABILITY_PAYMENT_SENT", serde_json::json!({"direction": "lsp_to_user", "amount_msat": 520_000}), &[("payment_id", "p")]);
+		let alarm = |id, name: &str| ev(id, name, serde_json::json!({}), &[("payment_id", "p")]);
+		assert_eq!(top_up_to_release(&[sent.clone(), alarm(2, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN")]).as_deref(), Some("p"));
+		// A claimed payment that could not be booked is stuck too, but repairing its channel record settles it, not a release.
+		let unbooked = [sent.clone(), alarm(2, "STABILITY_TOP_UP_BOOKING_FAILED")];
+		assert!(top_up_alarm_is_urgent(&unbooked) && top_up_to_release(&unbooked).is_none());
+		assert!(!top_up_alarm_is_urgent(&[sent.clone(), alarm(2, "STABILITY_TOP_UP_BOOKING_FAILED"), alarm(3, "STABILITY_PAYMENT_SETTLED")]), "booked after all");
+		// A payment that is merely unclaimed is the node's to settle.
+		let unclaimed = [sent.clone(), alarm(2, "STABILITY_TOP_UP_DEFERRED_STILL_PENDING")];
+		assert!(!top_up_alarm_is_urgent(&unclaimed) && top_up_to_release(&unclaimed).is_none());
+		// An outcome recovered the old way ends the offer as well.
+		for ended in ["STABILITY_PAYMENT_SETTLED", "STABILITY_PAYMENT_FAILED", "STABILITY_PAYMENT_ROLLED_BACK", "STABILITY_PAYMENT_ROLLBACK_SKIPPED", "PAYMENT_FAILED"] {
+			assert_eq!(top_up_to_release(&[sent.clone(), alarm(2, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), alarm(3, ended)]), None, "{ended}");
+		}
+
+		let released = |decision: &str| {
+			vec![
+				sent.clone(),
+				alarm(2, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"),
+				ev(3, "STABILITY_TOP_UP_RELEASED", serde_json::json!({"decision": decision}), &[("payment_id", "p")]),
+			]
+		};
+		let settled = ev(4, "STABILITY_PAYMENT_SETTLED", serde_json::json!({"direction": "outbound", "amount_msat": 520_000}), &[("payment_id", "p")]);
+
+		let mut arrived = released("arrived");
+		arrived.push(settled.clone());
+		assert_eq!(top_up_to_release(&arrived), None);
+		assert_eq!(build_entries(&arrived, "uid")[0].summary, "LSP paid 520 sats to keep the peg; an operator counted it as arrived");
+
+		// "Not arrived" ends the flow by itself: the node never reports a failure for it.
+		let mut dropped = released("not_arrived");
+		assert_eq!(top_up_to_release(&dropped), None);
+		assert!(!top_up_alarm_is_urgent(&dropped));
+		let entries = build_entries(&dropped, "uid");
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].summary, "LSP's payment of 520 sats to keep the peg was dropped; an operator counted it as not arrived");
+		assert!(!entries[0].failed);
+
+		// The node then reports it claimed after all: that stays on the payment for good.
+		dropped.push(settled);
+		dropped.push(alarm(5, "STABILITY_TOP_UP_RELEASE_CONFLICT"));
+		assert!(top_up_alarm_is_urgent(&dropped));
+		assert!(build_entries(&dropped, "uid")[0].summary.ends_with("the user may have been paid twice; an operator counted it as not arrived"));
+		let failed_after = [arrived[0].clone(), arrived[3].clone(), alarm(5, "STABILITY_TOP_UP_FAILED_AFTER_BOOKING")];
+		assert!(top_up_alarm_is_urgent(&failed_after));
+		assert_eq!(top_up_alarm(&failed_after), Some("the node reports it failed after it was booked: verify this channel's books"));
 	}
 
 	#[test]

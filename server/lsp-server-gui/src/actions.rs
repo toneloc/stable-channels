@@ -25,7 +25,7 @@ use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeReques
 use sc_rest_client::sc_protos::stable::{
 	EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
 	ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest,
-	LogRequest,
+	LogRequest, ReleaseStabilityPaymentRequest,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
@@ -1276,6 +1276,73 @@ pub fn edit_stable_channel(ctx: AppCtx) {
 				let mut forms = ctx.forms;
 				forms.write().edit_stable_channel = Default::default();
 				// Refresh the table so the new target shows immediately.
+				fetch_stable_channels(ctx);
+			} else {
+				ctx.error(v.status);
+			}
+		},
+	);
+}
+
+/// The request for an answer: the first one asks the daemon for the channel's figures, and only a confirmation of that same answer is sent as acknowledged.
+pub(crate) fn release_request(form: &crate::state::ReleaseStabilityPaymentForm, arrived: bool) -> ReleaseStabilityPaymentRequest {
+	ReleaseStabilityPaymentRequest {
+		payment_id: form.payment_id.clone(),
+		decision: if arrived { "arrived" } else { "not_arrived" }.to_owned(),
+		acknowledged: form.confirming == Some(arrived),
+	}
+}
+
+/// Show the daemon's figures for an answer, unless the dialog has moved on to another payment since they were asked for.
+pub(crate) fn show_release_preview(
+	form: &mut crate::state::ReleaseStabilityPaymentForm, requested_payment_id: &str, arrived: bool, figures: String,
+) -> bool {
+	if form.payment_id != requested_payment_id {
+		return false;
+	}
+	form.confirming = Some(arrived);
+	form.notice = figures;
+	true
+}
+
+/// Reset the dialog after a release went through, unless it has moved on to another payment since; returns whether it should close.
+pub(crate) fn finish_release(form: &mut crate::state::ReleaseStabilityPaymentForm, requested_payment_id: &str) -> bool {
+	if form.payment_id != requested_payment_id {
+		return false;
+	}
+	*form = Default::default();
+	true
+}
+
+/// Sends the operator's answer about the payment the dialog describes; the daemon first returns the figures to confirm, and releases only a payment the node has no record of.
+pub fn release_stability_payment(ctx: AppCtx, arrived: bool) {
+	if busy(ctx, Op::ReleaseStabilityPayment) {
+		return;
+	}
+	let Some(client) = client(ctx) else { return };
+	let form = ctx.forms.peek().release_stability_payment.clone();
+	if form.payment_id.is_empty() {
+		return;
+	}
+	let request = release_request(&form, arrived);
+	let requested_payment_id = form.payment_id;
+	run(
+		ctx,
+		Op::ReleaseStabilityPayment,
+		async move { client.release_stability_payment(request).await },
+		move |ctx, v| {
+			let mut forms = ctx.forms;
+			if v.needs_acknowledgement {
+				show_release_preview(&mut forms.write().release_stability_payment, &requested_payment_id, arrived, v.status);
+			} else if v.ok {
+				ctx.success(v.status);
+				// The dialog may by now be open for another payment, which this answer must not close.
+				if finish_release(&mut forms.write().release_stability_payment, &requested_payment_id) {
+					close_dialog(ctx);
+				}
+				// Reload the history so the released payment shows its outcome.
+				invalidate_channel_ledger(ctx);
+				fetch_channel_ledger(ctx, false);
 				fetch_stable_channels(ctx);
 			} else {
 				ctx.error(v.status);

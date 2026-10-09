@@ -983,10 +983,14 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "STABILITY_RECEIVE_UNATTRIBUTED",
     "STABILITY_PUSH_QUEUED",
     "STABILITY_CHECK_ONLY",
+    "STABILITY_WAKE_POLL_ONLINE",
     "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN",
     "STABILITY_TOP_UP_DEFERRED_STILL_PENDING",
     "STABILITY_TOP_UP_BOOKING_FAILED",
     "STABILITY_TOP_UP_LOOKUP_FAILED",
+    "STABILITY_TOP_UP_RELEASED",
+    "STABILITY_TOP_UP_RELEASE_CONFLICT",
+    "STABILITY_TOP_UP_FAILED_AFTER_BOOKING",
     // SYNC publications and their final outcomes (never each retry).
     "SYNC_MESSAGE_SENT",
     "SYNC_RETRY_EXHAUSTED",
@@ -1103,6 +1107,11 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     // One row per sync keysend attempt, hundreds an hour against offline phones; SYNC_RETRY_BLOCKED
     // and SYNC_RETRY_EXHAUSTED are the durable records of a channel that cannot be reached.
     "SYNC_MESSAGE_FAILED",
+    // A wake watch starting or expiring is diagnostic; only the reconnect reaches the channel ledger.
+    "STABILITY_WAKE_POLL_STARTED",
+    "STABILITY_WAKE_POLL_TIMEOUT",
+    // Event-stream transport; EVENT_STREAM_GAP_STARTED, EVENT_STREAM_GAP_CLOSED and RECONCILIATION_RESULT are the durable records.
+    "EVENT_STREAM_CONNECTED", "EVENT_STREAM_CONNECT_FAILED", "EVENT_STREAM_DISCONNECTED", "RECONCILIATION_STARTED",
     // Price-feed transport.
     "WEBSOCKET_DISCONNECTED",
     // Per-tick and per-attempt traces whose outcome is recorded elsewhere, transport, and UI.
@@ -1719,6 +1728,29 @@ mod tests {
         assert_eq!(draft.after.as_ref().and_then(|state| state.amount_sats), Some(9_769));
     }
 
+    /// The source above a file's first test-gated module; a test-gated item among production code does not end it.
+    fn production_source(text: &str) -> &str {
+        let gate = "#[cfg(test)]";
+        let mut searched = 0;
+        while let Some(found) = text[searched..].find(gate) {
+            let start = searched + found;
+            searched = start + gate.len();
+            let item = text[searched..].trim_start();
+            let item = item.strip_prefix("pub(crate) ").or_else(|| item.strip_prefix("pub ")).unwrap_or(item);
+            if item.starts_with("mod ") {
+                return &text[..start];
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn production_source_ends_at_the_test_module_not_at_a_test_gated_item() {
+        let source = "fn a() {}\n#[cfg(test)]\npub(crate) fn helper() {}\nfn b() {}\n#[cfg(test)]\npub(crate) mod testing {}\nfn c() {}\n";
+        assert_eq!(production_source(source), "fn a() {}\n#[cfg(test)]\npub(crate) fn helper() {}\nfn b() {}\n");
+        assert_eq!(production_source("fn a() {}\n"), "fn a() {}\n");
+    }
+
     #[test]
     fn every_emitted_event_is_explicitly_classified() {
         // Every string literal handed to audit_event / record_event in non-test code must sit in
@@ -1738,7 +1770,7 @@ mod tests {
                     continue;
                 }
                 let text = std::fs::read_to_string(&path).unwrap();
-                let production = text.split("#[cfg(test)]").next().unwrap_or("");
+                let production = production_source(&text);
                 for call in ["audit_event(", "record_event("] {
                     for (idx, _) in production.match_indices(call) {
                         let rest = production[idx + call.len()..].trim_start();
@@ -1757,7 +1789,8 @@ mod tests {
         }
         unclassified.sort();
         unclassified.dedup();
-        assert!(seen > 100, "the scan found only {seen} emitted events; the call-site pattern no longer matches");
+        // Keep the floor just under the real count, so a scan that stops reaching part of the tree fails here.
+        assert!(seen >= 285, "the scan found only {seen} emitted events; it no longer reaches every production call site");
         assert!(unclassified.is_empty(), "events no list (or two lists) classify: {unclassified:?}");
         for name in OPERATIONAL_EVENTS {
             assert!(!records_channel_state(name), "{name} is operational and must not reach the ledger");

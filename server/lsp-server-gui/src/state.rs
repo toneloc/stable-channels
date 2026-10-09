@@ -444,6 +444,17 @@ impl From<&ChannelLedgerForm> for ChannelLedgerRequestKey {
     }
 }
 
+/// The stability payment the release dialog is about, and how the history describes it.
+#[derive(Default, Clone)]
+pub struct ReleaseStabilityPaymentForm {
+	pub payment_id: String,
+	pub summary: String,
+	/// The answer waiting for confirmation (true = arrived), set once the daemon has returned the channel's figures for it.
+	pub confirming: Option<bool>,
+	/// The figures and consequence the daemon returned for that answer.
+	pub notice: String,
+}
+
 /// The rejected trade fee the refund dialog is about to send back.
 #[derive(Default, Clone)]
 pub struct RefundTradeFeeForm {
@@ -476,6 +487,7 @@ pub struct Forms {
 	pub channel_ledger: ChannelLedgerForm,
 	pub chain_source: ChainSourceForm,
 	pub refund_trade_fee: RefundTradeFeeForm,
+	pub release_stability_payment: ReleaseStabilityPaymentForm,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -756,6 +768,7 @@ pub enum Op {
 	GetPrice,
 	ListStableChannels,
 	EditStableChannel,
+	ReleaseStabilityPayment,
 	ListSettlementPayments,
 	GetRevenue,
 	RefundTradeFee,
@@ -805,6 +818,8 @@ pub enum Dialog {
 	ConfirmSend(SendKind),
 	/// Confirm step before a rejected trade's fee is sent back.
 	RefundTradeFee,
+	/// Operator's decision about a stability payment the node has no record of.
+	ReleaseStabilityPayment,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
