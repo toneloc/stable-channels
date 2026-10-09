@@ -24,11 +24,28 @@ enum SendChannelSpendPolicy {
             return lightningBalanceSats
         case .onchain:
             if !readyChannels.isEmpty && !isSweeping {
-                let channelOutbound = readyChannels.map(\.outboundCapacityMsat).reduce(0, +) / 1000
-                return min(channelOutbound, lightningBalanceSats)
+                // An on-chain splice-out is executed against a single specific channel.
+                // Outbound capacity cannot be aggregated across channels; the spendable amount
+                // is bounded by the capacity of the largest ready channel.
+                let maxSingleChannelOutbound = readyChannels.map { $0.outboundCapacityMsat / 1000 }.max() ?? 0
+                return min(maxSingleChannelOutbound, lightningBalanceSats)
             }
             return onchainBalanceSats
         }
+    }
+
+    /// Selects the best ready channel capable of funding an on-chain splice-out of `requiredSats` (including fee).
+    /// Chooses the smallest channel that has sufficient outbound capacity (best fit), or falls back to the largest.
+    static func selectSpliceChannel(
+        channels: [ChannelDetails],
+        requiredSats: UInt64
+    ) -> ChannelDetails? {
+        let ready = channels.filter(\.isChannelReady)
+        let sufficient = ready.filter { ($0.outboundCapacityMsat / 1000) >= requiredSats }
+        if let bestFit = sufficient.min(by: { $0.outboundCapacityMsat < $1.outboundCapacityMsat }) {
+            return bestFit
+        }
+        return ready.max(by: { $0.outboundCapacityMsat < $1.outboundCapacityMsat })
     }
 
     /// Resolves primary channel routing fee parameters from active channels, falling back to
@@ -47,5 +64,33 @@ enum SendChannelSpendPolicy {
     /// True if an on-chain destination will be dispatched as a splice-out from an open channel.
     static func isSpliceOut(channels: [ChannelDetails], isSweeping: Bool) -> Bool {
         channels.contains(where: \.isChannelReady) && !isSweeping
+    }
+
+    /// Computes the largest sendable amount such that amount + fee(amount) fits inside the available balance.
+    /// Runs a monotonic contraction mapping fixed-point iteration to handle non-linear/proportional routing fees.
+    static func calculateMaxSendable(
+        available: UInt64,
+        feeEstimator: (UInt64) -> UInt64
+    ) -> UInt64 {
+        guard available > 0 else { return 0 }
+
+        func fits(_ amount: UInt64) -> Bool {
+            let fee = feeEstimator(amount)
+            return fee <= available && amount <= available - fee
+        }
+
+        var candidate = available
+        for _ in 0..<8 {
+            let fee = feeEstimator(candidate)
+            let next = available > fee ? (available - fee) : 0
+            if next == candidate { break }
+            candidate = next
+        }
+        var steps = 0
+        while candidate > 0 && !fits(candidate) && steps < 64 {
+            candidate -= 1
+            steps += 1
+        }
+        return fits(candidate) ? candidate : 0
     }
 }

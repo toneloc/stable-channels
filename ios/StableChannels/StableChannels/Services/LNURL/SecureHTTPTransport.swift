@@ -8,6 +8,8 @@ protocol SecureHTTPTransporting: Sendable {
     func executeGet(url: URL) async throws -> (Data, HTTPURLResponse)
 }
 
+typealias SecureHTTPTransport = NWConnectionTransport
+
 // MARK: - NWConnection Session (Lifecycle and Cancellation Manager)
 
 final class NWConnectionSession: @unchecked Sendable {
@@ -153,19 +155,32 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         return requestData
     }
 
-    /// Pure function for selecting the pinned IP address from resolved host IPs.
-    static func selectPinnedIP(for host: String, resolvedIPs: [String]) throws -> String {
+    /// Pure function for selecting vetted candidate IP addresses from resolved host IPs.
+    static func selectCandidateIPs(for host: String, resolvedIPs: [String]) throws -> [String] {
         let clean = SecureEndpointValidator.cleanHostString(host)
         if let canonical = SecureEndpointValidator.canonicalNumericIP(clean),
            SecureEndpointValidator.evaluateNumericIP(clean) == false {
-            return canonical
+            return [canonical]
         }
         guard !resolvedIPs.isEmpty,
-              resolvedIPs.allSatisfy({ SecureEndpointValidator.evaluateNumericIP($0) == false }),
-              let selected = resolvedIPs.first(where: { $0.contains(".") }) ?? resolvedIPs.first else {
+              resolvedIPs.allSatisfy({ SecureEndpointValidator.evaluateNumericIP($0) == false }) else {
             throw LNURLError.insecureEndpoint
         }
-        return selected
+        let v4 = resolvedIPs.filter { $0.contains(".") }
+        let v6 = resolvedIPs.filter { !$0.contains(".") }
+        let candidates = v4 + v6
+        guard !candidates.isEmpty else {
+            throw LNURLError.insecureEndpoint
+        }
+        return candidates
+    }
+
+    /// Pure function for selecting the pinned IP address from resolved host IPs.
+    static func selectPinnedIP(for host: String, resolvedIPs: [String]) throws -> String {
+        guard let first = try selectCandidateIPs(for: host, resolvedIPs: resolvedIPs).first else {
+            throw LNURLError.insecureEndpoint
+        }
+        return first
     }
 
     /// Pure function for validating a redirect target against the current request URL.
@@ -213,6 +228,93 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         try await executeGetInternal(url: url, hop: 0)
     }
 
+    private func dialCandidate(
+        ip: String,
+        cleanHost: String,
+        port: NWEndpoint.Port,
+        isHTTPS: Bool,
+        requestData: Data
+    ) async throws -> (data: Data, cleanClose: Bool) {
+        var (endpoint, params) = Self.buildDialParameters(
+            cleanHost: cleanHost,
+            vettedIP: ip,
+            port: port,
+            isHTTPS: isHTTPS
+        )
+        #if DEBUG
+            if let override = dialTargetOverride {
+                (endpoint, params) = override(endpoint, params)
+            }
+        #endif
+        let connection = NWConnection(to: endpoint, using: params)
+        return try await sendAndReceive(
+            connection: connection,
+            requestData: requestData,
+            timeout: timeoutInterval
+        )
+    }
+
+    /// Races candidate IPs using Happy Eyeballs (RFC 8305) with a 250ms Connection Attempt Delay.
+    private func raceCandidates(
+        candidateIPs: [String],
+        cleanHost: String,
+        port: NWEndpoint.Port,
+        isHTTPS: Bool,
+        requestData: Data
+    ) async throws -> (data: Data, cleanClose: Bool) {
+        if candidateIPs.count == 1 {
+            return try await dialCandidate(
+                ip: candidateIPs[0],
+                cleanHost: cleanHost,
+                port: port,
+                isHTTPS: isHTTPS,
+                requestData: requestData
+            )
+        }
+
+        return try await withThrowingTaskGroup(of: Result<(data: Data, cleanClose: Bool), Error>.self) { group in
+            for (index, ip) in candidateIPs.enumerated() {
+                group.addTask {
+                    if index > 0 {
+                        do {
+                            // RFC 8305 Section 5 recommends a Connection Attempt Delay of 250ms.
+                            try await Task.sleep(nanoseconds: UInt64(index) * 250_000_000)
+                        } catch {
+                            return .failure(error)
+                        }
+                    }
+                    do {
+                        let result = try await self.dialCandidate(
+                            ip: ip,
+                            cleanHost: cleanHost,
+                            port: port,
+                            isHTTPS: isHTTPS,
+                            requestData: requestData
+                        )
+                        return .success(result)
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+
+            var lastError: Error?
+            while let result = try await group.next() {
+                switch result {
+                case let .success(response):
+                    group.cancelAll()
+                    return response
+                case let .failure(error):
+                    if !(error is CancellationError) {
+                        lastError = error
+                    }
+                }
+            }
+
+            throw lastError ?? LNURLError.networkError("Could not connect to recipient endpoint.")
+        }
+    }
+
     private func executeGetInternal(url: URL, hop: Int) async throws -> (Data, HTTPURLResponse) {
         try Task.checkCancellation()
         guard hop <= 3 else {
@@ -246,19 +348,10 @@ final class NWConnectionTransport: SecureHTTPTransporting {
             return try await onionTransport.executeGet(url: url)
         }
 
-        let vettedIP = try Self.selectPinnedIP(for: cleanHost, resolvedIPs: hostResolver.resolveHostIPs(cleanHost))
-        var (endpoint, params) = Self.buildDialParameters(
-            cleanHost: cleanHost,
-            vettedIP: vettedIP,
-            port: port,
-            isHTTPS: isHTTPS
+        let candidateIPs = try Self.selectCandidateIPs(
+            for: cleanHost,
+            resolvedIPs: hostResolver.resolveHostIPs(cleanHost)
         )
-        #if DEBUG
-            if let override = dialTargetOverride {
-                (endpoint, params) = override(endpoint, params)
-            }
-        #endif
-        let connection = NWConnection(to: endpoint, using: params)
 
         let requestData = try Self.buildRequest(
             url: url,
@@ -266,7 +359,15 @@ final class NWConnectionTransport: SecureHTTPTransporting {
             portValue: portValue,
             defaultPort: defaultPort
         )
-        let rawResponse = try await sendAndReceive(connection: connection, requestData: requestData)
+
+        let rawResponse = try await raceCandidates(
+            candidateIPs: candidateIPs,
+            cleanHost: cleanHost,
+            port: port,
+            isHTTPS: isHTTPS,
+            requestData: requestData
+        )
+
         let (body, httpResponse) = try HTTPResponseParser.parse(
             data: rawResponse.data,
             url: url,
@@ -274,7 +375,8 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         )
 
         if [301, 302, 303, 307, 308].contains(httpResponse.statusCode) {
-            let loc = (httpResponse.allHeaderFields["location"] ?? httpResponse.allHeaderFields["Location"]) as? String
+            let loc = (httpResponse.allHeaderFields["location"] ?? httpResponse
+                .allHeaderFields["Location"]) as? String
             let target = try Self.validateRedirectTarget(
                 currentURL: url,
                 locationHeader: loc,
@@ -289,16 +391,18 @@ final class NWConnectionTransport: SecureHTTPTransporting {
 
     private func sendAndReceive(
         connection: NWConnection,
-        requestData: Data
+        requestData: Data,
+        timeout: TimeInterval? = nil
     ) async throws -> (data: Data, cleanClose: Bool) {
         try Task.checkCancellation()
         let holder = SessionHolder()
+        let actualTimeout = timeout ?? self.timeoutInterval
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let session = NWConnectionSession(
                     connection: connection,
                     requestData: requestData,
-                    timeoutInterval: self.timeoutInterval,
+                    timeoutInterval: actualTimeout,
                     queue: self.nwQueue,
                     continuation: continuation
                 )
