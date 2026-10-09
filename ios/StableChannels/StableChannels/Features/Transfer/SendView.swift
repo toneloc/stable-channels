@@ -1,587 +1,126 @@
 import SwiftUI
-import UIKit
-import LDKNode
-import CoreImage
 
+/// Primary coordinator container for the multi-step send workflow.
 struct SendView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
-    @State private var input = ""
-    @State private var amountSats = ""
-    @State private var amountUSDStr = ""
-    @State private var isSending = false
-    @State private var errorMessage: String?
-    @State private var success = false
-    @State private var sentAmountSats: UInt64 = 0
-    @State private var qrAlertMessage = ""
-    @State private var feeRateSatVb: Double?
 
-    private enum InputType {
-        case bolt11
-        case bolt12
-        case onchain
-        case unknown
-    }
+    @State private var model: SendFlowModel
 
-    private var detectedType: InputType {
-        var trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if trimmed.hasPrefix("bitcoin:") {
-            trimmed = String(trimmed.dropFirst(8))
+    init(initialInput: String? = nil, model: SendFlowModel? = nil) {
+        let initialModel = model ?? SendFlowModel()
+        if let initialInput, !initialInput.isEmpty {
+            initialModel.inputText = initialInput
         }
-        if trimmed.hasPrefix("lnbc") || trimmed.hasPrefix("lntb") || trimmed.hasPrefix("lnts") {
-            return .bolt11
-        } else if trimmed.hasPrefix("lno") {
-            return .bolt12
-        } else if trimmed.hasPrefix("bc1") || trimmed.hasPrefix("1") || trimmed.hasPrefix("3") || trimmed
-            .hasPrefix("tb1") {
-            return .onchain
-        }
-        return .unknown
-    }
-
-    /// Try to parse a bolt11 invoice amount from the current input
-    private var parsedBolt11Msat: UInt64? {
-        guard detectedType == .bolt11 else { return nil }
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard let inv = try? Bolt11Invoice.fromStr(invoiceStr: trimmed) else { return nil }
-        return inv.amountMilliSatoshis()
-    }
-
-    private var isAmountlessBolt11: Bool {
-        detectedType == .bolt11 && parsedBolt11Msat == nil &&
-            !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private var manualAmountMsat: UInt64 {
-        convertedMsat(fromUSD: amountUSDStr, price: appState.accountingBTCPrice) ?? 0
-    }
-
-    /// Sats being sent (from invoice or manual entry)
-    private var displaySats: UInt64 {
-        switch detectedType {
-        case .bolt11:
-            if let msat = parsedBolt11Msat, msat > 0 {
-                return msat / 1000
-            }
-            return manualAmountMsat / 1000
-        case .bolt12, .onchain:
-            return convertedSats(fromUSD: amountSats, price: appState.accountingBTCPrice) ?? 0
-        case .unknown:
-            return 0
-        }
-    }
-
-    private var displayUSD: Double? {
-        let price = appState.btcPrice
-        guard price > 0, displaySats > 0 else { return nil }
-        return Double(displaySats) / Double(Constants.satsInBTC) * price
-    }
-
-    private func convertedSats(fromUSD value: String, price: Double) -> UInt64? {
-        guard price > 0, let usd = Double(value), usd > 0 else { return nil }
-        let sats = usd / price * Double(Constants.satsInBTC)
-        guard sats.isFinite, sats >= 1, sats < Double(UInt64.max) else { return nil }
-        return UInt64(sats)
-    }
-
-    private func convertedMsat(fromUSD value: String, price: Double) -> UInt64? {
-        guard price > 0, let usd = Double(value), usd > 0 else { return nil }
-        let msat = usd / price * Double(Constants.satsInBTC) * 1_000
-        guard msat.isFinite, msat >= 1, msat < Double(UInt64.max) else { return nil }
-        return UInt64(msat)
-    }
-
-    private func untrustedPriceError() -> NSError {
-        NSError(
-            domain: "PriceOracle",
-            code: 1,
-            userInfo: [NSLocalizedDescriptionKey: String(
-                localized: "error_price_unavailable",
-                defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
-            )]
-        )
-    }
-
-    private var onchainFeeEstimateText: String {
-        guard let feeRateSatVb else {
-            return String(localized: "info_fee_estimating", defaultValue: "Estimating...")
-        }
-        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: false)
-        let displayRate: UInt64
-        if feeRateSatVb.isFinite && feeRateSatVb > 0 {
-            let rounded = feeRateSatVb.rounded()
-            displayRate = rounded >= Double(UInt64.max) ? UInt64.max : UInt64(max(1.0, rounded))
-        } else {
-            displayRate = 1
-        }
-        return String(
-            format: String(localized: "info_onchain_fee_estimate_value", defaultValue: "~%@ BTC (%llu sat/vB)"),
-            feeSats.btcSpacedFormatted,
-            displayRate
-        )
-    }
-
-    private var counterpartyForwardingFeeParams: (baseMsat: UInt64, proportionalMillionths: UInt64) {
-        guard let channel = appState.nodeService.channels.first(where: \.isChannelReady) else {
-            return (
-                UInt64(Constants.lightningDefaultForwardingFeeBaseMsat),
-                UInt64(Constants.lightningDefaultForwardingFeeProportionalMillionths)
-            )
-        }
-        return (
-            UInt64(channel.counterpartyForwardingInfoFeeBaseMsat ?? Constants.lightningDefaultForwardingFeeBaseMsat),
-            UInt64(channel.counterpartyForwardingInfoFeeProportionalMillionths ?? Constants
-                .lightningDefaultForwardingFeeProportionalMillionths)
-        )
-    }
-
-    private func lightningFeeEstimateText(for sats: UInt64) -> String {
-        let params = counterpartyForwardingFeeParams
-        let amountMsat = saturatingMultiply(sats, 1_000)
-        let proportionalMsat = saturatingMultiply(amountMsat, params.proportionalMillionths) / 1_000_000
-        let feeMsat = saturatingAdd(params.baseMsat, proportionalMsat)
-        let feeSats = saturatingAdd(feeMsat, 999) / 1_000
-        guard feeSats > 0 else {
-            return String(localized: "info_lightning_lsp_fee_none", defaultValue: "No fee expected")
-        }
-        if appState.btcPrice > 0 {
-            let usd = Double(feeSats) / Double(Constants.satsInBTC) * appState.btcPrice
-            return String(
-                format: String(localized: "info_lightning_lsp_fee_estimate_with_usd", defaultValue: "~%@ (%@ BTC)"),
-                usd.usdFormatted,
-                feeSats.btcSpacedFormatted
-            )
-        }
-        return String(
-            format: String(localized: "info_lightning_lsp_fee_estimate", defaultValue: "~%@ BTC"),
-            feeSats.btcSpacedFormatted
-        )
-    }
-
-    private func saturatingMultiply(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
-        let result = lhs.multipliedReportingOverflow(by: rhs)
-        return result.overflow ? UInt64.max : result.partialValue
-    }
-
-    private func saturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
-        let result = lhs.addingReportingOverflow(rhs)
-        return result.overflow ? UInt64.max : result.partialValue
+        _model = State(initialValue: initialModel)
     }
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section(String(localized: "header_invoice_address", defaultValue: "To")) {
-                    TextField(
-                        String(localized: "placeholder_invoice",
-                               defaultValue: "Invoice or onchain address"),
-                        text: $input,
-                        axis: .vertical
+            ZStack {
+                Color(uiColor: .systemGroupedBackground)
+                    .ignoresSafeArea()
+
+                if model.isFetchingLNURL {
+                    SendLoadingView(
+                        title: String(localized: "title_resolving_lnurl", defaultValue: "Resolving Lightning Address"),
+                        subtitle: String(
+                            localized: "subtitle_resolving_lnurl",
+                            defaultValue: "Fetching invoice parameters from payee server..."
+                        ),
+                        curve: .roseCurve,
+                        tint: .orange
                     )
-                    .font(.system(.body, design: .monospaced))
-                    .lineLimit(3...6)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                }
-
-                if !input.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Section {
-                        switch detectedType {
-                        case .bolt11:
-                            Label(
-                                String(localized: "label_bolt11", defaultValue: "Bolt11 Invoice"),
-                                systemImage: "bolt.fill"
-                            )
-                            .foregroundStyle(.blue)
-                            if let msat = parsedBolt11Msat, msat > 0 {
-                                let sats = msat / 1000
-                                HStack {
-                                    Text(String(localized: "label_amount_row", defaultValue: "Amount"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    VStack(alignment: .trailing, spacing: 2) {
-                                        if let usd = displayUSD {
-                                            Text(usd.usdFormatted)
-                                                .fontWeight(.medium)
-                                        }
-                                        Text("\(sats.btcSpacedFormatted) BTC")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                HStack {
-                                    Text(String(localized: "label_fee_row", defaultValue: "Fee"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(lightningFeeEstimateText(for: sats))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            } else if isAmountlessBolt11 {
-                                TextField(
-                                    String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
-                                    text: $amountUSDStr
-                                )
-                                .keyboardType(.decimalPad)
-                                if manualAmountMsat > 0 {
-                                    HStack {
-                                        Text(String(localized: "label_amount_row", defaultValue: "Amount"))
-                                            .foregroundStyle(.secondary)
-                                        Spacer()
-                                        VStack(alignment: .trailing, spacing: 2) {
-                                            if let usd = displayUSD {
-                                                Text(usd.usdFormatted)
-                                                    .fontWeight(.medium)
-                                            }
-                                            Text("\(displaySats.btcSpacedFormatted) BTC")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    HStack {
-                                        Text(String(localized: "label_fee_row", defaultValue: "Fee"))
-                                            .foregroundStyle(.secondary)
-                                        Spacer()
-                                        Text(lightningFeeEstimateText(for: displaySats))
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                        case .bolt12:
-                            Label(
-                                String(localized: "label_bolt12_offer", defaultValue: "Bolt12 Offer"),
-                                systemImage: "bolt.fill"
-                            )
-                            .foregroundStyle(.purple)
-                            TextField(
-                                String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
-                                text: $amountSats
-                            )
-                            .keyboardType(.decimalPad)
-                            .autocorrectionDisabled()
-                            if let usd = displayUSD {
-                                HStack {
-                                    Text(String(localized: "label_amount", defaultValue: "Amount"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    VStack(alignment: .trailing, spacing: 2) {
-                                        Text(usd.usdFormatted)
-                                            .fontWeight(.medium)
-                                        Text("\(displaySats.btcSpacedFormatted) BTC")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                HStack {
-                                    Text(String(localized: "label_fee", defaultValue: "Fee"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(lightningFeeEstimateText(for: displaySats))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        case .onchain:
-                            Label(
-                                String(localized: "label_on_chain_address", defaultValue: "Onchain Address"),
-                                systemImage: "link"
-                            )
-                            .foregroundStyle(.orange)
-                            TextField(
-                                String(localized: "placeholder_amount_usd", defaultValue: "Amount (USD)"),
-                                text: $amountSats
-                            )
-                            .keyboardType(.decimalPad)
-                            .autocorrectionDisabled()
-                            if let usd = displayUSD {
-                                HStack {
-                                    Text(String(localized: "label_amount", defaultValue: "Amount"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    VStack(alignment: .trailing, spacing: 2) {
-                                        Text(usd.usdFormatted)
-                                            .fontWeight(.medium)
-                                        Text("\(displaySats.btcSpacedFormatted) BTC")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                }
-                                HStack {
-                                    Text(String(localized: "label_network_fee", defaultValue: "Network fee"))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text(onchainFeeEstimateText)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            if appState.nodeService.channels.contains(where: \.isChannelReady) {
-                                Text(String(localized: "info_splice_out", defaultValue: "Will route via splice-out"))
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                            }
-                        case .unknown:
-                            Label(
-                                String(localized: "label_unrecognized_format", defaultValue: "Unrecognized format"),
-                                systemImage: "questionmark.circle"
-                            )
-                            .foregroundStyle(.secondary)
-                        }
-                    }
-
-                    if let error = errorMessage {
-                        Section {
-                            Label(error, systemImage: "exclamationmark.triangle")
-                                .foregroundStyle(.red)
-                        }
-                    }
-
-                    // Send button is below the form as a sticky bar
-                }
-
-                if success {
-                    Section {
-                        VStack(spacing: 4) {
-                            let sentTitle = displayUSD.map { "Payment sent: \($0.usdFormatted)" } ?? "Payment sent"
-                            Label(
-                                sentTitle,
-                                systemImage: "checkmark.circle.fill"
-                            )
-                            .foregroundStyle(.green)
-                            if sentAmountSats > 0 {
-                                let price = appState.btcPrice
-                                if price > 0 {
-                                    let usd = Double(sentAmountSats) / Double(Constants.satsInBTC) * price
-                                    Text(usd.usdFormatted)
-                                        .fontWeight(.medium)
-                                }
-                                Text("\(sentAmountSats.btcSpacedFormatted) BTC")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
+                    .transition(.opacity)
+                } else {
+                    stepContent
+                        .animation(.easeInOut(duration: 0.25), value: model.step)
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                if detectedType != .unknown && !success {
-                    Button {
-                        Task { await send() }
-                    } label: {
-                        if isSending {
-                            ProgressView()
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                        } else {
-                            Text(String(localized: "button_send_payment", defaultValue: "Send"))
-                                .fontWeight(.semibold)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 14)
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
-                    .disabled(isSending || success || needsAmount)
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                }
-            }
-            .navigationTitle(String(localized: "button_send", defaultValue: "Send"))
+            .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(true)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(success ? String(localized: "button_done", defaultValue: "Done") : String(
-                        localized: "button_cancel",
-                        defaultValue: "Cancel"
-                    )) { dismiss() }
+                    leadingToolbarButton
                 }
-            }
-            .qrInputToolbar(text: $input, sanitize: QRCodeExtractor.sanitizePaymentInput)
-            .task {
-                feeRateSatVb = await appState.feeRateService.currentRate()
             }
         }
     }
 
-    private var needsAmount: Bool {
-        switch detectedType {
-        case .bolt11:
-            return isAmountlessBolt11 && manualAmountMsat == 0
-        case .bolt12, .onchain:
-            return displaySats == 0
-        default:
-            return false
+    @ViewBuilder
+    private var stepContent: some View {
+        switch model.step {
+        case .recipient:
+            SendRecipientStepView(model: model)
+        case .amount:
+            SendAmountStepView(model: model)
+        case .confirm:
+            SendConfirmStepView(model: model)
+        case .success:
+            SendSuccessStepView(model: model) {
+                dismiss()
+            }
         }
     }
 
-    private func send() async {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-
-        guard appState.isOnline else {
-            errorMessage = String(
-                localized: "error_offline_send",
-                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
-            )
-            return
+    private var navigationTitle: String {
+        if model.isFetchingLNURL {
+            return ""
         }
-
-        // Dismiss any active keyboard to avoid blocking system auth dialogs
-        UIApplication.shared.sendAction(
-            Selector(("resignFirstResponder")),
-            to: nil,
-            from: nil,
-            for: nil
-        )
-
-        let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-
-        let requiresAuth: Bool
-        let reason: String
-
-        switch detectedType {
-        case .onchain:
-            requiresAuth = transactionAuth
-            reason = "Confirm onchain withdrawal of all funds"
-        case .bolt11, .bolt12:
-            requiresAuth = transactionAuth
-            reason = "Confirm payment of \(displaySats.btcSpacedFormatted) BTC"
-        default:
-            requiresAuth = false
-            reason = ""
+        switch model.step {
+        case .recipient:
+            return String(localized: "title_send", defaultValue: "Send")
+        case .amount:
+            return String(localized: "title_send_amount", defaultValue: "Amount")
+        case .confirm:
+            return String(localized: "title_send_confirm", defaultValue: "Review")
+        case .success:
+            return model.isPendingSettlement
+                ? String(localized: "title_send_pending", defaultValue: "Payment Pending")
+                : String(localized: "title_send_success", defaultValue: "Payment Sent")
         }
+    }
 
-        if requiresAuth {
-            let authPassed = await appState.authenticate(reason: reason)
-            guard authPassed else {
-                errorMessage = appState.authError ?? "Authentication required to send."
-                return
+    @ViewBuilder
+    private var leadingToolbarButton: some View {
+        if model.isFetchingLNURL {
+            EmptyView()
+        } else {
+            switch model.step {
+            case .recipient:
+                Button(String(localized: "button_done", defaultValue: "Done")) {
+                    dismiss()
+                }
+            case .amount:
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        model.step = .recipient
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text(String(localized: "button_back", defaultValue: "Back"))
+                    }
+                }
+            case .confirm:
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if case .bolt11(_, _, let msat) = model.destination, let msat, msat > 0 {
+                            model.step = .recipient
+                        } else {
+                            model.step = .amount
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left")
+                        Text(String(localized: "button_back", defaultValue: "Back"))
+                    }
+                }
+            case .success:
+                EmptyView()
             }
-        }
-
-        appState.ensureLSPConnected()
-        isSending = true
-        errorMessage = nil
-        defer { isSending = false }
-
-        do {
-            switch detectedType {
-            case .bolt11:
-                let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: trimmed)
-                let invoiceMsat = bolt11.amountMilliSatoshis() ?? 0
-                let paymentId: PaymentId
-                let actualMsat: UInt64
-                let price: Double
-                if invoiceMsat > 0 {
-                    price = appState.btcPrice
-                    try appState.ensureNoUnsettledSurplus(amountMsat: invoiceMsat)
-                    paymentId = try appState.nodeService.sendPayment(invoice: bolt11)
-                    actualMsat = invoiceMsat
-                } else {
-                    price = appState.accountingBTCPrice
-                    guard let converted = convertedMsat(fromUSD: amountUSDStr, price: price) else {
-                        throw untrustedPriceError()
-                    }
-                    actualMsat = converted
-                    try appState.ensureNoUnsettledSurplus(amountMsat: actualMsat)
-                    paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: actualMsat)
-                }
-                let invoiceUSD: Double? = (price > 0 && actualMsat > 0) ? (
-                    Double(actualMsat) / 1000.0 / 100_000_000.0
-                ) *
-                    price : nil
-                _ = try? appState.databaseService?.paymentRepo.recordPayment(
-                    paymentId: "\(paymentId)",
-                    paymentType: "lightning",
-                    direction: "sent",
-                    amountMsat: actualMsat,
-                    amountUSD: invoiceUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending"
-                )
-                sentAmountSats = actualMsat / 1000
-
-            case .bolt12:
-                let price = appState.accountingBTCPrice
-                guard let sats = convertedSats(fromUSD: amountSats, price: price) else {
-                    throw untrustedPriceError()
-                }
-                let offer = try Offer.fromStr(offerStr: trimmed)
-                let msat = sats * 1000
-                try appState.ensureNoUnsettledSurplus(amountMsat: msat)
-                let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
-                let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
-                _ = try? appState.databaseService?.paymentRepo.recordPayment(
-                    paymentId: "\(paymentId)",
-                    paymentType: "bolt12",
-                    direction: "sent",
-                    amountMsat: msat,
-                    amountUSD: amountUSD,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    status: "pending"
-                )
-                sentAmountSats = sats
-
-            case .onchain:
-                let price = appState.accountingBTCPrice
-                guard let sats = convertedSats(fromUSD: amountSats, price: price) else {
-                    throw untrustedPriceError()
-                }
-                let amountUSD: Double? = price > 0 ? (Double(sats) / Double(Constants.satsInBTC)) * price : nil
-                // Route through splice-out if channel exists
-                if let channel = appState.nodeService.channels.first(where: { $0.isChannelReady }) {
-                    guard !appState.isSweeping else {
-                        throw NSError(
-                            domain: "",
-                            code: 0,
-                            userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress — try again shortly"]
-                        )
-                    }
-                    try appState.beginSpliceOut(amountSats: sats, address: trimmed)
-                    do {
-                        try appState.nodeService.spliceOut(
-                            userChannelId: channel.userChannelId,
-                            counterpartyNodeId: channel.counterpartyNodeId,
-                            address: trimmed,
-                            amountSats: sats
-                        )
-                    } catch {
-                        appState.cancelPendingSpliceStart()
-                        throw error
-                    }
-                } else {
-                    let txid = try appState.nodeService.sendOnchain(address: trimmed, amountSats: sats)
-                    _ = try? appState.databaseService?.paymentRepo.recordPayment(
-                        paymentId: txid,
-                        paymentType: "onchain",
-                        direction: "sent",
-                        amountMsat: sats * 1000,
-                        amountUSD: amountUSD,
-                        btcPrice: price > 0 ? price : nil,
-                        counterparty: nil,
-                        status: "pending",
-                        txid: txid,
-                        address: trimmed
-                    )
-                    appState.onchainSendBroadcasted(amountSats: sats, isSendAll: false, txid: txid)
-                }
-                sentAmountSats = sats
-
-            case .unknown:
-                errorMessage = String(
-                    localized: "error_unrecognized_format",
-                    defaultValue: "Unrecognized payment format"
-                )
-                return
-            }
-
-            success = true
-        } catch {
-            errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
         }
     }
 }
