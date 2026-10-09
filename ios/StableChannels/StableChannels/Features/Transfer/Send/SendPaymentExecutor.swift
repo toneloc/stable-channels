@@ -2,11 +2,32 @@ import CryptoKit
 import Foundation
 import LDKNode
 
-/// Output result from a successfully broadcast payment.
+/// How a dispatched payment will settle. A caller must handle every case: a splice-out has
+/// neither a payment id to await nor a txid until negotiation completes, so it is its own case
+/// rather than a pair of nils.
+enum SendPaymentOutcome: Equatable, Sendable {
+    /// Lightning payment in flight; await settlement by payment id.
+    case lightning(paymentId: String)
+    /// On-chain transaction already broadcast.
+    case onchain(txid: String)
+    /// Splice-out initiated from the channel; it confirms on-chain and Home tracks it as pending.
+    case spliceOut
+}
+
+/// Output result from a successfully dispatched payment.
 struct SendPaymentResult: Equatable, Sendable {
     let sentAmountSats: UInt64
-    let paymentId: String?
-    let txid: String?
+    let outcome: SendPaymentOutcome
+
+    var paymentId: String? {
+        if case .lightning(let paymentId) = outcome { return paymentId }
+        return nil
+    }
+
+    var txid: String? {
+        if case .onchain(let txid) = outcome { return txid }
+        return nil
+    }
 }
 
 /// Orchestrates payment dispatch across Lightning, LNURL, and Onchain subsystems.
@@ -19,7 +40,7 @@ struct SendPaymentExecutor {
         lnurlParams: LNURLPayParams?,
         lnurlComment: String,
         appState: AppState,
-        lnurlService: LNURLServiceProtocol
+        lnurlService: LNURLServiceProtocol?
     ) async throws -> SendPaymentResult {
         let price = appState.accountingBTCPrice
 
@@ -35,6 +56,16 @@ struct SendPaymentExecutor {
         case .bolt12(let offer, _):
             return try await sendBolt12(offer: offer, effectiveSats: effectiveSats, price: price, appState: appState)
         case .lightningAddress, .lnurlPay:
+            // Fail closed: without a known wallet network there is no validator for the invoice.
+            guard let lnurlService else {
+                throw NSError(
+                    domain: "Send",
+                    code: 3,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Wallet network is not initialized. Please wait until connected."
+                    ]
+                )
+            }
             return try await sendLNURL(
                 params: lnurlParams,
                 comment: lnurlComment,
@@ -78,7 +109,7 @@ struct SendPaymentExecutor {
             paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: invoice, amountMsat: actualMsat)
         }
         recordPayment(id: "\(paymentId)", type: "lightning", msat: actualMsat, price: price, appState: appState)
-        return SendPaymentResult(sentAmountSats: actualMsat / 1000, paymentId: "\(paymentId)", txid: nil)
+        return SendPaymentResult(sentAmountSats: actualMsat / 1000, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
     private static func sendBolt12(offer: Offer, effectiveSats: UInt64, price: Double,
@@ -92,7 +123,7 @@ struct SendPaymentExecutor {
         try appState.ensureNoUnsettledSurplus(amountMsat: msat)
         let paymentId = try appState.nodeService.sendBolt12UsingAmount(offer: offer, amountMsat: msat)
         recordPayment(id: "\(paymentId)", type: "bolt12", msat: msat, price: price, appState: appState)
-        return SendPaymentResult(sentAmountSats: effectiveSats, paymentId: "\(paymentId)", txid: nil)
+        return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
     private static func sendLNURL(
@@ -153,7 +184,7 @@ struct SendPaymentExecutor {
         try appState.ensureNoUnsettledSurplus(amountMsat: msat)
         let paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: msat)
         recordPayment(id: "\(paymentId)", type: "lnurl", msat: msat, price: price, appState: appState)
-        return SendPaymentResult(sentAmountSats: effectiveSats, paymentId: "\(paymentId)", txid: nil)
+        return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
     private static func sendOnchain(
@@ -188,7 +219,7 @@ struct SendPaymentExecutor {
                 appState.cancelPendingSpliceStart()
                 throw error
             }
-            return SendPaymentResult(sentAmountSats: effectiveSats, paymentId: nil, txid: nil)
+            return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .spliceOut)
         } else {
             let txid = try appState.nodeService.sendOnchain(
                 address: address,
@@ -205,7 +236,7 @@ struct SendPaymentExecutor {
                 txid: txid,
                 appState: appState
             )
-            return SendPaymentResult(sentAmountSats: effectiveSats, paymentId: nil, txid: txid)
+            return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .onchain(txid: txid))
         }
     }
 
@@ -230,7 +261,7 @@ struct SendPaymentExecutor {
             appState: appState
         )
         appState.onchainSendBroadcasted(amountSats: onchainSats, isSendAll: true, txid: txid)
-        return SendPaymentResult(sentAmountSats: onchainSats, paymentId: nil, txid: txid)
+        return SendPaymentResult(sentAmountSats: onchainSats, outcome: .onchain(txid: txid))
     }
 
     private static func recordPayment(

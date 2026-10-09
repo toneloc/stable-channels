@@ -127,7 +127,10 @@ final class SendAmountCalculatorTests: XCTestCase {
 
         // BTC normalization
         XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: ".001", unit: .btc), "0.001")
-        XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: "0.123456789", unit: .btc), "0.12345679")
+        // Excess precision is truncated, never rounded up: normalization can only lower an amount.
+        XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: "0.123456789", unit: .btc), "0.12345678")
+        XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: "12.345", unit: .usd), "12.34")
+        XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: "12.349", unit: .usd), "12.34")
 
         // Empty text
         XCTAssertEqual(SendAmountCalculator.normalizeAmountInput(text: "", unit: .usd), "")
@@ -173,5 +176,50 @@ final class SendAmountCalculatorTests: XCTestCase {
             ),
             5000
         )
+    }
+
+    func testComputeEffectiveSats_isExactForInputsThatAreInexactAsDoubles() {
+        // 0.0003 * 1e8 is 29999.999999999996 as a binary double; flooring that drops a sat.
+        // Decimal arithmetic must give the amount the user actually typed.
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.0003", unit: .btc, btcPrice: 65_000), 30_000)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.0006", unit: .btc, btcPrice: 65_000), 60_000)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.0012", unit: .btc, btcPrice: 65_000), 120_000)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.00000001", unit: .btc, btcPrice: 65_000), 1)
+        // 4.55 / 65,000 * 1e8 is 6999.999999999999 as a double.
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "4.55", unit: .usd, btcPrice: 65_000), 7_000)
+        // Sub-sat precision is still floored, never rounded up.
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.000000019", unit: .btc, btcPrice: 65_000), 1)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0.015", unit: .usd, btcPrice: 60_000), 25)
+    }
+
+    func testComputeEffectiveSats_rejectsMalformedNumbers() {
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "1e5", unit: .sats, btcPrice: 65_000), 0)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "1.2.3", unit: .btc, btcPrice: 65_000), 0)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "+5", unit: .sats, btcPrice: 65_000), 0)
+        XCTAssertEqual(SendAmountCalculator.computeEffectiveSats(text: "0x10", unit: .sats, btcPrice: 65_000), 0)
+    }
+
+    func testFormatSatsForUnit_btcIsExactAndRoundTripsWithoutDrift() {
+        let btcPrice: Double = 65_000
+        XCTAssertEqual(SendAmountCalculator.formatSatsForUnit(30_000, unit: .btc, btcPrice: btcPrice), "0.00030000")
+        XCTAssertEqual(SendAmountCalculator.formatSatsForUnit(12_345_678, unit: .btc, btcPrice: btcPrice), "0.12345678")
+        XCTAssertEqual(SendAmountCalculator.formatSatsForUnit(1, unit: .btc, btcPrice: btcPrice), "0.00000001")
+
+        // Sats -> BTC -> Sats must return the same sats, for values that are inexact as doubles.
+        for sats: UInt64 in [1, 30_000, 59_999, 119_999, 12_345_678, 2_100_000_000_000_000] {
+            let btcText = SendAmountCalculator.formatSatsForUnit(sats, unit: .btc, btcPrice: btcPrice)
+            XCTAssertEqual(
+                SendAmountCalculator.switchUnit(from: .btc, to: .sats, text: btcText, btcPrice: btcPrice),
+                "\(sats)",
+                "round-trip drifted for \(sats) sats via \(btcText)"
+            )
+        }
+    }
+
+    func testFormatSatsForUnit_usdTruncatesToCents() {
+        // 10,001 sats @ $65,000 = $6.50065 -> $6.50, never $6.51.
+        XCTAssertEqual(SendAmountCalculator.formatSatsForUnit(10_001, unit: .usd, btcPrice: 65_000), "6.50")
+        // 1 sat @ $65,000 is below a cent.
+        XCTAssertEqual(SendAmountCalculator.formatSatsForUnit(1, unit: .usd, btcPrice: 65_000), "0.00")
     }
 }

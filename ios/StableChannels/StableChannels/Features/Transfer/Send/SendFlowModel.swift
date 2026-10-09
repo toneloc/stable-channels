@@ -161,11 +161,16 @@ final class SendFlowModel {
                 return appState.lightningBalanceSats
             }
         case .onchain:
-            if appState.hasReadyChannel && !appState.isSweeping {
-                return appState.totalBalanceSats
-            } else {
-                return appState.spendableOnchainSats
+            // Mirror SendPaymentExecutor.sendOnchain: with a ready channel the send is a
+            // splice-out funded from the channel, so only the channel's outbound balance is
+            // spendable — not the combined lightning + on-chain total. Keyed on the live channel
+            // list, not the cached hasReadyChannel flag, so the guard and the executor agree.
+            let readyChannels = appState.nodeService.channels.filter(\.isChannelReady)
+            if !readyChannels.isEmpty && !appState.isSweeping {
+                let channelOutbound = readyChannels.map(\.outboundCapacityMsat).reduce(0, +) / 1000
+                return min(channelOutbound, appState.lightningBalanceSats)
             }
+            return appState.spendableOnchainSats
         }
     }
 
@@ -200,14 +205,32 @@ final class SendFlowModel {
         }
     }
 
+    /// Largest amount such that amount + fee(amount) fits inside the available balance.
+    /// A proportional routing fee makes the fee depend on the amount, so a fixed number of
+    /// passes can land on a candidate whose own fee no longer fits; iterate to a fixed point and
+    /// then step down until the candidate provably fits.
     func calculateMaxSendableSats(appState: AppState) -> UInt64 {
         let available = availableSpendableSats(appState: appState)
-        var candidate = available
-        for _ in 0..<2 {
-            let fee = estimatedFeeSatsForAmount(sats: candidate, appState: appState)
-            candidate = available > fee ? (available - fee) : 0
+        guard available > 0 else { return 0 }
+
+        func fits(_ amount: UInt64) -> Bool {
+            let fee = estimatedFeeSatsForAmount(sats: amount, appState: appState)
+            return fee <= available && amount <= available - fee
         }
-        return candidate
+
+        var candidate = available
+        for _ in 0..<8 {
+            let fee = estimatedFeeSatsForAmount(sats: candidate, appState: appState)
+            let next = available > fee ? (available - fee) : 0
+            if next == candidate { break }
+            candidate = next
+        }
+        var steps = 0
+        while candidate > 0 && !fits(candidate) && steps < 64 {
+            candidate -= 1
+            steps += 1
+        }
+        return fits(candidate) ? candidate : 0
     }
 
     func isInsufficientBalance(appState: AppState) -> Bool {
@@ -314,6 +337,15 @@ final class SendFlowModel {
         guard !isSending else { return }
         errorMessage = nil
 
+        guard appState.isOnline else {
+            errorMessage = String(
+                localized: "error_offline_send",
+                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
+            )
+            resetToken += 1
+            return
+        }
+
         // For onchain sends, block if fee rate has not loaded (non-standard tier)
         if case .onchain = dest, !isFeeRateReady {
             errorMessage = "Waiting for network fee rate. Please wait a moment."
@@ -366,7 +398,6 @@ final class SendFlowModel {
 
         do {
             let service = resolvedLNURLService(appState: appState)
-                ?? LNURLService(expectedNetwork: appState.nodeService.activeNetwork ?? .bitcoin)
             let result = try await SendPaymentExecutor.execute(
                 destination: dest,
                 effectiveSats: sats,
@@ -377,26 +408,30 @@ final class SendFlowModel {
                 lnurlService: service
             )
 
-            // Onchain broadcasts immediately into mempool
-            if let txid = result.txid {
+            switch result.outcome {
+            case .onchain(let txid):
+                // Already broadcast into the mempool.
                 sentAmountSats = result.sentAmountSats
                 successTxid = txid
-                successPaymentId = result.paymentId
+                successPaymentId = nil
                 isPendingSettlement = false
                 step = .success
-                return
-            }
 
-            // Lightning settlement pipeline (BOLT11, BOLT12, LNURL)
-            if let pid = result.paymentId {
+            case .spliceOut:
+                // The splice confirms on-chain; there is no payment to await and no txid until
+                // negotiation completes. Home shows it as a pending move meanwhile.
+                sentAmountSats = result.sentAmountSats
+                successTxid = nil
+                successPaymentId = nil
+                isPendingSettlement = true
+                step = .success
+
+            case .lightning(let pid):
                 let timeout: TimeInterval
-                switch dest {
-                case .bolt12:
+                if case .bolt12 = dest {
                     timeout = 10.0
-                case .bolt11, .lightningAddress, .lnurlPay:
+                } else {
                     timeout = 7.0
-                case .onchain:
-                    timeout = 0
                 }
 
                 let outcome = await SendPaymentExecutor.awaitPaymentSettlement(

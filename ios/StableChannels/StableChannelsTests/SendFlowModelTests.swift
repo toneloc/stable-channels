@@ -1,3 +1,4 @@
+import LDKNode
 import XCTest
 @testable import StableChannels
 
@@ -411,5 +412,148 @@ final class SendFlowModelTests: XCTestCase {
 
         XCTAssertEqual(model.errorMessage, "Wallet network is not initialized. Please wait until connected.")
         XCTAssertEqual(model.resetToken, 1)
+    }
+
+    // MARK: - Fixtures
+
+    /// A ready channel with the given outbound balance and routing-fee policy. Mirrors the
+    /// fixture in StabilityServiceTests; only the fields the send flow reads are meaningful.
+    private func readyChannel(outboundSats: UInt64, feeProportionalMillionths: UInt32 = 0) -> ChannelDetails {
+        ChannelDetails(
+            channelId: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+            counterpartyNodeId: "020202020202020202020202020202020202020202020202020202020202020202",
+            fundingTxo: nil,
+            fundingRedeemScript: nil,
+            shortChannelId: nil,
+            outboundScidAlias: nil,
+            inboundScidAlias: nil,
+            channelValueSats: outboundSats + 100_000,
+            unspendablePunishmentReserve: 1_000,
+            userChannelId: "send-flow-test-chan",
+            feerateSatPer1000Weight: 253,
+            outboundCapacityMsat: outboundSats * 1_000,
+            inboundCapacityMsat: 100_000_000,
+            confirmationsRequired: 1,
+            confirmations: 6,
+            isOutbound: false,
+            isChannelReady: true,
+            isUsable: true,
+            isAnnounced: false,
+            cltvExpiryDelta: 144,
+            counterpartyUnspendablePunishmentReserve: 1_000,
+            counterpartyOutboundHtlcMinimumMsat: 1_000,
+            counterpartyOutboundHtlcMaximumMsat: 200_000_000,
+            counterpartyForwardingInfoFeeBaseMsat: 1_000,
+            counterpartyForwardingInfoFeeProportionalMillionths: feeProportionalMillionths,
+            counterpartyForwardingInfoCltvExpiryDelta: 144,
+            nextOutboundHtlcLimitMsat: outboundSats * 1_000,
+            nextOutboundHtlcMinimumMsat: 1_000,
+            forceCloseSpendDelay: 144,
+            inboundHtlcMinimumMsat: 1_000,
+            inboundHtlcMaximumMsat: 200_000_000,
+            config: ChannelConfig(
+                forwardingFeeProportionalMillionths: 100,
+                forwardingFeeBaseMsat: 1000,
+                cltvExpiryDelta: 144,
+                maxDustHtlcExposure: .fixedLimit(limitMsat: 5_000_000),
+                forceCloseAvoidanceMaxFeeSatoshis: 10_000,
+                acceptUnderpayingHtlcs: false
+            ),
+            channelShutdownState: nil
+        )
+    }
+
+    // MARK: - Review fixes
+
+    func testExecuteSend_blocksWhenOffline() async {
+        let appState = AppState()
+        appState.isOnline = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.amountUnit = .sats
+        model.amountInputText = "1000"
+        model.feeRateSatVb = 10
+        model.step = .confirm
+        let initialToken = model.resetToken
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(model.step, .confirm, "an offline send must not reach the success step")
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("offline") == true)
+        XCTAssertEqual(model.resetToken, initialToken + 1, "the slider must snap back")
+        XCTAssertFalse(model.isSending)
+    }
+
+    func testAvailableSpendableSats_onchainWithReadyChannelIsTheChannelBalance() {
+        // A send to an address with a ready channel is a splice-out from that channel, so the
+        // on-chain balance must not be counted as spendable for it.
+        let appState = AppState()
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 20_000)]
+        appState.lightningBalanceSats = 20_000
+        appState.spendableOnchainSats = 30_000
+        appState.isSweeping = false
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+
+        XCTAssertEqual(model.availableSpendableSats(appState: appState), 20_000)
+        XCTAssertEqual(model.calculateMaxSendableSats(appState: appState), 20_000)
+
+        model.amountUnit = .sats
+        model.amountInputText = "25000"
+        XCTAssertTrue(model.isInsufficientBalance(appState: appState))
+
+        // With no ready channel the on-chain balance is what is spendable.
+        appState.nodeService.channelsOverride = []
+        model.feeRateSatVb = 10
+        XCTAssertEqual(model.availableSpendableSats(appState: appState), 30_000)
+    }
+
+    func testCalculateMaxSendableSats_alwaysFitsUnderAProportionalRoutingFee() throws {
+        // With a proportional fee the fee depends on the amount; the max must satisfy
+        // max + fee(max) <= available and be the largest such amount.
+        let appState = AppState()
+        appState.nodeService.channelsOverride = [readyChannel(
+            outboundSats: 10_000_000,
+            feeProportionalMillionths: 1_000
+        )]
+        let model = SendFlowModel()
+        model.destination = .lightningAddress(
+            handle: "alice",
+            domain: "tips.net",
+            url: try XCTUnwrap(URL(string: "https://tips.net"))
+        )
+
+        for available: UInt64 in [50_052, 50_053, 50_054, 12_345, 1_000, 999_999, 1, 2, 3] {
+            appState.lightningBalanceSats = available
+            let maxSats = model.calculateMaxSendableSats(appState: appState)
+            let fee = model.estimatedFeeSatsForAmount(sats: maxSats, appState: appState)
+            XCTAssertLessThanOrEqual(maxSats + fee, available, "available \(available): \(maxSats) + \(fee) overshoots")
+            if maxSats > 0 {
+                let nextFee = model.estimatedFeeSatsForAmount(sats: maxSats + 1, appState: appState)
+                XCTAssertGreaterThan(
+                    maxSats + 1 + nextFee,
+                    available,
+                    "available \(available): \(maxSats) is not maximal"
+                )
+            }
+        }
+    }
+
+    func testSendPaymentResult_exposesOutcomeAccessors() {
+        let lightning = SendPaymentResult(sentAmountSats: 10, outcome: .lightning(paymentId: "pid"))
+        XCTAssertEqual(lightning.paymentId, "pid")
+        XCTAssertNil(lightning.txid)
+
+        let onchain = SendPaymentResult(sentAmountSats: 10, outcome: .onchain(txid: "txid"))
+        XCTAssertEqual(onchain.txid, "txid")
+        XCTAssertNil(onchain.paymentId)
+
+        let splice = SendPaymentResult(sentAmountSats: 10, outcome: .spliceOut)
+        XCTAssertNil(splice.paymentId)
+        XCTAssertNil(splice.txid)
     }
 }
