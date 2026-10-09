@@ -147,6 +147,9 @@
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
 		49D7BFE730794B280089BF1C /* SendChannelSpendPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D7BFE630794B280089BF1C /* SendChannelSpendPolicy.swift */; };
+		49D7BFE930795E8C0089BF1C /* SendChannelSpendPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D7BFE830795E8C0089BF1C /* SendChannelSpendPolicyTests.swift */; };
+		49D7BFED30795EAA0089BF1C /* PaymentSettlementObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D7BFEA30795EAA0089BF1C /* PaymentSettlementObserver.swift */; };
+		49D7BFF130795F4A0089BF1C /* SendFlowExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D7BFF030795F4A0089BF1C /* SendFlowExecution.swift */; };
 		49D997493074F5D10024B3A7 /* NetworkReachabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */; };
 		49D9974A3074F5D10024B3A7 /* OfflineHandlingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */; };
 		49D9974F3074F6090024B3A7 /* NetworkStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D9974E3074F6090024B3A7 /* NetworkStatus.swift */; };
@@ -422,6 +425,9 @@
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
 		49D7BFE630794B280089BF1C /* SendChannelSpendPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendChannelSpendPolicy.swift; sourceTree = "<group>"; };
+		49D7BFE830795E8C0089BF1C /* SendChannelSpendPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendChannelSpendPolicyTests.swift; sourceTree = "<group>"; };
+		49D7BFEA30795EAA0089BF1C /* PaymentSettlementObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentSettlementObserver.swift; sourceTree = "<group>"; };
+		49D7BFF030795F4A0089BF1C /* SendFlowExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendFlowExecution.swift; sourceTree = "<group>"; };
 		49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkReachabilityTests.swift; sourceTree = "<group>"; };
 		49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineHandlingTests.swift; sourceTree = "<group>"; };
 		49D9974C3074F6090024B3A7 /* NetworkMonitoring.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitoring.swift; sourceTree = "<group>"; };
@@ -604,10 +610,12 @@
 			children = (
 				49206E093073C27600217838 /* AddressVisualChunkView.swift */,
 				49206E0A3073C27600217838 /* NetworkFeeSelectorView.swift */,
+				49D7BFEA30795EAA0089BF1C /* PaymentSettlementObserver.swift */,
 				49206E0B3073C27600217838 /* SendAmountStepView.swift */,
 				49206E0C3073C27600217838 /* SendConfirmCards.swift */,
 				49206E0D3073C27600217838 /* SendConfirmStepView.swift */,
 				49206E0E3073C27600217838 /* SendDestinationBadgeView.swift */,
+				49D7BFF030795F4A0089BF1C /* SendFlowExecution.swift */,
 				49206E013073A92D00217838 /* SendFlowModel.swift */,
 				49206E023073A92D00217838 /* SendFlowStep.swift */,
 				49206E0F3073C27600217838 /* SendLoadingView.swift */,
@@ -1091,6 +1099,7 @@
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */,
+				49D7BFE830795E8C0089BF1C /* SendChannelSpendPolicyTests.swift */,
 				49206DFA3073A90200217838 /* SendFlowModelTests.swift */,
 				49206E223073C2F200217838 /* SendMultiStepViewTests.swift */,
 				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
@@ -1243,6 +1252,7 @@
 				490224CC302F90A500DF84AA /* PriceServiceTests.swift in Sources */,
 				4944457E3053DB5000B5A146 /* PriceChartAlgorithmsTests.swift in Sources */,
 				49FEF36D30124CEE0089850F /* MempoolWebSocketServiceTests.swift in Sources */,
+				49D7BFE930795E8C0089BF1C /* SendChannelSpendPolicyTests.swift in Sources */,
 				495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */,
 				D2000000000000000000004D /* PaymentFeeEstimatorTests.swift in Sources */,
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
@@ -1346,6 +1356,7 @@
 				499DBE712FD2DACF003E89F9 /* ResilientEsploraClient.swift in Sources */,
 				499DBE722FD2DACF003E89F9 /* StaggeredTaskLauncher.swift in Sources */,
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
+				49D7BFF130795F4A0089BF1C /* SendFlowExecution.swift in Sources */,
 				49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				49DDB0012FF0000100000001 /* Models.swift in Sources */,
@@ -1436,6 +1447,7 @@
 				49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */,
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
+				49D7BFED30795EAA0089BF1C /* PaymentSettlementObserver.swift in Sources */,
 				49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */,
 				CF42CAD5BA55B3F759B62E22 /* Trade.swift in Sources */,
 				49E4D8A32FED84B7002AF338 /* BackupServiceProtocol.swift in Sources */,

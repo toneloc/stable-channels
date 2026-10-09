@@ -5,6 +5,7 @@ struct SendAmountStepView: View {
     @Bindable var model: SendFlowModel
     @Environment(AppState.self) private var appState
     @FocusState private var isAmountFocused: Bool
+    @State private var isMaxActive: Bool = false
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -28,7 +29,13 @@ struct SendAmountStepView: View {
             .padding(.horizontal, 16)
             .padding(.top, 16)
         }
-        .scrollDismissesKeyboard(.interactively)
+        .scrollDismissesKeyboard(.immediately)
+        .scrollBounceBehavior(.basedOnSize)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isAmountFocused = false
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
         .onAppear { isAmountFocused = true }
         .onChange(of: isAmountFocused) { _, isFocused in
             if !isFocused { model.normalizeAmountInput() }
@@ -71,11 +78,7 @@ struct SendAmountStepView: View {
     }
 
     private var heroAmountCard: some View {
-        let textLen = model.amountInputText.isEmpty ? model.amountUnit.placeholder.count : model.amountInputText.count
-        let charWidth: CGFloat = 20
-        let fieldWidth = max(70, CGFloat(textLen) * charWidth + 20)
-
-        return VStack(spacing: 12) {
+        VStack(spacing: 12) {
             HStack {
                 unitMenuButton
                 Spacer()
@@ -87,25 +90,32 @@ struct SendAmountStepView: View {
                         .font(.system(size: 34, weight: .bold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
-                TextField(
-                    model.amountUnit.placeholder,
-                    text: $model.amountInputText
-                )
-                .font(.system(size: 38, weight: .bold, design: .rounded))
-                .keyboardType(model.amountUnit == .sats ? .numberPad : .decimalPad)
-                .multilineTextAlignment(model.amountUnit == .usd ? .leading : .trailing)
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .frame(width: fieldWidth)
-                .focused($isAmountFocused)
-                .onChange(of: model.amountInputText) { _, new in
-                    let sanitized = InputSanitizer.decimal(new, maxDecimals: model.amountUnit.maxDecimals)
-                    if sanitized.count > 16 {
-                        model.amountInputText = String(sanitized.prefix(16))
-                    } else {
-                        model.amountInputText = sanitized
-                    }
+
+                ZStack {
+                    Text(model.amountInputText.isEmpty ? model.amountUnit.placeholder : model.amountInputText)
+                        .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(
+                            isAmountFocused
+                                ? Color.clear
+                                : (model.amountInputText.isEmpty ? Color.secondary.opacity(0.4) : Color.primary)
+                        )
+                        .contentTransition(.numericText())
+                        .padding(.horizontal, 4)
+                        .frame(minWidth: 44)
+
+                    TextField(
+                        model.amountUnit.placeholder,
+                        text: $model.amountInputText
+                    )
+                    .font(.system(size: 38, weight: .bold, design: .rounded).monospacedDigit())
+                    .keyboardType(model.amountUnit == .sats ? .numberPad : .decimalPad)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(1)
+                    .focused($isAmountFocused)
+                    .foregroundStyle(isAmountFocused ? Color.primary : Color.clear)
                 }
+                .fixedSize(horizontal: true, vertical: false)
+
                 if model.amountUnit != .usd {
                     Text(model.amountUnit.symbolOrSuffix)
                         .font(.system(size: 20, weight: .semibold, design: .rounded))
@@ -115,11 +125,29 @@ struct SendAmountStepView: View {
             .frame(maxWidth: .infinity, alignment: .center)
             .contentShape(Rectangle())
             .onTapGesture { isAmountFocused = true }
+            .onChange(of: model.amountInputText) { _, new in
+                let sanitized = InputSanitizer.decimal(new, maxDecimals: model.amountUnit.maxDecimals)
+                if sanitized.count > 16 {
+                    model.amountInputText = String(sanitized.prefix(16))
+                } else if sanitized != new {
+                    model.amountInputText = sanitized
+                }
+                if isMaxActive, isAmountFocused {
+                    let maxText = SendAmountCalculator.formatSatsForUnit(
+                        model.calculateMaxSendableSats(appState: appState),
+                        unit: model.amountUnit,
+                        btcPrice: appState.accountingBTCPrice
+                    )
+                    if sanitized != maxText {
+                        isMaxActive = false
+                    }
+                }
+            }
 
             let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-            if sats > 0 {
-                secondaryConversionButton(sats: sats)
-            }
+            secondaryConversionButton(sats: sats)
+                .opacity(sats > 0 ? 1.0 : 0.45)
+                .allowsHitTesting(sats > 0)
 
             if let params = model.lnurlParams, params.hasCustomSendBounds {
                 Text(model.amountUnit.allowedRangeText(params: params, btcPrice: appState.accountingBTCPrice))
@@ -197,22 +225,28 @@ struct SendAmountStepView: View {
 
     private var presetPercentages: some View {
         let available = model.availableSpendableSats(appState: appState)
-        let maxSpendable = model.calculateMaxSendableSats(appState: appState)
-        let currentSats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        let isMax = available > 0 && maxSpendable > 0 && currentSats == maxSpendable
         return HStack(spacing: 12) {
             ForEach([25, 50, 100], id: \.self) { pct in
                 Button {
-                    model.applyPercentage(
-                        pct,
-                        totalBalanceSats: available,
-                        btcPrice: appState.accountingBTCPrice,
-                        appState: appState
-                    )
+                    isAmountFocused = false
+                    UISelectionFeedbackGenerator().selectionChanged()
+                    withAnimation(.snappy(duration: 0.32, extraBounce: 0.04)) {
+                        if pct == 100 {
+                            isMaxActive = true
+                        } else {
+                            isMaxActive = false
+                        }
+                        model.applyPercentage(
+                            pct,
+                            totalBalanceSats: available,
+                            btcPrice: appState.accountingBTCPrice,
+                            appState: appState
+                        )
+                    }
                 } label: {
                     if pct == 100 {
-                        HStack(spacing: 5) {
-                            LemniscateBloomIcon(isActive: isMax, size: 13, tint: Color.blue)
+                        HStack(spacing: 6) {
+                            LemniscateBloomIcon(isActive: isMaxActive, size: 16, tint: Color.blue)
                             Text(String(localized: "button_max", defaultValue: "Max"))
                                 .font(.subheadline.weight(.medium))
                         }

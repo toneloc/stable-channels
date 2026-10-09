@@ -8,15 +8,17 @@ struct SendLoadingView: View {
     var tint: Color = .orange
 
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 12) {
             Spacer()
 
             CurveProgressIndicator(
                 curve: curve,
-                size: 76,
+                size: 110,
                 tint: tint,
-                enablesPulse: false,
-                enablesRotation: false
+                particleCount: 140,
+                trailSpan: 0.12,
+                enablesPulse: true,
+                enablesRotation: true
             )
 
             VStack(spacing: 8) {

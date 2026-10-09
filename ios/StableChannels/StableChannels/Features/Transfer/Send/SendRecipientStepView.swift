@@ -24,6 +24,11 @@ struct SendRecipientStepView: View {
         }
         .padding(.horizontal, 16)
         .padding(.top, 16)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isInputFocused = false
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        }
         .onAppear {
             isInputFocused = true
             Task { @MainActor in

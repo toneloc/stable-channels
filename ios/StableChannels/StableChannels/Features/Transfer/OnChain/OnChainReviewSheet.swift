@@ -30,19 +30,18 @@ struct OnChainReviewSheet: View {
         recommendedFees != nil || feeRateSatVb != nil || selectedFeeTier == .standard
     }
 
-    private var hasReadyChannel: Bool {
-        appState.nodeService.channels.contains { $0.isChannelReady }
-    }
-
     private var isSpliceOut: Bool {
-        hasReadyChannel && !sendAll && !appState.isSweeping
+        !sendAll && SendChannelSpendPolicy.isSpliceOut(
+            channels: appState.nodeService.channels,
+            isSweeping: appState.isSweeping
+        )
     }
 
     private var estimatedFeeSats: UInt64 {
-        if isSpliceOut {
-            return 0
-        }
         let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10)
+        if isSpliceOut {
+            return PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
+        }
         return PaymentFeeEstimator.estimateOnchainFee(
             feeRateSatVb: rate,
             isSendAll: sendAll
@@ -82,27 +81,25 @@ struct OnChainReviewSheet: View {
                             btcPrice: appState.accountingBTCPrice
                         )
 
-                        if !isSpliceOut {
-                            NetworkFeeSelectorView(
-                                selectedTier: $selectedFeeTier,
-                                baseFeeRateSatVb: feeRateSatVb ?? 10,
-                                isSendAll: sendAll,
-                                btcPrice: appState.accountingBTCPrice,
-                                showExplanation: false
-                            )
-                        }
+                        NetworkFeeSelectorView(
+                            selectedTier: $selectedFeeTier,
+                            baseFeeRateSatVb: feeRateSatVb ?? 10,
+                            isSendAll: sendAll,
+                            btcPrice: appState.accountingBTCPrice,
+                            showExplanation: false
+                        )
 
                         SendConfirmFeeTotalCard(
                             feeLabel: isSpliceOut ? String(
-                                localized: "label_routing_fee",
-                                defaultValue: "Routing Fee"
+                                localized: "label_splice_fee",
+                                defaultValue: "Splice Fee"
                             ) :
                                 String(
                                     localized: "label_total_fees",
                                     defaultValue: "Network Fee"
                                 ),
                             estimatedFeeSats: estimatedFeeSats,
-                            rateSatVb: isSpliceOut ? nil : effectiveFeeRateSatVb,
+                            rateSatVb: effectiveFeeRateSatVb,
                             totalDebitSats: totalDebitSats,
                             btcPrice: appState.accountingBTCPrice
                         )
