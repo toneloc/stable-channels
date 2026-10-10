@@ -3,6 +3,24 @@ import XCTest
 
 @MainActor
 final class OfflineHandlingTests: XCTestCase {
+    /// Builds an AppState whose WalletLifecycleManager uses an in-memory mock keychain,
+    /// preventing leftover simulator Keychain entries from poisoning detectStartupState().
+    private func makeIsolatedAppState(
+        networkMonitor: MockNetworkMonitor,
+        keychainMnemonic: String? = nil
+    ) -> AppState {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("offline_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let mockKeychain = OfflineTestMnemonicStorage()
+        mockKeychain.mockMnemonic = keychainMnemonic
+        let lifecycle = WalletLifecycleManager(
+            keychain: mockKeychain,
+            userDataDir: tempDir,
+            validator: { _ in false }
+        )
+        return AppState(networkMonitor: networkMonitor, lifecycleManager: lifecycle)
+    }
+
     func testAppStateOnlineReflectsNetworkMonitor() {
         let mockMonitor = MockNetworkMonitor(initialStatus: .online)
         let appState = AppState(networkMonitor: mockMonitor)
@@ -40,7 +58,7 @@ final class OfflineHandlingTests: XCTestCase {
 
     func testRetryConnectionWhenOnlineDismissesNotice() async {
         let mockMonitor = MockNetworkMonitor(initialStatus: .online)
-        let appState = AppState(networkMonitor: mockMonitor)
+        let appState = makeIsolatedAppState(networkMonitor: mockMonitor)
         XCTAssertFalse(appState.hasCompletedInitialSync)
         appState.showOfflineNotice = true
 
@@ -85,12 +103,29 @@ final class OfflineHandlingTests: XCTestCase {
 
     func testStartupWhenOfflineTransitionsToOfflinePhase() async {
         let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
-        let appState = AppState(networkMonitor: mockMonitor)
+        let appState = makeIsolatedAppState(networkMonitor: mockMonitor)
 
         XCTAssertEqual(appState.phase, .loading)
         await appState.start()
         XCTAssertEqual(appState.phase, .offline)
         XCTAssertTrue(appState.isOfflineBlocked)
+    }
+
+    func testRetryConnectionAfterOfflineStartupPreservesNewWalletCreation() async {
+        let mockMonitor = MockNetworkMonitor(initialStatus: .offline)
+        let appState = makeIsolatedAppState(networkMonitor: mockMonitor)
+
+        await appState.start()
+        XCTAssertEqual(appState.phase, .offline)
+        XCTAssertEqual(appState.startupState, .newWallet)
+
+        mockMonitor.setStatus(.online)
+        await appState.retryConnection()
+
+        XCTAssertFalse(appState.showOfflineNotice, "Offline notice must be dismissed after online retry")
+        XCTAssertFalse(appState.isRetryingConnection)
+        XCTAssertEqual(appState.phase, .wallet)
+        XCTAssertEqual(appState.startupState, .ready)
     }
 
     func testCachedBalancesAndPricePreservedWhenOffline() {
@@ -322,4 +357,31 @@ final class OfflineHandlingTests: XCTestCase {
 
         XCTAssertFalse(appState.hasCompletedInitialSync, "retryConnection must no-op when already retrying")
     }
+}
+
+// MARK: - In-memory mock keychain for test isolation
+
+/// Prevents leftover simulator Keychain entries from contaminating
+/// WalletLifecycleManager.detectStartupState() during tests.
+private final class OfflineTestMnemonicStorage: MnemonicStorageProtocol {
+    var mockMnemonic: String?
+    var mockPendingMnemonic: String?
+
+    func storeMnemonic(_ mnemonic: String) throws { mockMnemonic = mnemonic }
+    func loadMnemonic() throws -> String {
+        guard let m = mockMnemonic else { throw WalletKeychainError.keyNotFound }
+        return m
+    }
+
+    func deleteMnemonic() throws { mockMnemonic = nil }
+    func hasMnemonic() throws -> Bool { mockMnemonic != nil }
+
+    func storePendingMnemonic(_ mnemonic: String) throws { mockPendingMnemonic = mnemonic }
+    func loadPendingMnemonic() throws -> String {
+        guard let p = mockPendingMnemonic else { throw WalletKeychainError.keyNotFound }
+        return p
+    }
+
+    func deletePendingMnemonic() throws { mockPendingMnemonic = nil }
+    func hasPendingMnemonic() throws -> Bool { mockPendingMnemonic != nil }
 }
