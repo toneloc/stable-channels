@@ -3,7 +3,7 @@ import SwiftUI
 struct PriceChartView: View {
     @Environment(AppState.self) private var appState
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = true
+    @AppStorage("is_price_chart_expanded") private var isExpanded: Bool = false
     @AppStorage("selected_price_chart_period") private var chartPeriod: ChartPeriod = .day
     @State private var priceHistory: [PriceRecord] = []
     @State private var chartMin: Double = 0
@@ -106,6 +106,7 @@ struct PriceChartView: View {
                         firstPrice: priceHistory.count >= 2 ? priceHistory.first?.price : nil,
                         selectedPrice: selectedPricePoint?.price
                     )
+                    .opacity(isExpanded ? 1 : 0)
                 }
 
                 Image(systemName: "chevron.right")
