@@ -51,6 +51,7 @@ import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.InputSanitizer
+import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
@@ -739,6 +740,10 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             Spacer(Modifier.weight(1f))
             Button(
                 onClick = {
+                    if (!appState.isOnline.value) {
+                        error = OfflineMessages.SEND
+                        return@Button
+                    }
                     isSending = true
                     error = null
                     pendingPaymentId = null

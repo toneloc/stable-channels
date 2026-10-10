@@ -15,7 +15,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.OfflineMessages
 import kotlinx.coroutines.launch
 
 @Composable
@@ -30,7 +32,13 @@ fun LspSettingsView(appState: AppState) {
     val activeAddress = remember(refreshKey) { LspPreferencesManager.getLspAddress(context) }
     val isCustom = remember(refreshKey) { LspPreferencesManager.hasCustomLsp(context) }
 
-    val hasActiveChannels = appState.nodeService.channels.isNotEmpty()
+    val isOnline by appState.isOnline.collectAsState()
+    val hasReadyChannel by appState.hasReadyChannel.collectAsState()
+    val sc by appState.stableChannel.collectAsState()
+    val hasActiveChannels =
+        appState.nodeService.channels.isNotEmpty() ||
+            hasReadyChannel ||
+            sc.userChannelId.isNotEmpty()
 
     var showSwitchDialog by remember { mutableStateOf(false) }
     var isBusy by remember { mutableStateOf(false) }
@@ -123,9 +131,15 @@ fun LspSettingsView(appState: AppState) {
                 )
             }
         } else {
+            if (!isOnline) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    OfflineBadge(info = OfflineMessages.LSP_INFO)
+                }
+                Spacer(Modifier.height(12.dp))
+            }
             Button(
                 onClick = { showSwitchDialog = true },
-                enabled = !isBusy,
+                enabled = !isBusy && isOnline,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Switch LSP")
@@ -141,7 +155,7 @@ fun LspSettingsView(appState: AppState) {
                         appState.resetLspToDefault { error -> finish(error) }
                     }
                 },
-                enabled = !isBusy && isCustom,
+                enabled = !isBusy && isCustom && isOnline,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Reset")

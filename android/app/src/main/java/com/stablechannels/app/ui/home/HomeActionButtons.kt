@@ -22,6 +22,7 @@ val SellPlum = Color(0xFFC78CFF)
 @Composable
 fun HomeActionButtons(
     hasReadyChannel: Boolean,
+    isOffline: Boolean = false,
     onSend: () -> Unit,
     onReceive: () -> Unit,
     onBuy: () -> Unit,
@@ -40,6 +41,7 @@ fun HomeActionButtons(
                 title = "Send",
                 icon = Icons.Default.ArrowUpward,
                 color = SendBlue,
+                enabled = !isOffline,
                 modifier = Modifier.weight(1f),
                 onClick = onSend,
             )
@@ -47,7 +49,8 @@ fun HomeActionButtons(
                 title = "Receive",
                 icon = Icons.Default.ArrowDownward,
                 color = ReceiveGreen,
-                pulse = !hasReadyChannel,
+                pulse = !hasReadyChannel && !isOffline,
+                enabled = !isOffline,
                 modifier = Modifier.weight(1f),
                 onClick = onReceive,
             )
@@ -60,7 +63,7 @@ fun HomeActionButtons(
                 title = "USD → BTC",
                 icon = Icons.Default.NorthEast,
                 color = BuyAmber,
-                enabled = hasReadyChannel,
+                enabled = hasReadyChannel && !isOffline,
                 modifier = Modifier.weight(1f),
                 onClick = onBuy,
             )
@@ -68,7 +71,7 @@ fun HomeActionButtons(
                 title = "BTC → USD",
                 icon = Icons.Default.SouthEast,
                 color = SellPlum,
-                enabled = hasReadyChannel,
+                enabled = hasReadyChannel && !isOffline,
                 modifier = Modifier.weight(1f),
                 onClick = onSell,
             )

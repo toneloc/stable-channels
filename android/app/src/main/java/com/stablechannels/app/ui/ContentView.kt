@@ -27,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -37,17 +36,13 @@ import com.stablechannels.app.ui.components.BalanceScaleKinematics
 import com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage
 import com.stablechannels.app.ui.components.OfflineDialog
 import com.stablechannels.app.ui.components.UnifiedBalanceLaunchView
-import com.stablechannels.app.util.isOnline
-import com.stablechannels.app.util.observeOnline
 
 @Composable
 fun ContentView(appState: AppState) {
     val phase by appState.phase.collectAsState()
     val errorMessage by appState.errorMessage.collectAsState()
-    val context = LocalContext.current
-    var online by remember { mutableStateOf(context.isOnline()) }
+    val online by appState.isOnline.collectAsState()
     var dismissed by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { context.observeOnline().collect { online = it } }
     LaunchedEffect(online) { if (online) dismissed = false }
 
     Box {
@@ -60,7 +55,7 @@ fun ContentView(appState: AppState) {
         }
         if (!online && !dismissed)
             OfflineDialog(
-                onTryAgain = { online = context.isOnline() },
+                onTryAgain = { appState.refreshOnlineStatus() },
                 onDismiss = { dismissed = true },
             )
     }

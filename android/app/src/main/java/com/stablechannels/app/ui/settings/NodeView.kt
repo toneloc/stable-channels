@@ -21,6 +21,13 @@ import com.stablechannels.app.util.Constants
 fun NodeView(appState: AppState) {
     val clipboardManager = LocalClipboardManager.current
     val isRunning by appState.nodeService.isRunningFlow.collectAsState()
+    val isOnline by appState.isOnline.collectAsState()
+    val (statusText, statusColor) =
+        when {
+            !isOnline -> "Offline (Paused)" to Color(0xFFF59E0B)
+            isRunning -> "Running" to Color(0xFF10B981)
+            else -> "Stopped" to Color(0xFFEF4444)
+        }
     var showNodeId by remember { mutableStateOf(false) }
     var copiedNodeId by remember { mutableStateOf(false) }
 
@@ -44,14 +51,14 @@ fun NodeView(appState: AppState) {
                 ) {
                     Surface(
                         shape = MaterialTheme.shapes.small,
-                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
+                        color = statusColor,
                         modifier = Modifier.size(8.dp),
                     ) {}
                     Text(
-                        text = if (isRunning) "Running" else "Stopped",
+                        text = statusText,
                         style = MaterialTheme.typography.bodyLarge,
                         fontWeight = FontWeight.Medium,
-                        color = if (isRunning) Color(0xFF10B981) else Color(0xFFEF4444),
+                        color = statusColor,
                     )
                 }
             }

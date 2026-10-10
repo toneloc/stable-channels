@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
@@ -44,6 +45,7 @@ import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -68,6 +70,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isFlashing by appState.paymentFlash.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
+    val isOnline by appState.isOnline.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -137,8 +140,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 isRefreshing = true
                 val startTime = System.currentTimeMillis()
                 appState.refreshBalances()
-                appState.priceService.fetchPrice()
-                appState.recordCurrentPrice()
+                if (isOnline) {
+                    appState.priceService.fetchPrice()
+                    appState.recordCurrentPrice()
+                }
                 // Prevent spinner from flashing on instant fetches
                 val elapsed = System.currentTimeMillis() - startTime
                 if (elapsed < 500) kotlinx.coroutines.delay(500 - elapsed)
@@ -200,7 +205,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     modifier = Modifier.padding(horizontal = 18.dp),
                     onDragStarted = { appState.ensureLSPConnected() },
                     onTradeRequest =
-                        if (hasReadyChannel)
+                        if (hasReadyChannel && isOnline)
                             { direction, amountUSD ->
                                 prefillTradeAmount = amountUSD
                                 if (direction == TradeDirection.BUY) showBuy = true
@@ -583,15 +588,20 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(8.dp))
             }
 
+            if (!isOnline) {
+                OfflineBadge(info = OfflineMessages.HOME_INFO)
+                Spacer(Modifier.height(12.dp))
+            }
+
             // Action buttons
             HomeActionButtons(
                 hasReadyChannel = hasReadyChannel,
+                isOffline = !isOnline,
                 onSend = { showSend = true },
                 onReceive = { showReceive = true },
                 onBuy = { showBuy = true },
                 onSell = { showSell = true },
             )
-
             // Status capsule
             if (statusMessage.isNotEmpty()) {
                 StatusCapsule(
