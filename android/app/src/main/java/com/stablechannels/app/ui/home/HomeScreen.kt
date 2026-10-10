@@ -218,7 +218,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             else showSell = true
                         }
                     else null,
-                onEmptyInteraction = { if(isOnline) showReceive = true },
+                onEmptyInteraction = { if (isOnline) showReceive = true },
             )
             Spacer(Modifier.height(12.dp))
 

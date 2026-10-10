@@ -26,10 +26,10 @@ import com.stablechannels.app.models.PendingTradePayment
 import com.stablechannels.app.services.BuyAmountPolicy
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
-import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.ui.components.DoneButton
 import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants

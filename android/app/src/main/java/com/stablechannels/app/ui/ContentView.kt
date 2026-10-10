@@ -69,15 +69,15 @@ fun SyncingView(
     onBalanced: (() -> Unit)? = null,
 ) {
     val elapsedSeconds by
-    produceState(initialValue = 0f, key1 = previewStage) {
-        if (previewStage != null) return@produceState
-        val startNanos = withFrameNanos { it }
-        while (true) {
-            withFrameNanos { frameTimeNanos ->
-                value = (frameTimeNanos - startNanos) / 1_000_000_000f
+        produceState(initialValue = 0f, key1 = previewStage) {
+            if (previewStage != null) return@produceState
+            val startNanos = withFrameNanos { it }
+            while (true) {
+                withFrameNanos { frameTimeNanos ->
+                    value = (frameTimeNanos - startNanos) / 1_000_000_000f
+                }
             }
         }
-    }
 
     val kinematics = remember { BalanceScaleKinematics() }
     val shimmerDuration = kinematics.totalShimmerDuration

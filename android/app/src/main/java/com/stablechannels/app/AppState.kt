@@ -1575,7 +1575,7 @@ class AppState(private val context: Context) : ViewModel() {
     /** Catches the node, LSP link, price and balances up once the network is back. */
     private fun onConnectivityRestored() {
         viewModelScope.launch(Dispatchers.IO) {
-           if (!isInBackground && nodeStartDeferredForOffline.compareAndSet(true, false)) {
+            if (!isInBackground && nodeStartDeferredForOffline.compareAndSet(true, false)) {
                 chainUrl = resolveChainUrl()
                 restartNodeFromForeground(keepWalletVisible = true)
                 return@launch

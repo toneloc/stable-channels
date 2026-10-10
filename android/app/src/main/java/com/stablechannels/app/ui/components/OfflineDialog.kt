@@ -137,7 +137,7 @@ private fun OfflineCard(onTryAgain: () -> Unit, onContinueOffline: () -> Unit) {
                     },
                     enabled = !checking,
                     modifier = Modifier.weight(1f),
-                    pressedRadius = 22.dp
+                    pressedRadius = 22.dp,
                 ) {
                     if (checking) {
                         CircularProgressIndicator(
@@ -157,13 +157,13 @@ private fun OfflineCard(onTryAgain: () -> Unit, onContinueOffline: () -> Unit) {
 @Composable
 private fun PulsingWifiOff(tint: Color) {
     val pulse by
-    rememberInfiniteTransition(label = "offlinePulse")
-        .animateFloat(
-            initialValue = 1f,
-            targetValue = 1.2f,
-            animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
-            label = "scale",
-        )
+        rememberInfiniteTransition(label = "offlinePulse")
+            .animateFloat(
+                initialValue = 1f,
+                targetValue = 1.2f,
+                animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
+                label = "scale",
+            )
     Box(contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp).scale(pulse).background(tint.copy(alpha = 0.12f), CircleShape))
         Box(
@@ -204,7 +204,7 @@ fun OfflineBadge(modifier: Modifier = Modifier, info: String? = null, tooltipMar
                     )
                     .border(BorderStroke(1.dp, red.copy(alpha = 0.35f)), RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 4.dp),
-           verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(

@@ -40,8 +40,8 @@ fun LspSettingsView(appState: AppState) {
     val sc by appState.stableChannel.collectAsState()
     val hasActiveChannels =
         appState.nodeService.channels.isNotEmpty() ||
-                hasReadyChannel ||
-                sc.userChannelId.isNotEmpty()
+            hasReadyChannel ||
+            sc.userChannelId.isNotEmpty()
 
     var showSwitchDialog by remember { mutableStateOf(false) }
     var isBusy by remember { mutableStateOf(false) }
