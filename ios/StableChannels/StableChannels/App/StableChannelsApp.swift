@@ -86,6 +86,11 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 
     // MARK: - Background Push (content-available: 1)
 
+    // iOS controls the background execution budget for remote notifications. Keep a safety
+    // margin below the system's roughly 30-second limit; unlike Android's foreground service,
+    // this wait cannot be extended by the app.
+    private static let backgroundPushWaitSeconds: TimeInterval = 25
+
     func application(
         _: UIApplication,
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
@@ -96,8 +101,9 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
         // Post to NotificationCenter so AppState can handle it
         NotificationCenter.default.post(name: .pushPaymentNotification, object: userInfo)
 
-        // Give the node up to 25 seconds to connect and receive the pending payment
-        DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+        // Give the node time to connect and receive the pending payment without overrunning the
+        // iOS background notification execution budget.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.backgroundPushWaitSeconds) {
             completionHandler(.newData)
         }
     }
@@ -185,4 +191,6 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
 extension Notification.Name {
     static let pushPaymentNotification = Notification.Name("pushPaymentNotification")
     static let priceHistoryUpdated = Notification.Name("priceHistoryUpdated")
+    static let paymentSettled = Notification.Name("paymentSettled")
+    static let paymentFailed = Notification.Name("paymentFailed")
 }

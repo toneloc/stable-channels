@@ -15,7 +15,7 @@ struct LSPSettingsView: View {
     @State private var showSuccess = false
 
     private var hasActiveChannel: Bool {
-        !appState.nodeService.channels.isEmpty
+        appState.hasActiveChannel
     }
 
     var body: some View {
@@ -126,6 +126,13 @@ struct LSPSettingsView: View {
             .padding(.vertical, 4)
         } header: {
             Text(String(localized: "section_active_lsp", defaultValue: "Active LSP"))
+        } footer: {
+            if !appState.isOnline {
+                Text(String(
+                    localized: "info_active_lsp_offline",
+                    defaultValue: "Connect to the internet to check your connection to this Lightning Service Provider."
+                ))
+            }
         }
     }
 
@@ -154,10 +161,17 @@ struct LSPSettingsView: View {
             }
             .padding(.vertical, 4)
         } footer: {
-            Text(String(
-                localized: "lsp_locked_footer",
-                defaultValue: "The Lightning Service Provider cannot be changed while a channel is open. The counterparty node is part of the channel's funding transaction."
-            ))
+            if !appState.isOnline {
+                Text(String(
+                    localized: "lsp_locked_footer_offline",
+                    defaultValue: "Connect to the internet to verify your Lightning Service Provider connection. Configuration remains locked while a channel is open."
+                ))
+            } else {
+                Text(String(
+                    localized: "lsp_locked_footer",
+                    defaultValue: "The Lightning Service Provider cannot be changed while a channel is open. The counterparty node is part of the channel's funding transaction."
+                ))
+            }
         }
     }
 
@@ -260,15 +274,22 @@ struct LSPSettingsView: View {
                     Spacer()
                 }
             }
-            .disabled(isRestarting)
+            .disabled(!appState.isOnline || isRestarting)
             .padding(.vertical, 4)
         } header: {
             Text(String(localized: "section_custom_lsp", defaultValue: "Connect to a Custom LSP"))
         } footer: {
-            Text(String(
-                localized: "info_custom_lsp",
-                defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
-            ))
+            if !appState.isOnline {
+                Text(String(
+                    localized: "info_custom_lsp_offline",
+                    defaultValue: "Internet connection required to connect to a new LSP."
+                ))
+            } else {
+                Text(String(
+                    localized: "info_custom_lsp",
+                    defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
+                ))
+            }
         }
     }
 
@@ -284,25 +305,27 @@ struct LSPSettingsView: View {
                     Text(String(localized: "button_reset_lsp", defaultValue: "Reset LSP"))
                 }
             }
-            .disabled(appState.activeLSP.isDefault || isRestarting)
+            .disabled(!appState.isOnline || appState.activeLSP.isDefault || isRestarting)
         }
     }
 
     // MARK: - Helpers
 
     private var connectionColor: Color {
+        guard appState.isOnline else { return .orange }
         guard appState.nodeService.isRunning else { return .red }
         let isConnected = appState.nodeService.channels.contains {
             $0.counterpartyNodeId == appState.activeLSP.pubkey
         }
-        // If the node is running we consider it "connected" to the LSP for
-        // visual purposes. Peer-level connectivity is managed by LDK internally.
         return isConnected || appState.nodeService.isRunning ? .green : .orange
     }
 
     private var connectionLabel: String {
-        guard appState.nodeService.isRunning else {
+        guard appState.isOnline else {
             return String(localized: "status_offline", defaultValue: "Offline")
+        }
+        guard appState.nodeService.isRunning else {
+            return String(localized: "status_disconnected", defaultValue: "Disconnected")
         }
         return String(localized: "status_connected", defaultValue: "Connected")
     }

@@ -9,6 +9,7 @@ struct ChannelSettingsView: View {
         // Read observable property on AppState to ensure view invalidation when channel state changes,
         // as NodeService is not directly observable.
         let _ = appState.hasReadyChannel
+        let _ = appState.isOnline
         List {
             if let channel = appState.nodeService.channels.first {
                 Section {
@@ -20,14 +21,7 @@ struct ChannelSettingsView: View {
                     HStack {
                         Text(String(localized: "label_status", defaultValue: "Status"))
                         Spacer()
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(channel.isChannelReady ? .green : .orange)
-                                .frame(width: 8, height: 8)
-                            Text(channel.isChannelReady
-                                ? String(localized: "channel_status_ready", defaultValue: "Ready")
-                                : String(localized: "channel_status_pending", defaultValue: "Pending"))
-                        }
+                        channelStatusBadge(isReady: channel.isChannelReady)
                     }
                     HStack {
                         Text(String(localized: "label_outbound", defaultValue: "Outbound"))
@@ -96,6 +90,15 @@ struct ChannelSettingsView: View {
                         ) {
                             showCloseChannelAlert = true
                         }
+                        .disabled(!appState.isOnline)
+                        .foregroundStyle(appState.isOnline ? .red : .secondary)
+                    } footer: {
+                        if !appState.isOnline {
+                            Text(String(
+                                localized: "info_close_channel_offline",
+                                defaultValue: "Internet connection required to close channel."
+                            ))
+                        }
                     }
                 } else {
                     Section {
@@ -115,6 +118,50 @@ struct ChannelSettingsView: View {
                         Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
                             .foregroundStyle(.secondary)
                     }
+                }
+            } else if appState.hasActiveChannel {
+                Section {
+                    HStack {
+                        Text(String(localized: "label_capacity", defaultValue: "Capacity"))
+                        Spacer()
+                        Text(appState.lightningBalanceSats.satsFormatted)
+                    }
+                    HStack {
+                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Spacer()
+                        channelStatusBadge(isReady: appState.hasReadyChannel)
+                    }
+                    if let txid = appState.fundingTxid, !txid.isEmpty {
+                        HStack {
+                            Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } footer: {
+                    Text(String(
+                        localized: "info_channel_offline_note",
+                        defaultValue: "Channel metrics cached. Reconnect to the internet for live balance synchronization."
+                    ))
+                }
+
+                Section {
+                    Button(
+                        String(localized: "button_close_channel", defaultValue: "Close channel"),
+                        role: .destructive
+                    ) {
+                        showCloseChannelAlert = true
+                    }
+                    .disabled(true)
+                    .foregroundStyle(.secondary)
+                } footer: {
+                    Text(String(
+                        localized: "info_close_channel_offline",
+                        defaultValue: "Internet connection required to close channel."
+                    ))
                 }
             } else {
                 Section {
@@ -168,6 +215,25 @@ struct ChannelSettingsView: View {
             } catch {
                 appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
                 appState.isChannelClosing = false
+            }
+        }
+    }
+
+    private func channelStatusBadge(isReady: Bool) -> some View {
+        HStack(spacing: 4) {
+            if !appState.isOnline {
+                Circle()
+                    .fill(.orange)
+                    .frame(width: 8, height: 8)
+                Text(String(localized: "channel_status_offline", defaultValue: "Offline"))
+                    .foregroundStyle(.orange)
+            } else {
+                Circle()
+                    .fill(isReady ? .green : .orange)
+                    .frame(width: 8, height: 8)
+                Text(isReady
+                    ? String(localized: "channel_status_ready", defaultValue: "Ready")
+                    : String(localized: "channel_status_pending", defaultValue: "Pending"))
             }
         }
     }

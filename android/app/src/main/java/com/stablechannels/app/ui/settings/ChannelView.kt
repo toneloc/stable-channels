@@ -14,6 +14,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.ui.components.NeutralOutlinedButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.btcSpacedFormatted
@@ -130,7 +132,7 @@ fun ChannelView(appState: AppState) {
                 )
             },
             confirmButton = {
-                TextButton(
+                NeutralTextButton(
                     onClick = {
                         showCloseConfirm = false
                         appState.isChannelClosing = true
@@ -151,7 +153,7 @@ fun ChannelView(appState: AppState) {
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
+                NeutralTextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
             },
         )
     }
@@ -230,7 +232,7 @@ private fun FundingTxCard(fundingTxid: String?) {
                         fontFamily = FontFamily.Monospace,
                     )
                     Spacer(Modifier.height(8.dp))
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             context.openInAppBrowser(
                                 "https://mempool.space/tx/${txid.substringBefore(":")}"
@@ -238,7 +240,7 @@ private fun FundingTxCard(fundingTxid: String?) {
                         },
                         contentPadding = PaddingValues(0.dp),
                     ) {
-                        Text("View on explorer ↗", color = Color(0xFF3B82F6))
+                        Text("View on explorer ↗")
                     }
                 }
             }
@@ -255,7 +257,7 @@ private fun CloseChannelButton(enabled: Boolean, onClick: () -> Unit) {
         }
         Spacer(Modifier.height(12.dp))
     }
-    OutlinedButton(
+    NeutralOutlinedButton(
         onClick = onClick,
         enabled = enabled,
         modifier = Modifier.fillMaxWidth(),

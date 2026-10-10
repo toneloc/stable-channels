@@ -42,6 +42,7 @@ import com.google.mlkit.vision.barcode.BarcodeScannerOptions
 import com.google.mlkit.vision.barcode.BarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
+import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.util.QRCodeUtils
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -222,7 +223,7 @@ fun QRScannerScreen(
                         textAlign = TextAlign.Center,
                     )
                     Spacer(Modifier.height(24.dp))
-                    Button(
+                    InkButton(
                         onClick = {
                             val intent =
                                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {

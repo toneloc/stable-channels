@@ -27,6 +27,9 @@ import com.stablechannels.app.services.BuyAmountPolicy
 import com.stablechannels.app.services.WalletErrorMessages
 import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.ui.components.OfflineBadge
+import com.stablechannels.app.ui.components.DoneButton
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
@@ -80,7 +83,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     ) {
         // Top Toolbar (Cancel / Title)
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
-            TextButton(
+            NeutralTextButton(
                 onClick = onDismiss,
                 modifier = Modifier.align(Alignment.CenterStart),
                 colors =
@@ -91,7 +94,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             } else {
                                 Color(0xFFE5E5EA)
                             },
-                        contentColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
                     ),
                 shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
                 contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -122,7 +125,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             amountText = String.format(Locale.US, "%.2f", maxBuyUSD)
                             error = null
@@ -136,7 +139,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                                     } else {
                                         androidx.compose.ui.graphics.Color(0xFFE5E5EA)
                                     },
-                                contentColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onSurface,
                             ),
                         shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
@@ -232,7 +235,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
 
                 Spacer(Modifier.height(16.dp))
-                Button(
+                InkButton(
                     onClick = {
                         if (!BuyAmountPolicy.accepts(amountUSD, sc.expectedUSD.amount)) {
                             error = "Enter an amount between $0 and ${maxBuyUSD.usdFormatted()}"
@@ -292,11 +295,11 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
 
                 Spacer(Modifier.height(24.dp))
-                Button(
+                InkButton(
                     onClick = {
                         if (!appState.isOnline.value) {
                             error = OfflineMessages.TRADE
-                            return@Button
+                            return@InkButton
                         }
                         isExecuting = true
                         error = null
@@ -357,7 +360,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     else Text("Confirm Order")
                 }
                 Spacer(Modifier.height(8.dp))
-                TextButton(onClick = { step = TradeStep.AMOUNT }) { Text("Back") }
+                NeutralTextButton(onClick = { step = TradeStep.AMOUNT }) { Text("Back") }
             }
 
             TradeStep.DONE -> {
@@ -429,7 +432,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
                 Spacer(Modifier.height(16.dp))
                 if (PaymentResultControls.showsTradeDone(outcome)) {
-                    Button(onClick = onDismiss) { Text("Done") }
+                    DoneButton(onClick = onDismiss)
                 }
             }
         }

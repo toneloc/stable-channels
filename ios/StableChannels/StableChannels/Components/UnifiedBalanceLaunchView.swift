@@ -60,7 +60,7 @@ public struct UnifiedBalanceLaunchView: View {
 
             let settleElapsed = settleStartTime.map { max(0.0, now - $0) }
             let stage = reduceMotion
-                ? .balanced
+                ? (isSyncComplete ? .balanced : .resting)
                 : kinematics.evaluate(
                     elapsedSinceStart: elapsed,
                     isSyncComplete: isSyncComplete,
@@ -75,9 +75,8 @@ public struct UnifiedBalanceLaunchView: View {
                 )
             }
             .onChange(of: stage) { _, newStage in
-                if newStage == .balanced && !hasNotifiedBalanced {
-                    hasNotifiedBalanced = true
-                    onBalanced?()
+                if newStage == .balanced {
+                    notifyBalancedIfNeeded()
                 }
             }
         }
@@ -86,13 +85,27 @@ public struct UnifiedBalanceLaunchView: View {
             startTime = Date().timeIntervalSinceReferenceDate
             if isSyncComplete {
                 settleStartTime = startTime
+                if reduceMotion {
+                    notifyBalancedIfNeeded()
+                }
             }
         }
         .onChange(of: isSyncComplete) { _, complete in
-            if complete && settleStartTime == nil {
-                settleStartTime = Date().timeIntervalSinceReferenceDate
+            if complete {
+                if settleStartTime == nil {
+                    settleStartTime = Date().timeIntervalSinceReferenceDate
+                }
+                if reduceMotion {
+                    notifyBalancedIfNeeded()
+                }
             }
         }
+    }
+
+    private func notifyBalancedIfNeeded() {
+        guard !hasNotifiedBalanced else { return }
+        hasNotifiedBalanced = true
+        onBalanced?()
     }
 
     private func drawStage(

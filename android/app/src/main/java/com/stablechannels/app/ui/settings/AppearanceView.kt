@@ -9,11 +9,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.stablechannels.app.ui.components.inkColor
 import com.stablechannels.app.ui.theme.ThemePreference
 
 @Composable
@@ -62,7 +62,7 @@ fun AppearanceView() {
                             onClick = null,
                             colors =
                                 RadioButtonDefaults.colors(
-                                    selectedColor = Color(0xFF10B981),
+                                    selectedColor = inkColor(),
                                     unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 ),
                         )

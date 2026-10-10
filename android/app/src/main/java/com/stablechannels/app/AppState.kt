@@ -985,6 +985,8 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _confirmationUpdateEpoch = MutableStateFlow(0)
     val confirmationUpdateEpoch: StateFlow<Int> = _confirmationUpdateEpoch
+    private val _confirmationPollUpdate = MutableStateFlow<ConfirmationPollUpdate?>(null)
+    val confirmationPollUpdate: StateFlow<ConfirmationPollUpdate?> = _confirmationPollUpdate
 
     private val _isSpliceInFlight = MutableStateFlow(false)
     val isSpliceInFlightFlow: StateFlow<Boolean>
@@ -1001,10 +1003,29 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
     private var sweepOnchainStart: Long = 0
+    // Persisted so a deposit deferred during a splice/close is still detected after a restart.
+    // The balance cache can't serve as the baseline: it is refreshed while detection is deferred.
     private var prevOnchainSats: Long =
-        context
-            .getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-            .getLong("cached_onchain_sats", 0L)
+        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE).let {
+            if (!it.contains("deposit_baseline_sats")) {
+                it.edit()
+                    .putLong("deposit_baseline_sats", it.getLong("cached_onchain_sats", 0L))
+                    .apply()
+            }
+            it.getLong("deposit_baseline_sats", 0L)
+        }
+        set(value) {
+            if (field != value) {
+                context
+                    .getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+                    .edit()
+                    .putLong("deposit_baseline_sats", value)
+                    .apply()
+            }
+            field = value
+        }
+
+    private var lastMissedReceiveCheckSecs = 0L
     private var stabilityJob: Job? = null
     private var heartbeatJob: Job? = null
     private var pendingDepositJob: Job? = null
@@ -1013,8 +1034,16 @@ class AppState(private val context: Context) : ViewModel() {
     private var nodeStartRetryAttempts: Int = 0
     private var spliceConfirmationJob: Job? = null
     private var monitoredSpliceTxid: String? = null
-    @Volatile private var isConfirmationPolling = false
-    @Volatile private var lastConfirmationPollAtMs = 0L
+    private val confirmationRefreshCoordinator =
+        ConfirmationRefreshCoordinator(
+            onResult = { result ->
+                _confirmationPollUpdate.update { previous ->
+                    ConfirmationPollUpdate((previous?.sequence ?: 0L) + 1, result)
+                }
+            }
+        ) { manual ->
+            paymentConfirmationPass.run(manual)
+        }
     /** Resolved esplora URL — Blockstream primary, mempool.space fallback. */
     var chainUrl: String = Constants.PRIMARY_CHAIN_URL
         private set
@@ -1033,6 +1062,30 @@ class AppState(private val context: Context) : ViewModel() {
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
     private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
+    private val paymentConfirmationPass =
+        PaymentConfirmationPass(
+            httpClient = httpClient,
+            chainUrls = {
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            },
+            database = { databaseService },
+            onReceiveTxidMismatch = { txid ->
+                if (_lastReceiveTxid.value == txid) {
+                    setLastReceiveTxid(null, null)
+                }
+            },
+            onRowsUpdated = { syncInline ->
+                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
+                if (syncInline) {
+                    syncWalletsAndRefreshBalances()
+                } else {
+                    // The native wallet sync can outlast a manual refresh's deadline, so a manual
+                    // or cancelled pass returns its result without waiting for it.
+                    viewModelScope.launch(Dispatchers.IO) { syncWalletsAndRefreshBalances() }
+                }
+            },
+        )
 
     fun start() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -1522,7 +1575,7 @@ class AppState(private val context: Context) : ViewModel() {
     /** Catches the node, LSP link, price and balances up once the network is back. */
     private fun onConnectivityRestored() {
         viewModelScope.launch(Dispatchers.IO) {
-            if (!isInBackground && nodeStartDeferredForOffline.compareAndSet(true, false)) {
+           if (!isInBackground && nodeStartDeferredForOffline.compareAndSet(true, false)) {
                 chainUrl = resolveChainUrl()
                 restartNodeFromForeground(keepWalletVisible = true)
                 return@launch
@@ -3065,6 +3118,17 @@ class AppState(private val context: Context) : ViewModel() {
                         } else {
                             val db = databaseService ?: return SpliceCompletion.DEFERRED
                             val sc = _stableChannel.value
+                            // The channel closed while this splice was confirming, so there are no
+                            // stable books left to reconcile. Retrying would fail forever and leave
+                            // the splice in flight, which also blocks new deposits from being
+                            // recorded.
+                            if (sc.userChannelId.isEmpty() && nodeService.channels.isEmpty()) {
+                                AuditService.log(
+                                    "SPLICE_RECONCILE_SKIPPED",
+                                    mapOf("txid" to txid, "reason" to "channel_closed"),
+                                )
+                                return@synchronized true
+                            }
                             // Reconcile against the current row, not a snapshot that may predate a
                             // signed correction or a background settlement. A retry removes no more
                             // backing once the row fits the confirmed channel balance.
@@ -3392,177 +3456,24 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private data class TxConfirmationStatus(
-        val confirmed: Boolean,
-        val blockHeight: Int?,
-    )
-
-    private fun fetchChainTipHeight(): Int? {
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder().url("${baseUrl.trimEnd('/')}/blocks/tip/height").build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string()?.trim() ?: return@use
-                    body.toIntOrNull()?.let {
-                        return it
-                    }
-                }
-            } catch (_: Exception) {}
-        }
-        return null
-    }
-
-    private fun fetchTxConfirmationStatus(txid: String): TxConfirmationStatus? {
-        val normalizedTxid = txid.substringBefore(":").trim()
-        if (normalizedTxid.isEmpty()) return null
-
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder()
-                        .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
-                        .build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string() ?: return@use
-                    val json = JSONObject(body)
-                    val confirmed = json.optBoolean("confirmed", false)
-                    val blockHeight =
-                        if (json.has("block_height") && !json.isNull("block_height")) {
-                            json.optInt("block_height", 0).takeIf { it > 0 }
-                        } else {
-                            null
-                        }
-                    return TxConfirmationStatus(confirmed = confirmed, blockHeight = blockHeight)
-                }
-            } catch (_: Exception) {}
-        }
-        return null
-    }
-
-    private fun fetchTxPaysToAddress(txid: String, address: String): Boolean? {
-        val normalizedTxid = txid.substringBefore(":").trim()
-        val targetAddress = QRCodeUtils.normalizeAddress(address)
-        if (normalizedTxid.isEmpty() || targetAddress.isBlank()) return null
-
-        val urls =
-            listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
-        for (baseUrl in urls) {
-            try {
-                val request =
-                    Request.Builder().url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid").build()
-                httpClient.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) return@use
-                    val body = response.body?.string() ?: return@use
-                    val txJson = JSONObject(body)
-                    val vouts = txJson.optJSONArray("vout") ?: return@use
-                    for (i in 0 until vouts.length()) {
-                        val vout = vouts.optJSONObject(i) ?: continue
-                        val voutAddress =
-                            QRCodeUtils.normalizeAddress(vout.optString("scriptpubkey_address", ""))
-                        if (voutAddress == targetAddress) {
-                            return true
-                        }
-                    }
-                    return false
-                }
-            } catch (_: Exception) {}
-        }
-        return null
-    }
+    /**
+     * Manual (pull-to-refresh) confirmation check. Waits for any in-flight pass, then runs a fresh
+     * one and suspends until it completes, returning whether the chain lookups succeeded. Bounded
+     * by [ConfirmationRefreshCoordinator.MANUAL_REFRESH_DEADLINE_MS] end to end, after which it
+     * returns [ConfirmationPollResult.TimedOut].
+     */
+    suspend fun refreshPaymentConfirmations(): ConfirmationPollResult =
+        withContext(Dispatchers.IO) { confirmationRefreshCoordinator.refresh() }
 
     private suspend fun pollPaymentConfirmations(force: Boolean = false) {
-        val now = System.currentTimeMillis()
-        if (!force && (now - lastConfirmationPollAtMs) < 15_000) {
-            return
-        }
-        if (isConfirmationPolling) {
-            return
-        }
+        confirmationRefreshCoordinator.pollIfIdle(force)
+    }
 
-        val db = databaseService ?: return
-        isConfirmationPolling = true
+    private fun syncWalletsAndRefreshBalances() {
         try {
-            val tipHeight = fetchChainTipHeight() ?: return
-            val pending = db.getPaymentsNeedingConfirmation(limit = 100)
-            var anyUpdated = false
-
-            pending.forEach { payment ->
-                val txid = payment.txid ?: return@forEach
-
-                if (payment.paymentType == "onchain" && payment.direction == "received") {
-                    val expectedAddress = payment.address?.trim().orEmpty()
-                    if (expectedAddress.isNotEmpty()) {
-                        when (fetchTxPaysToAddress(txid, expectedAddress)) {
-                            false -> {
-                                val cleared = db.clearPaymentTxidForRow(payment.id)
-                                anyUpdated = anyUpdated || cleared
-                                if (_lastReceiveTxid.value == txid) {
-                                    setLastReceiveTxid(null, null)
-                                }
-                                AuditService.log(
-                                    "ONCHAIN_TXID_ADDRESS_MISMATCH",
-                                    mapOf(
-                                        "payment_id" to payment.id,
-                                        "txid" to txid,
-                                        "address" to expectedAddress,
-                                    ),
-                                )
-                                return@forEach
-                            }
-                            null -> return@forEach
-                            true -> {}
-                        }
-                    }
-                }
-
-                val txStatus = fetchTxConfirmationStatus(txid) ?: return@forEach
-                val required = requiredConfirmationsForType(payment.paymentType)
-
-                val (newConfirmations, newStatus) =
-                    if (!txStatus.confirmed) {
-                        0 to "pending"
-                    } else {
-                        val blockHeight = txStatus.blockHeight
-                        val confs =
-                            if (blockHeight != null) {
-                                (tipHeight - blockHeight + 1)
-                                    .coerceAtLeast(0)
-                                    .coerceAtMost(required)
-                            } else {
-                                payment.confirmations.coerceAtLeast(1).coerceAtMost(required)
-                            }
-                        confs to if (confs >= required) "completed" else "pending"
-                    }
-
-                if (payment.confirmations != newConfirmations || payment.status != newStatus) {
-                    val updated =
-                        db.updatePaymentConfirmationState(
-                            paymentRowId = payment.id,
-                            confirmations = newConfirmations,
-                            status = newStatus,
-                        )
-                    anyUpdated = anyUpdated || updated
-                }
-            }
-
-            if (anyUpdated) {
-                _confirmationUpdateEpoch.value = _confirmationUpdateEpoch.value + 1
-                try {
-                    nodeService.syncWallets()
-                } catch (_: Exception) {}
-                refreshBalances()
-            }
-            lastConfirmationPollAtMs = now
-        } finally {
-            isConfirmationPolling = false
-        }
+            nodeService.syncWallets()
+        } catch (_: Exception) {}
+        refreshBalances()
     }
 
     private fun runStabilityCheck() {
@@ -3928,6 +3839,10 @@ class AppState(private val context: Context) : ViewModel() {
         if (isSweeping || pendingSplice != null) {
             return
         }
+        // Both only attach txids or add rows for deposits already received, so they wait for the
+        // same splice/close guard; they are retried on every tick.
+        recoverMissedReceive()
+        resolveTxidlessReceives()
         if (currentSats > prevOnchainSats) {
             val depositSats = currentSats - prevOnchainSats
             if (depositSats < 1000) {
@@ -4027,6 +3942,122 @@ class AppState(private val context: Context) : ViewModel() {
             startPendingDepositPolling()
         }
         prevOnchainSats = currentSats
+    }
+
+    private val rejectedTxidAdoptions: MutableSet<Pair<Long, String>> =
+        java.util.concurrent.ConcurrentHashMap.newKeySet()
+
+    /**
+     * Gives txid-less pending receive rows their txid from the wallet's own payment list, matching
+     * on exact amount and confirming the transaction pays the row's address. Covers deposits that
+     * arrived while the app was closed, which would otherwise stay at 0 confirmations forever
+     * because the confirmation poller only tracks rows with a txid.
+     */
+    private fun resolveTxidlessReceives() {
+        val db = databaseService ?: return
+        if (!db.hasTxidlessPendingReceive()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val inbound =
+                try {
+                    nodeService.node?.listPayments().orEmpty().mapNotNull { p ->
+                        val kind = p.kind as? PaymentKind.Onchain ?: return@mapNotNull null
+                        val msat = p.amountMsat?.toLong() ?: return@mapNotNull null
+                        if (p.direction != PaymentDirection.INBOUND) return@mapNotNull null
+                        Triple(kind.txid, msat, p.latestUpdateTimestamp.toLong())
+                    }
+                } catch (e: Exception) {
+                    Log.w("AppState", "listPayments failed resolving receive txids: ${e.message}")
+                    return@launch
+                }
+            val paying = mutableMapOf<Long, MutableList<String>>()
+            inbound.forEach { (txid, msat, seenAtSecs) ->
+                for (candidate in db.findTxidlessReceives(txid, msat, seenAtSecs)) {
+                    val rejection = candidate.id to txid
+                    if (rejection in rejectedTxidAdoptions) continue
+                    // Amount alone is ambiguous (the wallet history can hold old transactions of
+                    // the same size), so only a txid that pays the row's address qualifies.
+                    when (paymentConfirmationPass.paysToAddress(txid, candidate.address.trim())) {
+                        true -> paying.getOrPut(candidate.id) { mutableListOf() }.add(txid)
+                        false -> rejectedTxidAdoptions.add(rejection)
+                        null -> {}
+                    }
+                }
+            }
+            var resolved = false
+            paying.forEach { (rowId, txids) ->
+                // A reused address can hold several same-amount payments; without a way to tell
+                // them apart, leave the row unresolved rather than guess.
+                val txid = txids.distinct().singleOrNull() ?: return@forEach
+                if (db.adoptTxidForRow(rowId, txid)) {
+                    resolved = true
+                    AuditService.log(
+                        "ONCHAIN_RECEIVE_TXID_RESOLVED",
+                        mapOf("txid" to txid, "row" to rowId),
+                    )
+                }
+            }
+            if (resolved) notifyPaymentRecorded()
+        }
+    }
+
+    /**
+     * Backstop for deposits neither the websocket nor the balance-delta path caught: asks the block
+     * explorer what recently paid our current receive address and records what is missing.
+     * Throttled; the DB call skips txids and amounts that already have a row.
+     */
+    private fun recoverMissedReceive() {
+        val address = _onchainReceiveAddress.value?.takeIf { it.isNotBlank() } ?: return
+        val db = databaseService ?: return
+        val now = System.currentTimeMillis() / 1000
+        if (now - lastMissedReceiveCheckSecs < 300) return
+        lastMissedReceiveCheckSecs = now
+        viewModelScope.launch(Dispatchers.IO) {
+            val urls =
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            for (baseUrl in urls) {
+                try {
+                    val request =
+                        Request.Builder()
+                            .url("${baseUrl.trimEnd('/')}/address/$address/txs")
+                            .build()
+                    val body =
+                        httpClient.newCall(request).execute().use { response ->
+                            if (response.isSuccessful) response.body?.string() else null
+                        } ?: continue
+                    val price = priceService.currentPrice.value
+                    var recorded = false
+                    MissedReceiveRecovery.recentReceives(body, address, now).forEach { receive ->
+                        val rowId =
+                            db.recordMissedReceive(
+                                txid = receive.txid,
+                                amountSats = receive.sats,
+                                amountUSD =
+                                    if (price > 0) {
+                                        receive.sats.toDouble() / Constants.SATS_IN_BTC * price
+                                    } else null,
+                                btcPrice = price.takeIf { it > 0 },
+                                address = address,
+                                sinceSecs = now - MissedReceiveRecovery.WINDOW_SECS,
+                            )
+                        if (rowId != -1L) {
+                            recorded = true
+                            // Lets the balance-delta path see this txid already has a row, as the
+                            // websocket path does, instead of adding a second placeholder row.
+                            setLastReceiveTxid(receive.txid, address)
+                            AuditService.log(
+                                "ONCHAIN_RECEIVE_RECOVERED",
+                                mapOf("txid" to receive.txid, "sats" to receive.sats),
+                            )
+                        }
+                    }
+                    if (recorded) notifyPaymentRecorded()
+                    return@launch
+                } catch (e: Exception) {
+                    Log.w("AppState", "Missed receive check failed: ${e.message}")
+                }
+            }
+        }
     }
 
     /** Poll every 10s until spendable on-chain balance updates (deposit confirmed). */
@@ -4577,6 +4608,11 @@ class AppState(private val context: Context) : ViewModel() {
                 .putBoolean(BalanceCacheKey.HAS_READY_CHANNEL, hasReady)
         persistPendingOutboundSend(editor, pendingOutboundSend)
         editor.apply()
+    }
+
+    /** Wakes screens that list pending rows (Home, History) right after a payment row is saved. */
+    fun notifyPaymentRecorded() {
+        _confirmationUpdateEpoch.update { it + 1 }
     }
 
     fun onchainSendBroadcasted(amountSats: Long, isSendAll: Boolean, txid: String? = null) {

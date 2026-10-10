@@ -46,6 +46,9 @@ import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.WalletErrorMessages
+import com.stablechannels.app.ui.components.DoneButton
+import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.scanner.QRScannerScreen
 import com.stablechannels.app.ui.theme.LocalDarkTheme
@@ -411,7 +414,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
         // Header row
         Box(modifier = Modifier.fillMaxWidth().height(56.dp)) {
             if (result == null || isPaymentPending) {
-                TextButton(
+                NeutralTextButton(
                     onClick = onDismiss,
                     modifier = Modifier.align(Alignment.CenterStart),
                     colors =
@@ -422,7 +425,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                 } else {
                                     Color(0xFFE5E5EA)
                                 },
-                            contentColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
                         ),
                     shape = RoundedCornerShape(20.dp),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
@@ -556,9 +559,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
             }
             Spacer(Modifier.weight(1f))
             if (!isPaymentPending) {
-                Button(onClick = onDismiss) {
-                    Text("Done")
-                }
+                DoneButton(onClick = onDismiss)
             }
         } else {
             // Loading indicator during photo QR extraction
@@ -636,7 +637,7 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    TextButton(
+                    NeutralTextButton(
                         onClick = {
                             val maxUSD =
                                 if (inputType == InputType.ONCHAIN) {
@@ -738,11 +739,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
 
             Spacer(Modifier.height(16.dp))
             Spacer(Modifier.weight(1f))
-            Button(
+            InkButton(
                 onClick = {
                     if (!appState.isOnline.value) {
                         error = OfflineMessages.SEND
-                        return@Button
+                        return@InkButton
                     }
                     isSending = true
                     error = null
@@ -889,9 +890,11 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                     (sats.toDouble() / Constants.SATS_IN_BTC) *
                                                         accountingPrice,
                                                 btcPrice = accountingPrice,
+                                                status = "pending",
                                                 txid = txid,
                                                 address = trimmed,
                                             )
+                                            appState.notifyPaymentRecorded()
                                             result = "Onchain tx sent: $txid"
                                         }
                                     }

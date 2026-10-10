@@ -12,7 +12,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,12 +24,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.WifiOff
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TooltipBox
@@ -56,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.ui.theme.LocalSemanticColors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -117,47 +116,34 @@ private fun OfflineCard(onTryAgain: () -> Unit, onContinueOffline: () -> Unit) {
             }
             Spacer(Modifier.height(24.dp))
 
-            val buttonColors =
-                ButtonDefaults.outlinedButtonColors(
-                    contentColor = MaterialTheme.colorScheme.secondary
-                )
-            val buttonPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
-
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                OutlinedButton(
+                NeutralOutlinedButton(
                     onClick = onContinueOffline,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    colors = buttonColors,
-                    contentPadding = buttonPadding,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text("Use offline", maxLines = 1)
                 }
-                OutlinedButton(
+                InkButton(
                     onClick = {
                         scope.launch {
                             checking = true
                             onTryAgain()
-                            kotlinx.coroutines.delay(850)
+                            delay(850)
                             checking = false
                         }
                     },
                     enabled = !checking,
-                    shape = RoundedCornerShape(12.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                    colors = buttonColors,
-                    contentPadding = buttonPadding,
                     modifier = Modifier.weight(1f),
+                    pressedRadius = 22.dp
                 ) {
                     if (checking) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
                             strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.secondary,
+                            color = LocalContentColor.current,
                         )
                     } else {
                         Text("Try again", fontWeight = FontWeight.SemiBold, maxLines = 1)
@@ -171,13 +157,13 @@ private fun OfflineCard(onTryAgain: () -> Unit, onContinueOffline: () -> Unit) {
 @Composable
 private fun PulsingWifiOff(tint: Color) {
     val pulse by
-        rememberInfiniteTransition(label = "offlinePulse")
-            .animateFloat(
-                initialValue = 1f,
-                targetValue = 1.2f,
-                animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
-                label = "scale",
-            )
+    rememberInfiniteTransition(label = "offlinePulse")
+        .animateFloat(
+            initialValue = 1f,
+            targetValue = 1.2f,
+            animationSpec = infiniteRepeatable(tween(1100), RepeatMode.Reverse),
+            label = "scale",
+        )
     Box(contentAlignment = Alignment.Center) {
         Box(Modifier.size(40.dp).scale(pulse).background(tint.copy(alpha = 0.12f), CircleShape))
         Box(
@@ -217,9 +203,8 @@ fun OfflineBadge(modifier: Modifier = Modifier, info: String? = null, tooltipMar
                         else Modifier
                     )
                     .border(BorderStroke(1.dp, red.copy(alpha = 0.35f)), RoundedCornerShape(6.dp))
-                    .background(red.copy(alpha = 0.08f), RoundedCornerShape(6.dp))
                     .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+           verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(

@@ -40,7 +40,7 @@ object OfflineMessages {
         "You're offline. Payments cannot be sent until network connectivity is restored."
     const val TRADE =
         "You're offline. Trades cannot be executed until network connectivity is restored."
-    const val CLOSE_CHANNEL = "Reconnect to close your channel."
-    const val HOME_INFO = "Sending and receiving resume when you're back online."
-    const val LSP_INFO = "Reconnect to switch your LSP."
+    const val CLOSE_CHANNEL = "Reconnect to close your channel"
+    const val HOME_INFO = "Sending and receiving resume when you're back online"
+    const val LSP_INFO = "Reconnect to switch your LSP"
 }

@@ -43,12 +43,15 @@ impl FcmService {
         Some(Self { credentials })
     }
 
-    pub async fn send(&self, token: &str, direction: &str, node_id: &str) {
+    pub async fn send(&self, token: &str, direction: &str, node_id: &str) -> bool {
         let creds = &self.credentials;
 
         let access_token = match generate_access_token(creds).await {
             Some(t) => t,
-            None => { error!("[fcm] Failed to generate access token"); return; }
+            None => {
+                error!("[fcm] Failed to generate access token");
+                return false;
+            }
         };
 
         let url = format!(
@@ -73,7 +76,10 @@ impl FcmService {
 
         let client = match http_client() {
             Ok(c) => c,
-            Err(e) => { error!("[fcm] Failed to build HTTP client: {}", e); return; }
+            Err(e) => {
+                error!("[fcm] Failed to build HTTP client: {}", e);
+                return false;
+            }
         };
         match client
             .post(&url)
@@ -86,12 +92,17 @@ impl FcmService {
                 let status = resp.status();
                 if status.is_success() {
                     info!("[fcm] Push sent to {}...", &token[..8.min(token.len())]);
+                    true
                 } else {
                     let text = resp.text().await.unwrap_or_default();
                     error!("[fcm] Push failed ({}): {}", status, text);
+                    false
                 }
             }
-            Err(e) => error!("[fcm] Request failed: {}", e),
+            Err(e) => {
+                error!("[fcm] Request failed: {}", e);
+                false
+            }
         }
     }
 }
