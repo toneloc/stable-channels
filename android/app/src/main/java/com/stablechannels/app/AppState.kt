@@ -1496,6 +1496,7 @@ class AppState(private val context: Context) : ViewModel() {
                 _isSyncing.value = false
                 val finishingColdStart = coldStartPending
                 if (finishingColdStart) restoreFundingOutpoint()
+                launch { priceService.fetchPrice() }
                 refreshBalances()
                 reconcilePendingLightningPayments()
                 pollPaymentConfirmations(force = true)

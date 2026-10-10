@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -40,6 +41,7 @@ fun BalanceBar(
     btcPrice: Double,
     maxSellUSD: Double = 0.0,
     isTrading: Boolean = false,
+    isOnline: Boolean = true,
     showBtcFormat: Boolean = false,
     modifier: Modifier = Modifier,
     onDragStarted: (() -> Unit)? = null,
@@ -55,8 +57,9 @@ fun BalanceBar(
 
     val isPriceReady = btcPrice > 0.0
     val interactive =
-        (isEmpty && onEmptyInteraction != null) ||
-            (!isEmpty && isPriceReady && onTradeRequest != null)
+        isOnline &&
+            ((isEmpty && onEmptyInteraction != null) ||
+                (!isEmpty && isPriceReady && onTradeRequest != null))
     val barHeight = 20.dp
     val thumbDiameter = BalanceBarDefaults.THUMB_DIAMETER
 
@@ -177,8 +180,8 @@ fun BalanceBar(
     val nativeColor = Color(0xFFF59E0B)
 
     val pulseScale = remember { Animatable(1f) }
-    LaunchedEffect(interactive, isEmpty, reduceMotion) {
-        if (interactive && !isEmpty && !reduceMotion) {
+    LaunchedEffect(interactive, isEmpty, isOnline, reduceMotion) {
+        if (interactive && !isEmpty && isOnline && !reduceMotion) {
             pulseScale.animateTo(
                 targetValue = 1.08f,
                 animationSpec =
@@ -192,8 +195,14 @@ fun BalanceBar(
         }
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        if (interactive) {
+    val currentIsOnline by rememberUpdatedState(isOnline)
+    val currentInteractive by rememberUpdatedState(interactive)
+    var hasHaptickedOfflineDrag by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = modifier.fillMaxWidth().graphicsLayer { alpha = if (isOnline) 1f else 0.85f }
+    ) {
+        if (interactive || !isOnline) {
             val showConversion =
                 state.isDragging ||
                     abs(state.currentOffsetPx) > 0.5f ||
@@ -208,6 +217,7 @@ fun BalanceBar(
                 showDepositPrompt = state.showDepositPrompt,
                 stableColor = stableColor,
                 nativeColor = nativeColor,
+                isOnline = isOnline,
                 onEmptyInteraction = onEmptyInteraction,
             )
             Spacer(Modifier.height(4.dp))
@@ -216,41 +226,56 @@ fun BalanceBar(
         Box(
             modifier =
                 Modifier.fillMaxWidth()
-                    .height(if (interactive) thumbDiameter else barHeight)
+                    .height(if (interactive || !isOnline) thumbDiameter else barHeight)
                     .onSizeChanged {
                         barWidthPx = it.width.toFloat()
                         state.updateLayout(it.width.toFloat(), thumbDiameterPx)
                     }
-                    .then(
-                        if (interactive) {
-                            Modifier.pointerInput(Unit) {
-                                    detectTapGestures(
-                                        onTap = { offset ->
-                                            if (!animator.isAwakening) {
-                                                state.onTap(offset)
-                                            }
-                                        }
-                                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onTap = { offset ->
+                                if (!currentIsOnline) {
+                                    haptics.impact()
+                                } else if (currentInteractive && !animator.isAwakening) {
+                                    state.onTap(offset)
                                 }
-                                .pointerInput(Unit) {
-                                    detectDragGestures(
-                                        onDragStart = { offset ->
-                                            if (!animator.isAwakening) {
-                                                state.onDragStart(offset)
-                                            }
-                                        },
-                                        onDrag = { change, dragAmount ->
-                                            if (!animator.isAwakening) {
-                                                change.consume()
-                                                state.onDrag(dragAmount.x)
-                                            }
-                                        },
-                                        onDragEnd = { state.onDragEnd() },
-                                        onDragCancel = { state.onDragCancel() },
-                                    )
+                            }
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                if (!currentIsOnline) {
+                                    if (!hasHaptickedOfflineDrag) {
+                                        haptics.impact()
+                                        hasHaptickedOfflineDrag = true
+                                    }
+                                } else if (currentInteractive && !animator.isAwakening) {
+                                    state.onDragStart(offset)
                                 }
-                        } else Modifier
-                    ),
+                            },
+                            onDrag = { change, dragAmount ->
+                                if (!currentIsOnline) {
+                                    change.consume()
+                                } else if (currentInteractive && !animator.isAwakening) {
+                                    change.consume()
+                                    state.onDrag(dragAmount.x)
+                                }
+                            },
+                            onDragEnd = {
+                                hasHaptickedOfflineDrag = false
+                                if (currentIsOnline && currentInteractive) {
+                                    state.onDragEnd()
+                                }
+                            },
+                            onDragCancel = {
+                                hasHaptickedOfflineDrag = false
+                                if (currentIsOnline && currentInteractive) {
+                                    state.onDragCancel()
+                                }
+                            },
+                        )
+                    },
             contentAlignment = Alignment.CenterStart,
         ) {
             BalanceBarAwakeningBloom(
@@ -272,13 +297,13 @@ fun BalanceBar(
                 nativeColor = nativeColor,
             )
 
-            if (interactive && barWidthPx > 0) {
+            if ((interactive || !isOnline) && barWidthPx > 0) {
                 val thumbOffsetDp = with(density) { thumbXPx.toDp() } - thumbDiameter / 2
                 val currentScale =
                     when {
                         animator.isAwakening -> animator.thumbAwakenScale
                         state.isDragging -> 1.15f
-                        isEmpty -> 1.0f
+                        isEmpty || !isOnline -> 1.0f
                         else -> pulseScale.value
                     }
                 BalanceBarThumb(

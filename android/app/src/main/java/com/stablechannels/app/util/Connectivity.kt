@@ -22,8 +22,12 @@ fun Context.observeOnline(): Flow<Boolean> = callbackFlow {
     val cm = getSystemService(ConnectivityManager::class.java)
     val callback =
         object : ConnectivityManager.NetworkCallback() {
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                trySend(isOnline())
+            override fun onCapabilitiesChanged(
+                network: Network,
+                caps: NetworkCapabilities,
+            ) {
+                val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                trySend(hasInternet)
             }
 
             override fun onAvailable(network: Network) {
@@ -31,7 +35,16 @@ fun Context.observeOnline(): Flow<Boolean> = callbackFlow {
             }
 
             override fun onLost(network: Network) {
-                trySend(isOnline())
+                val active = cm?.activeNetwork
+                if (active == null || active == network) {
+                    trySend(false)
+                } else {
+                    trySend(isOnline())
+                }
+            }
+
+            override fun onUnavailable() {
+                trySend(false)
             }
         }
     trySend(isOnline())

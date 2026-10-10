@@ -238,6 +238,19 @@ fun OfflineBadgeView(
 ) {
     val red = Color(0xFFEF4444)
 
+    val infiniteTransition = rememberInfiniteTransition(label = "offlinePulse")
+    val pulseAlpha by
+        infiniteTransition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.25f,
+            animationSpec =
+                infiniteRepeatable(
+                    animation = tween(durationMillis = 750),
+                    repeatMode = RepeatMode.Reverse,
+                ),
+            label = "pulseAlpha",
+        )
+
     Surface(
         shape = RoundedCornerShape(6.dp),
         color = red.copy(alpha = 0.08f),
@@ -257,7 +270,7 @@ fun OfflineBadgeView(
                     painter = painterResource(R.drawable.ic_wifi_slash),
                     contentDescription = null,
                     tint = red,
-                    modifier = Modifier.size(10.dp),
+                    modifier = Modifier.size(11.dp).alpha(pulseAlpha),
                 )
                 Text(
                     text = OfflineMessages.TITLE,
@@ -265,7 +278,7 @@ fun OfflineBadgeView(
                     fontWeight = FontWeight.Bold,
                     color = red,
                 )
-                Box(modifier = Modifier.size(4.dp).background(red, CircleShape))
+                Box(modifier = Modifier.size(4.dp).alpha(pulseAlpha).background(red, CircleShape))
             }
             if (!subtitle.isNullOrBlank()) {
                 Text(

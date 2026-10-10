@@ -35,7 +35,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
-import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
@@ -47,7 +46,6 @@ import com.stablechannels.app.ui.trade.SellScreen
 import com.stablechannels.app.ui.transfer.ReceiveScreen
 import com.stablechannels.app.ui.transfer.SendScreen
 import com.stablechannels.app.util.Constants
-import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.openInAppBrowser
 import com.stablechannels.app.util.usdFormatted
 import kotlinx.coroutines.Dispatchers
@@ -193,16 +191,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 onToggleShowBTC = { showBTC = !showBTC },
             )
 
-            if (!isOnline) {
-                Spacer(Modifier.height(8.dp))
-                Box(
-                    modifier = Modifier.fillMaxWidth(),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    OfflineBadge(info = OfflineMessages.CHECK_NETWORK)
-                }
-            }
-
             Spacer(Modifier.height(8.dp))
 
             // Balance bar
@@ -217,6 +205,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         appState.priceService.accountingPrice.value,
                     ) ?: 0L) / 100.0,
                 isTrading = showBuy || showSell,
+                isOnline = isOnline,
                 showBtcFormat = showBTC,
                 modifier = Modifier.padding(horizontal = 18.dp),
                 onDragStarted = { appState.ensureLSPConnected() },
