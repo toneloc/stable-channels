@@ -146,6 +146,12 @@ fun BalanceBar(
         }
     }
 
+    LaunchedEffect(isOnline) {
+        if (!isOnline && state.isDragging) {
+            state.onDragCancel(rebase = reduceMotion)
+        }
+    }
+
     val currentFraction =
         when {
             animator.isAwakening && animator.settleFraction != null -> animator.settleFraction!!
@@ -266,13 +272,13 @@ fun BalanceBar(
                                 hasHaptickedOfflineDrag = false
                                 if (currentIsOnline && currentInteractive) {
                                     state.onDragEnd()
+                                } else {
+                                    state.onDragCancel(rebase = reduceMotion)
                                 }
                             },
                             onDragCancel = {
                                 hasHaptickedOfflineDrag = false
-                                if (currentIsOnline && currentInteractive) {
-                                    state.onDragCancel()
-                                }
+                                state.onDragCancel(rebase = reduceMotion)
                             },
                         )
                     },
