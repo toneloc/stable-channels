@@ -297,7 +297,7 @@ async fn run(state: AppState) {
             );
             // Finish failed accounting writes before reconnect hydration or backfill can
             // change the same books. The existing stream remains open while we retry.
-            let mut mgr = StableChannelManager::lock_for_event(
+            let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(
                 &state.stable_manager,
                 state.ldk_server.as_ref(),
             )
@@ -385,7 +385,7 @@ async fn dispatch(
     let ldk = state.ldk_server.as_ref() as &dyn LdkServerCalls;
     // Keep this envelope on the stack while an earlier correction is unsaved. Returning or
     // reconnecting here would lose the event because LDK Server does not replay its stream.
-    let mut mgr = StableChannelManager::lock_for_event(&state.stable_manager, ldk).await;
+    let mut mgr = StableChannelManager::lock_for_event_with_top_ups_resolved(&state.stable_manager, ldk).await;
     let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
     let outcome = dispatch_event(envelope.event, &mut mgr, &state.db, ldk, btc_price).await;
     drop(mgr);
@@ -511,6 +511,22 @@ pub(crate) async fn dispatch_event(
                         return DispatchOutcome::Reconnect;
                     }
                 }
+                // Safe to book directly: dispatch runs under lock_for_event, which has already saved any correction that would replace these books.
+                match mgr.settle_stability_top_up(payment_id, amount_msat, fee_paid_msat) {
+                    Ok(crate::stable_manager::TopUpSettlement::NotOnTheWay) => {}
+                    Ok(_) => settlement_handled = true,
+                    Err(error) => {
+                        stable_channels::audit::audit_event(
+                            "DB_WRITE_FAILED",
+                            serde_json::json!({
+                                "op": "claim_stability_top_up",
+                                "payment_id": payment_id,
+                                "error": error.to_string(),
+                            }),
+                        );
+                        return DispatchOutcome::Reconnect;
+                    }
+                }
                 let known_settlement = db
                     .settlement_exists(payment_id)
                     .ok()
@@ -583,12 +599,30 @@ pub(crate) async fn dispatch_event(
                     return DispatchOutcome::Reconnect;
                 }
             }
+            let top_up_channel = match payment_id.as_deref().map(|payment_id| mgr.fail_stability_top_up(payment_id)) {
+                Some(Ok(channel)) => channel,
+                Some(Err(error)) => {
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({
+                            "op": "fail_stability_top_up",
+                            "payment_id": payment_id,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return DispatchOutcome::Reconnect;
+                }
+                None => None,
+            };
+            if let (None, Some(payment_id)) = (&top_up_channel, payment_id.as_deref()) {
+                mgr.note_failure_of_booked_top_up(payment_id);
+            }
+            // Only a top-up booked when it was sent has anything to roll back; for any other payment this finds nothing.
             let rollback = payment_id
                 .as_deref()
                 .and_then(|payment_id| mgr.handle_failed_stability_payment(payment_id));
-            let user_channel_id = rollback
-                .as_ref()
-                .map(|rollback| rollback.user_channel_id.clone())
+            let user_channel_id = top_up_channel
+                .or_else(|| rollback.as_ref().map(|rollback| rollback.user_channel_id.clone()))
                 .or_else(|| {
                     payment_id.as_deref()
                         .and_then(|pid| db.get_settlement_channel(pid).ok().flatten())

@@ -7,12 +7,13 @@ use axum::response::Response;
 use sc_protos::stable::{
     EditStableChannelRequest, EditStableChannelResponse, ListSettlementPaymentsRequest,
     ListSettlementPaymentsResponse, ListStableChannelsRequest, ListStableChannelsResponse,
-    SettlementPayment, StableChannelInfo,
+    ReleaseStabilityPaymentRequest, ReleaseStabilityPaymentResponse, SettlementPayment,
+    StableChannelInfo,
 };
 use stable_channels::price_feeds::get_fresh_cached_price_no_fetch;
 
 use crate::handlers::{decode_body, error_response, ok_response};
-use crate::stable_manager::EditOutcome;
+use crate::stable_manager::{EditOutcome, ReleaseOutcome};
 use crate::state::AppState;
 
 fn to_proto_locations(rows: Vec<stable_channels::db::PeerLocationRecord>) -> Vec<sc_protos::stable::PeerLocation> {
@@ -95,6 +96,46 @@ pub async fn edit_stable_channel(
     ok_response(EditStableChannelResponse { ok, status })
 }
 
+/// Whether a release counts the payment as arrived; None for anything but the two spelled-out answers, so an empty request can never drop a payment.
+fn release_decision(decision: &str) -> Option<bool> {
+    match decision {
+        "arrived" => Some(true),
+        "not_arrived" => Some(false),
+        _ => None,
+    }
+}
+
+/// Operator's decision about a stability payment the node has no record of.
+pub async fn release_stability_payment(
+    State(state): State<AppState>,
+    body: Bytes,
+) -> Response {
+    let req: ReleaseStabilityPaymentRequest = match decode_body(&body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+
+    let Some(arrived) = release_decision(&req.decision) else {
+        let status = format!("Unknown decision {:?}; send \"arrived\" or \"not_arrived\"", req.decision);
+        return ok_response(ReleaseStabilityPaymentResponse { ok: false, status, needs_acknowledgement: false });
+    };
+    let btc_price = get_fresh_cached_price_no_fetch();
+
+    let ReleaseOutcome { ok, status, needs_acknowledgement } = {
+        let mut mgr = state.stable_manager.lock().await;
+        mgr.release_stability_payment(
+            &req.payment_id,
+            arrived,
+            req.acknowledged,
+            state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
+            btc_price,
+        )
+        .await
+    };
+
+    ok_response(ReleaseStabilityPaymentResponse { ok, status, needs_acknowledgement })
+}
+
 pub async fn list_settlement_payments(
     State(state): State<AppState>,
     body: Bytes,
@@ -126,6 +167,15 @@ mod tests {
     use super::*;
     use prost::Message;
     use stable_channels::db::PeerLocationRecord;
+
+    #[test]
+    fn release_needs_a_spelled_out_decision() {
+        assert_eq!(release_decision("arrived"), Some(true));
+        assert_eq!(release_decision("not_arrived"), Some(false));
+        for unclear in ["", "Arrived", "true", "false", "not arrived"] {
+            assert_eq!(release_decision(unclear), None, "{unclear:?}");
+        }
+    }
 
     #[test]
     fn locations_map_to_proto_and_old_readers_ignore_them() {

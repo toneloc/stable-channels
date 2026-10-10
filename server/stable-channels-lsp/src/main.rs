@@ -32,7 +32,7 @@ use sc_protos::revenue::{GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 use sc_protos::stable::{
     AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
     LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
-    REGISTER_PUSH_PATH,
+    REGISTER_PUSH_PATH, RELEASE_STABILITY_PAYMENT_PATH,
 };
 use ldk_server_client::ldk_server_grpc::endpoints::{
     BOLT11_RECEIVE_PATH, BOLT11_SEND_PATH, BOLT12_RECEIVE_PATH, BOLT12_SEND_PATH,
@@ -249,6 +249,10 @@ async fn main() -> Result<()> {
         .route(
             &format!("/{}", EDIT_STABLE_CHANNEL_PATH),
             post(handlers::stable_channels::edit_stable_channel),
+        )
+        .route(
+            &format!("/{}", RELEASE_STABILITY_PAYMENT_PATH),
+            post(handlers::stable_channels::release_stability_payment),
         )
         .route(
             &format!("/{}", REGISTER_PUSH_PATH),

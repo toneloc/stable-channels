@@ -8,8 +8,9 @@ use crate::ledger::{
 	latest_state_caption, loaded_events_caption, relative_timestamp, sats_delta, snapshot_rows, status_help,
 	status_tone, timeline_order, ForwardingLeg,
 };
-use crate::state::{AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Op};
-use crate::ui::widgets::{Empty, Hover, Icon, IdCopy, InfoTip, Pill, SegBtn, Spinner, Stat, TextInput};
+use crate::state::{AppCtx, ChannelLedgerForm, ChannelLedgerRequestKey, Dialog, Op, ReleaseStabilityPaymentForm};
+use crate::ui::widgets::{Bubble, Empty, Hover, Icon, IdCopy, InfoTip, Modal, Pill, SegBtn, Spinner, Stat, TextInput};
+use crate::ui::{close_dialog, open_dialog};
 
 const CATEGORIES: [&str; 10] =
 	["channel", "payment", "forwarding", "trade", "stability", "peer", "sweep", "reconciliation", "operator", "system"];
@@ -218,6 +219,7 @@ fn HistoryHeader(channel: String, overview: Option<ChannelLedgerOverview>, first
 /// Day-grouped, one line per business event; a row expands into its underlying ledger steps.
 #[component]
 fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverview>, channel: String, newest_first: bool) -> Element {
+	let ctx = use_context::<AppCtx>();
 	let mut open = use_signal(std::collections::HashSet::<i64>::new);
 	let first_ms = events.iter().map(|e| e.occurred_at_ms).min();
 	let last_ms = events.iter().map(|e| e.occurred_at_ms).max();
@@ -268,6 +270,22 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 							if let Some(target) = entry.target_after.filter(|_| entry.target_changed) {
 								Pill { tone: "info", "target {crate::format::format_usd(target)}" }
 							}
+							if let Some(payment_id) = crate::history::top_up_to_release(&entry.events) {
+								button {
+									class: "btn sm",
+									onclick: {
+										let summary = entry.summary.clone();
+										move |e: MouseEvent| {
+											e.stop_propagation();
+											let mut forms = ctx.forms;
+											forms.write().release_stability_payment =
+												ReleaseStabilityPaymentForm { payment_id: payment_id.clone(), summary: summary.clone(), ..Default::default() };
+											open_dialog(ctx, Dialog::ReleaseStabilityPayment);
+										}
+									},
+									"Release"
+								}
+							}
 						}
 					}
 					if open.read().contains(&entry.key) {
@@ -278,6 +296,54 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 						}
 					}
 				}
+			}
+		}
+	}
+}
+
+/// Asks the operator what happened to a stability payment the node has no record of.
+#[component]
+pub fn ReleaseStabilityPaymentDialog() -> Element {
+	let ctx = use_context::<AppCtx>();
+	let mut forms = ctx.forms;
+	let form = forms.read().release_stability_payment.clone();
+	let pending = ctx.busy(Op::ReleaseStabilityPayment);
+	let mut cancel = move || {
+		forms.write().release_stability_payment = Default::default();
+		close_dialog(ctx);
+	};
+	rsx! {
+		Modal {
+			title: "Release stability payment",
+			sub: "Decide what happened to a payment the node has no record of",
+			icon: rsx! { Bubble { icon: "alert", tone: "orange" } },
+			onclose: move |_| cancel(),
+			footer: rsx! {
+				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
+				if let Some(arrived) = form.confirming {
+					button { class: "btn", disabled: pending,
+						onclick: move |_| {
+							let mut forms = ctx.forms;
+							let mut forms = forms.write();
+							forms.release_stability_payment.confirming = None;
+							forms.release_stability_payment.notice.clear();
+						},
+						"Back"
+					}
+					button { class: "btn primary", disabled: pending, onclick: move |_| actions::release_stability_payment(ctx, arrived),
+						if pending { Spinner {} }
+						if arrived { "Confirm: it arrived" } else { "Confirm: it did not arrive" }
+					}
+				} else {
+					button { class: "btn", disabled: pending, onclick: move |_| actions::release_stability_payment(ctx, false), "It did not arrive" }
+					button { class: "btn", disabled: pending, onclick: move |_| actions::release_stability_payment(ctx, true), "It arrived" }
+				}
+			},
+			p { "{form.summary}" }
+			if form.confirming.is_some() {
+				p { class: "small", strong { "{form.notice}" } }
+			} else {
+				span { class: "small muted", "Choosing an answer first shows the channel's balance and books and what that answer will do; nothing changes until it is confirmed. \"It arrived\" adds the payment's sats to the channel's books. \"It did not arrive\" drops the payment and the next stability check pays whatever is still owed, so a wrong answer pays the user twice; it is accepted only once the payment is 14 days old and can no longer be in flight. A payment the node still holds, or cannot be asked about, is not released." }
 			}
 		}
 	}
