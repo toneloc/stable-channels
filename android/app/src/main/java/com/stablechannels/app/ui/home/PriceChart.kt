@@ -50,7 +50,7 @@ fun PriceChart(
     val haptic = LocalHapticFeedback.current
     val prefs = remember(context) { context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE) }
     var isExpanded by remember {
-        mutableStateOf(prefs.getBoolean(PREF_KEY_CHART_EXPANDED, true))
+        mutableStateOf(prefs.getBoolean(PREF_KEY_CHART_EXPANDED, false))
     }
     val chevronRotation by
         animateFloatAsState(
