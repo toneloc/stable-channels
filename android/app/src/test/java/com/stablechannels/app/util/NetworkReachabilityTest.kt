@@ -1,9 +1,11 @@
 package com.stablechannels.app.util
 
 import java.io.IOException
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.PortUnreachableException
+import java.net.ProtocolException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -11,6 +13,7 @@ import javax.net.ssl.SSLException
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.lightningdevkit.ldknode.NodeException
 
 class NetworkReachabilityTest {
 
@@ -38,6 +41,46 @@ class NetworkReachabilityTest {
         )
         assertTrue(
             NetworkReachabilityEvaluator.isNetworkError(SSLException("SSL handshake failed"))
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(ProtocolException("Connection reset"))
+        )
+        assertTrue(NetworkReachabilityEvaluator.isNetworkError(InterruptedIOException("Timeout")))
+    }
+
+    @Test
+    fun `isNetworkError identifies typed NodeException variants`() {
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(NodeException.ConnectionFailed("network"))
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(
+                NodeException.LiquiditySourceUnavailable("network")
+            )
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(
+                NodeException.FeerateEstimationUpdateFailed("network")
+            )
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(
+                NodeException.FeerateEstimationUpdateTimeout("network")
+            )
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(NodeException.TxSyncFailed("network"))
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(NodeException.TxSyncTimeout("network"))
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(NodeException.GossipUpdateFailed("network"))
+        )
+        assertTrue(
+            NetworkReachabilityEvaluator.isNetworkError(
+                NodeException.GossipUpdateTimeout("network")
+            )
         )
     }
 

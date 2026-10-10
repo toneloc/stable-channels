@@ -8,13 +8,15 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import org.lightningdevkit.ldknode.NodeException
 
-/** True if the active network claims internet access. */
+/** True if the active network claims internet access and has been validated. */
 fun Context.isOnline(): Boolean {
     val cm = getSystemService(ConnectivityManager::class.java) ?: return false
     val network = cm.activeNetwork ?: return false
     val caps = cm.getNetworkCapabilities(network) ?: return false
-    return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
 }
 
 /** Emits online/offline changes for the default network. */
@@ -26,7 +28,9 @@ fun Context.observeOnline(): Flow<Boolean> = callbackFlow {
                 network: Network,
                 caps: NetworkCapabilities,
             ) {
-                val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                val hasInternet =
+                    caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
                 trySend(hasInternet)
             }
 
@@ -49,7 +53,11 @@ fun Context.observeOnline(): Flow<Boolean> = callbackFlow {
         }
     trySend(isOnline())
     cm?.registerDefaultNetworkCallback(callback)
-    awaitClose { cm?.unregisterNetworkCallback(callback) }
+    awaitClose {
+        try {
+            cm?.unregisterNetworkCallback(callback)
+        } catch (_: Exception) {}
+    }
 }
     .distinctUntilChanged()
 
@@ -66,9 +74,25 @@ object NetworkReachabilityEvaluator {
                     curr is java.net.NoRouteToHostException ||
                     curr is java.net.PortUnreachableException ||
                     curr is java.net.SocketException ||
-                    curr is javax.net.ssl.SSLException
+                    curr is javax.net.ssl.SSLException ||
+                    curr is java.net.ProtocolException ||
+                    curr is java.io.InterruptedIOException
             ) {
                 return true
+            }
+            if (curr is NodeException) {
+                if (
+                    curr is NodeException.ConnectionFailed ||
+                        curr is NodeException.LiquiditySourceUnavailable ||
+                        curr is NodeException.FeerateEstimationUpdateFailed ||
+                        curr is NodeException.FeerateEstimationUpdateTimeout ||
+                        curr is NodeException.TxSyncFailed ||
+                        curr is NodeException.TxSyncTimeout ||
+                        curr is NodeException.GossipUpdateFailed ||
+                        curr is NodeException.GossipUpdateTimeout
+                ) {
+                    return true
+                }
             }
             val msg = curr.message?.lowercase() ?: ""
             if (

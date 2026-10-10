@@ -42,13 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.R
@@ -198,8 +197,9 @@ fun OfflinePageView(
                             Icons.Default.Refresh,
                             contentDescription = null,
                             modifier =
-                                Modifier.size(14.dp)
-                                    .rotate(if (isSpinning || isRetrying) spinAngle else 0f),
+                                Modifier.size(14.dp).graphicsLayer {
+                                    rotationZ = if (isSpinning || isRetrying) spinAngle else 0f
+                                },
                             tint = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
@@ -270,7 +270,7 @@ fun OfflineBadgeView(
                     painter = painterResource(R.drawable.ic_wifi_slash),
                     contentDescription = null,
                     tint = red,
-                    modifier = Modifier.size(11.dp).alpha(pulseAlpha),
+                    modifier = Modifier.size(11.dp).graphicsLayer { alpha = pulseAlpha },
                 )
                 Text(
                     text = OfflineMessages.TITLE,
@@ -278,7 +278,12 @@ fun OfflineBadgeView(
                     fontWeight = FontWeight.Bold,
                     color = red,
                 )
-                Box(modifier = Modifier.size(4.dp).alpha(pulseAlpha).background(red, CircleShape))
+                Box(
+                    modifier =
+                        Modifier.size(4.dp)
+                            .graphicsLayer { alpha = pulseAlpha }
+                            .background(red, CircleShape)
+                )
             }
             if (!subtitle.isNullOrBlank()) {
                 Text(
@@ -297,7 +302,6 @@ fun OfflineBadgeView(
 fun OfflineBadge(
     modifier: Modifier = Modifier,
     info: String? = OfflineMessages.CHECK_NETWORK,
-    tooltipMargin: Dp = 18.dp,
 ) {
     OfflineBadgeView(modifier = modifier, subtitle = info)
 }

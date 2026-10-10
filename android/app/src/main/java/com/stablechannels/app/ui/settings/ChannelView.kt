@@ -253,7 +253,7 @@ private fun CloseChannelButton(enabled: Boolean, onClick: () -> Unit) {
     val red = Color(0xFFEF4444)
     if (!enabled) {
         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            OfflineBadge(info = OfflineMessages.CLOSE_CHANNEL, tooltipMargin = 16.dp)
+            OfflineBadge(info = OfflineMessages.CLOSE_CHANNEL)
         }
         Spacer(Modifier.height(12.dp))
     }

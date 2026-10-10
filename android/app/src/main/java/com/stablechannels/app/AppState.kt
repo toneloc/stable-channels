@@ -1448,9 +1448,9 @@ class AppState(private val context: Context) : ViewModel() {
      * @param keepWalletVisible keep showing the cached wallet (with the syncing indicator) instead
      *   of switching to the full-screen sync view while the node starts.
      */
-    fun restartNodeFromForeground(keepWalletVisible: Boolean = false) {
+    fun restartNodeFromForeground(keepWalletVisible: Boolean = false): Job {
         isWaitingForPayment = false
-        viewModelScope.launch(Dispatchers.IO) {
+        return viewModelScope.launch(Dispatchers.IO) {
             if (!isInitialized) {
                 isInitialized = true
                 start()
@@ -1525,7 +1525,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
+    internal fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
         if (e is NodeService.AlreadyRunningException && nodeService.isRunning) {
             Log.w("AppState", "Ignoring duplicate node start after another start succeeded", e)
             _phase.value = Phase.WALLET
@@ -1604,7 +1604,7 @@ class AppState(private val context: Context) : ViewModel() {
         setOnline(context.isOnline())
     }
 
-    private fun setOnline(online: Boolean) {
+    internal fun setOnline(online: Boolean) {
         if (_isOnline.getAndUpdate { online } == online) return
         AuditService.log(if (online) "NETWORK_ONLINE" else "NETWORK_OFFLINE", emptyMap())
         if (online) {
@@ -1616,7 +1616,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun deferNodeStartUntilOnline() {
+    internal fun deferNodeStartUntilOnline() {
         nodeStartDeferredForOffline.set(true)
         if (coldStartPending) restoreFundingOutpoint()
         nodeStartRetryJob?.cancel()
@@ -1647,36 +1647,21 @@ class AppState(private val context: Context) : ViewModel() {
                     try {
                         chainUrl = resolveChainUrl()
                         nodeStartDeferredForOffline.set(false)
-                        restartNodeFromForeground(
-                            keepWalletVisible = (previousPhase == Phase.WALLET)
-                        )
-                        _phase.value = Phase.WALLET
-                    } catch (e: Exception) {
-                        if (previousPhase == Phase.OFFLINE) {
-                            if (
-                                !_isOnline.value ||
-                                    NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                                        e,
-                                        !_isOnline.value,
-                                    )
-                            ) {
-                                _phase.value = Phase.OFFLINE
-                            } else {
-                                _phase.value = Phase.ERROR
-                                _errorMessage.value = "Node start failed: ${e.message}"
-                            }
-                        } else {
-                            AuditService.log(
-                                "RETRY_CONNECTION_WALLET_FAILED",
-                                mapOf("error" to (e.message ?: "")),
+                        val job =
+                            restartNodeFromForeground(
+                                keepWalletVisible = (previousPhase == Phase.WALLET)
                             )
-                        }
+                        job.join()
+                    } catch (e: Exception) {
+                        handleNodeStartFailure(e, "Retry connection failed")
                     } finally {
                         _isSyncing.value = false
                     }
                 } else {
                     onConnectivityRestored()
-                    _phase.value = Phase.WALLET
+                    if (previousPhase == Phase.OFFLINE) {
+                        _phase.value = Phase.WALLET
+                    }
                 }
             } finally {
                 isRetryingConnection.value = false

@@ -53,7 +53,7 @@ fun BalanceBarHeader(
             label = "conversionAlpha",
         )
 
-    val headerHeight = 34.dp
+    val minHeaderHeight = 34.dp
 
     val pillTextStyle =
         MaterialTheme.typography.labelSmall.copy(
@@ -73,7 +73,16 @@ fun BalanceBarHeader(
         }
 
     Box(
-        modifier = modifier.fillMaxWidth().height(headerHeight),
+        modifier =
+            if (isOnline) {
+                modifier.fillMaxWidth().height(minHeaderHeight)
+            } else {
+                modifier
+                    .fillMaxWidth()
+                    .wrapContentHeight()
+                    .defaultMinSize(minHeight = minHeaderHeight)
+                    .padding(vertical = 4.dp)
+            },
         contentAlignment = Alignment.Center,
     ) {
         if (!isOnline) {

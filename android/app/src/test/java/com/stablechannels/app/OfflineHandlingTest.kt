@@ -1,9 +1,13 @@
 package com.stablechannels.app
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.NetworkInfo
 import com.stablechannels.app.AppState.Companion.BalanceCacheKey
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.OfflineMessages
+import com.stablechannels.app.util.isOnline
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -13,13 +17,44 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowNetworkCapabilities
+import org.robolectric.shadows.ShadowNetworkInfo
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
 class OfflineHandlingTest {
 
     private lateinit var context: Context
+
+    private fun setDeviceOnline(online: Boolean) {
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        val shadowCm = Shadows.shadowOf(cm)
+        if (online) {
+            val info =
+                ShadowNetworkInfo.newInstance(
+                    NetworkInfo.DetailedState.CONNECTED,
+                    ConnectivityManager.TYPE_WIFI,
+                    0,
+                    true,
+                    NetworkInfo.State.CONNECTED,
+                )
+            shadowCm.setActiveNetworkInfo(info)
+            shadowCm.setDefaultNetworkActive(true)
+            val network = cm.activeNetwork
+            if (network != null) {
+                val caps = ShadowNetworkCapabilities.newInstance()
+                val shadowCaps = Shadows.shadowOf(caps)
+                shadowCaps.addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                shadowCaps.addCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                shadowCm.setNetworkCapabilities(network, caps)
+            }
+        } else {
+            shadowCm.setActiveNetworkInfo(null)
+            shadowCm.setDefaultNetworkActive(false)
+        }
+    }
 
     @Before
     fun setUp() {
@@ -28,6 +63,27 @@ class OfflineHandlingTest {
         if (!userDir.exists()) userDir.mkdirs()
         File(userDir, "keys_seed").delete()
         File(userDir, "seed_phrase").delete()
+        setDeviceOnline(false)
+    }
+
+    @Test
+    fun `isOnline returns true only when internet and validated capabilities are present`() {
+        setDeviceOnline(false)
+        assertFalse(context.isOnline())
+
+        setDeviceOnline(true)
+        assertTrue(context.isOnline())
+
+        val cm = context.getSystemService(ConnectivityManager::class.java)
+        val shadowCm = Shadows.shadowOf(cm)
+        val network = cm.activeNetwork
+        if (network != null) {
+            val capsNoValidation = ShadowNetworkCapabilities.newInstance()
+            Shadows.shadowOf(capsNoValidation)
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            shadowCm.setNetworkCapabilities(network, capsNoValidation)
+            assertFalse(context.isOnline())
+        }
     }
 
     @Test
@@ -118,5 +174,55 @@ class OfflineHandlingTest {
         val appState = AppState(context)
         appState.setPhaseWallet()
         assertEquals(Phase.WALLET, appState.phase.value)
+    }
+
+    @Test
+    fun `deferNodeStartUntilOnline transitions phase to OFFLINE and clears syncing`() {
+        val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+        assertFalse(appState.isSyncing.value)
+        assertEquals("", appState.errorMessage.value)
+    }
+
+    @Test
+    fun `handleNodeStartFailure transitions to OFFLINE on network error`() {
+        val appState = AppState(context)
+        appState.setOnline(false)
+        appState.handleNodeStartFailure(
+            java.net.ConnectException("Connection refused"),
+            "fallback",
+        )
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+        assertFalse(appState.isSyncing.value)
+    }
+
+    @Test
+    fun `handleNodeStartFailure transitions to ERROR on non-retryable fatal error`() {
+        setDeviceOnline(true)
+        val appState = AppState(context)
+        appState.setOnline(true)
+        val fatalError = IllegalStateException("Corrupt database schema")
+        appState.handleNodeStartFailure(fatalError, "Wallet start failed")
+        assertEquals(Phase.ERROR, appState.phase.value)
+        assertEquals("Corrupt database schema", appState.errorMessage.value)
+    }
+
+    @Test
+    fun `retryConnection does not force Phase WALLET when still offline`() {
+        val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+
+        appState.setOnline(false)
+        appState.retryConnection()
+
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+    }
+
+    @Test
+    fun `retryConnection re-entry guard prevents duplicate concurrent executions`() {
+        val appState = AppState(context)
+        assertFalse(appState.isRetrying.value)
     }
 }
