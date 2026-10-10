@@ -16,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.ui.components.OfflineBadge
+import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.openInAppBrowser
 import kotlinx.coroutines.Dispatchers
@@ -24,7 +26,6 @@ import kotlinx.coroutines.launch
 @Composable
 fun ChannelView(appState: AppState) {
     val sc by appState.stableChannel.collectAsState()
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var showCloseConfirm by remember { mutableStateOf(false) }
 
@@ -36,35 +37,15 @@ fun ChannelView(appState: AppState) {
     val isClosing by appState.isChannelClosingFlow.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
     val channels = appState.nodeService.channels
+    val isOnline by appState.isOnline.collectAsState()
+    val lightningSats by appState.lightningBalanceSats.collectAsState()
+    val hasCachedChannel = hasReadyChannel || sc.userChannelId.isNotEmpty()
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (channels.isNotEmpty() && !isClosing) {
             val ch = channels.first()
 
-            // Status with colored dot
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Status", style = MaterialTheme.typography.bodyLarge)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Surface(
-                        shape = MaterialTheme.shapes.small,
-                        color = if (ch.isChannelReady) Color(0xFF10B981) else Color(0xFFF59E0B),
-                        modifier = Modifier.size(8.dp),
-                    ) {}
-                    Text(
-                        text = if (ch.isChannelReady) "Ready" else "Pending",
-                        style = MaterialTheme.typography.bodyLarge,
-                        fontWeight = FontWeight.Medium,
-                        color = if (ch.isChannelReady) Color(0xFF10B981) else Color(0xFFF59E0B),
-                    )
-                }
-            }
+            ChannelStatusRow(isReady = ch.isChannelReady, isOnline = isOnline)
 
             Spacer(Modifier.height(20.dp))
 
@@ -85,53 +66,11 @@ fun ChannelView(appState: AppState) {
                 "${(ch.inboundCapacityMsat.toLong() / 1000).btcSpacedFormatted()} BTC",
             )
 
-            // Funding Tx
-            appState.fundingTxid?.let { txid ->
-                if (txid.isNotEmpty()) {
-                    Spacer(Modifier.height(20.dp))
-                    Surface(
-                        shape = MaterialTheme.shapes.medium,
-                        tonalElevation = 1.dp,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Text(
-                                text = "Funding Transaction",
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.height(4.dp))
-                            Text(
-                                text = "${txid.take(8)}...${txid.takeLast(8)}",
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontFamily = FontFamily.Monospace,
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            NeutralTextButton(
-                                onClick = {
-                                    context.openInAppBrowser(
-                                        "https://mempool.space/tx/${txid.substringBefore(":")}"
-                                    )
-                                },
-                                contentPadding = PaddingValues(0.dp),
-                            ) {
-                                Text("View on explorer ↗")
-                            }
-                        }
-                    }
-                }
-            }
+            FundingTxCard(appState.fundingTxid)
 
             if (hasReadyChannel) {
                 Spacer(Modifier.height(32.dp))
-                NeutralOutlinedButton(
-                    onClick = { showCloseConfirm = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFEF4444)),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFEF4444)),
-                ) {
-                    Text("Close channel")
-                }
+                CloseChannelButton(enabled = isOnline, onClick = { showCloseConfirm = true })
             }
         } else if (isClosing) {
             // Channel is closing — show status
@@ -156,6 +95,15 @@ fun ChannelView(appState: AppState) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        } else if (hasCachedChannel) {
+            ChannelStatusRow(isReady = hasReadyChannel, isOnline = isOnline)
+            Spacer(Modifier.height(20.dp))
+            ChannelDetailRow("Capacity", "${lightningSats.btcSpacedFormatted()} BTC")
+            FundingTxCard(appState.fundingTxid)
+            if (!isOnline) {
+                Spacer(Modifier.height(32.dp))
+                CloseChannelButton(enabled = false, onClick = {})
             }
         } else {
             Text(
@@ -224,5 +172,98 @@ private fun ChannelDetailRow(label: String, value: String) {
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,
         )
+    }
+}
+
+@Composable
+private fun ChannelStatusRow(isReady: Boolean, isOnline: Boolean) {
+    val (label, color) =
+        when {
+            !isOnline -> "Offline" to Color(0xFFF59E0B)
+            isReady -> "Ready" to Color(0xFF10B981)
+            else -> "Pending" to Color(0xFFF59E0B)
+        }
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Status", style = MaterialTheme.typography.bodyLarge)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = color,
+                modifier = Modifier.size(8.dp),
+            ) {}
+            Text(
+                text = label,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                color = color,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FundingTxCard(fundingTxid: String?) {
+    val context = LocalContext.current
+    fundingTxid?.let { txid ->
+        if (txid.isNotEmpty()) {
+            Spacer(Modifier.height(20.dp))
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Funding Transaction",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = "${txid.take(8)}...${txid.takeLast(8)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    NeutralTextButton(
+                        onClick = {
+                            context.openInAppBrowser(
+                                "https://mempool.space/tx/${txid.substringBefore(":")}"
+                            )
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("View on explorer ↗")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CloseChannelButton(enabled: Boolean, onClick: () -> Unit) {
+    val red = Color(0xFFEF4444)
+    if (!enabled) {
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+            OfflineBadge(info = OfflineMessages.CLOSE_CHANNEL)
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+    NeutralOutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.fillMaxWidth(),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = red),
+        border = BorderStroke(1.dp, if (enabled) red else red.copy(alpha = 0.38f)),
+    ) {
+        Text("Close channel")
     }
 }

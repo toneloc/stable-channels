@@ -17,11 +17,16 @@ import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.AppFormatters
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.NetworkReachabilityEvaluator
+import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.QRCodeUtils
+import com.stablechannels.app.util.isOnline
+import com.stablechannels.app.util.observeOnline
 import com.stablechannels.app.util.satsFormatted
 import com.stablechannels.app.util.usdFormatted
 import java.io.File
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.min
@@ -30,6 +35,8 @@ import kotlin.math.roundToLong
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -43,6 +50,7 @@ enum class Phase {
     ONBOARDING,
     SYNCING,
     WALLET,
+    OFFLINE,
     ERROR,
 }
 
@@ -171,6 +179,8 @@ class AppState(private val context: Context) : ViewModel() {
             const val ONCHAIN = "cached_onchain_sats"
             const val SPENDABLE = "cached_spendable_sats"
             const val NATIVE = "cached_native_sats"
+            const val HAS_READY_CHANNEL = "cached_has_ready_channel"
+            const val NODE_ID = "node_id"
             const val PENDING_AMOUNT = "pending_outbound_onchain_sats"
             const val PENDING_IS_SEND_ALL = "pending_outbound_is_send_all"
             const val PENDING_BASELINE = "pending_outbound_baseline_sats"
@@ -574,6 +584,14 @@ class AppState(private val context: Context) : ViewModel() {
     private var isInitialized = false
     private var backgroundStopJob: Job? = null
 
+    private val _isOnline = MutableStateFlow(context.isOnline())
+    val isOnline: StateFlow<Boolean> = _isOnline
+    private var connectivityJob: Job? = null
+    private val nodeStartDeferredForOffline = AtomicBoolean(false)
+
+    @Volatile private var coldStartPending = true
+    @Volatile private var isInBackground = false
+
     @Volatile var isWaitingForPayment = false
 
     // Set while an in-app system picker (e.g. photo picker) is open, so the transient onPause
@@ -698,7 +716,13 @@ class AppState(private val context: Context) : ViewModel() {
     val totalBalanceSats: StateFlow<Long>
         get() = _totalBalanceSats
 
-    private val _hasReadyChannel = MutableStateFlow(false)
+    // Seeded from cache so an offline launch still shows the account as active.
+    private val _hasReadyChannel =
+        MutableStateFlow(
+            context
+                .getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+                .getBoolean(BalanceCacheKey.HAS_READY_CHANNEL, false)
+        )
     val hasReadyChannel: StateFlow<Boolean>
         get() = _hasReadyChannel
 
@@ -1094,9 +1118,7 @@ class AppState(private val context: Context) : ViewModel() {
                 // Load cached channel state so UI has correct slider/values immediately
                 loadChannelFromDB()
                 priceService.startAutoRefresh()
-
-                // Resolve best esplora endpoint before starting node
-                chainUrl = resolveChainUrl()
+                observeConnectivity()
 
                 // Consume LDK events. Each event carries a CompletableDeferred; completing it
                 // unblocks NodeService so it can call n.eventHandled() and fetch the next event.
@@ -1116,7 +1138,15 @@ class AppState(private val context: Context) : ViewModel() {
 
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
-                if (seedFile.exists() || seedPhraseFile.exists()) {
+                val hasExistingWallet = seedFile.exists() || seedPhraseFile.exists()
+
+                if (hasExistingWallet) {
+                    if (!_isOnline.value) {
+                        AuditService.log("STARTUP_ALREADY_OFFLINE", emptyMap())
+                        deferNodeStartUntilOnline()
+                        return@launch
+                    }
+                    chainUrl = resolveChainUrl()
                     val hasCachedChannel = _stableChannel.value.userChannelId.isNotEmpty()
                     if (hasCachedChannel) {
                         _phase.value = Phase.WALLET
@@ -1132,6 +1162,7 @@ class AppState(private val context: Context) : ViewModel() {
                     loadChannelFromDB() // reload — SPS may have incremented backingSats while we
                     // waited
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    cacheNodeId()
                     resetNodeStartRetryState()
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
@@ -1140,10 +1171,7 @@ class AppState(private val context: Context) : ViewModel() {
                     reconcilePendingLightningPayments()
                     // Restore the known funding txid before the first live balance refresh so
                     // an ordinary cold start is not mistaken for a funding transition.
-                    val balanceCachePrefs =
-                        context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
-                    fundingTxid = balanceCachePrefs.getString("funding_txid", null)
-                    fundingVout = balanceCachePrefs.getInt("funding_vout", -1).takeIf { it >= 0 }
+                    restoreFundingOutpoint()
                     refreshBalances()
                     pollPaymentConfirmations(force = true)
                     // Off the critical startup path: it makes blocking LDK/DB calls, and the
@@ -1154,66 +1182,7 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     connectMempoolWebSocket()
                     resumePendingSpliceConfirmation()
-                    // Restore channel-closing state if a close is still pending on-chain
-                    val pendingCloseId = databaseService?.getPendingChannelClosePaymentId()
-                    if (pendingCloseId != null) {
-                        pendingClosePaymentId = pendingCloseId
-                        isChannelClosing = true
-                        if (_lastCloseTxid.value == null) {
-                            val dbTxid = databaseService?.getPaymentTxid(pendingCloseId)
-                            if (!dbTxid.isNullOrEmpty()) {
-                                setLastCloseTxid(dbTxid)
-                            } else {
-                                // Resume background resolver if it hasn't found the TX yet.
-                                // An unknown vout must NOT default to 0 — that's a real, possibly
-                                // different output of the same funding tx, and CloseTxidResolver
-                                // would accept whatever spent it as the close txid (see #264).
-                                // Leave the row unresolved instead of guessing; it will resolve
-                                // once fundingVout is known (e.g. after refreshBalances() backfills
-                                // it on the next tick, if the channel is still visible to LDK).
-                                val closeFundingTxid = fundingTxid
-                                val closeVout = fundingVout
-                                if (
-                                    closeFundingTxid != null &&
-                                        closeVout != null &&
-                                        databaseService != null
-                                ) {
-                                    trackedClosingFundingTxid = closeFundingTxid
-                                    mempoolWebSocketService.trackTx(closeFundingTxid)
-                                    val resolver =
-                                        CloseTxidResolver(
-                                            chainURLs =
-                                                listOf(
-                                                    Constants.PRIMARY_CHAIN_URL,
-                                                    Constants.FALLBACK_CHAIN_URL,
-                                                ),
-                                            onResolved = { _, txid ->
-                                                Log.d(
-                                                    "AppState",
-                                                    "Close TX resolved on restart: $txid",
-                                                )
-                                                setLastCloseTxid(txid)
-                                                mempoolWebSocketService.untrackTx(closeFundingTxid)
-                                                trackedClosingFundingTxid = null
-                                            },
-                                        )
-                                    viewModelScope.launch(Dispatchers.IO) {
-                                        resolver.resolve(
-                                            paymentId = pendingCloseId,
-                                            fundingTxid = closeFundingTxid,
-                                            vout = closeVout,
-                                            databaseService = databaseService!!,
-                                        )
-                                    }
-                                } else if (closeFundingTxid != null && closeVout == null) {
-                                    AuditService.log(
-                                        "CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT",
-                                        mapOf("payment_id" to pendingCloseId),
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    restorePendingChannelClose()
                     detectOnchainDeposit()
 
                     // Resume pending deposit polling if an unconfirmed deposit exists from a
@@ -1225,6 +1194,7 @@ class AppState(private val context: Context) : ViewModel() {
                     reregisterPushTokenIfNeeded()
                     processPendingPushPayment()
                     startStabilityTimer()
+                    coldStartPending = false
                     // Ensure LSP connection after startup settles
                     viewModelScope.launch(Dispatchers.IO) {
                         delay(3000)
@@ -1232,8 +1202,15 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 } else {
                     // New wallet — auto-create
+                    if (!_isOnline.value) {
+                        AuditService.log("WALLET_CREATE_ALREADY_OFFLINE", emptyMap())
+                        _phase.value = Phase.OFFLINE
+                        return@launch
+                    }
+                    chainUrl = resolveChainUrl()
                     _phase.value = Phase.SYNCING
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    cacheNodeId()
                     resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
                     reconcilePendingLightningPayments()
@@ -1242,6 +1219,7 @@ class AppState(private val context: Context) : ViewModel() {
                     connectMempoolWebSocket()
                     reregisterPushTokenIfNeeded()
                     startStabilityTimer()
+                    coldStartPending = false
                     viewModelScope.launch(Dispatchers.IO) {
                         delay(3000)
                         ensureLSPConnected()
@@ -1249,6 +1227,71 @@ class AppState(private val context: Context) : ViewModel() {
                 }
             } catch (e: Exception) {
                 handleNodeStartFailure(e, "Unknown error")
+            }
+        }
+    }
+
+    private fun restoreFundingOutpoint() {
+        val prefs = context.getSharedPreferences("balance_cache", Context.MODE_PRIVATE)
+        fundingTxid = prefs.getString("funding_txid", null)
+        fundingVout = prefs.getInt("funding_vout", -1).takeIf { it >= 0 }
+    }
+
+    /** Restores channel-closing state if a close is still pending on-chain. */
+    private fun restorePendingChannelClose() {
+        val pendingCloseId = databaseService?.getPendingChannelClosePaymentId()
+        if (pendingCloseId != null) {
+            pendingClosePaymentId = pendingCloseId
+            isChannelClosing = true
+            if (_lastCloseTxid.value == null) {
+                val dbTxid = databaseService?.getPaymentTxid(pendingCloseId)
+                if (!dbTxid.isNullOrEmpty()) {
+                    setLastCloseTxid(dbTxid)
+                } else {
+                    // Resume background resolver if it hasn't found the TX yet.
+                    // An unknown vout must NOT default to 0 — that's a real, possibly
+                    // different output of the same funding tx, and CloseTxidResolver
+                    // would accept whatever spent it as the close txid (see #264).
+                    // Leave the row unresolved instead of guessing; it will resolve
+                    // once fundingVout is known (e.g. after refreshBalances() backfills
+                    // it on the next tick, if the channel is still visible to LDK).
+                    val closeFundingTxid = fundingTxid
+                    val closeVout = fundingVout
+                    if (closeFundingTxid != null && closeVout != null && databaseService != null) {
+                        trackedClosingFundingTxid = closeFundingTxid
+                        mempoolWebSocketService.trackTx(closeFundingTxid)
+                        val resolver =
+                            CloseTxidResolver(
+                                chainURLs =
+                                    listOf(
+                                        Constants.PRIMARY_CHAIN_URL,
+                                        Constants.FALLBACK_CHAIN_URL,
+                                    ),
+                                onResolved = { _, txid ->
+                                    Log.d(
+                                        "AppState",
+                                        "Close TX resolved on restart: $txid",
+                                    )
+                                    setLastCloseTxid(txid)
+                                    mempoolWebSocketService.untrackTx(closeFundingTxid)
+                                    trackedClosingFundingTxid = null
+                                },
+                            )
+                        viewModelScope.launch(Dispatchers.IO) {
+                            resolver.resolve(
+                                paymentId = pendingCloseId,
+                                fundingTxid = closeFundingTxid,
+                                vout = closeVout,
+                                databaseService = databaseService!!,
+                            )
+                        }
+                    } else if (closeFundingTxid != null && closeVout == null) {
+                        AuditService.log(
+                            "CLOSE_TXID_RESOLVE_SKIPPED_UNKNOWN_VOUT",
+                            mapOf("payment_id" to pendingCloseId),
+                        )
+                    }
+                }
             }
         }
     }
@@ -1296,6 +1339,7 @@ class AppState(private val context: Context) : ViewModel() {
         get() = pendingSplice != null && spliceTxid == null
 
     fun stopNodeForBackground() {
+        isInBackground = true
         val negotiatingSplice = isNegotiatingSplice
         if (!isWaitingForPayment && !isPickingMedia && !negotiatingSplice) {
             // Defer the stop so a quick app-switch reconnects instantly instead of forcing a
@@ -1346,6 +1390,7 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     fun cancelBackgroundStop() {
+        isInBackground = false
         if (backgroundStopJob != null) {
             backgroundStopJob?.cancel()
             Log.d("AppState", "Cancelled pending background stop")
@@ -1399,9 +1444,13 @@ class AppState(private val context: Context) : ViewModel() {
         nodeService.stop()
     }
 
-    fun restartNodeFromForeground() {
+    /**
+     * @param keepWalletVisible keep showing the cached wallet (with the syncing indicator) instead
+     *   of switching to the full-screen sync view while the node starts.
+     */
+    fun restartNodeFromForeground(keepWalletVisible: Boolean = false): Job {
         isWaitingForPayment = false
-        viewModelScope.launch(Dispatchers.IO) {
+        return viewModelScope.launch(Dispatchers.IO) {
             if (!isInitialized) {
                 isInitialized = true
                 start()
@@ -1421,6 +1470,11 @@ class AppState(private val context: Context) : ViewModel() {
                 clearSyncStatusMessage()
                 return@launch
             }
+            if (!_isOnline.value) {
+                deferNodeStartUntilOnline()
+                return@launch
+            }
+            nodeStartDeferredForOffline.set(false)
             Log.d("AppState", "Restarting node from foreground")
             if (!waitForBackgroundService()) {
                 scheduleNodeStartRetry()
@@ -1428,12 +1482,21 @@ class AppState(private val context: Context) : ViewModel() {
             }
             try {
                 loadChannelFromDB()
-                _phase.value = Phase.SYNCING
+                if (keepWalletVisible) {
+                    _isSyncing.value = true
+                } else {
+                    _phase.value = Phase.SYNCING
+                }
                 nodeService.start(Network.BITCOIN, chainUrl, null)
+                cacheNodeId()
                 resetNodeStartRetryState()
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
                 _phase.value = Phase.WALLET
+                _isSyncing.value = false
+                val finishingColdStart = coldStartPending
+                if (finishingColdStart) restoreFundingOutpoint()
+                launch { priceService.fetchPrice() }
                 refreshBalances()
                 reconcilePendingLightningPayments()
                 pollPaymentConfirmations(force = true)
@@ -1444,6 +1507,16 @@ class AppState(private val context: Context) : ViewModel() {
                 resumePendingSpliceConfirmation()
                 reregisterPushTokenIfNeeded()
                 startStabilityTimer()
+                if (finishingColdStart) {
+                    restorePendingChannelClose()
+                    launch { repairBooksAboveLiveBalance() }
+                    detectOnchainDeposit()
+                    if (_onchainBalanceSats.value > 0L && _spendableOnchainSats.value == 0L) {
+                        startPendingDepositPolling()
+                    }
+                    processPendingPushPayment()
+                    coldStartPending = false
+                }
                 clearSyncStatusMessage()
             } catch (e: Exception) {
                 Log.e("AppState", "Node restart failed", e)
@@ -1452,7 +1525,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    private fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
+    internal fun handleNodeStartFailure(e: Exception, fallbackMessage: String) {
         if (e is NodeService.AlreadyRunningException && nodeService.isRunning) {
             Log.w("AppState", "Ignoring duplicate node start after another start succeeded", e)
             _phase.value = Phase.WALLET
@@ -1466,6 +1539,16 @@ class AppState(private val context: Context) : ViewModel() {
             return
         }
 
+        refreshOnlineStatus()
+        if (
+            !_isOnline.value ||
+                NetworkReachabilityEvaluator.shouldPresentOfflineNotice(e, !_isOnline.value)
+        ) {
+            AuditService.log("NODE_START_FAILED_OFFLINE", mapOf("error" to (e.message ?: "")))
+            deferNodeStartUntilOnline()
+            return
+        }
+
         if (isRetryableNodeStartFailure(e)) {
             _phase.value = Phase.SYNCING
             _errorMessage.value = ""
@@ -1476,6 +1559,133 @@ class AppState(private val context: Context) : ViewModel() {
 
         _errorMessage.value = e.message ?: fallbackMessage
         _phase.value = Phase.ERROR
+    }
+
+    private val isRetryingConnection = MutableStateFlow(false)
+    val isRetrying: StateFlow<Boolean> = isRetryingConnection.asStateFlow()
+
+    fun hasExistingWallet(): Boolean {
+        val seedFile = File(Constants.userDataDir(context), "keys_seed")
+        val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
+        return seedFile.exists() || seedPhraseFile.exists()
+    }
+
+    fun setPhaseWallet() {
+        _phase.value = Phase.WALLET
+    }
+
+    private fun cacheNodeId() {
+        val nodeId = nodeService.nodeId
+        if (nodeId.isNotEmpty()) {
+            context
+                .getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(BalanceCacheKey.NODE_ID, nodeId)
+                .apply()
+        }
+    }
+
+    fun getCachedNodeId(): String {
+        if (nodeService.nodeId.isNotEmpty()) return nodeService.nodeId
+        return context
+            .getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(BalanceCacheKey.NODE_ID, "") ?: ""
+    }
+
+    private fun observeConnectivity() {
+        if (connectivityJob != null) return
+        connectivityJob = viewModelScope.launch {
+            context.observeOnline().collect { setOnline(it) }
+        }
+    }
+
+    /** Re-reads connectivity now, e.g. from the offline dialog's "Try again". */
+    fun refreshOnlineStatus() {
+        setOnline(context.isOnline())
+    }
+
+    internal fun setOnline(online: Boolean) {
+        if (_isOnline.getAndUpdate { online } == online) return
+        AuditService.log(if (online) "NETWORK_ONLINE" else "NETWORK_OFFLINE", emptyMap())
+        if (online) {
+            if (_phase.value == Phase.OFFLINE) {
+                retryConnection()
+            } else {
+                onConnectivityRestored()
+            }
+        }
+    }
+
+    internal fun deferNodeStartUntilOnline() {
+        nodeStartDeferredForOffline.set(true)
+        if (coldStartPending) restoreFundingOutpoint()
+        nodeStartRetryJob?.cancel()
+        nodeStartRetryJob = null
+        _isSyncing.value = false
+        _errorMessage.value = ""
+        clearSyncStatusMessage()
+        _phase.value = Phase.OFFLINE
+        AuditService.log("NODE_START_DEFERRED_OFFLINE", emptyMap())
+    }
+
+    /** Retries connection to the network and node services after an offline condition. */
+    fun retryConnection() {
+        if (isRetryingConnection.value) return
+        isRetryingConnection.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                refreshOnlineStatus()
+                if (!_isOnline.value) {
+                    AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", emptyMap())
+                    return@launch
+                }
+                val previousPhase = _phase.value
+                if (!nodeService.isRunning) {
+                    if (previousPhase == Phase.OFFLINE) {
+                        _isSyncing.value = true
+                    }
+                    try {
+                        chainUrl = resolveChainUrl()
+                        nodeStartDeferredForOffline.set(false)
+                        val job =
+                            restartNodeFromForeground(
+                                keepWalletVisible = (previousPhase == Phase.WALLET)
+                            )
+                        job.join()
+                    } catch (e: Exception) {
+                        handleNodeStartFailure(e, "Retry connection failed")
+                    } finally {
+                        _isSyncing.value = false
+                    }
+                } else {
+                    onConnectivityRestored()
+                    if (previousPhase == Phase.OFFLINE) {
+                        _phase.value = Phase.WALLET
+                    }
+                }
+            } finally {
+                isRetryingConnection.value = false
+            }
+        }
+    }
+
+    /** Catches the node, LSP link, price and balances up once the network is back. */
+    private fun onConnectivityRestored() {
+        viewModelScope.launch(Dispatchers.IO) {
+            if (!isInBackground && nodeStartDeferredForOffline.compareAndSet(true, false)) {
+                chainUrl = resolveChainUrl()
+                restartNodeFromForeground(keepWalletVisible = true)
+                return@launch
+            }
+            if (!nodeService.isRunning) return@launch
+            ensureLSPConnected()
+            refreshBalances()
+            pollPaymentConfirmations(force = true)
+            updateStableBalances()
+            connectMempoolWebSocket()
+            priceService.fetchPrice()
+            recordCurrentPrice()
+        }
     }
 
     // Matched by exception type (not message text) since LDK's Display strings aren't a stable
@@ -1613,6 +1823,7 @@ class AppState(private val context: Context) : ViewModel() {
      * block, or null if the change is allowed.
      */
     private fun lspChangeBlockedReason(): String? {
+        if (!_isOnline.value) return OfflineMessages.LSP_INFO
         if (!nodeService.isRunning) return "Start the wallet before changing the LSP."
         nodeService.refreshChannels()
         val hasChannel = nodeService.channels.isNotEmpty()
@@ -4491,6 +4702,7 @@ class AppState(private val context: Context) : ViewModel() {
                 .putLong(BalanceCacheKey.ONCHAIN, onchain)
                 .putLong(BalanceCacheKey.SPENDABLE, spendable)
                 .putLong(BalanceCacheKey.NATIVE, native)
+                .putBoolean(BalanceCacheKey.HAS_READY_CHANNEL, hasReady)
         persistPendingOutboundSend(editor, pendingOutboundSend)
         editor.apply()
     }

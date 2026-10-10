@@ -70,6 +70,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isFlashing by appState.paymentFlash.collectAsState()
     val confirmationUpdateEpoch by appState.confirmationUpdateEpoch.collectAsState()
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
+    val isOnline by appState.isOnline.collectAsState()
     val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
@@ -143,8 +144,10 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 isRefreshing = true
                 val startTime = System.currentTimeMillis()
                 appState.refreshBalances()
-                appState.priceService.fetchPrice()
-                appState.recordCurrentPrice()
+                if (isOnline) {
+                    appState.priceService.fetchPrice()
+                    appState.recordCurrentPrice()
+                }
                 // Prevent spinner from flashing on instant fetches
                 val elapsed = System.currentTimeMillis() - startTime
                 if (elapsed < 500) kotlinx.coroutines.delay(500 - elapsed)
@@ -202,18 +205,19 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                         appState.priceService.accountingPrice.value,
                     ) ?: 0L) / 100.0,
                 isTrading = showBuy || showSell,
+                isOnline = isOnline,
                 showBtcFormat = showBTC,
                 modifier = Modifier.padding(horizontal = 18.dp),
                 onDragStarted = { appState.ensureLSPConnected() },
                 onTradeRequest =
-                    if (hasReadyChannel)
+                    if (hasReadyChannel && isOnline)
                         { request ->
                             prefillTradeAmount = request.amountUSD
                             if (request.direction == TradeDirection.BUY) showBuy = true
                             else showSell = true
                         }
                     else null,
-                onEmptyInteraction = { showReceive = true },
+                onEmptyInteraction = { if (isOnline) showReceive = true },
             )
             Spacer(Modifier.height(12.dp))
 
@@ -631,13 +635,13 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
             // Action buttons
             HomeActionButtons(
                 hasReadyChannel = hasReadyChannel,
+                isOffline = !isOnline,
                 pulseReceive = !hasReadyChannel && totalSats == 0L && !isOpeningChannel,
                 onSend = { showSend = true },
                 onReceive = { showReceive = true },
                 onBuy = { showBuy = true },
                 onSell = { showSell = true },
             )
-
             // Status capsule
             if (statusMessage.isNotEmpty()) {
                 StatusCapsule(
