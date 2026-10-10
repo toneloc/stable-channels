@@ -17,6 +17,8 @@ struct CurveProgressIndicator: View {
     var duration: Double = 4.6
     var pulseDuration: Double = 4.2
     var showTrack: Bool = true
+    var enablesPulse: Bool = true
+    var enablesRotation: Bool = true
 
     var body: some View {
         TimelineView(.animation) { timeline in
@@ -34,16 +36,16 @@ struct CurveProgressIndicator: View {
 
         let activePulseDuration = (curve == .roseCurve) ? 4.6 : (curve == .lemniscateBloom ? 5.0 : pulseDuration)
         let pulseAngle = (time.truncatingRemainder(dividingBy: activePulseDuration) / activePulseDuration) * (2.0 * .pi)
-        let detailScale = 0.52 + ((sin(pulseAngle + 0.55) + 1.0) / 2.0) * 0.48
+        let detailScale = enablesPulse ? (0.52 + ((sin(pulseAngle + 0.55) + 1.0) / 2.0) * 0.48) : 1.0
 
         let activeDuration = curve == .spiralSearch ? 7.8 :
             (curve == .roseCurve ? 5.4 : (curve == .lemniscateBloom ? 5.6 : duration))
-        let activeSpan = curve == .spiralSearch ? 0.28 :
-            (curve == .roseCurve ? 0.32 : (curve == .lemniscateBloom ? 0.40 : trailSpan))
-        let activeParticles = curve == .roseCurve ? 64 : (curve == .lemniscateBloom ? 70 : particleCount)
+        let activeSpan = curve == .roseCurve ? 0.12 :
+            (curve == .spiralSearch ? 0.28 : (curve == .lemniscateBloom ? 0.40 : trailSpan))
+        let activeParticles = curve == .roseCurve ? 140 : (curve == .lemniscateBloom ? 70 : particleCount)
         let progress = time.truncatingRemainder(dividingBy: activeDuration) / activeDuration
 
-        if curve == .roseCurve {
+        if enablesRotation && curve == .roseCurve {
             let rotationDuration = 28.0
             let rotationAngle = -(time.truncatingRemainder(dividingBy: rotationDuration) / rotationDuration) *
                 (2.0 * .pi)
@@ -54,7 +56,7 @@ struct CurveProgressIndicator: View {
 
         if showTrack {
             var trackPath = Path()
-            let steps = (curve == .roseCurve || curve == .lemniscateBloom) ? 240 : 120
+            let steps = (curve == .roseCurve) ? 480 : ((curve == .lemniscateBloom) ? 240 : 120)
             for step in 0...steps {
                 let u = Double(step) / Double(steps)
                 let pt = Self.pointOnCurve(curve: curve, progress: u, detailScale: detailScale)
@@ -69,7 +71,7 @@ struct CurveProgressIndicator: View {
                 }
             }
             trackPath.closeSubpath()
-            let trackColor = (strokeColor ?? tint).opacity(0.12)
+            let trackColor = (strokeColor ?? tint).opacity(0.10)
             context.stroke(trackPath, with: .color(trackColor), lineWidth: max(1.0, 1.8 * scale))
         }
 
@@ -85,7 +87,7 @@ struct CurveProgressIndicator: View {
             )
 
             let fade = pow(1.0 - tailOffset, 0.56)
-            let radius = max(1.2, (0.9 + fade * 2.7) * scale)
+            let radius = max(0.9, (0.9 + fade * 2.7) * scale)
             let opacity = 0.04 + fade * 0.96
 
             let particleRect = CGRect(

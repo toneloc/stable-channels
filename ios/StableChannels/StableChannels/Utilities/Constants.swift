@@ -76,6 +76,7 @@ enum Constants {
     static let lightningDefaultForwardingFeeProportionalMillionths: UInt32 = 0
     static let estimatedOnchainSendVBytes: UInt64 = 140
     static let estimatedOnchainSendAllVBytes: UInt64 = 250
+    static let estimatedSpliceOutVBytes: UInt64 = 180
     static let estimatedChannelCloseVBytes: UInt64 = 180
 
     // MARK: - Channel
