@@ -28,6 +28,7 @@ fun NodeView(appState: AppState) {
             isRunning -> "Running" to Color(0xFF10B981)
             else -> "Stopped" to Color(0xFFEF4444)
         }
+    val effectiveNodeId = appState.getCachedNodeId()
     var showNodeId by remember { mutableStateOf(false) }
     var copiedNodeId by remember { mutableStateOf(false) }
 
@@ -71,8 +72,8 @@ fun NodeView(appState: AppState) {
             onClick = {
                 if (!showNodeId) {
                     showNodeId = true
-                } else if (appState.nodeService.nodeId.isNotEmpty()) {
-                    clipboardManager.setText(AnnotatedString(appState.nodeService.nodeId))
+                } else if (effectiveNodeId.isNotEmpty()) {
+                    clipboardManager.setText(AnnotatedString(effectiveNodeId))
                     copiedNodeId = true
                 }
             },
@@ -103,10 +104,10 @@ fun NodeView(appState: AppState) {
                         )
                     }
                 }
-                if (showNodeId && appState.nodeService.nodeId.isNotEmpty()) {
+                if (showNodeId && effectiveNodeId.isNotEmpty()) {
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        text = appState.nodeService.nodeId,
+                        text = effectiveNodeId,
                         style = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

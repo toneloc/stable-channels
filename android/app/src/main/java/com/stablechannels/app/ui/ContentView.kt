@@ -14,10 +14,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,30 +32,32 @@ import com.stablechannels.app.Phase
 import com.stablechannels.app.ui.components.BalanceScaleKinematics
 import com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage
 import com.stablechannels.app.ui.components.InkButton
-import com.stablechannels.app.ui.components.OfflineDialog
+import com.stablechannels.app.ui.components.OfflinePageView
 import com.stablechannels.app.ui.components.UnifiedBalanceLaunchView
 
 @Composable
 fun ContentView(appState: AppState) {
     val phase by appState.phase.collectAsState()
     val errorMessage by appState.errorMessage.collectAsState()
-    val online by appState.isOnline.collectAsState()
-    var dismissed by remember { mutableStateOf(false) }
-    LaunchedEffect(online) { if (online) dismissed = false }
+    val isRetrying by appState.isRetrying.collectAsState()
 
-    Box {
+    Box(modifier = Modifier.fillMaxSize()) {
         when (phase) {
             Phase.LOADING,
             Phase.ONBOARDING,
             Phase.SYNCING -> SyncingView()
             Phase.WALLET -> MainTabView(appState)
+            Phase.OFFLINE ->
+                OfflinePageView(
+                    isRetrying = isRetrying,
+                    onRetry = { appState.retryConnection() },
+                    onGoToHome =
+                        if (appState.hasExistingWallet()) {
+                            { appState.setPhaseWallet() }
+                        } else null,
+                )
             Phase.ERROR -> ErrorView(errorMessage) { appState.start() }
         }
-        if (!online && !dismissed)
-            OfflineDialog(
-                onTryAgain = { appState.refreshOnlineStatus() },
-                onDismiss = { dismissed = true },
-            )
     }
 }
 

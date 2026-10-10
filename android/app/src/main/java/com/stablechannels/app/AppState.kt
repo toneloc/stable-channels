@@ -17,6 +17,7 @@ import com.stablechannels.app.services.websocket.WebSocketEvent
 import com.stablechannels.app.util.AppFormatters
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
+import com.stablechannels.app.util.NetworkReachabilityEvaluator
 import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.QRCodeUtils
 import com.stablechannels.app.util.isOnline
@@ -34,6 +35,7 @@ import kotlin.math.roundToLong
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import okhttp3.MediaType.Companion.toMediaType
@@ -48,6 +50,7 @@ enum class Phase {
     ONBOARDING,
     SYNCING,
     WALLET,
+    OFFLINE,
     ERROR,
 }
 
@@ -177,6 +180,7 @@ class AppState(private val context: Context) : ViewModel() {
             const val SPENDABLE = "cached_spendable_sats"
             const val NATIVE = "cached_native_sats"
             const val HAS_READY_CHANNEL = "cached_has_ready_channel"
+            const val NODE_ID = "node_id"
             const val PENDING_AMOUNT = "pending_outbound_onchain_sats"
             const val PENDING_IS_SEND_ALL = "pending_outbound_is_send_all"
             const val PENDING_BASELINE = "pending_outbound_baseline_sats"
@@ -1132,15 +1136,17 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 }
 
-                if (!_isOnline.value) {
-                    deferNodeStartUntilOnline()
-                    return@launch
-                }
-                chainUrl = resolveChainUrl()
-
                 val seedFile = File(Constants.userDataDir(context), "keys_seed")
                 val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
-                if (seedFile.exists() || seedPhraseFile.exists()) {
+                val hasExistingWallet = seedFile.exists() || seedPhraseFile.exists()
+
+                if (hasExistingWallet) {
+                    if (!_isOnline.value) {
+                        AuditService.log("STARTUP_ALREADY_OFFLINE", emptyMap())
+                        deferNodeStartUntilOnline()
+                        return@launch
+                    }
+                    chainUrl = resolveChainUrl()
                     val hasCachedChannel = _stableChannel.value.userChannelId.isNotEmpty()
                     if (hasCachedChannel) {
                         _phase.value = Phase.WALLET
@@ -1156,6 +1162,7 @@ class AppState(private val context: Context) : ViewModel() {
                     loadChannelFromDB() // reload — SPS may have incremented backingSats while we
                     // waited
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    cacheNodeId()
                     resetNodeStartRetryState()
                     nodeStartRetryJob?.cancel()
                     nodeStartRetryJob = null
@@ -1195,8 +1202,15 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                 } else {
                     // New wallet — auto-create
+                    if (!_isOnline.value) {
+                        AuditService.log("WALLET_CREATE_ALREADY_OFFLINE", emptyMap())
+                        _phase.value = Phase.OFFLINE
+                        return@launch
+                    }
+                    chainUrl = resolveChainUrl()
                     _phase.value = Phase.SYNCING
                     nodeService.start(Network.BITCOIN, chainUrl, null)
+                    cacheNodeId()
                     resetNodeStartRetryState()
                     _phase.value = Phase.WALLET
                     reconcilePendingLightningPayments()
@@ -1474,6 +1488,7 @@ class AppState(private val context: Context) : ViewModel() {
                     _phase.value = Phase.SYNCING
                 }
                 nodeService.start(Network.BITCOIN, chainUrl, null)
+                cacheNodeId()
                 resetNodeStartRetryState()
                 nodeStartRetryJob?.cancel()
                 nodeStartRetryJob = null
@@ -1524,7 +1539,10 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         refreshOnlineStatus()
-        if (!_isOnline.value) {
+        if (
+            !_isOnline.value ||
+                NetworkReachabilityEvaluator.shouldPresentOfflineNotice(e, !_isOnline.value)
+        ) {
             AuditService.log("NODE_START_FAILED_OFFLINE", mapOf("error" to (e.message ?: "")))
             deferNodeStartUntilOnline()
             return
@@ -1542,6 +1560,37 @@ class AppState(private val context: Context) : ViewModel() {
         _phase.value = Phase.ERROR
     }
 
+    private val isRetryingConnection = MutableStateFlow(false)
+    val isRetrying: StateFlow<Boolean> = isRetryingConnection.asStateFlow()
+
+    fun hasExistingWallet(): Boolean {
+        val seedFile = File(Constants.userDataDir(context), "keys_seed")
+        val seedPhraseFile = File(Constants.userDataDir(context), "seed_phrase")
+        return seedFile.exists() || seedPhraseFile.exists()
+    }
+
+    fun setPhaseWallet() {
+        _phase.value = Phase.WALLET
+    }
+
+    private fun cacheNodeId() {
+        val nodeId = nodeService.nodeId
+        if (nodeId.isNotEmpty()) {
+            context
+                .getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(BalanceCacheKey.NODE_ID, nodeId)
+                .apply()
+        }
+    }
+
+    fun getCachedNodeId(): String {
+        if (nodeService.nodeId.isNotEmpty()) return nodeService.nodeId
+        return context
+            .getSharedPreferences(BalanceCacheKey.PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(BalanceCacheKey.NODE_ID, "") ?: ""
+    }
+
     private fun observeConnectivity() {
         if (connectivityJob != null) return
         connectivityJob = viewModelScope.launch {
@@ -1557,7 +1606,13 @@ class AppState(private val context: Context) : ViewModel() {
     private fun setOnline(online: Boolean) {
         if (_isOnline.getAndUpdate { online } == online) return
         AuditService.log(if (online) "NETWORK_ONLINE" else "NETWORK_OFFLINE", emptyMap())
-        if (online) onConnectivityRestored()
+        if (online) {
+            if (_phase.value == Phase.OFFLINE) {
+                retryConnection()
+            } else {
+                onConnectivityRestored()
+            }
+        }
     }
 
     private fun deferNodeStartUntilOnline() {
@@ -1568,8 +1623,64 @@ class AppState(private val context: Context) : ViewModel() {
         _isSyncing.value = false
         _errorMessage.value = ""
         clearSyncStatusMessage()
-        _phase.value = Phase.WALLET
+        _phase.value = Phase.OFFLINE
         AuditService.log("NODE_START_DEFERRED_OFFLINE", emptyMap())
+    }
+
+    /** Retries connection to the network and node services after an offline condition. */
+    fun retryConnection() {
+        if (isRetryingConnection.value) return
+        isRetryingConnection.value = true
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                refreshOnlineStatus()
+                if (!_isOnline.value) {
+                    AuditService.log("RETRY_CONNECTION_STILL_OFFLINE", emptyMap())
+                    return@launch
+                }
+                val previousPhase = _phase.value
+                if (!nodeService.isRunning) {
+                    if (previousPhase == Phase.OFFLINE) {
+                        _isSyncing.value = true
+                    }
+                    try {
+                        chainUrl = resolveChainUrl()
+                        nodeStartDeferredForOffline.set(false)
+                        restartNodeFromForeground(
+                            keepWalletVisible = (previousPhase == Phase.WALLET)
+                        )
+                        _phase.value = Phase.WALLET
+                    } catch (e: Exception) {
+                        if (previousPhase == Phase.OFFLINE) {
+                            if (
+                                !_isOnline.value ||
+                                    NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                                        e,
+                                        !_isOnline.value,
+                                    )
+                            ) {
+                                _phase.value = Phase.OFFLINE
+                            } else {
+                                _phase.value = Phase.ERROR
+                                _errorMessage.value = "Node start failed: ${e.message}"
+                            }
+                        } else {
+                            AuditService.log(
+                                "RETRY_CONNECTION_WALLET_FAILED",
+                                mapOf("error" to (e.message ?: "")),
+                            )
+                        }
+                    } finally {
+                        _isSyncing.value = false
+                    }
+                } else {
+                    onConnectivityRestored()
+                    _phase.value = Phase.WALLET
+                }
+            } finally {
+                isRetryingConnection.value = false
+            }
+        }
     }
 
     /** Catches the node, LSP link, price and balances up once the network is back. */

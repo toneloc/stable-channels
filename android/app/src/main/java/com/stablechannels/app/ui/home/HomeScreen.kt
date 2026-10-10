@@ -193,6 +193,16 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 onToggleShowBTC = { showBTC = !showBTC },
             )
 
+            if (!isOnline) {
+                Spacer(Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    OfflineBadge(info = OfflineMessages.CHECK_NETWORK)
+                }
+            }
+
             Spacer(Modifier.height(8.dp))
 
             // Balance bar
@@ -631,11 +641,6 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(8.dp))
-            }
-
-            if (!isOnline) {
-                OfflineBadge(info = OfflineMessages.HOME_INFO)
-                Spacer(Modifier.height(12.dp))
             }
 
             // Action buttons
