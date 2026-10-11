@@ -305,7 +305,7 @@ struct PendingBookUpdate {
 
 /// A top-up with no outcome for longer than this is reported; it still waits for its outcome.
 const STABILITY_TOP_UP_STALE_SECS: i64 = 3600;
-/// A top-up expires about 4 days of blocks after it is sent; only one sent longer ago than this, which allows for far slower blocks, may be released as not arrived.
+/// Fourteen days, well past a top-up's own expiry (about four days of blocks) even when blocks are slow: one sent longer ago can no longer be in flight, and only then may it be released as not arrived or despite a failing lookup.
 const TOP_UP_MAX_IN_FLIGHT_SECS: i64 = 14 * 86_400;
 /// How long a top-up alarm stays quiet before it is raised again while its cause lasts.
 const STABILITY_TOP_UP_ALARM_REPEAT_SECS: i64 = 86_400;
@@ -865,11 +865,11 @@ impl StableChannelManager {
         }
     }
 
-    /// Record that a top-up keeps waiting, again each day it lasts: the node answered that it has no record of it, or it has had no outcome for a long time.
-    fn report_waiting_top_up(&mut self, payment_id: &str, user_channel_id: &str, no_record: bool, age_secs: i64) {
-        if no_record {
+    /// Record that a top-up keeps waiting, again each day it lasts. `needs_release` means the node will not report on it: it has no record of it, or still cannot be asked once the payment is too old to be in flight.
+    fn report_waiting_top_up(&mut self, payment_id: &str, user_channel_id: &str, needs_release: bool, age_secs: i64) {
+        if needs_release {
             if let Some(day) = self.top_up_alarm_due(payment_id, "outcome_unknown") {
-                // The node has lost its record and will report no outcome, though the payment itself may still be in the channel; an operator's release ends the wait.
+                // No outcome will come from the node, so an operator's release ends the wait; with a lost record the payment itself may still be in the channel.
                 stable_channels::audit::audit_event(
                     "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN",
                     serde_json::json!({
@@ -937,8 +937,9 @@ impl StableChannelManager {
                     self.top_up_lookup_failed = true;
                     self.top_ups_unresolved.push((payment_id.to_owned(), top_up.user_channel_id.clone()));
                     outstanding.extend(parse_user_channel_id(&top_up.user_channel_id));
-                    // A node that cannot be asked may still hold the payment, so this is never the "no record" report that invites a release.
-                    self.report_waiting_top_up(payment_id, &top_up.user_channel_id, false, now.saturating_sub(top_up.recorded_at));
+                    // A node that cannot be asked may still hold the payment; only once it is too old to be in flight does waiting lead nowhere.
+                    let age_secs = now.saturating_sub(top_up.recorded_at);
+                    self.report_waiting_top_up(payment_id, &top_up.user_channel_id, age_secs > TOP_UP_MAX_IN_FLIGHT_SECS, age_secs);
                     continue;
                 }
             };
@@ -995,7 +996,8 @@ impl StableChannelManager {
                     tracing::warn!("[stable] stability payment lookup failed for {}: {}", payment_id, error);
                     self.top_up_lookup_failed = true;
                     self.top_ups_unresolved.push((payment_id.clone(), user_channel_id.clone()));
-                    self.report_waiting_top_up(&payment_id, &user_channel_id, false, now.saturating_sub(recorded_at));
+                    let age_secs = now.saturating_sub(recorded_at);
+                    self.report_waiting_top_up(&payment_id, &user_channel_id, age_secs > TOP_UP_MAX_IN_FLIGHT_SECS, age_secs);
                     continue;
                 }
             };
@@ -1271,7 +1273,7 @@ impl StableChannelManager {
         }
     }
 
-    /// Operator action for a stability payment the node has no record of: count it as arrived, or as not arrived once it is too old to still be in flight. Whatever the node does report is applied first, a payment it holds or cannot be asked about is left alone, and a call without `acknowledged` only returns the figures.
+    /// Operator action for a stability payment the node will not report on: count it as arrived, or as not arrived once it is too old to still be in flight. Whatever the node does report is applied first, a payment it holds is left alone, one it cannot be asked about is left alone until it is that old, and a call without `acknowledged` only returns the figures.
     pub async fn release_stability_payment(
         &mut self,
         payment_id: &str,
@@ -1306,10 +1308,12 @@ impl StableChannelManager {
         if self.correction_pending(&user_channel_id) {
             return refused("Balance correction is pending; retry the release after it is saved".to_owned());
         }
-        // A payment the node holds can still land, and one it cannot be asked about may be held, so neither is released; only its answer that it has no record goes on.
-        match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.to_owned() }).await {
+        // Seconds the payment could still be in flight; negative once it is too old to be.
+        let in_flight_secs_left = TOP_UP_MAX_IN_FLIGHT_SECS.saturating_sub(Self::unix_time_secs().saturating_sub(recorded_at));
+        // A payment the node holds can still land, so it is never released. Only its answer that it has no record goes on, or a failed lookup once the payment is too old to be in flight.
+        let node_answer = match ldk.get_payment_details(GetPaymentDetailsRequest { payment_id: payment_id.to_owned() }).await {
             Ok(response) => match response.payment.map(|payment| payment.status) {
-                None => {}
+                None => "no_record",
                 Some(status) if status == PaymentStatus::Succeeded as i32 => {
                     return refused("The node reports this payment claimed, so it is not released; the next stability check books it, or it is booked once its channel record can be found".to_owned());
                 }
@@ -1320,12 +1324,13 @@ impl StableChannelManager {
                     return refused("The node still holds this payment; it is booked or dropped by itself once the node reports its outcome".to_owned());
                 }
             },
-            Err(e) => {
-                return refused(format!("The node could not be asked about this payment ({}), so it may still hold it; it can be released only once the node answers that it has no record of it", e));
+            // A failed lookup says nothing about a payment the node may still hold; one too old to be in flight can no longer land, so the operator decides as for a lost record.
+            Err(e) if in_flight_secs_left >= 0 => {
+                return refused(format!("The node could not be asked about this payment ({}), so it may still hold it; it can be released once the node answers that it has no record of it, or once the payment is 14 days old", e));
             }
-        }
+            Err(_) => "lookup_failed",
+        };
         // No record means the node lost it, not that the payment is gone: it can sit in the channel until it expires, and replacing it before then could pay twice.
-        let in_flight_secs_left = TOP_UP_MAX_IN_FLIGHT_SECS.saturating_sub(Self::unix_time_secs().saturating_sub(recorded_at));
         if !arrived && in_flight_secs_left >= 0 {
             return refused(format!(
                 "This payment may still be in flight, so it can be counted as not arrived only once it is 14 days old, in about {} day(s); it can be counted as arrived as soon as the channel's balance shows it",
@@ -1350,10 +1355,15 @@ impl StableChannelManager {
         if !acknowledged {
             // The balance cannot tell an arrived top-up from the user's own sats, or a missing one from a spend, so it is shown and the answer confirmed, never judged here.
             let in_neither = unallocated_sats.unwrap_or(0);
+            let lead = if node_answer == "no_record" {
+                "The node has no record of this payment"
+            } else {
+                "The node cannot be asked about this payment, which was sent over 14 days ago"
+            };
             let figures = match (their_sats, books) {
-                (Some(held), Some((backing, native))) => format!("The node has no record of this payment. The channel holds {held} sats for the user, with {in_neither} sats in neither side's balance (payments in flight and channel fees); the books have {backing} sats of backing and {native} spare sats"),
-                (Some(held), None) => format!("The node has no record of this payment. The channel holds {held} sats for the user, with {in_neither} sats in neither side's balance, and has no books loaded"),
-                (None, _) => "The node has no record of this payment. The channel is not open".to_owned(),
+                (Some(held), Some((backing, native))) => format!("{lead}. The channel holds {held} sats for the user, with {in_neither} sats in neither side's balance (payments in flight and channel fees); the books have {backing} sats of backing and {native} spare sats"),
+                (Some(held), None) => format!("{lead}. The channel holds {held} sats for the user, with {in_neither} sats in neither side's balance, and has no books loaded"),
+                (None, _) => format!("{lead}. The channel is not open"),
             };
             let payment = match top_up_sats {
                 Some(sats) => format!("{sats} sats of this payment are not in the books yet"),
@@ -1377,7 +1387,7 @@ impl StableChannelManager {
             "user_channel_id": user_channel_id,
             "unbooked_sats": top_up_sats,
             "decision": if arrived { "arrived" } else { "not_arrived" },
-            "node_answer": "no_record",
+            "node_answer": node_answer,
             "sent_at": recorded_at,
             "live_receiver_sats": their_sats,
             "unallocated_sats": unallocated_sats,
@@ -3019,7 +3029,7 @@ impl StableChannelManager {
                                     Ok(false) => {
                                         stable_channels::audit::audit_event(
                                             "DB_WRITE_FAILED",
-                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": "duplicate payment id or zero amount" }),
+                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": if amount_sats == 0 { "zero amount, nothing to record" } else { "payment id already recorded" } }),
                                         );
                                         false
                                     },
@@ -5966,7 +5976,7 @@ mod tests {
         dispatch_sync_outcome(&mut mgr, &ldk, "fake-payment-id", false).await;
         assert_channel_books(&mgr, 50.0, 50_000);
 
-        // No cooldown is left over from the failed send.
+        // As on main, a failed top-up leaves no cooldown behind: there the rollback restores it (failed_outbound_stability_payment_restores_backing_and_cooldown).
         mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
         assert_eq!(top_up_sats_sent(&ldk), [12_500, 12_500]);
         assert_channel_books(&mgr, 50.0, 50_000);
@@ -6945,12 +6955,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payment_the_node_cannot_be_asked_about_is_never_released() {
+    async fn payment_the_node_cannot_be_asked_about_waits_while_it_could_still_be_in_flight() {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let (mut mgr, ldk, push) = top_up_in_flight().await;
         // The wallet is asleep with the payment in flight, and for hours the node fails every lookup while it answers everything else.
         node_reports(&ldk, "fake-payment-id", PaymentStatus::Pending);
-        save_test_connection(&mgr).execute("UPDATE settlement_payments SET recorded_at = recorded_at - 7200", []).unwrap();
+        age_stability_payments(&mgr, 7200);
         ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
         stable_channels::audit::enable_test_capture();
         tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
@@ -6975,6 +6985,65 @@ mod tests {
         tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
         assert_eq!(top_up_sats_sent(&ldk), [12_500]);
         assert_channel_books(&mgr, 50.0, 62_500);
+    }
+
+    #[tokio::test]
+    async fn payment_the_node_still_cannot_be_asked_about_once_too_old_to_be_in_flight_can_be_released() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        for arrived in [false, true] {
+            let (mut mgr, ldk, push) = top_up_in_flight().await;
+            ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+            // One hour short of the limit it is still only a payment without an outcome.
+            age_stability_payments(&mgr, TOP_UP_MAX_IN_FLIGHT_SECS - 3600);
+            stable_channels::audit::enable_test_capture();
+            tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+            assert_eq!(count_events(&stable_channels::audit::drain_test_capture(), "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 0);
+            assert!(!release(&mut mgr, &ldk, "fake-payment-id", arrived, true).await.ok);
+
+            // Past the limit it can no longer land, so the operator is told and decides as for a lost record.
+            age_stability_payments(&mgr, 2 * 3600);
+            tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+            let events = stable_channels::audit::drain_test_capture();
+            stable_channels::audit::disable_test_capture();
+            assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 1, "arrived={arrived}");
+            assert_eq!(top_up_sats_sent(&ldk), [12_500], "nothing is sent until it is released");
+            if arrived {
+                set_receiver_sats(&ldk, 62_500);
+            }
+            let preview = release(&mut mgr, &ldk, "fake-payment-id", arrived, false).await;
+            assert!(preview.needs_acknowledgement && preview.status.contains("The node cannot be asked about this payment"), "{}", preview.status);
+            assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1);
+            let outcome = release(&mut mgr, &ldk, "fake-payment-id", arrived, true).await;
+            assert!(outcome.ok, "arrived={arrived}: {}", outcome.status);
+            assert!(mgr.db.stability_top_ups_in_flight().unwrap().is_empty());
+
+            tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+            if arrived {
+                assert_channel_books(&mgr, 50.0, 62_500);
+                assert_eq!(top_up_sats_sent(&ldk), [12_500]);
+            } else {
+                assert_channel_books(&mgr, 50.0, 50_000);
+                assert_eq!(top_up_sats_sent(&ldk), [12_500, 12_500], "what is still owed is paid once");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn old_payment_the_node_answers_about_again_is_settled_by_the_node_not_by_a_release() {
+        let (mut mgr, ldk, push) = top_up_in_flight().await;
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        age_stability_payments(&mgr, TOP_UP_MAX_IN_FLIGHT_SECS + 60);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+
+        // Lookups work again before the operator acts, and the node says it was claimed.
+        ldk.payment_lookup_failures.store(0, Ordering::SeqCst);
+        node_reports(&ldk, "fake-payment-id", PaymentStatus::Succeeded);
+        set_receiver_sats(&ldk, 62_500);
+        let outcome = release(&mut mgr, &ldk, "fake-payment-id", false, true).await;
+        assert!(!outcome.ok, "the node's answer wins: {}", outcome.status);
+        assert_channel_books(&mgr, 50.0, 62_500);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(top_up_sats_sent(&ldk), [12_500]);
     }
 
     /// A $50 channel whose older daemon raised backing to 62,500 when it sent a top-up the node now has no record of.
@@ -7026,12 +7095,40 @@ mod tests {
         assert!(outcome.ok && outcome.status.contains("left as they are"), "{}", outcome.status);
         assert_channel_books(&mgr, 45.0, 56_250);
 
-        // A node that cannot be asked about it may still hold it, so it is not released.
+        // A node that cannot be asked about a recent one may still hold it, so it is not released; once it is too old to be in flight it is.
         let (mut mgr, ldk) = old_style_top_up_the_node_has_no_record_of().await;
         ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        save_test_connection(&mgr).execute("UPDATE settlement_payments SET recorded_at = strftime('%s', 'now')", []).unwrap();
         assert!(!release(&mut mgr, &ldk, "old-top-up", false, true).await.ok);
         assert_eq!(mgr.db.legacy_stability_payments_pending().unwrap().len(), 1);
         assert_channel_books(&mgr, 50.0, 62_500);
+        age_stability_payments(&mgr, TOP_UP_MAX_IN_FLIGHT_SECS + 60);
+        let outcome = release(&mut mgr, &ldk, "old-top-up", false, true).await;
+        assert!(outcome.ok, "{}", outcome.status);
+        assert!(mgr.db.legacy_stability_payments_pending().unwrap().is_empty());
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_booked_before_the_upgrade_that_the_node_cannot_be_asked_about_needs_release_only_once_too_old_to_be_in_flight() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk) = old_style_top_up_the_node_has_no_record_of().await;
+        ldk.payment_lookup_failures.store(usize::MAX, Ordering::SeqCst);
+        // Two hours old, the node may still hold it: it only waits.
+        save_test_connection(&mgr).execute("UPDATE settlement_payments SET recorded_at = strftime('%s', 'now') - 7200", []).unwrap();
+        stable_channels::audit::enable_test_capture();
+        mgr.resolve_top_ups_in_flight(&ldk).await;
+        let events = stable_channels::audit::drain_test_capture();
+        assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 0, "a node that cannot be asked has not said the payment is gone");
+        assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_STILL_PENDING"), 1);
+
+        // Past the limit it can no longer land, so the operator is told to release it.
+        age_stability_payments(&mgr, TOP_UP_MAX_IN_FLIGHT_SECS);
+        mgr.resolve_top_ups_in_flight(&ldk).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 1);
+        assert_eq!(mgr.db.legacy_stability_payments_pending().unwrap().len(), 1, "it still waits for the operator");
     }
 
     #[tokio::test]

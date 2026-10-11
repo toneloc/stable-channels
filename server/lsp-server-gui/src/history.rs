@@ -202,7 +202,7 @@ pub fn top_up_alarm(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
 	} else if !settled && has(events, &["STABILITY_TOP_UP_BOOKING_FAILED"]) {
 		Some("it was claimed but not booked: the channel record was not found")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"]) {
-		Some("the node lost its record of it: nothing is resent until an operator releases it")
+		Some("the node will not report what happened to it: nothing is resent until an operator releases it")
 	} else if !over && has(events, &["STABILITY_TOP_UP_DEFERRED_STILL_PENDING"]) {
 		Some("it has had no outcome for over an hour: waiting, nothing resent")
 	} else {
@@ -210,7 +210,7 @@ pub fn top_up_alarm(events: &[ChannelLedgerEvent]) -> Option<&'static str> {
 	}
 }
 
-/// Whether the top-up's alarm is one that waiting will not clear: the node has no record of it, it was claimed and could not be booked, or the node contradicted what was booked or released.
+/// Whether the top-up's alarm is one that waiting will not clear: the node will not report on it, it was claimed and could not be booked, or the node contradicted what was booked or released.
 pub fn top_up_alarm_is_urgent(events: &[ChannelLedgerEvent]) -> bool {
 	let settled = has(events, &["STABILITY_PAYMENT_SETTLED"]);
 	top_up_to_release(events).is_some()
@@ -218,7 +218,7 @@ pub fn top_up_alarm_is_urgent(events: &[ChannelLedgerEvent]) -> bool {
 		|| has(events, &["STABILITY_TOP_UP_RELEASE_CONFLICT", "STABILITY_TOP_UP_FAILED_AFTER_BOOKING"])
 }
 
-/// The payment id of a top-up the node has no record of, for an operator to release; None once it has an outcome.
+/// The payment id of a top-up the node will not report on (no record, or a lookup still failing once it is too old to be in flight), for an operator to release; None once it has an outcome.
 pub fn top_up_to_release(events: &[ChannelLedgerEvent]) -> Option<String> {
 	let over = has(events, &[
 		"STABILITY_PAYMENT_SETTLED",
@@ -402,7 +402,7 @@ fn describe(events: &[ChannelLedgerEvent], channel: &str, amount: Option<u64>, t
 		"PEER_DISCONNECTED" => (EntryKind::Peer, "Wallet offline".to_owned()),
 		"STABILITY_PUSH_QUEUED" => (EntryKind::Other, "Wallet above peg: push sent to wake it".to_owned()),
 		"STABILITY_CHECK_ONLY" => (EntryKind::Other, "Wallet above peg: waiting for it to pay".to_owned()),
-		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Node lost its record of a stability payment: nothing is resent until an operator releases it".to_owned()),
+		"STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => (EntryKind::Other, "Node will not report on a stability payment: nothing is resent until an operator releases it".to_owned()),
 		"STABILITY_TOP_UP_RELEASED" => (EntryKind::Other, "Operator released a stability payment".to_owned()),
 		"STABILITY_TOP_UP_RELEASE_CONFLICT" => (EntryKind::Other, "Released stability payment was claimed after all: the user may have been paid twice".to_owned()),
 		"STABILITY_TOP_UP_FAILED_AFTER_BOOKING" => (EntryKind::Other, "Booked stability payment reported failed: verify this channel's books".to_owned()),
@@ -594,7 +594,7 @@ mod tests {
 		};
 		for (alarm, text) in [
 			("STABILITY_TOP_UP_DEFERRED_STILL_PENDING", "it has had no outcome for over an hour: waiting, nothing resent"),
-			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node lost its record of it: nothing is resent until an operator releases it"),
+			("STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN", "the node will not report what happened to it: nothing is resent until an operator releases it"),
 			("STABILITY_TOP_UP_BOOKING_FAILED", "it was claimed but not booked: the channel record was not found"),
 			("STABILITY_TOP_UP_LOOKUP_FAILED", "verify this channel's books"),
 		] {

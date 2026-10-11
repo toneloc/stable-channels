@@ -818,7 +818,7 @@ pub enum Dialog {
 	ConfirmSend(SendKind),
 	/// Confirm step before a rejected trade's fee is sent back.
 	RefundTradeFee,
-	/// Operator's decision about a stability payment the node has no record of.
+	/// Operator's decision about a stability payment the node will not report on.
 	ReleaseStabilityPayment,
 }
 

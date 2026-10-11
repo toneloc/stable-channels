@@ -301,7 +301,7 @@ fn Timeline(events: Vec<ChannelLedgerEvent>, overview: Option<ChannelLedgerOverv
 	}
 }
 
-/// Asks the operator what happened to a stability payment the node has no record of.
+/// Asks the operator what happened to a stability payment the node will not report on.
 #[component]
 pub fn ReleaseStabilityPaymentDialog() -> Element {
 	let ctx = use_context::<AppCtx>();
@@ -315,7 +315,7 @@ pub fn ReleaseStabilityPaymentDialog() -> Element {
 	rsx! {
 		Modal {
 			title: "Release stability payment",
-			sub: "Decide what happened to a payment the node has no record of",
+			sub: "Decide what happened to a payment the node will not report on",
 			icon: rsx! { Bubble { icon: "alert", tone: "orange" } },
 			onclose: move |_| cancel(),
 			footer: rsx! {
@@ -343,7 +343,7 @@ pub fn ReleaseStabilityPaymentDialog() -> Element {
 			if form.confirming.is_some() {
 				p { class: "small", strong { "{form.notice}" } }
 			} else {
-				span { class: "small muted", "Choosing an answer first shows the channel's balance and books and what that answer will do; nothing changes until it is confirmed. \"It arrived\" adds the payment's sats to the channel's books. \"It did not arrive\" drops the payment and the next stability check pays whatever is still owed, so a wrong answer pays the user twice; it is accepted only once the payment is 14 days old and can no longer be in flight. A payment the node still holds, or cannot be asked about, is not released." }
+				span { class: "small muted", "Choosing an answer first shows the channel's balance and books and what that answer will do; nothing changes until it is confirmed. \"It arrived\" adds the payment's sats to the channel's books. \"It did not arrive\" drops the payment and the next stability check pays whatever is still owed, so a wrong answer pays the user twice; it is accepted only once the payment is 14 days old and can no longer be in flight. A payment the node still holds is not released, and one it cannot be asked about only once it is 14 days old." }
 			}
 		}
 	}

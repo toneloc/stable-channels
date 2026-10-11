@@ -522,7 +522,7 @@ impl LspRestClient {
 		self.post_request(&request, &url).await
 	}
 
-	/// Counts a stability payment the node has no record of as arrived or as not arrived; the first call returns the figures to confirm.
+	/// Counts a stability payment the node will not report on as arrived or as not arrived; the first call returns the figures to confirm.
 	pub async fn release_stability_payment(
 		&self, request: ReleaseStabilityPaymentRequest,
 	) -> Result<ReleaseStabilityPaymentResponse, LspRestError> {

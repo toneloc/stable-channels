@@ -1314,7 +1314,7 @@ pub(crate) fn finish_release(form: &mut crate::state::ReleaseStabilityPaymentFor
 	true
 }
 
-/// Sends the operator's answer about the payment the dialog describes; the daemon first returns the figures to confirm, and releases only a payment the node has no record of.
+/// Sends the operator's answer about the payment the dialog describes; the daemon first returns the figures to confirm, and releases only a payment the node will not report on.
 pub fn release_stability_payment(ctx: AppCtx, arrived: bool) {
 	if busy(ctx, Op::ReleaseStabilityPayment) {
 		return;

@@ -105,7 +105,7 @@ fn release_decision(decision: &str) -> Option<bool> {
     }
 }
 
-/// Operator's decision about a stability payment the node has no record of.
+/// Operator's decision about a stability payment the node will not report on.
 pub async fn release_stability_payment(
     State(state): State<AppState>,
     body: Bytes,
