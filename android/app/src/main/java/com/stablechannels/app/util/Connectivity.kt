@@ -112,11 +112,6 @@ object NetworkReachabilityEvaluator {
         }
         return false
     }
-
-    fun shouldPresentOfflineNotice(throwable: Throwable?, isNetworkOffline: Boolean): Boolean {
-        if (isNetworkOffline) return true
-        return isNetworkError(throwable)
-    }
 }
 
 object OfflineMessages {

@@ -1451,6 +1451,12 @@ class AppState(private val context: Context) : ViewModel() {
     fun restartNodeFromForeground(keepWalletVisible: Boolean = false): Job {
         isWaitingForPayment = false
         return viewModelScope.launch(Dispatchers.IO) {
+            // LDK may only start with a foreground activity or the background service holding
+            // it. onResume clears isInBackground before calling this, so it restarts the node.
+            if (isInBackground) {
+                Log.d("AppState", "Skipping node start while backgrounded; resume will restart it")
+                return@launch
+            }
             if (!isInitialized) {
                 isInitialized = true
                 start()
@@ -1516,6 +1522,10 @@ class AppState(private val context: Context) : ViewModel() {
                     }
                     processPendingPushPayment()
                     coldStartPending = false
+                    launch {
+                        delay(3000)
+                        ensureLSPConnected()
+                    }
                 }
                 clearSyncStatusMessage()
             } catch (e: Exception) {
@@ -1540,16 +1550,16 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         refreshOnlineStatus()
-        if (
-            !_isOnline.value ||
-                NetworkReachabilityEvaluator.shouldPresentOfflineNotice(e, !_isOnline.value)
-        ) {
+        if (!_isOnline.value) {
             AuditService.log("NODE_START_FAILED_OFFLINE", mapOf("error" to (e.message ?: "")))
             deferNodeStartUntilOnline()
             return
         }
 
-        if (isRetryableNodeStartFailure(e)) {
+        // The device is online, so a network-shaped failure is a chain-source or LSP outage, not
+        // lost connectivity. Keep retrying with backoff; no connectivity event will fire to
+        // recover from the offline page, and its "No Internet Connection" copy would be false.
+        if (isRetryableNodeStartFailure(e) || NetworkReachabilityEvaluator.isNetworkError(e)) {
             _phase.value = Phase.SYNCING
             _errorMessage.value = ""
             _statusMessage.value = "Network unstable. Retrying wallet sync..."
@@ -1685,8 +1695,9 @@ class AppState(private val context: Context) : ViewModel() {
             pollPaymentConfirmations(force = true)
             updateStableBalances()
             connectMempoolWebSocket()
+            val lastPriceUpdate = priceService.lastUpdate.value
             priceService.fetchPrice()
-            recordCurrentPrice()
+            if (priceService.lastUpdate.value.after(lastPriceUpdate)) recordCurrentPrice()
         }
     }
 

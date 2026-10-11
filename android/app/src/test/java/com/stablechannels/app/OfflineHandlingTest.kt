@@ -9,8 +9,11 @@ import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.isOnline
 import java.io.File
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -77,13 +80,12 @@ class OfflineHandlingTest {
         val cm = context.getSystemService(ConnectivityManager::class.java)
         val shadowCm = Shadows.shadowOf(cm)
         val network = cm.activeNetwork
-        if (network != null) {
-            val capsNoValidation = ShadowNetworkCapabilities.newInstance()
-            Shadows.shadowOf(capsNoValidation)
-                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            shadowCm.setNetworkCapabilities(network, capsNoValidation)
-            assertFalse(context.isOnline())
-        }
+        assertNotNull(network)
+        val capsNoValidation = ShadowNetworkCapabilities.newInstance()
+        Shadows.shadowOf(capsNoValidation)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        shadowCm.setNetworkCapabilities(network, capsNoValidation)
+        assertFalse(context.isOnline())
     }
 
     @Test
@@ -236,8 +238,72 @@ class OfflineHandlingTest {
     }
 
     @Test
-    fun `retryConnection re-entry guard prevents duplicate concurrent executions`() {
+    fun `retryConnection holds its re-entry guard while running and releases it after`() {
         val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
         assertFalse(appState.isRetrying.value)
+
+        appState.retryConnection()
+        assertTrue(appState.isRetrying.value)
+        // A second tap while the first retry runs is ignored by the guard.
+        appState.retryConnection()
+
+        assertTrue(waitUntil { !appState.isRetrying.value })
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+    }
+
+    @Test
+    fun `connectivity restored in foreground on offline screen retries connection`() {
+        val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
+
+        appState.setOnline(true)
+
+        assertTrue(appState.isRetrying.value)
+        // The retry re-reads the (still offline) device and settles back to offline.
+        assertTrue(waitUntil { !appState.isOnline.value && !appState.isRetrying.value })
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+    }
+
+    @Test
+    fun `online network failure at node start retries instead of showing the offline page`() {
+        setDeviceOnline(true)
+        for (error in
+            listOf(
+                java.net.SocketTimeoutException("Read timed out"),
+                java.net.UnknownHostException("esplora.example.com"),
+            )) {
+            val appState = AppState(context)
+            appState.handleNodeStartFailure(error, "fallback")
+            assertEquals(error.toString(), Phase.SYNCING, appState.phase.value)
+            assertEquals("", appState.errorMessage.value)
+            // Park the scheduled retry so it cannot start a node after the test.
+            appState.stopNodeForBackground()
+        }
+    }
+
+    @Test
+    fun `restartNodeFromForeground does not start the node while backgrounded`() {
+        val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
+        appState.stopNodeForBackground()
+        setDeviceOnline(true)
+        appState.refreshOnlineStatus()
+
+        runBlocking { withTimeout(5_000) { appState.restartNodeFromForeground().join() } }
+
+        // Node startup opens the wallet database first; it must never begin in the background.
+        assertFalse(waitUntil(1_000) { appState.databaseService != null })
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+        assertFalse(appState.isSyncing.value)
+    }
+
+    private fun waitUntil(timeoutMs: Long = 3_000, condition: () -> Boolean): Boolean {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            if (condition()) return true
+            Thread.sleep(20)
+        }
+        return condition()
     }
 }

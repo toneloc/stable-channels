@@ -131,48 +131,4 @@ class NetworkReachabilityTest {
             NetworkReachabilityEvaluator.isNetworkError(NullPointerException("Missing parameter"))
         )
     }
-
-    @Test
-    fun `shouldPresentOfflineNotice returns true when network is offline regardless of error`() {
-        assertTrue(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(null, isNetworkOffline = true)
-        )
-        assertTrue(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                IllegalArgumentException("any"),
-                isNetworkOffline = true,
-            )
-        )
-        assertTrue(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                ConnectException("failed"),
-                isNetworkOffline = true,
-            )
-        )
-    }
-
-    @Test
-    fun `shouldPresentOfflineNotice delegates to isNetworkError when network is online`() {
-        assertFalse(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(null, isNetworkOffline = false)
-        )
-        assertFalse(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                IllegalArgumentException("any"),
-                isNetworkOffline = false,
-            )
-        )
-        assertTrue(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                ConnectException("Connection refused"),
-                isNetworkOffline = false,
-            )
-        )
-        assertTrue(
-            NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                UnknownHostException("cannot resolve"),
-                isNetworkOffline = false,
-            )
-        )
-    }
 }
