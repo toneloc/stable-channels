@@ -8,7 +8,23 @@ protocol SecureHTTPTransporting: Sendable {
     func executeGet(url: URL) async throws -> (Data, HTTPURLResponse)
 }
 
-typealias SecureHTTPTransport = NWConnectionTransport
+// MARK: - Dial Race Claim
+
+/// Lets exactly one of several racing connections send the request. A request (e.g. an LNURL
+/// callback) can have server-side effects, so racing candidates compete to connect, not to send.
+final class DialRaceClaim: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isClaimed = false
+
+    /// Returns true for the first caller only.
+    func claim() -> Bool {
+        lock.withLock {
+            guard !isClaimed else { return false }
+            isClaimed = true
+            return true
+        }
+    }
+}
 
 // MARK: - NWConnection Session (Lifecycle and Cancellation Manager)
 
@@ -22,6 +38,7 @@ final class NWConnectionSession: @unchecked Sendable {
     private let requestData: Data
     private let timeoutInterval: TimeInterval
     private let queue: DispatchQueue
+    private let sendClaim: DialRaceClaim?
     private let continuation: CheckedContinuation<(data: Data, cleanClose: Bool), Error>
 
     init(
@@ -29,12 +46,14 @@ final class NWConnectionSession: @unchecked Sendable {
         requestData: Data,
         timeoutInterval: TimeInterval,
         queue: DispatchQueue,
+        sendClaim: DialRaceClaim? = nil,
         continuation: CheckedContinuation<(data: Data, cleanClose: Bool), Error>
     ) {
         self.connection = connection
         self.requestData = requestData
         self.timeoutInterval = timeoutInterval
         self.queue = queue
+        self.sendClaim = sendClaim
         self.continuation = continuation
     }
 
@@ -76,6 +95,11 @@ final class NWConnectionSession: @unchecked Sendable {
     private func handleState(_ state: NWConnection.State) {
         switch state {
         case .ready:
+            // Lost the race to another candidate: bow out before sending anything.
+            if let sendClaim, !sendClaim.claim() {
+                complete(with: .failure(CancellationError()))
+                return
+            }
             connection.send(content: requestData, completion: .contentProcessed { [weak self] sendError in
                 guard let self else { return }
                 if let sendError {
@@ -233,7 +257,8 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         cleanHost: String,
         port: NWEndpoint.Port,
         isHTTPS: Bool,
-        requestData: Data
+        requestData: Data,
+        sendClaim: DialRaceClaim? = nil
     ) async throws -> (data: Data, cleanClose: Bool) {
         var (endpoint, params) = Self.buildDialParameters(
             cleanHost: cleanHost,
@@ -247,14 +272,11 @@ final class NWConnectionTransport: SecureHTTPTransporting {
             }
         #endif
         let connection = NWConnection(to: endpoint, using: params)
-        return try await sendAndReceive(
-            connection: connection,
-            requestData: requestData,
-            timeout: timeoutInterval
-        )
+        return try await sendAndReceive(connection: connection, requestData: requestData, sendClaim: sendClaim)
     }
 
     /// Races candidate IPs using Happy Eyeballs (RFC 8305) with a 250ms Connection Attempt Delay.
+    /// Only the first connection to become ready sends the request.
     private func raceCandidates(
         candidateIPs: [String],
         cleanHost: String,
@@ -272,6 +294,7 @@ final class NWConnectionTransport: SecureHTTPTransporting {
             )
         }
 
+        let sendClaim = DialRaceClaim()
         return try await withThrowingTaskGroup(of: Result<(data: Data, cleanClose: Bool), Error>.self) { group in
             for (index, ip) in candidateIPs.enumerated() {
                 group.addTask {
@@ -289,7 +312,8 @@ final class NWConnectionTransport: SecureHTTPTransporting {
                             cleanHost: cleanHost,
                             port: port,
                             isHTTPS: isHTTPS,
-                            requestData: requestData
+                            requestData: requestData,
+                            sendClaim: sendClaim
                         )
                         return .success(result)
                     } catch {
@@ -392,18 +416,18 @@ final class NWConnectionTransport: SecureHTTPTransporting {
     private func sendAndReceive(
         connection: NWConnection,
         requestData: Data,
-        timeout: TimeInterval? = nil
+        sendClaim: DialRaceClaim?
     ) async throws -> (data: Data, cleanClose: Bool) {
         try Task.checkCancellation()
         let holder = SessionHolder()
-        let actualTimeout = timeout ?? self.timeoutInterval
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let session = NWConnectionSession(
                     connection: connection,
                     requestData: requestData,
-                    timeoutInterval: actualTimeout,
+                    timeoutInterval: self.timeoutInterval,
                     queue: self.nwQueue,
+                    sendClaim: sendClaim,
                     continuation: continuation
                 )
                 holder.setSession(session)

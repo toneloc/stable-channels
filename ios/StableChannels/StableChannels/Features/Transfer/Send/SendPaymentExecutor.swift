@@ -291,12 +291,11 @@ struct SendPaymentExecutor {
         txid: String? = nil,
         appState: AppState
     ) {
+        let usd: Double? = price > 0 ? (Double(msat) / 1000.0 / Double(Constants.satsInBTC)) * price : nil
         // Guard against downgrading: if the event handler already marked
         // this payment completed or failed, backfill details and do not insert "pending".
         if let existing = appState.databaseService?.paymentRepo.payment(paymentId: id) {
-            let status = existing.status
-            if status == "completed" || status == "succeeded" || status == "failed" {
-                let usd: Double? = price > 0 ? (Double(msat) / 1000.0 / Double(Constants.satsInBTC)) * price : nil
+            if existing.isSettled || existing.isFailed {
                 try? appState.databaseService?.paymentRepo.backfillPaymentDetails(
                     paymentId: id,
                     amountMsat: msat,
@@ -310,7 +309,6 @@ struct SendPaymentExecutor {
             }
         }
 
-        let usd: Double? = price > 0 ? (Double(msat) / 1000.0 / Double(Constants.satsInBTC)) * price : nil
         _ = try? appState.databaseService?.paymentRepo.recordPayment(
             paymentId: id,
             paymentType: type,
@@ -322,20 +320,6 @@ struct SendPaymentExecutor {
             status: "pending",
             txid: txid,
             address: address
-        )
-    }
-
-    typealias SettlementOutcome = PaymentSettlementOutcome
-
-    static func awaitPaymentSettlement(
-        paymentId: String,
-        timeoutSeconds: TimeInterval,
-        appState: AppState? = nil
-    ) async -> SettlementOutcome {
-        await PaymentSettlementObserver.awaitSettlement(
-            paymentId: paymentId,
-            timeoutSeconds: timeoutSeconds,
-            appState: appState
         )
     }
 }

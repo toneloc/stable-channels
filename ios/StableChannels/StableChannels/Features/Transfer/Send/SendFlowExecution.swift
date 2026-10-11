@@ -60,14 +60,12 @@ extension SendFlowModel {
         let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
         guard sats > 0 else {
             errorMessage = "Invalid amount."
-            resetToken += 1
             return
         }
         let available = availableSpendableSats(appState: appState)
         let totalDebit = sats + estimatedFeeSats(appState: appState)
         guard totalDebit <= available, available > 0 else {
             errorMessage = "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
-            resetToken += 1
             return
         }
 
@@ -86,20 +84,12 @@ extension SendFlowModel {
             switch result.outcome {
             case .onchain(let txid):
                 // Already broadcast into the mempool.
-                sentAmountSats = result.sentAmountSats
-                successTxid = txid
-                successPaymentId = nil
-                isPendingSettlement = false
-                step = .success
+                showSuccess(sentSats: result.sentAmountSats, txid: txid, isPending: false)
 
             case .spliceOut:
                 // The splice confirms on-chain; there is no payment to await and no txid until
                 // negotiation completes. Home shows it as a pending move meanwhile.
-                sentAmountSats = result.sentAmountSats
-                successTxid = nil
-                successPaymentId = nil
-                isPendingSettlement = true
-                step = .success
+                showSuccess(sentSats: result.sentAmountSats, isPending: true)
 
             case .lightning(let pid):
                 let timeout: TimeInterval
@@ -116,23 +106,23 @@ extension SendFlowModel {
                 )
                 switch outcome {
                 case .settled:
-                    sentAmountSats = result.sentAmountSats
-                    successPaymentId = pid
-                    successTxid = nil
-                    isPendingSettlement = false
-                    step = .success
+                    showSuccess(sentSats: result.sentAmountSats, paymentId: pid, isPending: false)
                 case .failed(let reason):
                     errorMessage = reason
                 case .timedOut:
-                    sentAmountSats = result.sentAmountSats
-                    successPaymentId = pid
-                    successTxid = nil
-                    isPendingSettlement = true
-                    step = .success
+                    showSuccess(sentSats: result.sentAmountSats, paymentId: pid, isPending: true)
                 }
             }
         } catch {
             errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
         }
+    }
+
+    private func showSuccess(sentSats: UInt64, paymentId: String? = nil, txid: String? = nil, isPending: Bool) {
+        sentAmountSats = sentSats
+        successPaymentId = paymentId
+        successTxid = txid
+        isPendingSettlement = isPending
+        step = .success
     }
 }

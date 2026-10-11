@@ -87,9 +87,9 @@ enum PaymentSettlementObserver {
         guard let record = appState?.databaseService?.paymentRepo.payment(paymentId: paymentId) else {
             return nil
         }
-        if record.status == "completed" || record.status == "succeeded" {
+        if record.isSettled {
             return .settled(paymentHash: record.paymentId)
-        } else if record.status == "failed" {
+        } else if record.isFailed {
             return .failed(reason: "The payment did not complete. Check its status in History before trying again.")
         }
         return nil

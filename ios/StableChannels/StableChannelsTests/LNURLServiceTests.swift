@@ -1,6 +1,7 @@
 import CryptoKit
 import LDKNode
 import Network
+import os
 import Security
 import XCTest
 @testable import StableChannels
@@ -1791,6 +1792,63 @@ final class LNURLServiceTests: XCTestCase {
         } catch {
             XCTFail("Expected networkError, got \(error)")
         }
+    }
+
+    func testDialRaceClaim_grantsOnlyFirstClaim() {
+        let claim = DialRaceClaim()
+        XCTAssertTrue(claim.claim())
+        XCTAssertFalse(claim.claim())
+    }
+
+    func testNWConnectionSession_lostDialRace_sendsNothing() async throws {
+        let receivedBytes = OSAllocatedUnfairLock(initialState: 0)
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+            incoming.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
+                receivedBytes.withLock { $0 += data?.count ?? 0 }
+            }
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testrace")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /callback HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+        let claim = DialRaceClaim()
+        XCTAssertTrue(claim.claim(), "Another candidate already won the race")
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+                (data: Data, cleanClose: Bool),
+                Error
+            >) in
+                NWConnectionSession(
+                    connection: connection,
+                    requestData: requestData,
+                    timeoutInterval: 2,
+                    queue: listenerQueue,
+                    sendClaim: claim,
+                    continuation: continuation
+                ).start()
+            }
+            XCTFail("Expected the losing candidate to cancel")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(receivedBytes.withLock { $0 }, 0)
     }
 
     func testNWConnectionSession_taskCancellation_abortsConnection() async throws {
