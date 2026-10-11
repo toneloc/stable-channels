@@ -14,6 +14,9 @@ class StableChannelsApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // E2E endpoint overrides — no-op in release builds and when no
+        // test_config.json is present. Must run before anything reads Constants.
+        com.stablechannels.app.util.TestOverrides.init(this)
         try {
             FirebaseApp.initializeApp(this)
         } catch (_: Exception) {

@@ -1,0 +1,78 @@
+# Step 36 — Aux: a splice whose accounting defers must finish without a restart
+# With every price feed down, a confirming splice-out cannot be valued: it must NOT be declared "Move confirmed", and when the feeds return the deduction must land on its own.
+#
+# The accounting needs a trusted BTC/USD price to value the spend. If the price
+# is stale when the confirmation lands, the deduction has to wait — but the app
+# used to stop the monitor, clear the splice state and show "Move confirmed"
+# anyway, leaving the row pending. A pending row also blocks the periodic books
+# repair, so nothing retried until the next app start: the withdrawal stayed
+# missing from Stable USD for as long as the app kept running.
+#
+# Run RIGHT AFTER 01 + 02 at the $100k base (position $75.31, ~$9-10 native).
+appId: com.stablechannels.app
+tags: [android, onchain, send, stability, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+- assertVisible: "\\$7[45]\\.\\d\\d"
+
+# $15 on-chain send: more than the native balance, so it must debit USD.
+- runScript:
+    file: helpers/create_address.js
+- tapOn: "Send"
+- tapOn: "To"
+- setClipboard: ${output.address}
+- pasteText
+- extendedWaitUntil:
+    visible: "Amount \\(USD\\)"
+    timeout: 20000
+- tapOn: "0.00"
+- inputText: "15"
+- hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- extendedWaitUntil:
+    visible: "Splice-out initiated"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Take the price away, wait past the 60s trust window, then confirm the splice.
+- runScript:
+    file: helpers/feeds_outage.js
+    env:
+      DOWN: "true"
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "75"
+- runScript:
+    file: helpers/mine_blocks.js
+
+# The move is NOT finished: no "Move confirmed" for an unaccounted withdrawal,
+# and the USD balance has not moved either.
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "40"
+- assertNotVisible: "Move confirmed"
+- assertVisible: "\\$7[45]\\.\\d\\d"
+
+# Price comes back: the monitor is still alive, so the deduction lands with no
+# restart — ~$75 − ~$6 overflow → $67-69.99.
+- runScript:
+    file: helpers/feeds_outage.js
+    env:
+      DOWN: "false"
+- extendedWaitUntil:
+    visible: "\\$6[7-9]\\.\\d\\d"
+    timeout: 180000
+- assertNotVisible: "\\$7[45]\\.\\d\\d"

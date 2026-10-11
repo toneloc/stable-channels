@@ -1,0 +1,77 @@
+# Step 34 — Aux: a deposit to an OLD receive address still confirms
+# Send to the receive address, then open Onchain again (which hands out a NEW address) before the deposit is noticed, then mine: the deposit must still get its txid and count to Confirmed.
+#
+# RED until fixed (found by this flow, 2026-09-11). Android stamps a newly
+# detected deposit with the CURRENT receive address and resolves its txid only
+# by looking that address up. A deposit sent to an earlier address and noticed
+# after the user reopened Onchain is therefore stamped with the wrong address,
+# never gets a txid, and stays "Receiving onchain…" forever — AppState's own
+# comment calls it unrecoverable. Real path: copy the address, send from an
+# exchange (minutes to arrive), reopen Receive → Onchain meanwhile. The fix is
+# to resolve pending deposits against every address the wallet has handed out
+# (LDK's wallet knows which output is ours), not only the latest one.
+# Guards #183 (new address must not erase the active deposit) and #267.
+#
+# Run RIGHT AFTER 01 + 02 (a funded channel; the onchain box empty).
+appId: com.stablechannels.app
+tags: [android, onchain, receive, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- tapOn: "Receive"
+- tapOn: "Onchain"
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "bcrt1.*"
+- runScript:
+    file: helpers/send_onchain.js
+# Unconfirmed deposit is in the mempool. Leave and reopen Onchain, which
+# generates a NEW receive address — the pending deposit must survive it.
+- tapOn: "(Back|Receive)"
+- tapOn: "Onchain"
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- tapOn: "(Back|Receive)"
+- tapOn:
+    text: "Done"
+    optional: true
+# The deposit is noticed before the kill (the onchain card's pending row).
+- extendedWaitUntil:
+    visible: "(.*Receiving onchain.*|Deposit confirming.*)"
+    timeout: 120000
+
+# Confirm it — the app stays alive throughout (flow 31 covers the kill).
+- runScript:
+    file: helpers/mine_blocks.js
+    env:
+      MINE_BLOCKS: "6"
+
+# Exactly one Received onchain row, fully confirmed, with its txid (the
+# detail sheet's explorer link needs one).
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Confirmed"
+    timeout: 240000
+- assertVisible: "Onchain · .*"
+- assertNotVisible:
+    text: "Onchain · .*"
+    index: 1
+- tapOn: "Onchain · .*"
+- assertVisible: "View on [Ee]xplorer"
+- tapOn: "Done"
+
+# The funds landed in the onchain box.
+- tapOn: "Home"
+- extendedWaitUntil:
+    visible: "(Swap|Move|Ready to move.*)"
+    timeout: 120000

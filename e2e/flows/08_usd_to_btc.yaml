@@ -1,0 +1,32 @@
+# Step 8 — USD -> BTC
+# "User converts USD exposure into BTC."
+# Selectors verified against BuyScreen.kt (identical shape to SellScreen).
+appId: com.stablechannels.app
+tags: [android, ios, trade]
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 30000
+- tapOn: "USD → BTC"
+
+- assertVisible: "How much USD to convert to BTC\\?"
+- tapOn: "0.00"
+# Keep part of the $74.25 stable position for later lifecycle checks.
+- inputText: "20"
+- tapOn: "Continue"
+
+- assertVisible: "Review USD -> BTC"
+- assertVisible: "\\$20\\.00"
+- assertVisible: "\\$0\\.20"
+- assertVisible: "\\$99,500\\.00"
+# Confirm button is now "Confirm Order" on both platforms (iOS button was
+# relabeled from "USD → BTC" in the copy-changes PR).
+- tapOn: "Confirm Order"
+
+- extendedWaitUntil:
+    visible: "Order (Confirmed|Pending)"
+    timeout: 30000
+- tapOn: "Done"
+- assertVisible: "BTC → USD"

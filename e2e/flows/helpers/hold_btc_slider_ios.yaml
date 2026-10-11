@@ -1,0 +1,7 @@
+appId: com.stablechannels.app
+---
+# Stay clamped at the left edge so the label holds on 100% BTC.
+- swipe:
+    start: 10%, 26%
+    end: 8%, 26%
+    duration: 1800

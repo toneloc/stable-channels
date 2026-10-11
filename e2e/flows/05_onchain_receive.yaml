@@ -1,0 +1,63 @@
+# Step 5 — Onchain Receive
+# "User receives an onchain payment from another app into the onchain box, then splices it into the channel."
+appId: com.stablechannels.app
+tags: [android, onchain, receive]
+env:
+  HARNESS_API: "http://localhost:9737"
+  SEND_SATS: "100000"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- tapOn: "Receive"
+- tapOn: "Onchain"          # ReceiveScreen toolbar -> FundWalletScreen
+
+# Address on the Fund Wallet screen (regtest = bcrt1...)
+- extendedWaitUntil:
+    visible: "bcrt1.*"
+    timeout: 20000
+- copyTextFrom:
+    text: "bcrt1.*"
+- runScript:
+    file: helpers/send_onchain.js
+- runScript:
+    file: helpers/mine_blocks.js
+
+- tapOn: "(Back|Receive)"    # Android Back / iOS nav-back (labeled by prev screen)
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Deposit confirms -> the onchain card on Home offers to move the funds.
+# Since #298 the Android card has two layouts: a plain "Move" button, or — while the
+# incoming-deposit row is still confirming — a collapsed "Ready to move · Receiving
+# onchain (n/6)" summary that hides the button until the card is tapped. It can flip
+# from the first to the second right after "Move" appears, so wait for the funds, then
+# for the deposit row to finish, and only then tap (expanding first if still collapsed).
+- extendedWaitUntil:
+    visible: "(Swap|Move|Ready to move.*)"   # Android / iOS label, or the collapsed card
+    timeout: 240000                          # E2E config syncs every 3s; keep a generous CI ceiling
+- extendedWaitUntil:
+    notVisible: ".*Receiving onchain.*"
+    timeout: 120000
+- retry:
+    maxRetries: 3
+    commands:
+      - runFlow:
+          when:
+            visible: "Ready to move.*"
+          commands:
+            - tapOn: "Ready to move.*"
+      - tapOn: "(Swap|Move)"
+
+# Prove the splice entered its pending state before mining.
+- extendedWaitUntil:
+    visible: "Move pending.*"
+    timeout: 60000
+- runScript:
+    file: helpers/mine_blocks.js
+
+# Durable signal: the pending state clears only after splice confirmation.
+- extendedWaitUntil:
+    notVisible: "Move pending.*"
+    timeout: 240000

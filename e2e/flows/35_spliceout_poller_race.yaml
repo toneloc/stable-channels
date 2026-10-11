@@ -1,0 +1,88 @@
+# Step 35 — Aux: the splice-out USD deduction must survive the confirmation poller
+# A splice-out confirms while the confirmation poller (not the splice monitor) marks the row complete: the Stable USD deduction must still happen.
+#
+# RED until fixed (issue #311, mainnet incident 2026-09-12). Two independent
+# writers complete a splice row:
+#   * spliceConfirmationJob → completeConfirmedSplice() → completeSplice()
+#     (WHERE status='pending') → reconcileOutgoing() → the USD deduction
+#   * pollPaymentConfirmations() → updatePaymentConfirmationState(), which marks
+#     splice rows completed at 1 confirmation and does NO reconcile
+# Whoever runs first wins. When the poller wins, completeSplice() no longer
+# matches a pending row, so the deduction never happens — and because
+# hasPendingSplice()/getPendingSpliceTxid() only look at pending rows, a
+# restart can't resume it either. The books then disagree with the LSP forever
+# and every later trade is rejected invalid_fee.
+#
+# On mainnet the poller usually wins: it is force-run on every mempool
+# websocket block header (i.e. the instant the confirming block lands), on
+# foreground resume, and whenever the user opens History. The splice monitor
+# only polls every 30s. Flow 25 passes only because regtest has no mainnet
+# websocket and the harness monitor ticks every 3s.
+#
+# This flow forces the production ordering deterministically: the pre-hook
+# pushes sync_interval_secs=120 (slow monitor), and opening History right
+# after mining triggers the forced confirmation poll.
+#
+# Run RIGHT AFTER 01 + 02 at the $100k base (position $75.31, ~$9-10 native).
+appId: com.stablechannels.app
+tags: [android, onchain, send, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible: "USD → BTC"
+    timeout: 60000
+- assertVisible: "\\$7[45]\\.\\d\\d"
+- runScript:
+    file: helpers/mark_time.js
+
+# $15 on-chain send: more than the native balance, so it must debit USD.
+- runScript:
+    file: helpers/create_address.js
+- tapOn: "Send"
+- tapOn: "To"
+- setClipboard: ${output.address}
+- pasteText
+- extendedWaitUntil:
+    visible: "Amount \\(USD\\)"
+    timeout: 20000
+- tapOn: "0.00"
+- inputText: "15"
+- hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- extendedWaitUntil:
+    visible: "Splice-out initiated"
+    timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Confirm it, then open History — which force-runs the confirmation poller and
+# lets it complete the splice row before the (slowed) monitor ever sees it.
+- runScript:
+    file: helpers/mine_blocks.js
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Confirmed"
+    timeout: 180000
+
+# The LSP deducted its side.
+- runScript:
+    file: helpers/assert_lsp_splice_out_deducted.js
+    env:
+      MARK_ISO: ${output.markIso}
+      MIN_DEDUCTED_USD: "3.5"
+      MAX_DEDUCTED_USD: "8"
+
+# The app must have deducted too — this is what breaks today.
+- tapOn: "Home"
+- extendedWaitUntil:
+    visible: "\\$6[7-9]\\.\\d\\d"
+    timeout: 120000
+- assertNotVisible: "\\$7[45]\\.\\d\\d"

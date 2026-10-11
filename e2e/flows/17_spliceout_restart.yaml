@@ -1,0 +1,120 @@
+# Step 17 — Aux: splice-out survives an app kill
+# Initiate an onchain send (splice-out), kill the app while the splice is pending, relaunch: the persisted row must resume its confirmation monitor and complete — not vanish, not show as failed.
+#
+# Guards PR #252 (splice-out persisted at initiation + transactional txid
+# assignment + restart resume) and #190 (confirmation tracking). Run in place
+# of 07 (i.e. after 06) — this flow performs 07's send plus the kill.
+#
+# iOS caveat: iOS persists the splice row at the spliceNegotiated event, not at
+# initiation, so the kill here deliberately lands after the broadcast wait; the
+# pre-negotiation kill remains a known iOS gap (see aux-tests-pr-analysis.md).
+appId: com.stablechannels.app
+tags: [android, ios, send, onchain, aux]
+env:
+  HARNESS_API: "http://localhost:9737"
+  MINE_BLOCKS: "6"
+---
+- launchApp:
+    stopApp: false
+- runScript:
+    file: helpers/create_address.js
+
+- extendedWaitUntil:
+    visible: "Send"
+    timeout: 30000
+- tapOn: "Send"
+# Same platform-split focus dance as flow 07.
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - tapOn: "To"
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Invoice or onchain address"
+- setClipboard: ${output.address}
+- pasteText
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Amount \\(USD\\)"
+          timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Onchain Address"
+          timeout: 20000
+- tapOn: "0.00"
+- inputText: "5"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - hideKeyboard
+- tapOn:
+    text: "Send"
+    index: 1
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - extendedWaitUntil:
+          visible: "Splice-out initiated"
+          timeout: 60000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - extendedWaitUntil:
+          visible: "Payment sent.*"
+          timeout: 60000
+- tapOn:
+    text: "Done"
+    optional: true
+
+# Wait for the broadcast signal so the kill lands mid-splice (and, on iOS,
+# after the spliceNegotiated event that writes the DB row). The redesigned
+# home (post-#256/#257) has no splice-out capsule — the signal is the History
+# row's confirmation badge (splice = 1 conf, PR #267).
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "Splice Out.*"
+    timeout: 60000
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
+    timeout: 60000
+- runScript:
+    file: helpers/wait_secs.js
+    env:
+      SECS: "8"
+
+# Kill mid-splice. On relaunch the pending splice must be reloaded from the DB
+# and still count toward confirmation — this reappearing is the core assertion.
+- stopApp
+- launchApp
+- tapOn: "History"
+- tapOn: "Payments"
+- extendedWaitUntil:
+    visible: "0/1 confirmed"
+    timeout: 90000
+
+# Only now mine: the RESUMED monitor (not the original one) must observe the
+# confirmation. The badge was positively observed above, so its disappearance
+# IS confirmation.
+- runScript:
+    file: helpers/mine_blocks.js
+- extendedWaitUntil:
+    notVisible: "0/1 confirmed"
+    timeout: 180000
+
+# History must show the completed splice-out, not a failed or duplicate row.
+- assertVisible: "Splice Out.*"
+- assertVisible: "Confirmed"
+- tapOn: "Home"

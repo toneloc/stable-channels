@@ -1,0 +1,18 @@
+# Maestro workspace config — run `maestro test flows/` from this directory.
+flows:
+  - "flows/*.yaml"
+executionOrder:
+  continueOnFailure: false
+  flowsOrder:
+    - 01_onboard_lightning
+    - 02_btc_to_usd
+    - 03_usd_stability
+    - 04_lightning_receive
+    - 05_onchain_receive
+    - 06_lightning_send
+    - 07_onchain_send
+    - 08_usd_to_btc
+    - 09_close_channel
+    - 10_backup_keys
+    - 11_import_keys
+    - 12_offboard_onchain
