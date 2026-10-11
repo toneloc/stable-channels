@@ -221,6 +221,21 @@ class OfflineHandlingTest {
     }
 
     @Test
+    fun `connectivity restored while backgrounded on offline screen does not retry node start`() {
+        val appState = AppState(context)
+        appState.deferNodeStartUntilOnline()
+        appState.stopNodeForBackground()
+
+        appState.setOnline(true)
+
+        assertFalse(appState.isRetrying.value)
+        // A retry would re-read the (still offline) device and flip isOnline back to false.
+        Thread.sleep(200)
+        assertTrue(appState.isOnline.value)
+        assertEquals(Phase.OFFLINE, appState.phase.value)
+    }
+
+    @Test
     fun `retryConnection re-entry guard prevents duplicate concurrent executions`() {
         val appState = AppState(context)
         assertFalse(appState.isRetrying.value)

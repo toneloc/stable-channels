@@ -1608,11 +1608,13 @@ class AppState(private val context: Context) : ViewModel() {
         if (_isOnline.getAndUpdate { online } == online) return
         AuditService.log(if (online) "NETWORK_ONLINE" else "NETWORK_OFFLINE", emptyMap())
         if (online) {
-            if (_phase.value == Phase.OFFLINE) {
-                retryConnection()
-            } else {
+            if (_phase.value != Phase.OFFLINE) {
                 onConnectivityRestored()
+            } else if (!isInBackground) {
+                retryConnection()
             }
+            // Backgrounded on the offline screen: onResume's restartNodeFromForeground() starts
+            // the node, so a reconnect never starts it without a foreground activity.
         }
     }
 
