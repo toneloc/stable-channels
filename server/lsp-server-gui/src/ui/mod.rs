@@ -346,6 +346,7 @@ fn Dialogs() -> Element {
 		Some(Dialog::LoadConfig) => rsx! { settings::LoadConfigDialog {} },
 		Some(Dialog::ConfirmSend(kind)) => rsx! { confirm::ConfirmSendDialog { kind } },
 		Some(Dialog::RefundTradeFee) => rsx! { revenue::RefundTradeFeeDialog {} },
+		Some(Dialog::ReleaseStabilityPayment) => rsx! { channel_ledger::ReleaseStabilityPaymentDialog {} },
 		None => rsx! {},
 	}
 }
@@ -968,6 +969,81 @@ mod tests {
 			forms.write().refund_trade_fee = crate::state::RefundTradeFeeForm { trade_payment_id: "t1".into(), amount_msat: 2_000_000, node_id: "02ab".into() };
 		});
 		rsx! { crate::ui::revenue::RefundTradeFeeDialog {} }
+	}
+
+	#[component]
+	fn ReleaseDialogHarness() -> Element {
+		let ctx = use_context_provider(|| AppCtx::new(Connection::new(), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_hook(move || {
+			let mut forms = ctx.forms;
+			forms.write().release_stability_payment =
+				crate::state::ReleaseStabilityPaymentForm { payment_id: "p1".into(), summary: "LSP sent 520 sats to keep the peg".into(), ..Default::default() };
+		});
+		rsx! { crate::ui::channel_ledger::ReleaseStabilityPaymentDialog {} }
+	}
+
+	#[component]
+	fn ReleaseConfirmHarness() -> Element {
+		let ctx = use_context_provider(|| AppCtx::new(Connection::new(), Forms::default(), Nav::default(), Prefs::default(), false));
+		use_hook(move || {
+			let mut forms = ctx.forms;
+			forms.write().release_stability_payment = crate::state::ReleaseStabilityPaymentForm {
+				payment_id: "p1".into(),
+				summary: "LSP sent 520 sats to keep the peg".into(),
+				confirming: Some(false),
+				notice: "The channel holds 62500 sats".into(),
+			};
+		});
+		rsx! { crate::ui::channel_ledger::ReleaseStabilityPaymentDialog {} }
+	}
+
+	#[test]
+	fn the_release_dialog_names_the_payment_and_offers_both_answers() {
+		let mut dom = VirtualDom::new(ReleaseDialogHarness);
+		dom.rebuild_in_place();
+		let html = dioxus_ssr::render(&dom);
+		assert!(html.contains("LSP sent 520 sats to keep the peg"));
+		assert!(html.contains("It arrived") && html.contains("It did not arrive") && !html.contains("Confirm:"));
+		assert!(html.contains("pays the user twice"));
+
+		// Once the daemon has returned the figures, only that answer can be confirmed.
+		let mut dom = VirtualDom::new(ReleaseConfirmHarness);
+		dom.rebuild_in_place();
+		let html = dioxus_ssr::render(&dom);
+		assert!(html.contains("The channel holds 62500 sats"));
+		assert!(html.contains("Confirm: it did not arrive") && html.contains("Back"));
+		assert!(!html.contains("It arrived") && !html.contains("Confirm: it arrived"));
+	}
+
+	#[test]
+	fn a_release_is_sent_as_confirmed_only_for_the_answer_the_figures_were_shown_for() {
+		let mut form = crate::state::ReleaseStabilityPaymentForm { payment_id: "p1".into(), ..Default::default() };
+		for arrived in [true, false] {
+			let first = crate::actions::release_request(&form, arrived);
+			assert_eq!((first.payment_id.as_str(), first.acknowledged), ("p1", false));
+			assert_eq!(first.decision, if arrived { "arrived" } else { "not_arrived" });
+		}
+		form.confirming = Some(false);
+		assert!(crate::actions::release_request(&form, false).acknowledged);
+		assert!(!crate::actions::release_request(&form, true).acknowledged, "the figures were shown for the other answer");
+	}
+
+	#[test]
+	fn figures_for_one_payment_never_reach_the_dialog_of_another() {
+		// The operator cancelled payment A's dialog while its figures were loading and opened payment B's.
+		let mut form = crate::state::ReleaseStabilityPaymentForm { payment_id: "B".into(), summary: "payment B".into(), ..Default::default() };
+		assert!(!crate::actions::show_release_preview(&mut form, "A", false, "The channel holds 1 sats".into()));
+		assert_eq!((form.confirming, form.notice.as_str()), (None, ""));
+		assert!(!crate::actions::release_request(&form, false).acknowledged);
+
+		assert!(crate::actions::show_release_preview(&mut form, "B", false, "The channel holds 2 sats".into()));
+		assert_eq!((form.confirming, form.notice.as_str()), (Some(false), "The channel holds 2 sats"));
+
+		// A's release finishing must not close or clear B's dialog either.
+		assert!(!crate::actions::finish_release(&mut form, "A"));
+		assert_eq!((form.payment_id.as_str(), form.confirming), ("B", Some(false)));
+		assert!(crate::actions::finish_release(&mut form, "B"));
+		assert!(form.payment_id.is_empty() && form.confirming.is_none() && form.notice.is_empty());
 	}
 
 	#[test]
