@@ -57,6 +57,24 @@ fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     (local_sats, remote_sats)
 }
 
+/// Msat per channel id in payments from the user that have not resolved, as the node's channel monitors list them: an entry with the whole sats of each HTLC, and the sub-sat parts and dust HTLCs in the channel's rounded total.
+fn unresolved_user_payments_msat(
+    balances: &[ldk_server_client::ldk_server_grpc::types::LightningBalance],
+) -> std::collections::HashMap<String, u64> {
+    use ldk_server_client::ldk_server_grpc::types::lightning_balance::BalanceType;
+    let mut held: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for balance in balances {
+        let (channel_id, msat) = match balance.balance_type.as_ref() {
+            Some(BalanceType::MaybePreimageClaimableHtlc(htlc)) => (&htlc.channel_id, htlc.amount_satoshis.saturating_mul(1000)),
+            Some(BalanceType::ClaimableOnChannelClose(open)) => (&open.channel_id, open.inbound_htlc_rounded_msat),
+            _ => continue,
+        };
+        let total = held.entry(channel_id.clone()).or_insert(0);
+        *total = total.saturating_add(msat);
+    }
+    held
+}
+
 /// Trade-entry backstop only. Inbound capacity is the user's post-payment spendable balance;
 /// neither the LSP's reserve nor the fee may be subtracted from it again.
 fn max_stabilization_rejected(
@@ -2693,6 +2711,14 @@ impl StableChannelManager {
                 by_user_channel_id.insert(uid, c.clone());
             }
         }
+        // Payments from the user that the node still lists as unresolved. If it cannot say, the plain balance check stands.
+        let held_msat = match ldk.get_balances(GetBalancesRequest {}).await {
+            Ok(r) => unresolved_user_payments_msat(&r.lightning_balances),
+            Err(e) => {
+                tracing::warn!("[stable] run_tick: get_balances failed: {}", e);
+                std::collections::HashMap::new()
+            }
+        };
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2733,24 +2759,29 @@ impl StableChannelManager {
             proposed.stable_receiver_usd = USD::from_bitcoin(proposed.stable_receiver_btc, btc_price);
             proposed.latest_price = btc_price;
 
-            // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced since outbound_capacity excludes in-flight HTLCs.
+            // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced so a forward's own event can deduct first, and so a payment the node has not listed yet is not read as a spend.
             let uid = sc.user_channel_id;
+            // Sats in a payment the user sent that has not resolved may come back, so only a balance they could not restore counts as a spend.
+            let recoverable_sats = (c.inbound_capacity_msat.saturating_add(held_msat.get(&c.channel_id).copied().unwrap_or(0)) / 1000)
+                .saturating_add(c.counterparty_unspendable_punishment_reserve);
             if matches!(scope, TickScope::WokenPeer(_)) {
                 // The debounce counts regular ticks 60s apart, so a wake pass must not advance it; nor may it top up a channel whose possible spend is still unreconciled.
-                if their_sats < sc.backing_sats {
+                if recoverable_sats < sc.backing_sats {
                     continue;
                 }
                 self.spend_debounce.remove(&uid);
-            } else if their_sats < sc.backing_sats {
+            } else if recoverable_sats < sc.backing_sats {
                 let count = {
                     let cnt = self.spend_debounce.entry(uid).or_insert(0);
                     *cnt = cnt.saturating_add(1);
                     *cnt
                 };
                 if count >= BACKSTOP_DEBOUNCE_TICKS {
-                    if let Some(usd_deducted) =
-                        stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price)
-                    {
+                    // Deduct down to the balance the user would hold with every unresolved payment returned, then put the live balance back.
+                    proposed.stable_receiver_btc = Bitcoin::from_sats(recoverable_sats);
+                    let usd_deducted = stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price);
+                    proposed.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+                    if let Some(usd_deducted) = usd_deducted {
                         if let Err(e) = self.db.save_channel(
                             &c.channel_id,
                             &format!("{}", uid),
@@ -2790,13 +2821,18 @@ impl StableChannelManager {
                                 "new_backing_sats": proposed.backing_sats,
                             }),
                         );
-                        backstop_syncs.push((
-                            uid,
-                            c.channel_id.clone(),
-                            proposed.expected_usd.0,
-                            proposed.backing_sats,
-                            proposed.counterparty.to_string(),
-                        ));
+                        if proposed.backing_sats <= their_sats {
+                            backstop_syncs.push((
+                                uid,
+                                c.channel_id.clone(),
+                                proposed.expected_usd.0,
+                                proposed.backing_sats,
+                                proposed.counterparty.to_string(),
+                            ));
+                        } else {
+                            // Backing above the live balance still holds an unresolved payment. Publish once the books match it.
+                            self.startup_sync_pending.insert(uid);
+                        }
                     }
                     self.spend_debounce.remove(&uid);
                 }
@@ -4327,7 +4363,7 @@ mod tests {
     };
     use ldk_server_client::ldk_server_grpc::types::{
         Channel as GrpcChannel, ForwardedPayment as GrpcForwardedPayment, HtlcLocator,
-        Payment as GrpcPayment, PaymentStatus,
+        LightningBalance as GrpcLightningBalance, Payment as GrpcPayment, PaymentStatus,
         PendingSweepBalance as GrpcPendingSweepBalance, Peer as GrpcPeer,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4357,6 +4393,10 @@ mod tests {
         /// Whether listing channels fails, as it does when the node is down.
         pub list_channels_fails: std::sync::atomic::AtomicBool,
         pub payments_page_size: StdMutex<Option<usize>>,
+        /// What the node's channel monitors report, with the payments still pending on each channel.
+        pub lightning_balances: StdMutex<Vec<GrpcLightningBalance>>,
+        /// Whether reading balances fails.
+        pub balances_fail: std::sync::atomic::AtomicBool,
     }
 
     impl FakeLdkServer {
@@ -4380,6 +4420,8 @@ mod tests {
                 payment_lookup_failures: AtomicUsize::new(0),
                 list_channels_fails: std::sync::atomic::AtomicBool::new(false),
                 payments_page_size: StdMutex::new(None),
+                lightning_balances: StdMutex::new(Vec::new()),
+                balances_fail: std::sync::atomic::AtomicBool::new(false),
             }
         }
         pub fn with_send_failure(mut self) -> Self {
@@ -4466,7 +4508,14 @@ mod tests {
         }
         async fn get_balances(&self, _req: GetBalancesRequest)
             -> Result<GetBalancesResponse, LdkServerError> {
-            Ok(GetBalancesResponse { pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(), ..Default::default() })
+            if self.balances_fail.load(Ordering::SeqCst) {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
+            }
+            Ok(GetBalancesResponse {
+                pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(),
+                lightning_balances: self.lightning_balances.lock().unwrap().clone(),
+                ..Default::default()
+            })
         }
         async fn list_peers(&self, _req: ListPeersRequest)
             -> Result<ListPeersResponse, LdkServerError> {
@@ -7861,7 +7910,7 @@ mod tests {
     async fn wake_pass_leaves_a_possible_unreconciled_spend_to_the_regular_tick() {
         let mut mgr = make_manager();
         seed_channel(&mut mgr, 189476124653200987495269098788434301048u128, COUNTERPARTY_HEX, CHANNEL_ID_HEX, 10.0, 10_000, 40_000, 50_000, 100_000.0);
-        // Live balance 5_000 (< backing 10_000): a spend not yet reconciled, or an HTLC in flight on reconnect.
+        // Live balance 5_000 (< backing 10_000): a spend not yet reconciled.
         let low = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 95_000_000, true,
         )]);
@@ -7963,6 +8012,262 @@ mod tests {
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6);
         assert!(fake.sends.lock().unwrap().is_empty(), "no backstop action when healthy");
+    }
+
+    // One channel's report built the way LDK's channel monitor builds it: an entry per HTLC with its whole sats, the sub-sat parts and any dust HTLC in the rounded totals.
+    fn monitor_balances(channel_id: &str, from_user_msat: &[u64], to_user_msat: &[u64]) -> Vec<GrpcLightningBalance> {
+        use ldk_server_client::ldk_server_grpc::types::{
+            lightning_balance::BalanceType, ClaimableOnChannelClose, MaybePreimageClaimableHtlc, MaybeTimeoutClaimableHtlc,
+        };
+        let is_dust = |msat: u64| msat < 354_000;
+        let rounded = |htlcs: &[u64]| htlcs.iter().map(|&msat| if is_dust(msat) { msat } else { msat % 1000 }).sum::<u64>();
+        let mut balances = vec![BalanceType::ClaimableOnChannelClose(ClaimableOnChannelClose {
+            channel_id: channel_id.to_owned(),
+            inbound_htlc_rounded_msat: rounded(from_user_msat),
+            outbound_payment_htlc_rounded_msat: rounded(to_user_msat),
+            ..Default::default()
+        })];
+        for &msat in from_user_msat.iter().filter(|&&msat| !is_dust(msat)) {
+            balances.push(BalanceType::MaybePreimageClaimableHtlc(MaybePreimageClaimableHtlc {
+                channel_id: channel_id.to_owned(), amount_satoshis: msat / 1000, ..Default::default()
+            }));
+        }
+        for &msat in to_user_msat.iter().filter(|&&msat| !is_dust(msat)) {
+            balances.push(BalanceType::MaybeTimeoutClaimableHtlc(MaybeTimeoutClaimableHtlc {
+                channel_id: channel_id.to_owned(), amount_satoshis: msat / 1000, outbound_payment: true, ..Default::default()
+            }));
+        }
+        balances.into_iter().map(|balance_type| GrpcLightningBalance { balance_type: Some(balance_type) }).collect()
+    }
+
+    // What the node reports for the 100k channel: the user's balance and the payments still pending each way, which are out of the sender's balance and not yet in the receiver's.
+    fn channel_reports(fake: &FakeLdkServer, user_msat: u64, from_user_msat: &[u64], to_user_msat: &[u64]) {
+        let pending_msat: u64 = from_user_msat.iter().chain(to_user_msat).sum();
+        let mut channel = make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 100_000_000 - user_msat - pending_msat, true,
+        );
+        channel.inbound_capacity_msat = user_msat;
+        *fake.channels.lock().unwrap() = vec![channel];
+        *fake.lightning_balances.lock().unwrap() = monitor_balances(CHANNEL_ID_HEX, from_user_msat, to_user_msat);
+    }
+
+    // What the stability loop does each minute, with the price left at $100k.
+    async fn regular_ticks(mgr: &mut StableChannelManager, fake: &FakeLdkServer, count: usize) {
+        let push = test_push(mgr);
+        for _ in 0..count {
+            mgr.reconcile_if_empty(fake as &dyn LdkServerCalls, 100_000.0).await;
+            mgr.run_tick(fake as &dyn LdkServerCalls, &push, 100_000.0).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn payment_held_across_ticks_then_failed_leaves_the_target_unchanged() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // A 20,000-sat payment is held: out of the user's balance, not in the LSP's, and listed by the node as unresolved.
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty(), "sats that can still come back are not a sighting of a spend");
+
+        // It fails and the sats come back: there was never anything to undo.
+        channel_reports(&fake, 50_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty(), "nothing was spent, so there is no correction to publish");
+    }
+
+    #[tokio::test]
+    async fn payment_held_across_ticks_then_settled_is_deducted_once() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+
+        // It settles: the sats reach the LSP's side and the forward is reported.
+        channel_reports(&fake, 30_000_000, &[], &[]);
+        forward_out(&mut mgr, &fake, 20_000).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+    }
+
+    #[tokio::test]
+    async fn settled_payment_whose_event_was_missed_is_deducted_once_it_is_no_longer_held() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+
+        // It settles but the forward is never reported: the balance check still finds the spend.
+        channel_reports(&fake, 30_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+    }
+
+    #[tokio::test]
+    async fn settled_spend_beside_a_held_payment_deducts_only_the_settled_part() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000 sats were spent with no forward reported, and 5,000 more are held.
+        channel_reports(&fake, 35_000_000, &[5_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty(), "books above the live balance are not published");
+
+        // The held payment fails, the balance meets the books and they are published.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert_book_sync(&fake, 40.0, 40_000);
+    }
+
+    #[tokio::test]
+    async fn held_payment_left_after_a_partial_deduction_is_deducted_once_when_it_settles() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 35_000_000, &[5_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        forward_out(&mut mgr, &fake, 5_000).await;
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 35.0, 35_000, 0);
+        assert_book_sync(&fake, 35.0, 35_000);
+    }
+
+    #[tokio::test]
+    async fn partial_deduction_rounds_the_recoverable_balance_down() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000.5 sats were spent with no forward reported, and 5,000 more are held: half a sat is all that is left of the last one.
+        channel_reports(&fake, 34_999_500, &[5_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 39.999, 39_999, 0);
+    }
+
+    #[tokio::test]
+    async fn payment_held_across_a_restart_then_failed_leaves_the_target_unchanged() {
+        let (mgr, fake) = settled_forwards_fixture(0, 50_000);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 0, None).unwrap();
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        let mut mgr = mgr;
+        regular_ticks(&mut mgr, &fake, 1).await;
+
+        // The daemon restarts with the payment still held: nothing it kept in memory survives.
+        let mut mgr = StableChannelManager::new(mgr.db.clone(), mgr.data_dir.clone());
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+
+        channel_reports(&fake, 50_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        let saved = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert_eq!((saved.expected_usd, saved.backing_sats), (50.0, 50_000));
+    }
+
+    #[tokio::test]
+    async fn payment_that_fails_between_the_two_node_reads_is_not_deducted() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+
+        // One tick reads the channel with the payment still out and the balances just after it failed.
+        *fake.lightning_balances.lock().unwrap() = monitor_balances(CHANNEL_ID_HEX, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+
+        // The next tick sees the sats back.
+        channel_reports(&fake, 50_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty());
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_dust_and_sub_sat_amounts_are_not_deducted() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // Two held payments: 20,000.5 sats, and a 300-sat one too small to get its own entry from the node.
+        channel_reports(&fake, 29_699_500, &[20_000_500, 300_000], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_payment_on_a_channel_with_reserves_is_not_deducted() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        {
+            // Each side's capacity leaves out the reserve it must keep: 1,000 sats for the user, 500 for the LSP.
+            let mut channels = fake.channels.lock().unwrap();
+            channels[0].inbound_capacity_msat -= 1_000_000;
+            channels[0].counterparty_unspendable_punishment_reserve = 1_000;
+            channels[0].outbound_capacity_msat -= 500_000;
+            channels[0].unspendable_punishment_reserve = Some(500);
+        }
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn payment_to_the_user_in_flight_does_not_hide_a_settled_spend() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000 sats were spent with no forward reported, while two payments to the user are still unclaimed: 12,500.4 sats and a 300-sat dust one.
+        channel_reports(&fake, 40_000_000, &[], &[12_500_400, 300_000]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert_book_sync(&fake, 40.0, 40_000);
+    }
+
+    #[tokio::test]
+    async fn payment_held_on_another_channel_does_not_hide_a_settled_spend() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[], &[]);
+        *fake.lightning_balances.lock().unwrap() = monitor_balances(ROUTING_CHANNEL_HEX, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+    }
+
+    #[tokio::test]
+    async fn splice_out_awaiting_confirmation_is_still_deducted_after_two_ticks() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // A negotiated 20,000-sat splice-out: out of the user's balance, the LSP's unchanged, and no payment for the node to list.
+        let mut channel = make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true);
+        channel.inbound_capacity_msat = 30_000_000;
+        *fake.channels.lock().unwrap() = vec![channel];
+        *fake.lightning_balances.lock().unwrap() = monitor_balances(CHANNEL_ID_HEX, &[], &[]);
+
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+    }
+
+    #[tokio::test]
+    async fn settled_spend_is_still_deducted_when_the_node_cannot_report_balances() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[], &[]);
+        fake.balances_fail.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 30.0, 30_000, 0);
+        assert_book_sync(&fake, 30.0, 30_000);
+    }
+
+    #[tokio::test]
+    async fn wake_pass_tops_up_a_channel_whose_only_gap_is_a_held_payment() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+
+        // At $80k the $50 target needs 62,500 sats against 50,000 of backing.
+        mgr.run_tick_plan(&fake as &dyn LdkServerCalls, 80_000.0, TickScope::WokenPeer(COUNTERPARTY_HEX)).await;
+        let sends = fake.sends.lock().unwrap();
+        assert_eq!(sends.len(), 1, "the held payment is not a spend, so the woken peer is topped up");
+        assert_eq!(sends[0].amount_msat, 12_500_000);
     }
 
     #[tokio::test]
