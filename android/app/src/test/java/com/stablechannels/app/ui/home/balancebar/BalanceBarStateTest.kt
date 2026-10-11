@@ -599,4 +599,39 @@ class BalanceBarStateTest {
         // lastFromOffset == 40 + (0.5 - 0.3) * 260 = 40 + 52 = 92
         assertEquals(92f, snapBack.lastFromOffset ?: 0f, 0.001f)
     }
+
+    @Test
+    fun onDragCancelResetsDraggingAndTriggersSnapBack() {
+        var tradeRequested: TradeRequest? = null
+        val snapBack = FakeBalanceBarSnapBack()
+        val spy = SpyBalanceBarHaptics()
+        val state =
+            BalanceBarState(
+                scope = testScope,
+                snapBack = snapBack,
+                haptics = spy,
+            )
+        state.updateInputs(
+            totalUSD = 100.0,
+            stableUSD = 50.0,
+            maxSellUSD = 50.0,
+            isEmpty = false,
+            density = 2f,
+            onDragStarted = null,
+            onTradeRequest = { tradeRequested = it },
+            onEmptyInteraction = null,
+        )
+        state.updateLayout(barWidthPx = 300f, thumbDiameterPx = 40f)
+
+        state.onDragStart(Offset(150f, 10f))
+        state.onDrag(dragAmountX = 50f)
+        assertTrue(state.isDragging)
+        assertEquals(50f, state.dragOffsetPx, 0.001f)
+
+        state.onDragCancel(rebase = true)
+
+        assertFalse(state.isDragging)
+        org.junit.Assert.assertNull(tradeRequested)
+        assertEquals(50f, snapBack.lastFromOffset ?: 0f, 0.001f)
+    }
 }
