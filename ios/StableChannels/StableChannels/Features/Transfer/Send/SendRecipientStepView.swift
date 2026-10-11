@@ -11,7 +11,7 @@ struct SendRecipientStepView: View {
             recipientCard
 
             if let error = model.errorMessage {
-                errorBanner(error)
+                SendErrorBanner(message: error)
             } else {
                 SendDestinationBadgeView(classification: model.classification)
             }
@@ -88,33 +88,38 @@ struct SendRecipientStepView: View {
                 }
             }
         }
-        .padding(16)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sendCard(padding: 16)
         .contentShape(Rectangle())
         .onTapGesture {
             isInputFocused = true
         }
     }
 
-    @ViewBuilder
+    /// Destination-aware spendable balance in BTC, with fiat when a price is available.
     private var availableBalanceFooter: some View {
-        if appState.btcPrice > 0 {
-            let usd = Double(appState.totalBalanceSats) / Double(Constants.satsInBTC) * appState.btcPrice
-            HStack(spacing: 4) {
-                Text(String(localized: "available_balance", defaultValue: "Available: "))
-                Text(verbatim: usd.usdFormatted)
+        let sats = model.availableSpendableSats(appState: appState)
+        let price = appState.accountingBTCPrice
+        return HStack(spacing: 4) {
+            Text(String(localized: "available_balance", defaultValue: "Available: "))
+                .foregroundStyle(.secondary)
+            Text(verbatim: "\(sats.btcSpacedFormatted) BTC")
+                .foregroundStyle(.primary)
+            Spacer()
+            if price > 0 {
+                let usd = Double(sats) / Double(Constants.satsInBTC) * price
+                Text(verbatim: "≈ \(usd.usdFormatted)")
+                    .foregroundStyle(.secondary)
             }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 4)
         }
+        .font(.footnote)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
     }
 
     private var continueButton: some View {
         Button {
             isInputFocused = false
-            Task { await model.proceedFromRecipient(appState: appState) }
+            model.startProceedFromRecipient(appState: appState)
         } label: {
             Text(String(localized: "button_continue", defaultValue: "Continue"))
                 .font(.headline)
@@ -125,18 +130,5 @@ struct SendRecipientStepView: View {
         .tint(Color.blue)
         .disabled(model.destination == nil || model.isFetchingLNURL)
         .padding(.bottom, 16)
-    }
-
-    private func errorBanner(_ message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill")
-                .foregroundStyle(.red)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.red)
-            Spacer()
-        }
-        .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }

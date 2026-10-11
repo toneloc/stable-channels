@@ -85,7 +85,9 @@ struct SendView: View {
     @ViewBuilder
     private var leadingToolbarButton: some View {
         if model.isFetchingLNURL {
-            EmptyView()
+            Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                model.cancelProceedFromRecipient()
+            }
         } else {
             switch model.step {
             case .recipient:

@@ -31,15 +31,15 @@ struct AddressVisualChunkView: View {
             HStack(spacing: 2) {
                 Text(prefix)
                     .font(.system(.subheadline, design: .monospaced).weight(.medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.orange)
                 if !middle.isEmpty {
                     Text(middle)
                         .font(.system(.subheadline, design: .monospaced))
-                        .foregroundStyle(Color(uiColor: .tertiaryLabel))
+                        .foregroundStyle(.primary)
                 }
                 Text(suffix)
                     .font(.system(.subheadline, design: .monospaced).weight(.medium))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -77,10 +77,10 @@ struct AddressVisualChunkView: View {
             var chunkAttr = AttributedString(chunk.text)
             if idx == 0 || idx == total - 1 {
                 chunkAttr.font = Font.system(.subheadline, design: .monospaced).weight(.bold)
-                chunkAttr.foregroundColor = Color.primary
+                chunkAttr.foregroundColor = Color.orange
             } else {
                 chunkAttr.font = Font.system(.subheadline, design: .monospaced).weight(.regular)
-                chunkAttr.foregroundColor = Color(uiColor: .tertiaryLabel)
+                chunkAttr.foregroundColor = Color.primary
             }
             result.append(chunkAttr)
             if idx < total - 1 {

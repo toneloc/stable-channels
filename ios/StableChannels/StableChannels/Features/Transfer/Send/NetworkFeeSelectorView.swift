@@ -7,6 +7,7 @@ struct NetworkFeeSelectorView: View {
     let isSendAll: Bool
     let btcPrice: Double
     var showExplanation: Bool = false
+    var recommendedFees: RecommendedFees?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -15,7 +16,7 @@ struct NetworkFeeSelectorView: View {
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(verbatim: "\(formatRate(selectedTier.effectiveRate(baseRate: baseFeeRateSatVb))) sat/vB")
+                Text(verbatim: "\(formatRate(displayedRate(for: selectedTier))) sat/vB")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Color.deepSendBlue)
             }
@@ -32,13 +33,12 @@ struct NetworkFeeSelectorView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sendCard()
     }
 
     private func feeTierOption(_ tier: NetworkFeeSpeedTier) -> some View {
         let isSelected = selectedTier == tier
-        let rate = tier.effectiveRate(baseRate: baseFeeRateSatVb)
+        let rate = displayedRate(for: tier)
         let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: rate, isSendAll: isSendAll)
         let feeUSD = (Double(feeSats) / Double(Constants.satsInBTC)) * btcPrice
 
@@ -61,7 +61,7 @@ struct NetworkFeeSelectorView: View {
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
                     .foregroundStyle(isSelected ? Color.deepSendBlue : .secondary)
 
-                Text(verbatim: "≈ \(feeUSD.usdFormatted)")
+                Text(verbatim: btcPrice > 0 ? "≈ \(feeUSD.usdFormatted)" : feeSats.satsFormatted)
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(isSelected ? Color.primary : .secondary)
             }
@@ -81,13 +81,18 @@ struct NetworkFeeSelectorView: View {
         .buttonStyle(.plain)
     }
 
+    /// Mirrors `SendFlowModel.effectiveFeeRateSatVb` so the displayed rate equals the rate sent.
+    private func displayedRate(for tier: NetworkFeeSpeedTier) -> Double {
+        tier.effectiveRate(baseRate: baseFeeRateSatVb, recommendedFees: recommendedFees)
+    }
+
     private func formatRate(_ rate: Double) -> String {
         rate.truncatingRemainder(dividingBy: 1) == 0 ? String(format: "%.0f", rate) : String(format: "%.1f", rate)
     }
 
     private var feeExplanationText: String {
         let vbytes = isSendAll ? Constants.estimatedOnchainSendAllVBytes : Constants.estimatedOnchainSendVBytes
-        let rate = selectedTier.effectiveRate(baseRate: baseFeeRateSatVb)
+        let rate = displayedRate(for: selectedTier)
         return "Estimated at \(formatRate(rate)) sat/vB for ~\(vbytes) vB transaction. Higher fee density prioritizes block inclusion."
     }
 }

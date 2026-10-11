@@ -20,7 +20,7 @@ struct SendAmountStepView: View {
                     commentCard(maxCharacters: maxComment)
                 }
                 if let error = model.errorMessage {
-                    errorCard(error)
+                    SendErrorBanner(message: error)
                 }
                 Spacer(minLength: 24)
                 continueButton
@@ -45,7 +45,11 @@ struct SendAmountStepView: View {
     private var availableBalanceCard: some View {
         let available = model.availableSpendableSats(appState: appState)
         let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        let isInsufficient = sats > available || (available == 0 && sats > 0)
+        // Fee-aware decision comes from the model; `sats > available` only picks the wording.
+        let isInsufficient = sats > 0 && model.isInsufficientBalance(appState: appState)
+        let insufficientLabel = sats > available
+            ? String(localized: "error_insufficient_funds", defaultValue: "Insufficient funds")
+            : String(localized: "error_insufficient_funds_incl_fee", defaultValue: "Insufficient funds incl. fee")
         let usd = (Double(available) / Double(Constants.satsInBTC)) * appState.accountingBTCPrice
 
         return VStack(alignment: .leading, spacing: 6) {
@@ -55,7 +59,7 @@ struct SendAmountStepView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 if isInsufficient {
-                    Text(String(localized: "error_insufficient_funds", defaultValue: "Insufficient funds"))
+                    Text(insufficientLabel)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.red)
                 }
@@ -73,8 +77,7 @@ struct SendAmountStepView: View {
                 }
             }
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sendCard()
     }
 
     private var heroAmountCard: some View {
@@ -155,8 +158,7 @@ struct SendAmountStepView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(18)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .sendCard(padding: 18)
     }
 
     private var unitMenuButton: some View {
@@ -219,8 +221,7 @@ struct SendAmountStepView: View {
             }
             Spacer()
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sendCard()
     }
 
     private var presetPercentages: some View {
@@ -269,7 +270,8 @@ struct SendAmountStepView: View {
                 Text(String(localized: "header_comment", defaultValue: "Note"))
                     .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 Spacer()
-                Text("\(model.lnurlComment.count)/\(maxCharacters)").font(.caption2).foregroundStyle(.secondary)
+                Text(verbatim: "\(model.lnurlComment.count)/\(maxCharacters)").font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             TextField(
                 String(localized: "placeholder_optional_comment", defaultValue: "Optional note for payee"),
@@ -280,26 +282,12 @@ struct SendAmountStepView: View {
                 if new.count > maxCharacters { model.lnurlComment = String(new.prefix(maxCharacters)) }
             }
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-    }
-
-    private func errorCard(_ message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-            Text(message).font(.footnote).foregroundStyle(.red)
-            Spacer()
-        }
-        .padding(12).background(
-            Color(uiColor: .secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 12)
-        )
+        .sendCard()
     }
 
     private var continueButton: some View {
         let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        let available = model.availableSpendableSats(appState: appState)
-        let isBlocked = sats == 0 || sats > available || available == 0
+        let isBlocked = sats == 0 || model.isInsufficientBalance(appState: appState)
 
         return Button {
             isAmountFocused = false

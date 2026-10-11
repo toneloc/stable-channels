@@ -33,6 +33,14 @@ final class SendFlowModel {
     var selectedFeeTier: NetworkFeeSpeedTier = .standard
     var resetToken: Int = 0
 
+    /// In-flight recipient resolution; owned here so the view can cancel it.
+    @ObservationIgnored private var recipientTask: Task<Void, Never>?
+
+    var successStatus: SendSuccessStatus {
+        if isPendingSettlement { return .pending }
+        return successTxid != nil ? .awaitingConfirmation : .completed
+    }
+
     /// Returns the effective fee rate using live recommended fees when available,
     /// or nil when the rate has not loaded and standard tier is selected.
     var effectiveFeeRateSatVb: Double? {
@@ -110,6 +118,26 @@ final class SendFlowModel {
         }
     }
 
+    /// Starts recipient resolution unless one is already in flight.
+    func startProceedFromRecipient(appState: AppState) {
+        guard recipientTask == nil else { return }
+        recipientTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await proceedFromRecipient(appState: appState)
+            // Uncancelled means no cancel or reset replaced the handle, so it is still this task.
+            if !Task.isCancelled { recipientTask = nil }
+        }
+    }
+
+    /// Abandons an in-flight Lightning Address/LNURL fetch and returns to the recipient step.
+    func cancelProceedFromRecipient() {
+        recipientTask?.cancel()
+        recipientTask = nil
+        isFetchingLNURL = false
+        errorMessage = nil
+        step = .recipient
+    }
+
     func proceedFromRecipient(appState: AppState) async {
         guard let dest = destination else { return }
         errorMessage = nil
@@ -121,12 +149,15 @@ final class SendFlowModel {
                 return
             }
             isFetchingLNURL = true
-            defer { isFetchingLNURL = false }
+            // A cancelled fetch skips the reset: cancel already cleared it, and a newer fetch may own it now.
+            defer { if !Task.isCancelled { isFetchingLNURL = false } }
             do {
                 let params = try await service.fetchPayParams(from: url)
+                guard !Task.isCancelled else { return }
                 self.lnurlParams = params
                 self.step = .amount
             } catch {
+                guard !Task.isCancelled else { return }
                 errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
             }
         case .bolt11(_, _, let msat):
@@ -244,17 +275,25 @@ final class SendFlowModel {
         }
 
         guard sats <= available else {
-            let price = appState.accountingBTCPrice
-            let availableUSD = price > 0 ? (Double(available) / Double(Constants.satsInBTC)) * price : 0
-            if amountUnit == .usd && price > 0 {
-                errorMessage = "Amount exceeds your balance. Available: $\(String(format: "%.2f", availableUSD)) (\(available.btcSpacedFormatted) BTC)"
-            } else {
-                errorMessage = "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
-            }
+            errorMessage = "Amount exceeds your balance. Available: \(balanceDescription(available, appState: appState))"
+            return
+        }
+
+        let fee = estimatedFeeSatsForAmount(sats: sats, appState: appState)
+        guard PaymentFeeEstimator.saturatingAdd(sats, fee) <= available else {
+            errorMessage = "Amount plus estimated fee exceeds your balance. Available: \(balanceDescription(available, appState: appState))"
             return
         }
 
         self.step = .confirm
+    }
+
+    /// "0.00 012 000 BTC (≈ $7.80)", omitting fiat when no price is available.
+    private func balanceDescription(_ sats: UInt64, appState: AppState) -> String {
+        let price = appState.accountingBTCPrice
+        guard price > 0 else { return "\(sats.btcSpacedFormatted) BTC" }
+        let usd = (Double(sats) / Double(Constants.satsInBTC)) * price
+        return "\(sats.btcSpacedFormatted) BTC (≈ \(usd.usdFormatted))"
     }
 
     func normalizeAmountInput() {
@@ -292,6 +331,8 @@ final class SendFlowModel {
     }
 
     func resetFlow() {
+        recipientTask?.cancel()
+        recipientTask = nil
         step = .recipient
         inputText = ""
         destination = nil

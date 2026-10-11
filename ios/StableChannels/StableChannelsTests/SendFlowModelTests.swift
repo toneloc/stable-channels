@@ -575,4 +575,131 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertNil(splice.paymentId)
         XCTAssertNil(splice.txid)
     }
+
+    func testProceedFromAmount_blocksWhenAmountPlusFeeExceedsBalance() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 10_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.feeRateSatVb = 10
+        model.selectedFeeTier = .standard
+        model.step = .amount
+        model.amountUnit = .sats
+        // 9,000 fits on its own, but 9,000 + 1,400 fee does not.
+        model.amountInputText = "9000"
+
+        model.proceedFromAmount(appState: appState)
+
+        XCTAssertEqual(model.step, .amount)
+        XCTAssertTrue(model.errorMessage?.contains("estimated fee") == true)
+    }
+
+    func testSuccessStatus_reflectsSettlementState() {
+        let model = SendFlowModel()
+
+        model.successTxid = "txid"
+        model.isPendingSettlement = false
+        XCTAssertEqual(model.successStatus, .awaitingConfirmation)
+
+        model.successTxid = nil
+        model.successPaymentId = "pid"
+        XCTAssertEqual(model.successStatus, .completed)
+
+        model.isPendingSettlement = true
+        XCTAssertEqual(model.successStatus, .pending)
+
+        model.successPaymentId = nil
+        XCTAssertEqual(model.successStatus, .pending, "A splice-out has no id yet and is pending")
+    }
+
+    func testCancelProceedFromRecipient_resetsStateAndIgnoresLateFailure() async throws {
+        let service = SuspendingLNURLService(delays: [.milliseconds(100)], shouldThrow: true)
+        let model = SendFlowModel(expectedNetwork: .bitcoin, lnurlService: service)
+        model.destination = .lnurlPay(url: try XCTUnwrap(URL(string: "https://ln.tips/user")))
+
+        model.startProceedFromRecipient(appState: AppState())
+        await waitUntil { model.isFetchingLNURL }
+        model.cancelProceedFromRecipient()
+
+        XCTAssertFalse(model.isFetchingLNURL)
+        XCTAssertEqual(model.step, .recipient)
+        XCTAssertNil(model.errorMessage)
+
+        // The cancelled fetch still throws later; its error must not surface.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(model.isFetchingLNURL)
+        XCTAssertEqual(model.step, .recipient)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.lnurlParams)
+    }
+
+    func testStartProceedFromRecipient_ignoresDuplicateTapsAndStaleCancelledTail() async throws {
+        // First fetch finishes before the second, so the cancelled tail runs while the newer fetch is in flight.
+        let service = SuspendingLNURLService(delays: [.milliseconds(100), .milliseconds(600)], shouldThrow: false)
+        let model = SendFlowModel(expectedNetwork: .bitcoin, lnurlService: service)
+        model.destination = .lnurlPay(url: try XCTUnwrap(URL(string: "https://ln.tips/user")))
+        let appState = AppState()
+
+        model.startProceedFromRecipient(appState: appState)
+        model.startProceedFromRecipient(appState: appState)
+        await waitUntil { model.isFetchingLNURL }
+        let firstCallCount = await service.callCount
+        XCTAssertEqual(firstCallCount, 1, "A duplicate tap must not start a second fetch")
+
+        model.cancelProceedFromRecipient()
+        model.startProceedFromRecipient(appState: appState)
+        await waitUntil { await service.callCount == 2 }
+
+        // Cancelled first fetch returns params; it must neither advance nor hide the newer spinner.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(model.isFetchingLNURL)
+        XCTAssertEqual(model.step, .recipient)
+        XCTAssertNil(model.lnurlParams)
+
+        await waitUntil { model.step == .amount }
+        XCTAssertEqual(model.step, .amount)
+        XCTAssertNotNil(model.lnurlParams)
+        XCTAssertFalse(model.isFetchingLNURL)
+    }
+
+    private func waitUntil(timeout: Duration = .seconds(3), _ condition: () async -> Bool) async {
+        let deadline = ContinuousClock.now + timeout
+        while await !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    /// Ignores cancellation and resolves after a per-call delay, so late results of cancelled fetches are exercised.
+    private actor SuspendingLNURLService: LNURLServiceProtocol {
+        private let delays: [Duration]
+        private let shouldThrow: Bool
+        private(set) var callCount = 0
+
+        init(delays: [Duration], shouldThrow: Bool) {
+            self.delays = delays
+            self.shouldThrow = shouldThrow
+        }
+
+        func fetchPayParams(from _: URL) async throws -> LNURLPayParams {
+            let delay = delays[min(callCount, delays.count - 1)]
+            callCount += 1
+            try? await Task.sleep(for: delay)
+            if shouldThrow { throw LNURLError.invalidResponse }
+            return LNURLPayParams(
+                tag: "payRequest",
+                callback: "https://ln.tips/cb",
+                minSendable: 1000,
+                maxSendable: 50_000_000,
+                metadata: "[]",
+                commentAllowed: nil
+            )
+        }
+
+        func fetchInvoice(params _: LNURLPayParams, amountMsat _: UInt64,
+                          comment _: String?) async throws -> LNURLPayInvoiceResponse {
+            throw LNURLError.invalidResponse
+        }
+    }
 }

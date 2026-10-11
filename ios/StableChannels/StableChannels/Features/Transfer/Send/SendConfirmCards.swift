@@ -2,6 +2,38 @@ import SwiftUI
 
 /// Shared UI cards used across Send Confirm Step and Onchain Review Sheet.
 
+extension View {
+    /// Shared send-flow card chrome: inset plus rounded grouped background.
+    func sendCard(padding: CGFloat = 14) -> some View {
+        self.padding(padding)
+            .background(
+                Color(uiColor: .secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+            )
+    }
+}
+
+/// Inline error message shown within the send flow.
+struct SendErrorBanner: View {
+    let message: String
+
+    var body: some View {
+        HStack {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.red)
+            Spacer()
+        }
+        .padding(12)
+        .background(
+            Color(uiColor: .secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+    }
+}
+
 /// Displays the cryptocurrency asset and route category.
 struct SendConfirmAssetCard: View {
     let routeDescription: String
@@ -27,8 +59,7 @@ struct SendConfirmAssetCard: View {
                 }
                 Spacer()
             }
-            .padding(14)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .sendCard()
         }
     }
 }
@@ -68,20 +99,9 @@ struct SendConfirmAddressCard: View {
                     }
                     AddressVisualChunkView(representation: representation)
                 }
-
-                if case .onchain = representation {
-                    Text(String(
-                        localized: "hint_verify_full_address",
-                        defaultValue: "Tip: Always verify the middle and full address to prevent prefix-spoofing."
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(Color(uiColor: .tertiaryLabel))
-                    .padding(.top, 2)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .sendCard(padding: 12)
             .contentShape(Rectangle())
             .onTapGesture {
                 UIPasteboard.general.string = rawAddress
@@ -114,13 +134,12 @@ struct SendConfirmReceivesCard: View {
                         .font(.system(size: 26, weight: .bold, design: .rounded))
                         .foregroundStyle(.primary)
                 }
-                Text("\(amountSats.btcSpacedFormatted) BTC (\(amountSats) sats)")
+                Text(verbatim: "\(amountSats.btcSpacedFormatted) BTC (\(amountSats.formatted()) sats)")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-            .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+            .sendCard()
         }
     }
 }
@@ -146,7 +165,7 @@ struct SendConfirmFeeTotalCard: View {
                                 format: "%.1f",
                                 rate
                             )
-                        Text("(\(formattedRate) sat/vB)")
+                        Text(verbatim: "(\(formattedRate) sat/vB)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -154,11 +173,17 @@ struct SendConfirmFeeTotalCard: View {
                 Spacer()
                 let feeUSD = (Double(estimatedFeeSats) / Double(Constants.satsInBTC)) * btcPrice
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text(feeUSD.usdFormatted)
-                        .font(.subheadline.weight(.medium))
-                    Text("\(estimatedFeeSats) sats")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    let feeSatsText = "\(estimatedFeeSats.formatted()) sats"
+                    if hasPrice {
+                        Text(feeUSD.usdFormatted)
+                            .font(.subheadline.weight(.medium))
+                        Text(verbatim: feeSatsText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(verbatim: feeSatsText)
+                            .font(.subheadline.weight(.medium))
+                    }
                 }
             }
             .padding(.horizontal, 4)
@@ -171,16 +196,26 @@ struct SendConfirmFeeTotalCard: View {
                 Spacer()
                 let totalUSD = (Double(totalDebitSats) / Double(Constants.satsInBTC)) * btcPrice
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text(totalUSD.usdFormatted)
-                        .font(.headline.weight(.bold))
-                    Text("\(totalDebitSats.btcSpacedFormatted) BTC")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    let totalBTCText = "\(totalDebitSats.btcSpacedFormatted) BTC"
+                    if hasPrice {
+                        Text(totalUSD.usdFormatted)
+                            .font(.headline.weight(.bold))
+                        Text(verbatim: totalBTCText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(verbatim: totalBTCText)
+                            .font(.headline.weight(.bold))
+                    }
                 }
             }
             .padding(.horizontal, 4)
         }
-        .padding(14)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+        .sendCard()
+    }
+
+    /// USD amounts are hidden without a price so the card never shows "$0.00".
+    private var hasPrice: Bool {
+        btcPrice > 0
     }
 }

@@ -45,9 +45,7 @@ struct SendSuccessStepView: View {
                 rippleScale = 1.45
                 rippleOpacity = 0.0
             }
-            UINotificationFeedbackGenerator().notificationOccurred(
-                model.isPendingSettlement ? .warning : .success
-            )
+            UINotificationFeedbackGenerator().notificationOccurred(hapticType)
         }
         .onDisappear {
             copyTask?.cancel()
@@ -80,35 +78,23 @@ struct SendSuccessStepView: View {
                 .font(.title2.weight(.bold))
 
             let sats = model.sentAmountSats
-            let usd = (Double(sats) / Double(Constants.satsInBTC)) * appState.btcPrice
-            if appState.btcPrice > 0 {
+            let price = appState.accountingBTCPrice
+            if price > 0 {
+                let usd = (Double(sats) / Double(Constants.satsInBTC)) * price
                 Text(usd.usdFormatted)
                     .font(.system(size: 28, weight: .bold, design: .rounded))
             }
-            Text("\(sats.btcSpacedFormatted) BTC")
+            Text(verbatim: "\(sats.btcSpacedFormatted) BTC")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            if model.isPendingSettlement {
-                Text(String(
-                    localized: "note_payment_pending",
-                    defaultValue: "Payment dispatched. Settlement is pending in the background. Check History for final status."
-                ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.top, 4)
-                .padding(.horizontal, 16)
-            } else if isBolt12 {
-                Text(String(
-                    localized: "note_bolt12_asynchronous",
-                    defaultValue: "Offer payment dispatched. Your node is requesting an invoice over Lightning onion messaging."
-                ))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.top, 4)
-                .padding(.horizontal, 16)
+            if let note = statusNote {
+                Text(verbatim: note)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 4)
+                    .padding(.horizontal, 16)
             }
         }
     }
@@ -238,20 +224,59 @@ struct SendSuccessStepView: View {
     }
 
     private var statusColor: Color {
-        model.isPendingSettlement ? .orange : .green
+        switch model.successStatus {
+        case .completed: .green
+        case .awaitingConfirmation, .pending: .orange
+        }
     }
 
     private var statusIconName: String {
-        model.isPendingSettlement ? "hourglass" : "checkmark.circle.fill"
+        switch model.successStatus {
+        case .completed: "checkmark.circle.fill"
+        case .awaitingConfirmation: "clock"
+        case .pending: "hourglass"
+        }
+    }
+
+    private var hapticType: UINotificationFeedbackGenerator.FeedbackType {
+        switch model.successStatus {
+        case .completed: .success
+        case .awaitingConfirmation, .pending: .warning
+        }
     }
 
     private var successTitle: String {
-        if model.isPendingSettlement {
-            return String(localized: "title_payment_pending", defaultValue: "Payment Pending")
-        } else if isBolt12 {
-            return String(localized: "title_payment_initiated", defaultValue: "Payment Initiated")
-        } else {
-            return String(localized: "title_payment_sent", defaultValue: "Payment Sent")
+        switch model.successStatus {
+        case .completed:
+            String(localized: "title_payment_sent", defaultValue: "Payment Sent")
+        case .awaitingConfirmation:
+            String(localized: "title_sent_awaiting_confirmation", defaultValue: "Sent - Awaiting Confirmation")
+        case .pending:
+            isBolt12
+                ? String(localized: "title_payment_initiated", defaultValue: "Payment Initiated")
+                : String(localized: "title_payment_pending", defaultValue: "Payment Pending")
+        }
+    }
+
+    private var statusNote: String? {
+        switch model.successStatus {
+        case .completed:
+            nil
+        case .awaitingConfirmation:
+            String(
+                localized: "note_onchain_awaiting_confirmation",
+                defaultValue: "Transaction broadcast. It will be final once it confirms on-chain."
+            )
+        case .pending:
+            isBolt12
+                ? String(
+                    localized: "note_bolt12_asynchronous",
+                    defaultValue: "Offer payment dispatched. Your node is requesting an invoice over Lightning onion messaging."
+                )
+                : String(
+                    localized: "note_payment_pending",
+                    defaultValue: "Payment dispatched. Settlement is pending in the background. Check History for final status."
+                )
         }
     }
 }
@@ -292,7 +317,7 @@ struct SendSuccessStepView: View {
     .environment(AppState())
 }
 
-#Preview("Settled Payment - On-Chain") {
+#Preview("Awaiting Confirmation - On-Chain") {
     let model = SendFlowModel()
     model.step = .success
     model.destination = .onchain(

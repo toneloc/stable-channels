@@ -32,7 +32,8 @@ struct SendConfirmStepView: View {
                             baseFeeRateSatVb: model.feeRateSatVb ?? 10,
                             isSendAll: false,
                             btcPrice: appState.accountingBTCPrice,
-                            showExplanation: false
+                            showExplanation: false,
+                            recommendedFees: model.recommendedFees
                         )
                     }
 
@@ -45,12 +46,12 @@ struct SendConfirmStepView: View {
                     )
 
                     if isInsufficientBalance {
-                        errorBanner(String(
+                        SendErrorBanner(message: String(
                             localized: "error_insufficient_balance_total",
                             defaultValue: "Insufficient balance. Total debit exceeds available funds."
                         ))
                     } else if let error = model.errorMessage {
-                        errorBanner(error)
+                        SendErrorBanner(message: error)
                     }
                 }
                 .padding(.horizontal, 16)
@@ -69,6 +70,12 @@ struct SendConfirmStepView: View {
                 }
                 .disabled(isInsufficientBalance || !model.isFeeRateReady)
                 .opacity(isInsufficientBalance || !model.isFeeRateReady ? 0.5 : 1.0)
+
+                if !model.isFeeRateReady {
+                    Text(String(localized: "label_loading_network_fee", defaultValue: "Loading network fee..."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 6)
@@ -140,15 +147,5 @@ struct SendConfirmStepView: View {
         case .lightningAddress, .lnurlPay: return String(localized: "header_recipient", defaultValue: "Recipient")
         case .onchain, .none: return String(localized: "header_address", defaultValue: "Recipient Address")
         }
-    }
-
-    private func errorBanner(_ message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-            Text(message).font(.footnote).foregroundStyle(.red)
-            Spacer()
-        }
-        .padding(12)
-        .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
