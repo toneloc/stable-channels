@@ -162,7 +162,7 @@ extension SendFlowModel {
         }
     }
 
-    private func showSuccess(sentSats: UInt64, paymentId: String? = nil, txid: String? = nil, isPending: Bool) {
+    func showSuccess(sentSats: UInt64, paymentId: String? = nil, txid: String? = nil, isPending: Bool) {
         sentAmountSats = sentSats
         successPaymentId = paymentId
         successTxid = txid

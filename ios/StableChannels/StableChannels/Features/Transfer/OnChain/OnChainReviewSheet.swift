@@ -9,13 +9,31 @@ struct OnChainReviewSheet: View {
     let address: String
     /// The send's single source of truth, owned by the presenting view.
     @Bindable var model: SendFlowModel
-    var onSent: (_ txid: String?, _ isSplice: Bool) -> Void
+    var onDone: () -> Void
 
     @State private var isSending = false
     @State private var reviewErrorMessage: String?
     @State private var resetToken = 0
 
     var body: some View {
+        Group {
+            if model.step == .success {
+                SendSuccessStepView(model: model, onDismiss: onDone)
+                    .background(Color(.systemGroupedBackground))
+            } else {
+                reviewContent
+            }
+        }
+        .presentationDetents([.large])
+        .presentationDragIndicator(.visible)
+        .task {
+            model.recommendedFees = await appState.feeRateService.recommendedFees()
+        }
+    }
+
+    /// Review step; after a successful send the sheet shows the shared send receipt instead.
+    @ViewBuilder
+    private var reviewContent: some View {
         let isSpliceOut = model.isSpliceOut(appState: appState)
         let isInsufficientBalance = model.isInsufficientBalance(appState: appState)
         NavigationStack {
@@ -102,11 +120,6 @@ struct OnChainReviewSheet: View {
                 }
             }
         }
-        .presentationDetents([.large])
-        .presentationDragIndicator(.visible)
-        .task {
-            model.recommendedFees = await appState.feeRateService.recommendedFees()
-        }
     }
 
     private func executeSend() async {
@@ -160,30 +173,29 @@ struct OnChainReviewSheet: View {
         }
 
         do {
+            let result: SendPaymentResult
             if sendAll {
-                let result = try await SendPaymentExecutor.sendAllOnchain(
+                result = try await SendPaymentExecutor.sendAllOnchain(
                     address: address,
                     price: appState.accountingBTCPrice,
                     feeRateSatVb: model.effectiveFeeRateSatVb,
                     appState: appState
                 )
-                onSent(result.txid, false)
-                dismiss()
             } else {
-                let result = try await SendPaymentExecutor.sendOnchain(
+                result = try await SendPaymentExecutor.sendOnchain(
                     address: address,
                     effectiveSats: sats,
                     price: appState.accountingBTCPrice,
                     feeRateSatVb: model.effectiveFeeRateSatVb,
                     appState: appState
                 )
-                if result.txid != nil {
-                    onSent(result.txid, false)
-                } else {
-                    onSent(nil, true)
-                }
-                dismiss()
             }
+            // A splice-out has no txid until negotiation completes, so its receipt stays pending.
+            model.showSuccess(
+                sentSats: sendAll ? sats : result.sentAmountSats,
+                txid: result.txid,
+                isPending: result.txid == nil
+            )
         } catch {
             reviewErrorMessage = error.localizedDescription
             resetToken += 1

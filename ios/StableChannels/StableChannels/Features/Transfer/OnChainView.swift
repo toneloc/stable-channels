@@ -3,12 +3,11 @@ import UIKit
 
 struct OnChainSendView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.dismiss) private var dismiss
     /// Single source of truth for this send's rules, shared with the review sheet.
     @State private var model = SendFlowModel()
     @State private var address = ""
     @State private var errorMessage: String?
-    @State private var txid: String?
-    @State private var spliceSuccess = false
     @State private var showReviewSheet = false
 
     private var amountSats: UInt64 {
@@ -30,26 +29,6 @@ struct OnChainSendView: View {
                             )
                         )
                     }
-                    if let txid {
-                        successCard(
-                            icon: "checkmark.circle.fill",
-                            title: String(localized: "success_sent", defaultValue: "Sent!"),
-                            detail: String(localized: "label_txid", defaultValue: "TXID") + ": " + txid,
-                            monospaced: true,
-                            linkStyle: true
-                        )
-                    }
-                    if spliceSuccess {
-                        successCard(
-                            icon: "checkmark.circle.fill",
-                            title: String(localized: "success_splice_out", defaultValue: "Splice-out initiated!"),
-                            detail: String(
-                                localized: "info_funds_arrive_onchain",
-                                defaultValue: "Funds will arrive onchain after confirmation."
-                            ),
-                            monospaced: false
-                        )
-                    }
                     if let error = errorMessage {
                         errorCard(error)
                     }
@@ -63,15 +42,12 @@ struct OnChainSendView: View {
             .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send Onchain"))
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
-            .sheet(isPresented: $showReviewSheet) {
-                OnChainReviewSheet(address: address, model: model) { sentTxid, isSplice in
-                    if let sentTxid {
-                        self.txid = sentTxid
-                        self.spliceSuccess = false
-                    } else if isSplice {
-                        self.spliceSuccess = true
-                        self.txid = nil
-                    }
+            .sheet(isPresented: $showReviewSheet, onDismiss: {
+                // Leaving the receipt, by Done or by swiping it away, also leaves this screen.
+                if model.step == .success { dismiss() }
+            }) {
+                OnChainReviewSheet(address: address, model: model) {
+                    showReviewSheet = false
                 }
             }
             .onChange(of: address, initial: true) { _, new in
@@ -126,40 +102,6 @@ struct OnChainSendView: View {
         .glassCard()
     }
 
-    private func successCard(icon: String, title: String, detail: String, monospaced: Bool,
-                             linkStyle: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: icon)
-                .font(.title2)
-                .foregroundStyle(.green)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.headline)
-                if linkStyle {
-                    Text(makeTxidAttributed(label: "TXID: ", txid: detail.replacingOccurrences(of: "TXID: ", with: "")))
-                        .font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled)
-                } else {
-                    Text(detail)
-                        .font(monospaced ? .system(.caption, design: .monospaced) : .caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            }
-            Spacer()
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16)
-                .fill(.green.opacity(0.12))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16)
-                .stroke(.green.opacity(0.3), lineWidth: 1)
-        )
-    }
-
     private func errorCard(_ message: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -197,16 +139,6 @@ struct OnChainSendView: View {
         .disabled(address.isEmpty || !model.canReviewOnchainAmount(appState: appState))
         .animation(.easeInOut(duration: 0.2), value: address.isEmpty)
         .animation(.easeInOut(duration: 0.2), value: amountSats)
-    }
-
-    private func makeTxidAttributed(label: String, txid: String) -> AttributedString {
-        var s = AttributedString(label)
-        s.foregroundColor = .secondary
-        var t = AttributedString(txid)
-        t.foregroundColor = .blue
-        t.underlineStyle = .single
-        t.link = Constants.txExplorerLink(for: txid)
-        return s + t
     }
 }
 
