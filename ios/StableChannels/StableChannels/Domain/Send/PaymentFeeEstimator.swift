@@ -28,6 +28,12 @@ enum PaymentFeeEstimator {
         msat / 1_000 + (msat % 1_000 == 0 ? 0 : 1)
     }
 
+    /// Converts sat/vB to the sat/kwu LDK broadcasts with (1 vB = 4 WU), rounded up so a fractional
+    /// rate such as 1.28 sat/vB is never sent below the rate shown and estimated.
+    static func satPerKwu(fromSatPerVb feeRateSatVb: Double) -> UInt64 {
+        UInt64((feeRateSatVb * 250).rounded(.up))
+    }
+
     /// Estimates the expected onchain transaction fee based on fee rate and send type.
     static func estimateOnchainFee(
         feeRateSatVb: Double,
@@ -118,8 +124,7 @@ enum NetworkFeeSpeedTier: String, CaseIterable, Identifiable, Sendable {
         case .standard:
             return normalized
         case .priority:
-            // The step keeps priority strictly above standard at the floor (1.3 vs 1.0). NodeService
-            // rounds to whole sat/vB, so 1.3 is broadcast as 1; only the ceiling makes them equal.
+            // The step keeps priority strictly above standard at the floor (1.3 vs 1.0).
             return min(ceiling, max(normalized + Self.priorityMinimumStepSatVb, normalized * 1.3))
         }
     }

@@ -74,6 +74,14 @@ final class PaymentFeeEstimatorTests: XCTestCase {
         XCTAssertEqual(fee, 280)
     }
 
+    func testSatPerKwu_keepsFractionalRateAndNeverRoundsBelowIt() {
+        XCTAssertEqual(PaymentFeeEstimator.satPerKwu(fromSatPerVb: 1.0), 250)
+        XCTAssertEqual(PaymentFeeEstimator.satPerKwu(fromSatPerVb: 1.28), 320)
+        XCTAssertEqual(PaymentFeeEstimator.satPerKwu(fromSatPerVb: 1.8), 450)
+        XCTAssertEqual(PaymentFeeEstimator.satPerKwu(fromSatPerVb: 1.001), 251)
+        XCTAssertEqual(PaymentFeeEstimator.satPerKwu(fromSatPerVb: Constants.maxAllowedFeeRateSatVb), 2_500_000)
+    }
+
     func testEstimateOnchainFee_overflowSafety() {
         let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: Double.greatestFiniteMagnitude, isSendAll: false)
         XCTAssertEqual(fee, UInt64.max)

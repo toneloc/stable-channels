@@ -654,7 +654,7 @@ class NodeService: NodeServiceProtocol {
         else {
             throw NodeServiceError.invalidFeeRate
         }
-        return FeeRate.fromSatPerVbU32(satVb: UInt32(round(rate)))
+        return FeeRate.fromSatPerKwu(satKwu: PaymentFeeEstimator.satPerKwu(fromSatPerVb: rate))
     }
 
     func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double? = nil) throws -> Txid {
