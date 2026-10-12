@@ -134,6 +134,34 @@ extension SendFlowModel {
         }
     }
 
+    /// A receipt shown as pending follows the payment to its outcome: settled completes it, failed
+    /// returns to confirm with the reason, and a timeout keeps it pending.
+    func applyLateSettlement(_ outcome: PaymentSettlementOutcome) {
+        guard isPendingSettlement, step == .success else { return }
+        switch outcome {
+        case .settled:
+            isPendingSettlement = false
+        case .failed(let reason):
+            isPendingSettlement = false
+            errorMessage = reason
+            step = .confirm
+        case .timedOut:
+            break
+        }
+    }
+
+    /// Keeps observing a pending Lightning receipt until it resolves or the screen goes away.
+    func observePendingSettlement(appState: AppState) async {
+        while !Task.isCancelled, isPendingSettlement, step == .success, let paymentId = successPaymentId {
+            let outcome = await PaymentSettlementObserver.awaitSettlement(
+                paymentId: paymentId,
+                timeoutSeconds: 60,
+                appState: appState
+            )
+            applyLateSettlement(outcome)
+        }
+    }
+
     private func showSuccess(sentSats: UInt64, paymentId: String? = nil, txid: String? = nil, isPending: Bool) {
         sentAmountSats = sentSats
         successPaymentId = paymentId

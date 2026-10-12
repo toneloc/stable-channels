@@ -50,6 +50,9 @@ struct SendSuccessStepView: View {
         .onDisappear {
             copyTask?.cancel()
         }
+        .task(id: model.successPaymentId) {
+            await model.observePendingSettlement(appState: appState)
+        }
     }
 
     private var statusHeaderSection: some View {

@@ -782,6 +782,32 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertEqual(failed.errorMessage, "Route not found")
     }
 
+    func testApplyLateSettlement_pendingReceiptFollowsOutcome() {
+        let settled = SendFlowModel()
+        settled.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid")
+        settled.applyLateSettlement(.timedOut)
+        XCTAssertEqual(settled.successStatus, .pending)
+        settled.applyLateSettlement(.settled)
+        XCTAssertEqual(settled.step, .success)
+        XCTAssertEqual(settled.successStatus, .completed)
+
+        let failed = SendFlowModel()
+        failed.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid")
+        failed.applyLateSettlement(.failed(reason: "Route not found"))
+        XCTAssertEqual(failed.step, .confirm)
+        XCTAssertEqual(failed.errorMessage, "Route not found")
+        XCTAssertFalse(failed.isPendingSettlement)
+    }
+
+    func testApplyLateSettlement_ignoredWhenReceiptIsNotPending() {
+        let model = SendFlowModel()
+        model.applySettlement(.settled, sentSats: 1000, paymentId: "pid")
+        model.applyLateSettlement(.failed(reason: "Route not found"))
+        XCTAssertEqual(model.step, .success)
+        XCTAssertEqual(model.successStatus, .completed)
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testPaymentRecordStatus_pendingIsNeitherSettledNorFailed() {
         func record(_ status: String) -> PaymentRecord {
             PaymentRecord(

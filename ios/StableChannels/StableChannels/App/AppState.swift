@@ -1824,6 +1824,8 @@ class AppState {
                     try? databaseService?.paymentRepo.updatePaymentStatus(
                         paymentId: "\(pid)", status: "failed"
                     )
+                    // History and payment details reload only when this epoch moves.
+                    confirmationUpdateEpoch += 1
                     NotificationCenter.default.post(
                         name: .paymentFailed,
                         object: nil,
@@ -2387,6 +2389,8 @@ class AppState {
                 status: "completed",
                 feeMsat: feePaidMsat
             )
+            // History and payment details reload only when this epoch moves.
+            confirmationUpdateEpoch += 1
             var userInfo: [String: Any] = ["paymentId": pidStr, "paymentHash": paymentHashStr]
             if let fee = feePaidMsat { userInfo["feePaidMsat"] = fee }
             NotificationCenter.default.post(
