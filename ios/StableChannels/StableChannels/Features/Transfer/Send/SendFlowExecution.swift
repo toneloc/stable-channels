@@ -23,7 +23,7 @@ extension SendFlowModel {
 
         // For onchain sends, block if fee rate has not loaded (non-standard tier)
         if case .onchain = dest, !isFeeRateReady {
-            errorMessage = "Waiting for network fee rate. Please wait a moment."
+            errorMessage = Self.feeRateNotReadyMessage
             resetToken += 1
             return
         }
@@ -44,7 +44,7 @@ extension SendFlowModel {
         if authEnabled {
             let passed = await appState.authenticate(reason: authReason)
             guard passed else {
-                errorMessage = appState.authError ?? "Authentication required to send."
+                errorMessage = appState.authError ?? Self.authenticationRequiredMessage
                 resetToken += 1
                 return
             }
@@ -57,34 +57,44 @@ extension SendFlowModel {
         }
 
         appState.ensureLSPConnected()
-        let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+        let sats = sendAmountSats(appState: appState)
+        let sendsAll = sendsEntireOnchainBalance(appState: appState)
         guard sats > 0 else {
             errorMessage = "Invalid amount."
             return
         }
         let available = availableSpendableSats(appState: appState)
-        let totalDebit = sats + estimatedFeeSats(appState: appState)
+        let totalDebit = PaymentFeeEstimator.saturatingAdd(sats, estimatedFeeSats(appState: appState))
         guard totalDebit <= available, available > 0 else {
             errorMessage = "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
             return
         }
 
         do {
-            let service = resolvedLNURLService(appState: appState)
-            let result = try await SendPaymentExecutor.execute(
-                destination: dest,
-                effectiveSats: sats,
-                feeRateSatVb: effectiveFeeRateSatVb,
-                lnurlParams: lnurlParams,
-                lnurlComment: lnurlComment,
-                appState: appState,
-                lnurlService: service
-            )
+            let result: SendPaymentResult
+            if sendsAll, case .onchain(let address, _) = dest {
+                result = try await SendPaymentExecutor.sendAllOnchain(
+                    address: address,
+                    price: appState.accountingBTCPrice,
+                    feeRateSatVb: effectiveFeeRateSatVb,
+                    appState: appState
+                )
+            } else {
+                result = try await SendPaymentExecutor.execute(
+                    destination: dest,
+                    effectiveSats: sats,
+                    feeRateSatVb: effectiveFeeRateSatVb,
+                    lnurlParams: lnurlParams,
+                    lnurlComment: lnurlComment,
+                    appState: appState,
+                    lnurlService: resolvedLNURLService(appState: appState)
+                )
+            }
 
             switch result.outcome {
             case .onchain(let txid):
                 // Already broadcast into the mempool.
-                showSuccess(sentSats: result.sentAmountSats, txid: txid, isPending: false)
+                showSuccess(sentSats: sendsAll ? sats : result.sentAmountSats, txid: txid, isPending: false)
 
             case .spliceOut:
                 // The splice confirms on-chain; there is no payment to await and no txid until
@@ -104,17 +114,23 @@ extension SendFlowModel {
                     timeoutSeconds: timeout,
                     appState: appState
                 )
-                switch outcome {
-                case .settled:
-                    showSuccess(sentSats: result.sentAmountSats, paymentId: pid, isPending: false)
-                case .failed(let reason):
-                    errorMessage = reason
-                case .timedOut:
-                    showSuccess(sentSats: result.sentAmountSats, paymentId: pid, isPending: true)
-                }
+                applySettlement(outcome, sentSats: result.sentAmountSats, paymentId: pid)
             }
         } catch {
             errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
+        }
+    }
+
+    /// Maps a Lightning settlement outcome to the result screen. A timeout is not a settlement:
+    /// it must stay pending so an unconfirmed payment never renders as "Payment Sent".
+    func applySettlement(_ outcome: PaymentSettlementOutcome, sentSats: UInt64, paymentId: String) {
+        switch outcome {
+        case .settled:
+            showSuccess(sentSats: sentSats, paymentId: paymentId, isPending: false)
+        case .failed(let reason):
+            errorMessage = reason
+        case .timedOut:
+            showSuccess(sentSats: sentSats, paymentId: paymentId, isPending: true)
         }
     }
 

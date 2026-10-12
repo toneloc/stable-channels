@@ -136,7 +136,7 @@ struct PaymentRecord: Codable, Equatable, Identifiable {
     }
 
     var isSettled: Bool {
-        status == "completed" || status == "succeeded"
+        status == "completed"
     }
 
     var isFailed: Bool {

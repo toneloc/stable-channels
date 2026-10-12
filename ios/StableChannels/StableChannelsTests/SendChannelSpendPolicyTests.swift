@@ -138,4 +138,83 @@ final class SendChannelSpendPolicyTests: XCTestCase {
 
         XCTAssertEqual(selected?.userChannelId, "ch2")
     }
+
+    func testSelectSpliceChannel_exactCapacityMatchIsSufficient() {
+        let small = createChannel(id: "small", outboundSats: 20000)
+        let exact = createChannel(id: "exact", outboundSats: 40000)
+        let large = createChannel(id: "large", outboundSats: 80000)
+
+        let selected = SendChannelSpendPolicy.selectSpliceChannel(
+            channels: [small, large, exact],
+            requiredSats: 40000
+        )
+
+        XCTAssertEqual(selected?.userChannelId, "exact")
+    }
+
+    func testAvailableOnchainSpendableSats_spliceOutIsBoundedByLargestChannel() {
+        let channels = [
+            createChannel(id: "a", outboundSats: 30000),
+            createChannel(id: "b", outboundSats: 50000)
+        ]
+
+        let splice = SendChannelSpendPolicy.availableOnchainSpendableSats(
+            channels: channels,
+            lightningBalanceSats: 80000,
+            onchainBalanceSats: 7000,
+            isSweeping: false
+        )
+        XCTAssertEqual(splice, 50000, "A splice-out draws on one channel, not the 80,000 sat total")
+
+        let sweeping = SendChannelSpendPolicy.availableOnchainSpendableSats(
+            channels: channels,
+            lightningBalanceSats: 80000,
+            onchainBalanceSats: 7000,
+            isSweeping: true
+        )
+        XCTAssertEqual(sweeping, 7000)
+
+        let noChannels = SendChannelSpendPolicy.availableOnchainSpendableSats(
+            channels: [],
+            lightningBalanceSats: 80000,
+            onchainBalanceSats: 7000,
+            isSweeping: false
+        )
+        XCTAssertEqual(noChannels, 7000)
+    }
+
+    func testIsOnchainSendAll_onlyForMaxOnchainWithoutSpliceOut() {
+        let onchain = SendDestination.onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        let ready = [createChannel(id: "a", outboundSats: 50000)]
+
+        XCTAssertTrue(SendChannelSpendPolicy.isOnchainSendAll(
+            isMax: true,
+            destination: onchain,
+            channels: [],
+            isSweeping: false
+        ))
+        XCTAssertFalse(SendChannelSpendPolicy.isOnchainSendAll(
+            isMax: false,
+            destination: onchain,
+            channels: [],
+            isSweeping: false
+        ))
+        XCTAssertFalse(
+            SendChannelSpendPolicy
+                .isOnchainSendAll(isMax: true, destination: onchain, channels: ready, isSweeping: false),
+            "A splice-out Max draws on one channel"
+        )
+        XCTAssertTrue(SendChannelSpendPolicy.isOnchainSendAll(
+            isMax: true,
+            destination: onchain,
+            channels: ready,
+            isSweeping: true
+        ))
+        XCTAssertFalse(SendChannelSpendPolicy.isOnchainSendAll(
+            isMax: true,
+            destination: nil,
+            channels: [],
+            isSweeping: false
+        ))
+    }
 }

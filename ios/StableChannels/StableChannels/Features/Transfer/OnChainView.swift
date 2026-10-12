@@ -3,50 +3,16 @@ import UIKit
 
 struct OnChainSendView: View {
     @Environment(AppState.self) private var appState
+    /// Single source of truth for this send's rules, shared with the review sheet.
+    @State private var model = SendFlowModel()
     @State private var address = ""
-    @State private var amountUSDStr = ""
-    @State private var sendAll = false
-    @State private var isSending = false
     @State private var errorMessage: String?
     @State private var txid: String?
     @State private var spliceSuccess = false
-    @State private var feeRateSatVb: Double?
     @State private var showReviewSheet = false
-    @State private var selectedFeeTier: NetworkFeeSpeedTier = .standard
 
-    private var amountSats: UInt64? {
-        convertedSats(price: appState.accountingBTCPrice)
-    }
-
-    private func convertedSats(price: Double) -> UInt64? {
-        guard let usd = Double(amountUSDStr), usd > 0, price > 0 else { return nil }
-        let sats = usd / price * Double(Constants.satsInBTC)
-        guard sats.isFinite, sats >= 1, sats < Double(UInt64.max) else { return nil }
-        return UInt64(sats)
-    }
-
-    private var hasReadyChannel: Bool {
-        appState.nodeService.channels.contains { $0.isChannelReady }
-    }
-
-    private var feeEstimateText: String {
-        guard let feeRateSatVb else {
-            return String(localized: "info_fee_estimating", defaultValue: "Estimating network fee...")
-        }
-        let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: feeRateSatVb, isSendAll: sendAll)
-        let rateDisplay = feeRateSatVb.isFinite && feeRateSatVb > 0
-            ? (feeRateSatVb.truncatingRemainder(dividingBy: 1) == 0
-                ? String(format: "%.0f", feeRateSatVb)
-                : String(format: "%.1f", feeRateSatVb))
-            : "1"
-        return String(
-            format: String(
-                localized: "info_onchain_fee_estimate_sentence",
-                defaultValue: "Expected network fee: ~%@ BTC (%@ sat/vB)"
-            ),
-            feeSats.btcSpacedFormatted,
-            rateDisplay
-        )
+    private var amountSats: UInt64 {
+        model.sendAmountSats(appState: appState)
     }
 
     var body: some View {
@@ -54,14 +20,8 @@ struct OnChainSendView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     addressCard
-                    OnChainAmountCard(
-                        hasReadyChannel: hasReadyChannel,
-                        sendAll: $sendAll,
-                        amountUSDStr: $amountUSDStr,
-                        amountSats: amountSats
-                    )
-                    infoCard(icon: "bitcoinsign.circle", text: feeEstimateText)
-                    if hasReadyChannel {
+                    OnChainAmountCard(model: model)
+                    if model.isSpliceOut(appState: appState) {
                         infoCard(
                             icon: "arrow.up.arrow.down",
                             text: String(
@@ -104,13 +64,7 @@ struct OnChainSendView: View {
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
             .sheet(isPresented: $showReviewSheet) {
-                OnChainReviewSheet(
-                    address: address,
-                    sendAll: sendAll,
-                    amountSats: amountSats,
-                    feeRateSatVb: feeRateSatVb,
-                    selectedFeeTier: $selectedFeeTier
-                ) { sentTxid, isSplice in
+                OnChainReviewSheet(address: address, model: model) { sentTxid, isSplice in
                     if let sentTxid {
                         self.txid = sentTxid
                         self.spliceSuccess = false
@@ -120,8 +74,11 @@ struct OnChainSendView: View {
                     }
                 }
             }
+            .onChange(of: address, initial: true) { _, new in
+                model.destination = .onchain(address: new, amountSats: nil)
+            }
             .task {
-                feeRateSatVb = await appState.feeRateService.currentRate()
+                model.feeRateSatVb = await appState.feeRateService.currentRate()
             }
         }
     }
@@ -230,18 +187,14 @@ struct OnChainSendView: View {
             errorMessage = nil
             showReviewSheet = true
         } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.body.weight(.semibold))
-                Text(String(localized: "button_review_transfer", defaultValue: "Review Transfer"))
-                    .fontWeight(.semibold)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
+            Text(String(localized: "button_review_transfer", defaultValue: "Review Transfer"))
+                .fontWeight(.semibold)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
         }
         .buttonStyle(.borderedProminent)
         .tint(.blue)
-        .disabled(address.isEmpty || (!sendAll && (amountSats ?? 0) == 0))
+        .disabled(address.isEmpty || !model.canReviewOnchainAmount(appState: appState))
         .animation(.easeInOut(duration: 0.2), value: address.isEmpty)
         .animation(.easeInOut(duration: 0.2), value: amountSats)
     }

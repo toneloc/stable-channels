@@ -40,6 +40,9 @@ struct SendView: View {
             .navigationTitle(navigationTitle)
             .navigationBarTitleDisplayMode(.inline)
             .navigationBarBackButtonHidden(true)
+            .onChange(of: appState.nodeService.activeNetwork, initial: true) { _, network in
+                model.expectedNetwork = network
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     leadingToolbarButton
@@ -120,6 +123,8 @@ struct SendView: View {
                         Text(String(localized: "button_back", defaultValue: "Back"))
                     }
                 }
+                // Leaving mid-send would surface its result on the wrong step.
+                .disabled(model.isSending)
             case .success:
                 EmptyView()
             }

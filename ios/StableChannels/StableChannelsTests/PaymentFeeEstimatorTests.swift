@@ -2,48 +2,40 @@ import XCTest
 @testable import StableChannels
 
 final class PaymentFeeEstimatorTests: XCTestCase {
-    // MARK: - Lightning Routing Fee Tests
+    // MARK: - Lightning Routing Fee Ceiling Tests
 
-    func testEstimateLightningFee_zeroSatsReturnsZero() {
-        let fee = PaymentFeeEstimator.estimateLightningFee(
-            sats: 0,
-            baseMsat: 1_000,
-            proportionalMillionths: 500
-        )
-        XCTAssertEqual(fee, 0)
+    func testMaxLightningRoutingFeeMsat_onePercentPlusFiftySats() {
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeMsat(amountMsat: 100_000_000), 1_050_000)
     }
 
-    func testEstimateLightningFee_standardForwardingCalculation() {
-        // 10,000 sats = 10,000,000 msat
-        // proportional: 10,000,000 * 500 / 1,000,000 = 5,000 msat
-        // total: 1,000 base + 5,000 prop = 6,000 msat = 6 sats
-        let fee = PaymentFeeEstimator.estimateLightningFee(
-            sats: 10_000,
-            baseMsat: 1_000,
-            proportionalMillionths: 500
-        )
-        XCTAssertEqual(fee, 6)
+    func testMaxLightningRoutingFeeMsat_zeroAmountIsBaseOnly() {
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeMsat(amountMsat: 0), 50_000)
     }
 
-    func testEstimateLightningFee_ceilingDivisionRoundsUp() {
-        // 1 sat = 1,000 msat. 1 msat base, 0 ppm -> 1 msat -> rounds up to 1 sat
-        let fee = PaymentFeeEstimator.estimateLightningFee(
-            sats: 1,
-            baseMsat: 1,
-            proportionalMillionths: 0
+    func testMaxLightningRoutingFeeMsat_maxAmountDoesNotTrap() {
+        // UInt64.max / 100 + 50_000 fits without saturating.
+        XCTAssertEqual(
+            PaymentFeeEstimator.maxLightningRoutingFeeMsat(amountMsat: UInt64.max),
+            184_467_440_737_145_516
         )
-        XCTAssertEqual(fee, 1)
     }
 
-    func testEstimateLightningFee_overflowSafetyDoesNotCrash() {
-        let fee = PaymentFeeEstimator.estimateLightningFee(
-            sats: UInt64.max,
-            baseMsat: 1_000,
-            proportionalMillionths: 5_000
-        )
-        let expected = (1_999 + (UInt64.max / 1_000_000)) / 1_000
-        XCTAssertEqual(fee, expected)
-        XCTAssertGreaterThan(fee, 18_000_000_000)
+    func testMaxLightningRoutingFeeSats_zeroSatsReturnsZero() {
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(sats: 0), 0)
+    }
+
+    func testMaxLightningRoutingFeeSats_wholeSatCeiling() {
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(sats: 100_000), 1_050)
+    }
+
+    func testMaxLightningRoutingFeeSats_roundsUpPartialSat() {
+        // 1_000 msat / 100 + 50_000 = 50_010 msat -> 51 sats
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(sats: 1), 51)
+    }
+
+    func testMaxLightningRoutingFeeSats_maxSatsSaturatesWithoutTrap() {
+        // sats * 1_000 saturates to UInt64.max msat; cap = 184_467_440_737_145_516 msat -> rounded up.
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(sats: UInt64.max), 184_467_440_737_146)
     }
 
     // MARK: - Onchain Fee Estimation Tests
@@ -105,7 +97,11 @@ final class PaymentFeeEstimatorTests: XCTestCase {
 
     func testNetworkFeeSpeedTier_lowFeeMempool() {
         let base = 1.0
-        XCTAssertEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base), 0.8, accuracy: 0.001)
+        XCTAssertEqual(
+            NetworkFeeSpeedTier.economy.effectiveRate(baseRate: base),
+            Constants.minAllowedFeeRateSatVb,
+            accuracy: 0.001
+        )
         XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), 1.0, accuracy: 0.001)
         XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: base), 1.3, accuracy: 0.001)
     }
@@ -143,7 +139,11 @@ final class PaymentFeeEstimatorTests: XCTestCase {
             let std = NetworkFeeSpeedTier.standard.effectiveRate(baseRate: rate)
             let pri = NetworkFeeSpeedTier.priority.effectiveRate(baseRate: rate)
 
-            XCTAssertGreaterThanOrEqual(eco, 0.1, "Economy must never drop below 0.1 sat/vB")
+            XCTAssertGreaterThanOrEqual(
+                eco,
+                Constants.minAllowedFeeRateSatVb,
+                "Economy must never drop below the node floor"
+            )
             XCTAssertLessThanOrEqual(eco, std, "Economy must not exceed standard")
             XCTAssertGreaterThan(pri, std, "Priority must strictly exceed standard")
         }
@@ -175,5 +175,89 @@ final class PaymentFeeEstimatorTests: XCTestCase {
             XCTAssertFalse(tier.targetBlocks.isEmpty)
             XCTAssertEqual(tier.id, tier.rawValue)
         }
+    }
+
+    func testSpliceOutVByteEstimateIsPinned() {
+        // Pinned to a literal: other tests derive their expectation from this constant.
+        XCTAssertEqual(Constants.estimatedSpliceOutVBytes, 180)
+    }
+
+    func testMaxLightningRoutingFeeSats_exactMsatRoundsUpSubSatRemainder() {
+        // 100,000.999 sats: cap is 1,050,009 msat, which must show as 1,051 sats, not 1,050.
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(amountMsat: 100_000_999), 1051)
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(amountMsat: 100_000_000), 1050)
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningRoutingFeeSats(amountMsat: 0), 0)
+    }
+
+    func testMaxLightningDebitSats_coversAmountPlusCeilingRoundedUp() {
+        // 100,000,999 + 1,050,009 = 101,051,008 msat -> 101,052 sats.
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningDebitSats(amountMsat: 100_000_999), 101_052)
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningDebitSats(amountMsat: 100_000_000), 101_050)
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningDebitSats(amountMsat: 0), 0)
+        XCTAssertEqual(PaymentFeeEstimator.maxLightningDebitSats(amountMsat: UInt64.max), UInt64.max / 1000 + 1)
+    }
+
+    // MARK: - Shared Fee-Rate Bounds
+
+    func testRecommendedFees_subFloorRatesClampToSharedFloor() {
+        let floor = Constants.minAllowedFeeRateSatVb
+        let subFloor = RecommendedFees(
+            fastestFee: 0.5,
+            halfHourFee: 0.5,
+            hourFee: 0.5,
+            economyFee: 0.5,
+            minimumFee: 0.5
+        )
+        for tier in NetworkFeeSpeedTier.allCases {
+            XCTAssertGreaterThanOrEqual(subFloor.rate(for: tier), floor, "\(tier) must not drop below the node floor")
+            XCTAssertGreaterThanOrEqual(tier.effectiveRate(baseRate: 0.5, recommendedFees: subFloor), floor)
+        }
+    }
+
+    func testNetworkFeeSpeedTier_subFloorBaseRateWithoutRecommendedFees() {
+        let floor = Constants.minAllowedFeeRateSatVb
+        for tier in NetworkFeeSpeedTier.allCases {
+            XCTAssertGreaterThanOrEqual(
+                tier.effectiveRate(baseRate: 0.3),
+                floor,
+                "\(tier) must not drop below the node floor"
+            )
+        }
+        XCTAssertGreaterThan(
+            NetworkFeeSpeedTier.priority.effectiveRate(baseRate: 0.3),
+            NetworkFeeSpeedTier.standard.effectiveRate(baseRate: 0.3),
+            "Priority must strictly exceed standard at the floor"
+        )
+    }
+
+    func testNetworkFeeSpeedTier_zeroNegativeAndNaNBaseRateStayWithinBounds() {
+        let floor = Constants.minAllowedFeeRateSatVb
+        let ceiling = Constants.maxAllowedFeeRateSatVb
+        for base in [0.0, -5.0, Double.nan] {
+            XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: base), floor)
+            for tier in NetworkFeeSpeedTier.allCases {
+                let rate = tier.effectiveRate(baseRate: base)
+                XCTAssertGreaterThanOrEqual(rate, floor, "\(tier) at base \(base)")
+                XCTAssertLessThanOrEqual(rate, ceiling, "\(tier) at base \(base)")
+            }
+        }
+    }
+
+    func testNetworkFeeSpeedTier_aboveCeilingClampsToCeiling() {
+        let ceiling = Constants.maxAllowedFeeRateSatVb
+        let huge = RecommendedFees(
+            fastestFee: 20_000.0,
+            halfHourFee: 20_000.0,
+            hourFee: 20_000.0,
+            economyFee: 20_000.0,
+            minimumFee: 20_000.0
+        )
+        for tier in NetworkFeeSpeedTier.allCases {
+            XCTAssertEqual(tier.effectiveRate(baseRate: 20_000.0, recommendedFees: huge), ceiling, "\(tier)")
+        }
+        // Without recommended fees, standard and priority hit the ceiling; economy stays below it.
+        XCTAssertEqual(NetworkFeeSpeedTier.standard.effectiveRate(baseRate: 20_000.0), ceiling)
+        XCTAssertEqual(NetworkFeeSpeedTier.priority.effectiveRate(baseRate: 20_000.0), ceiling)
+        XCTAssertLessThanOrEqual(NetworkFeeSpeedTier.economy.effectiveRate(baseRate: 20_000.0), ceiling)
     }
 }

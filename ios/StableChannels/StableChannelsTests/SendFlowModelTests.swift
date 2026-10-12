@@ -1,4 +1,5 @@
 import LDKNode
+import UIKit
 import XCTest
 @testable import StableChannels
 
@@ -327,8 +328,9 @@ final class SendFlowModelTests: XCTestCase {
 
         let maxSats = model.calculateMaxSendableSats(appState: appState)
         let fee = model.estimatedFeeSatsForAmount(sats: maxSats, appState: appState)
-        XCTAssertLessThanOrEqual(maxSats + fee, 50_000)
-        XCTAssertGreaterThan(maxSats, 49_000)
+        // Reserves the routing-fee ceiling: 49,455 + (1% + 50 = 545) = 50,000.
+        XCTAssertEqual(maxSats, 49_455)
+        XCTAssertEqual(fee, 545)
     }
 
     func testResetFlowRestoresInitialState() {
@@ -434,9 +436,9 @@ final class SendFlowModelTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    /// A ready channel with the given outbound balance and routing-fee policy. Mirrors the
+    /// A ready channel with the given outbound balance. Mirrors the
     /// fixture in StabilityServiceTests; only the fields the send flow reads are meaningful.
-    private func readyChannel(outboundSats: UInt64, feeProportionalMillionths: UInt32 = 0) -> ChannelDetails {
+    private func readyChannel(outboundSats: UInt64) -> ChannelDetails {
         ChannelDetails(
             channelId: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             counterpartyNodeId: "020202020202020202020202020202020202020202020202020202020202020202",
@@ -462,7 +464,7 @@ final class SendFlowModelTests: XCTestCase {
             counterpartyOutboundHtlcMinimumMsat: 1_000,
             counterpartyOutboundHtlcMaximumMsat: 200_000_000,
             counterpartyForwardingInfoFeeBaseMsat: 1_000,
-            counterpartyForwardingInfoFeeProportionalMillionths: feeProportionalMillionths,
+            counterpartyForwardingInfoFeeProportionalMillionths: 0,
             counterpartyForwardingInfoCltvExpiryDelta: 144,
             nextOutboundHtlcLimitMsat: outboundSats * 1_000,
             nextOutboundHtlcMinimumMsat: 1_000,
@@ -531,20 +533,33 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertEqual(model.availableSpendableSats(appState: appState), 30_000)
     }
 
-    func testCalculateMaxSendableSats_alwaysFitsUnderAProportionalRoutingFee() throws {
-        // With a proportional fee the fee depends on the amount; the max must satisfy
-        // max + fee(max) <= available and be the largest such amount.
+    func testCalculateMaxSendableSats_reservesRoutingFeeCeiling() throws {
+        // The ceiling is 1% + 50 sats, rounded up: max is the largest amount with
+        // max + cap(max) <= available, and max + 1 + cap(max + 1) > available.
         let appState = AppState()
-        appState.nodeService.channelsOverride = [readyChannel(
-            outboundSats: 10_000_000,
-            feeProportionalMillionths: 1_000
-        )]
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
         let model = SendFlowModel()
         model.destination = .lightningAddress(
             handle: "alice",
             domain: "tips.net",
             url: try XCTUnwrap(URL(string: "https://tips.net"))
         )
+
+        let cases: [(available: UInt64, max: UInt64, cap: UInt64)] = [
+            (100_000, 98_960, 1_040),
+            (50_000, 49_455, 545),
+            (1_000, 940, 60),
+            (100, 49, 51),
+            (52, 1, 51),
+            (51, 0, 0),
+            (1, 0, 0)
+        ]
+        for expected in cases {
+            appState.lightningBalanceSats = expected.available
+            let maxSats = model.calculateMaxSendableSats(appState: appState)
+            XCTAssertEqual(maxSats, expected.max, "available \(expected.available)")
+            XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: maxSats, appState: appState), expected.cap)
+        }
 
         for available: UInt64 in [50_052, 50_053, 50_054, 12_345, 1_000, 999_999, 1, 2, 3] {
             appState.lightningBalanceSats = available
@@ -560,6 +575,48 @@ final class SendFlowModelTests: XCTestCase {
                 )
             }
         }
+    }
+
+    func testLightningFee_isTheRoutingFeeCeilingRegardlessOfChannelPolicy() throws {
+        let appState = AppState()
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 10_000_000)]
+        let model = SendFlowModel()
+        model.destination = .lightningAddress(
+            handle: "alice",
+            domain: "tips.net",
+            url: try XCTUnwrap(URL(string: "https://tips.net"))
+        )
+
+        XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 0, appState: appState), 0)
+        XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 1, appState: appState), 51)
+        XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 100_000, appState: appState), 1_050)
+    }
+
+    func testInsufficientBalance_flipsExactlyWhereAmountPlusRoutingCeilingExceedsBalance() throws {
+        let appState = AppState()
+        appState.lightningBalanceSats = 50_000
+        let model = SendFlowModel()
+        model.destination = .lightningAddress(
+            handle: "alice",
+            domain: "tips.net",
+            url: try XCTUnwrap(URL(string: "https://tips.net"))
+        )
+        model.amountUnit = .sats
+
+        // 49,455 + 545 = 50,000 fits exactly.
+        model.amountInputText = "49455"
+        XCTAssertFalse(model.isInsufficientBalance(appState: appState))
+        model.step = .amount
+        model.proceedFromAmount(appState: appState)
+        XCTAssertEqual(model.step, .confirm)
+
+        // 49,456 + 545 = 50,001 does not, although the amount alone fits.
+        model.amountInputText = "49456"
+        XCTAssertTrue(model.isInsufficientBalance(appState: appState))
+        model.step = .amount
+        model.proceedFromAmount(appState: appState)
+        XCTAssertEqual(model.step, .amount)
+        XCTAssertTrue(model.errorMessage?.contains("estimated fee") == true)
     }
 
     func testSendPaymentResult_exposesOutcomeAccessors() {
@@ -701,5 +758,362 @@ final class SendFlowModelTests: XCTestCase {
                           comment _: String?) async throws -> LNURLPayInvoiceResponse {
             throw LNURLError.invalidResponse
         }
+    }
+
+    func testApplySettlement_timedOutStaysPendingNotCompleted() {
+        let model = SendFlowModel()
+        model.applySettlement(.timedOut, sentSats: 21000, paymentId: "pid")
+
+        XCTAssertEqual(model.step, .success)
+        XCTAssertEqual(model.successStatus, .pending)
+        XCTAssertEqual(model.successPaymentId, "pid")
+        XCTAssertEqual(model.sentAmountSats, 21000)
+    }
+
+    func testApplySettlement_settledCompletesAndFailedStaysOnStep() {
+        let settled = SendFlowModel()
+        settled.applySettlement(.settled, sentSats: 1000, paymentId: "pid")
+        XCTAssertEqual(settled.successStatus, .completed)
+
+        let failed = SendFlowModel()
+        failed.step = .confirm
+        failed.applySettlement(.failed(reason: "Route not found"), sentSats: 1000, paymentId: "pid")
+        XCTAssertEqual(failed.step, .confirm)
+        XCTAssertEqual(failed.errorMessage, "Route not found")
+    }
+
+    func testPaymentRecordStatus_pendingIsNeitherSettledNorFailed() {
+        func record(_ status: String) -> PaymentRecord {
+            PaymentRecord(
+                id: 1,
+                paymentId: "pid",
+                paymentType: "lightning",
+                direction: "sent",
+                amountMsat: 1000,
+                amountUSD: nil,
+                btcPrice: nil,
+                counterparty: nil,
+                status: status,
+                createdAt: 0,
+                feeMsat: 0,
+                txid: nil,
+                address: nil,
+                confirmations: 0,
+                txBlockHeight: nil
+            )
+        }
+        XCTAssertFalse(record("pending").isSettled)
+        XCTAssertFalse(record("pending").isFailed)
+        XCTAssertTrue(record("completed").isSettled)
+        XCTAssertTrue(record("failed").isFailed)
+        XCTAssertFalse(record("failed").isSettled)
+    }
+
+    func testSendOnchain_refusesWhileSweeping() async {
+        let appState = AppState()
+        appState.isSweeping = true
+        do {
+            _ = try await SendPaymentExecutor.sendOnchain(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                effectiveSats: 10000,
+                price: 0,
+                feeRateSatVb: 5,
+                appState: appState
+            )
+            XCTFail("An on-chain send must not dispatch while a sweep holds the wallet's UTXOs")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "A splice is already in progress")
+        }
+    }
+
+    func testLnurlParams_cachesDownsampledPayeeAvatar() throws {
+        let side: CGFloat = 1000
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let png = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+            .pngData { context in
+                UIColor.orange.setFill()
+                context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+            }
+        let metadata = "[[\"text/plain\",\"Tip\"],[\"image/png;base64\",\"\(png.base64EncodedString())\"]]"
+        let model = SendFlowModel()
+
+        model.lnurlParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/callback",
+            minSendable: 1000,
+            maxSendable: 1_000_000,
+            metadata: metadata,
+            commentAllowed: nil
+        )
+
+        let avatar = try XCTUnwrap(model.payeeAvatar)
+        XCTAssertLessThanOrEqual(max(avatar.width, avatar.height), LNURLAvatar.maxPixelSize)
+        model.lnurlParams = nil
+        XCTAssertNil(model.payeeAvatar)
+    }
+
+    // Regtest invoice that expired one second after creation.
+    private static let expiredRegtestInvoice =
+        "lnbcrt500n1p4tkum6hp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qf7cucxts7m2m34lwa78u7mv7x5kdpclmamjugwgm3jpevvwtge0jpp583gggyx4gapnxcynr0xyufahkyxthd6a9h235s904n5pmjwvxvpqsp5gz0j34zt87chh6dr0etekngg3y7snw6tnsrdtpw03vr2h5nuetdq9qyysgqcqzp2xqppd49a5hs3dpn5ssgqryd6m7utpcf6ysz4t9yhx6hl2cl4j94283m5dchu6xduq8ca4946qggzw7n28wgutuud4qga56l4lww8pkjmu9qpdkkksu"
+
+    func testInput_rejectsInvoiceForAnotherNetwork() {
+        let model = SendFlowModel(expectedNetwork: .bitcoin)
+        model.inputText = Self.expiredRegtestInvoice
+
+        XCTAssertNil(model.destination)
+        guard case .invalid = model.classification else {
+            return XCTFail("A regtest invoice must be rejected on a mainnet wallet")
+        }
+    }
+
+    func testInput_reclassifiesWhenNetworkBecomesKnown() {
+        let model = SendFlowModel()
+        model.inputText = Self.expiredRegtestInvoice
+        XCTAssertNotNil(model.destination)
+
+        model.expectedNetwork = .bitcoin
+
+        XCTAssertNil(model.destination)
+        guard case .invalid = model.classification else {
+            return XCTFail("Learning the network must re-check text typed before it was known")
+        }
+    }
+
+    func testProceedFromRecipient_rejectsExpiredInvoice() async {
+        let model = SendFlowModel()
+        model.inputText = Self.expiredRegtestInvoice
+
+        await model.proceedFromRecipient(appState: AppState())
+
+        XCTAssertEqual(model.step, .recipient)
+        XCTAssertTrue(model.errorMessage?.contains("expired") == true)
+    }
+
+    func testIsFeeRateReady_onchainWaitsForARealRate() {
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.selectedFeeTier = .standard
+        XCTAssertFalse(model.isFeeRateReady, "The review must not offer a placeholder rate as the fee")
+
+        model.feeRateSatVb = 4
+        XCTAssertTrue(model.isFeeRateReady)
+    }
+
+    // MARK: - Max amount
+
+    func testMaxAmount_onchainFollowsSelectedFeeTierAndEmptiesWallet() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.feeRateSatVb = 10
+        model.applyPercentage(100, totalBalanceSats: 100_000, btcPrice: 65000, appState: appState)
+
+        XCTAssertTrue(model.isMaxAmount)
+        XCTAssertTrue(model.sendsEntireOnchainBalance(appState: appState))
+
+        // Send-all transaction (250 vB): every tier is selectable and amount + fee is the whole balance.
+        let expected: [(NetworkFeeSpeedTier, UInt64)] = [(.economy, 98000), (.standard, 97500), (.priority, 96750)]
+        for (tier, amount) in expected {
+            model.selectedFeeTier = tier
+            XCTAssertEqual(model.sendAmountSats(appState: appState), amount, "\(tier)")
+            XCTAssertEqual(
+                model.sendAmountSats(appState: appState) + model.estimatedFeeSats(appState: appState),
+                100_000
+            )
+            XCTAssertFalse(model.isInsufficientBalance(appState: appState), "\(tier)")
+        }
+    }
+
+    func testMaxAmount_spliceOutFollowsSelectedFeeTier() {
+        let appState = AppState()
+        appState.hasReadyChannel = true
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.lightningBalanceSats = 50000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.feeRateSatVb = 10
+        model.applyPercentage(100, totalBalanceSats: 50000, btcPrice: 65000, appState: appState)
+
+        XCTAssertFalse(model.sendsEntireOnchainBalance(appState: appState), "A splice-out is not a send-all")
+        // Splice-out (180 vB) drawn from the single channel.
+        model.selectedFeeTier = .standard
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 48200)
+        model.selectedFeeTier = .priority
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 47660)
+        XCTAssertFalse(model.isInsufficientBalance(appState: appState))
+    }
+
+    func testMaxAmount_turnedOffByOtherPercentageOrNewDestination() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.feeRateSatVb = 10
+
+        model.applyPercentage(100, totalBalanceSats: 100_000, btcPrice: 65000, appState: appState)
+        model.applyPercentage(50, totalBalanceSats: 100_000, btcPrice: 65000, appState: appState)
+        XCTAssertFalse(model.isMaxAmount)
+
+        model.applyPercentage(100, totalBalanceSats: 100_000, btcPrice: 65000, appState: appState)
+        model.inputText = "bc1q9vza2e8x573nczrlzms0wvx3gsqjx7vavgkx0l"
+        XCTAssertFalse(model.isMaxAmount)
+    }
+
+    func testSendAllOnchain_refusesWhileSweeping() async {
+        let appState = AppState()
+        appState.isSweeping = true
+        do {
+            _ = try await SendPaymentExecutor.sendAllOnchain(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                price: 0,
+                feeRateSatVb: 5,
+                appState: appState
+            )
+            XCTFail("Send-all spends every UTXO a sweep has committed")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "A splice is already in progress")
+        }
+    }
+
+    func testAmountEdited_keepsMaxOnlyWhileTextIsTheMaxAmount() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.feeRateSatVb = 10
+        model.amountUnit = .sats
+        model.applyPercentage(100, totalBalanceSats: 100_000, btcPrice: 65000, appState: appState)
+
+        model.amountEdited(appState: appState)
+        XCTAssertTrue(model.isMaxAmount, "Max text unchanged keeps Max")
+
+        model.amountInputText = "5000"
+        model.amountEdited(appState: appState)
+        XCTAssertFalse(model.isMaxAmount)
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 5000)
+    }
+
+    // MARK: - On-chain wallet send-all (Settings)
+
+    func testOnchainWalletSendAll_withReadyChannelEmptiesWalletInsteadOfSplicing() {
+        let appState = AppState()
+        appState.hasReadyChannel = true
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.lightningBalanceSats = 50000
+        appState.spendableOnchainSats = 100_000
+        appState.isSweeping = false
+        let model = SendFlowModel()
+        model.destination = .onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        model.feeRateSatVb = 10
+        XCTAssertTrue(model.isSpliceOut(appState: appState), "An entered amount with a ready channel splices out")
+
+        model.sendsAllFromOnchainWallet = true
+
+        XCTAssertFalse(model.isMaxAmount, "The on-chain wallet send-all is not the main-flow Max")
+        XCTAssertFalse(model.isSpliceOut(appState: appState))
+        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 10, isSendAll: true)
+        XCTAssertEqual(model.estimatedFeeSats(appState: appState), fee)
+        XCTAssertEqual(model.availableSpendableSats(appState: appState), 100_000)
+        XCTAssertEqual(model.totalDebitSats(appState: appState), 100_000)
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 100_000 - fee)
+        XCTAssertFalse(model.isInsufficientBalance(appState: appState))
+
+        model.resetFlow()
+        XCTAssertFalse(model.sendsAllFromOnchainWallet)
+    }
+
+    func testIsSpliceOut_falseWhileSweepingEvenWithReadyChannel() {
+        let appState = AppState()
+        appState.hasReadyChannel = true
+        appState.nodeService.channelsOverride = [readyChannel(outboundSats: 50000)]
+        appState.isSweeping = true
+        let model = SendFlowModel()
+
+        XCTAssertFalse(model.isSpliceOut(appState: appState))
+
+        appState.isSweeping = false
+        XCTAssertTrue(model.isSpliceOut(appState: appState))
+    }
+
+    func testTotalDebitAndBaseFeeRate_withoutOnchainWalletSendAll() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        XCTAssertEqual(model.baseFeeRateSatVb, 10, "Placeholder until a rate loads")
+        model.feeRateSatVb = 4
+        XCTAssertEqual(model.baseFeeRateSatVb, 4)
+        model.amountUnit = .sats
+        model.amountInputText = "5000"
+
+        let fee = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: 4, isSendAll: false)
+        XCTAssertEqual(model.estimatedFeeSats(appState: appState), fee)
+        XCTAssertEqual(model.totalDebitSats(appState: appState), 5000 + fee)
+    }
+
+    func testOnchainWalletSendAll_balanceBelowFeeSendsNothingButDebitsBalance() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100
+        let model = SendFlowModel()
+        model.destination = .onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        model.feeRateSatVb = 10
+        model.sendsAllFromOnchainWallet = true
+
+        XCTAssertGreaterThan(model.estimatedFeeSats(appState: appState), 100)
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 0)
+        XCTAssertEqual(model.totalDebitSats(appState: appState), 100)
+        XCTAssertFalse(model.isInsufficientBalance(appState: appState))
+    }
+
+    func testOnchainAmountReviewRules_amountMode() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.destination = .onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        model.feeRateSatVb = 10
+        model.amountUnit = .sats
+
+        model.amountInputText = ""
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 0)
+        XCTAssertFalse(model.exceedsAvailableAmount(appState: appState))
+        XCTAssertFalse(model.canReviewOnchainAmount(appState: appState), "A zero amount cannot be reviewed")
+
+        model.amountInputText = "5000"
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 5000)
+        XCTAssertFalse(model.exceedsAvailableAmount(appState: appState))
+        XCTAssertTrue(model.canReviewOnchainAmount(appState: appState))
+
+        model.amountInputText = "200000"
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 200_000)
+        XCTAssertTrue(model.exceedsAvailableAmount(appState: appState))
+        XCTAssertFalse(model.canReviewOnchainAmount(appState: appState))
+    }
+
+    func testOnchainAmountReviewRules_sendAllMode() {
+        let appState = AppState()
+        appState.hasReadyChannel = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.destination = .onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        model.feeRateSatVb = 10
+        model.amountUnit = .sats
+        model.amountInputText = "200000"
+        model.sendsAllFromOnchainWallet = true
+
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 100_000, "Send-all shows the whole balance")
+        XCTAssertFalse(model.exceedsAvailableAmount(appState: appState), "A typed amount is ignored for send-all")
+        XCTAssertTrue(model.canReviewOnchainAmount(appState: appState))
+
+        appState.spendableOnchainSats = 100
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 100)
+        XCTAssertTrue(model.canReviewOnchainAmount(appState: appState), "Send-all is reviewable even below the fee")
     }
 }

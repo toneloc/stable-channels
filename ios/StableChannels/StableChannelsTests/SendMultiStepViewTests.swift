@@ -43,7 +43,7 @@ final class SendMultiStepViewTests: XCTestCase {
         XCTAssertGreaterThan(priorityRate, standardRate)
         XCTAssertEqual(standardRate, baseRate)
         XCTAssertLessThan(economyRate, standardRate)
-        XCTAssertGreaterThanOrEqual(economyRate, 0.1)
+        XCTAssertGreaterThanOrEqual(economyRate, Constants.minAllowedFeeRateSatVb)
     }
 
     func testDestinationVisualRepresentationExtraction() {
@@ -52,22 +52,5 @@ final class SendMultiStepViewTests: XCTestCase {
         let rep = DestinationVisualRepresentation.onchain(chunked)
 
         XCTAssertEqual(rep.rawDestination, p2pkhAddr)
-    }
-
-    func testSendDestinationBadgeClassification() {
-        let empty = PaymentDestinationClassification.empty
-        let invalid = PaymentDestinationClassification.invalid(reason: "Unknown format")
-
-        if case .empty = empty {
-            // Success
-        } else {
-            XCTFail("Expected empty classification")
-        }
-
-        if case .invalid(let reason) = invalid {
-            XCTAssertEqual(reason, "Unknown format")
-        } else {
-            XCTFail("Expected invalid classification")
-        }
     }
 }

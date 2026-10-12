@@ -2,7 +2,7 @@ import Foundation
 
 /// Settlement outcome of an in-flight payment.
 enum PaymentSettlementOutcome: Sendable {
-    case settled(paymentHash: String?)
+    case settled
     case failed(reason: String)
     case timedOut
 }
@@ -30,8 +30,7 @@ enum PaymentSettlementObserver {
                 queue: .main
             ) { note in
                 guard let pid = note.userInfo?["paymentId"] as? String, pid == paymentId else { return }
-                let hash = note.userInfo?["paymentHash"] as? String
-                continuation.yield(.settled(paymentHash: hash))
+                continuation.yield(.settled)
                 continuation.finish()
             }
 
@@ -88,7 +87,7 @@ enum PaymentSettlementObserver {
             return nil
         }
         if record.isSettled {
-            return .settled(paymentHash: record.paymentId)
+            return .settled
         } else if record.isFailed {
             return .failed(reason: "The payment did not complete. Check its status in History before trying again.")
         }

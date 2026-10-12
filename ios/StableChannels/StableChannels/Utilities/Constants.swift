@@ -25,6 +25,7 @@ enum Constants {
     static let feeRateBlockstreamURL = primaryChainURL
     static let feeRateMempoolURL = "https://mempool.space"
 
+    /// Single fee-rate floor for the app: the node sends whole sat/vB, so anything below 1 cannot be broadcast.
     static let minAllowedFeeRateSatVb: Double = 1.0
     static let maxAllowedFeeRateSatVb: Double = 10_000.0
 
@@ -72,8 +73,6 @@ enum Constants {
     static let maxChannelUSD: Double = 100.0
     /// Stable-channel trade fee paid to the LSP as the TRADE_V1 keysend amount.
     static let stableChannelTradeFeeRate: Double = 0.01
-    static let lightningDefaultForwardingFeeBaseMsat: UInt32 = 1_000
-    static let lightningDefaultForwardingFeeProportionalMillionths: UInt32 = 0
     static let estimatedOnchainSendVBytes: UInt64 = 140
     static let estimatedOnchainSendAllVBytes: UInt64 = 250
     static let estimatedSpliceOutVBytes: UInt64 = 180

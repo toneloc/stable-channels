@@ -16,11 +16,11 @@ struct SendConfirmStepView: View {
                             headerTitle: addressHeaderTitle,
                             representation: AddressVisualChunker.formatDestination(dest),
                             rawAddress: dest.rawDestination,
-                            avatarData: model.lnurlParams?.avatarImageData
+                            avatar: model.payeeAvatar
                         )
                     }
 
-                    let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+                    let sats = model.sendAmountSats(appState: appState)
                     SendConfirmReceivesCard(
                         amountSats: sats,
                         btcPrice: appState.accountingBTCPrice
@@ -30,7 +30,7 @@ struct SendConfirmStepView: View {
                         NetworkFeeSelectorView(
                             selectedTier: $model.selectedFeeTier,
                             baseFeeRateSatVb: model.feeRateSatVb ?? 10,
-                            isSendAll: false,
+                            isSendAll: model.sendsEntireOnchainBalance(appState: appState),
                             btcPrice: appState.accountingBTCPrice,
                             showExplanation: false,
                             recommendedFees: model.recommendedFees
@@ -41,7 +41,10 @@ struct SendConfirmStepView: View {
                         feeLabel: feeCardLabel,
                         estimatedFeeSats: model.estimatedFeeSats(appState: appState),
                         rateSatVb: isLightning ? nil : model.effectiveFeeRateSatVb,
-                        totalDebitSats: sats + model.estimatedFeeSats(appState: appState),
+                        totalDebitSats: PaymentFeeEstimator.saturatingAdd(
+                            sats,
+                            model.estimatedFeeSats(appState: appState)
+                        ),
                         btcPrice: appState.accountingBTCPrice
                     )
 
@@ -116,8 +119,12 @@ struct SendConfirmStepView: View {
         if isSpliceOut {
             return String(localized: "label_splice_fee", defaultValue: "Splice Fee")
         }
-        return isLightning
-            ? String(localized: "label_routing_fee", defaultValue: "Routing Fee")
+        if isLightning {
+            return String(localized: "label_max_routing_fee", defaultValue: "Max Routing Fee")
+        }
+        // Sending everything: the node sets the exact fee when it builds the transaction.
+        return model.sendsEntireOnchainBalance(appState: appState)
+            ? String(localized: "label_estimated_network_fee", defaultValue: "Estimated Network Fee")
             : String(localized: "label_total_fees", defaultValue: "Network Fee")
     }
 

@@ -2595,6 +2595,25 @@ final class LNURLServiceTests: XCTestCase {
 
     private static let testCertP12Base64B =
         "MIIFyQIBAzCCBY8GCSqGSIb3DQEHAaCCBYAEggV8MIIFeDCCAncGCSqGSIb3DQEHBqCCAmgwggJkAgEAMIICXQYJKoZIhvcNAQcBMBwGCiqGSIb3DQEMAQYwDgQImo8r39534IwCAggAgIICMLbMuWYIkPGABDcFj4QFxbzBR4j07G5RmW+2snCk+wSX/s+kXRWX1AZOKgZ4h6ICZL7dGCueZ2QopbB1L39q1I0GYNB5Yq6WacbepBJB04vEcpJx1r8WqVLBlTBRROK9J2rLOtrT1G84rPsIdZ3irFZesullNqWA8N9X/ZJoam6mnBa2SNdh7bVbbdt/EnEx5Y6n6/I3DYScfMy4eA0ApEf06zg2ObuHsOHNbYg1KYJrt8DkZVkfP+u1bndz+ERhPNeU5P8yEoFRkcMcofG+bgv5/UQoy68GQat7H+fwgZbnEmo9swjOrc2AYTUjM+c2k4os2uesKfpZbFAyL19f0VcqfZos6vWob8/4ICccLXv52jOk4uTR2jO8tD63rtpc2LpfUgF6oef2T8bn40e52t5ZijOgi+xGNkr/c1B8rDGMWRwQE/YOOFYG63Kuy9YBq3H45mIGmpdJFIYS9JmEQpXWNVzss7oyBfdCyVPyKq7EbWP9ya92fQZDbNf2mQlsRIL/9sZfBSUFUke39vyhYLL3yOyH+c3qdSbN1lFgtGEdzoxeLnqw4+K0yNAvEeqYi7wFWUcxH8d3ZOS6nR3EQ0K2xEEXpydZmwuIHMIIdF8Q9UhNbhQmtyGqHIOwJXFqQlQzjGI3jHiLLTuxCQRAaHXcFRdRO9Mdikjr2y/QfrsvokvEQjarBFvRwJgWCOlcX2CxFrMEO1YUo7mb3dKh3XG0MMj1OoCTDXWIsClZEA+QMIIC+QYJKoZIhvcNAQcBoIIC6gSCAuYwggLiMIIC3gYLKoZIhvcNAQwKAQKgggKmMIICojAcBgoqhkiG9w0BDAEDMA4ECPbRJVMOs7QiAgIIAASCAoArJ43gpQVEBiKPOXIuXRIbAULQanYPTRS5Gnmm4GDOcSox2jDuv4E1xyGWim54LEzZoB7hSHOroXgDxlO2nnQu+4uuMZe6TMzMtGllPVlbkfUpVTzYO/Wop8ZZq9eNIm01YuFy9SWazYkf0JxegjuA/XXZl6NBUokRZC/I0E3wyzMQfYEdqfhnhBH+z9M3BpRfGf76ULcucFjBQouFOQn6g2yBv3xsJ64aSXETzYA362xYEGwqmWuEBPVR0BT39vJms3cliAv+Gt+W9WVIEnFir4g/O9L8vyb+ZJ7VBVbPyiYHUhr6tcZV1wjO/QstoZr3myAI7SQ6A7eSTNp/e/rCz1v1WaZFcqkgWo7uyeRA4emGQdvnkghfDeI9RebOYqR3TWegsaJRIp2lab+MtPS7z+l3rtB05YxYipo+fTBTX9dW09kgRb7HGK8b/O6QydiBWAxhzusNUS4KM6rkZtd4P5VNOrtX3rFgw6XvQNfa1w3WUtdkPHgXE1wv5/MQ82QWboSIQM6A3EYDRn8vnQUxdyYYqSYCubC5RKiFyF7f2wvDEb6QWtnrcl3TA9LFmthP/Rw0Da2p0pFH3QbUqJFIyCe/dEaGhWlSRl3crUMEC3p390+2jp3ipNzcCliXfiC+EEClrdkY9W0u0+NBuRaGT2gTNf+20cwiP0PigU2oKtaN7Rpvd1vOd6QUyPEPbR89BkGglve9lRS7XFqn3RqSlNEVg6bRlH31ZnBFAaHcxg5r1OUOaTzmVkkzIox+KvFwSM+YxM+8EgKz65XEHiBmLNHZPsh9CYz/zdsZjTVCRBdFchsnjMpm/AZEl9OmJxRrUqChkCz4q2ZmS7oOqB+qMSUwIwYJKoZIhvcNAQkVMRYEFC+CfGcnUSKE/a1fx5i96bzSP48jMDEwITAJBgUrDgMCGgUABBRPxLdParpuWEquhRWWWFXHjYJVGQQIT/mzWW41YxoCAggA"
+
+    func testLNURLAvatar_rejectsNonImageAndOversizedBytes() {
+        XCTAssertNil(LNURLAvatar.thumbnail(from: Data("not an image".utf8)))
+        var oversized = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        oversized.append(Data(count: LNURLAvatar.maxEncodedBytes))
+        XCTAssertNil(LNURLAvatar.thumbnail(from: oversized))
+    }
+
+    func testNWConnectionTransport_selectCandidateIPs_interleavesFamiliesAndCaps() throws {
+        let resolved = [
+            "93.184.216.34",
+            "93.184.216.35",
+            "93.184.216.36",
+            "2606:2800:220:1::1",
+            "2606:2800:220:1::2"
+        ]
+        let candidates = try NWConnectionTransport.selectCandidateIPs(for: "example.com", resolvedIPs: resolved)
+        XCTAssertEqual(candidates, ["93.184.216.34", "2606:2800:220:1::1", "93.184.216.35", "2606:2800:220:1::2"])
+    }
 }
 
 private struct MockHostIPResolver: HostIPResolving {

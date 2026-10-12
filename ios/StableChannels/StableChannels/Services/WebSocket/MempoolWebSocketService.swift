@@ -117,6 +117,10 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         set { reconnectionManager.reconnectAttempts = newValue }
     }
 
+    var currentWebSocketTask: URLSessionWebSocketTask? {
+        webSocketTask
+    }
+
     // MARK: - State
 
     private(set) var isConnected: Bool = false
@@ -175,6 +179,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     /// Establishes the WebSocket connection and starts the message listener loop.
     func connect() {
         guard !isConnected else { return }
+        // Handshake in flight; replacing the task would tear down the pending connection.
+        if let task = webSocketTask, task.state == .running { return }
 
         reconnectionManager.reset()
         reconnectionManager.stopReconnectTask()
@@ -425,7 +431,6 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
             for match in matches {
                 guard !match.isTxid else { continue }
                 let targetKey = match.target
-                let isTxid = match.isTxid
                 let dedupKey = "\(txid)_\(targetKey)"
 
                 if isRecentlyProcessed(dedupKey) { continue }
@@ -436,7 +441,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
                 AuditService.log(
                     "WEBSOCKET_MATCH_DETECTED",
-                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "\(isTxid)"]
+                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "false"]
                 )
                 onTransactionDetected?(.receive(target: targetKey, txid: txid, amountSats: amountSats))
             }

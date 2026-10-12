@@ -3,10 +3,7 @@ import SwiftUI
 /// Card view for entering USD/BTC amount or selecting "Send All" in onchain transfers.
 struct OnChainAmountCard: View {
     @Environment(AppState.self) private var appState
-    let hasReadyChannel: Bool
-    @Binding var sendAll: Bool
-    @Binding var amountUSDStr: String
-    let amountSats: UInt64?
+    @Bindable var model: SendFlowModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -19,15 +16,17 @@ struct OnChainAmountCard: View {
                 Spacer()
             }
 
-            let available = sendAll ? appState
-                .spendableOnchainSats :
-                (hasReadyChannel && !appState.isSweeping ? appState.totalBalanceSats : appState.spendableOnchainSats)
-            let availableUSD = appState
-                .accountingBTCPrice > 0 ? (Double(available) / Double(Constants.satsInBTC)) * appState
-                .accountingBTCPrice : 0
-            let effectiveSats = sendAll ? available : (amountSats ?? 0)
+            let sendAll = model.sendsAllFromOnchainWallet
+            let amountUSDStr = model.amountInputText
+            let available = model.availableSpendableSats(appState: appState)
+            let effectiveSats = model.displayedAmountSats(appState: appState)
+            let availableUSD = SendAmountCalculator.formatSatsForUnit(
+                available,
+                unit: .usd,
+                btcPrice: appState.accountingBTCPrice
+            )
             let displayUSD = sendAll
-                ? String(format: "%.2f", availableUSD)
+                ? (availableUSD.isEmpty ? "0.00" : availableUSD)
                 : (amountUSDStr.isEmpty ? "0.00" : amountUSDStr)
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -50,16 +49,16 @@ struct OnChainAmountCard: View {
                     if !sendAll {
                         TextField(
                             String(localized: "placeholder_amount_usd", defaultValue: "0.00"),
-                            text: $amountUSDStr
+                            text: $model.amountInputText
                         )
                         .keyboardType(.decimalPad)
                         .font(.system(size: 36, weight: .semibold, design: .rounded).monospacedDigit())
                         .lineLimit(1)
                         .minimumScaleFactor(0.5)
                         .foregroundStyle(Color.clear)
-                        .onChange(of: amountUSDStr) { _, new in
+                        .onChange(of: model.amountInputText) { _, new in
                             let sanitized = InputSanitizer.decimal(new)
-                            amountUSDStr = sanitized.count > 16 ? String(sanitized.prefix(16)) : sanitized
+                            model.amountInputText = sanitized.count > 16 ? String(sanitized.prefix(16)) : sanitized
                         }
                     }
                 }
@@ -79,8 +78,7 @@ struct OnChainAmountCard: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.96)))
             }
 
-            let isExceeded = !sendAll && (amountSats ?? 0) > available
-            if isExceeded {
+            if model.exceedsAvailableAmount(appState: appState) {
                 HStack(spacing: 6) {
                     Image(systemName: "exclamationmark.circle.fill")
                         .font(.caption)
@@ -95,7 +93,7 @@ struct OnChainAmountCard: View {
                 .transition(.opacity)
             }
 
-            Toggle(isOn: $sendAll.animation(.snappy(duration: 0.32, extraBounce: 0.04))) {
+            Toggle(isOn: $model.sendsAllFromOnchainWallet.animation(.snappy(duration: 0.32, extraBounce: 0.04))) {
                 HStack(spacing: 8) {
                     LemniscateBloomIcon(isActive: sendAll, size: 16, tint: .green)
                     Text(String(localized: "toggle_send_all", defaultValue: "Send All"))
@@ -103,7 +101,7 @@ struct OnChainAmountCard: View {
                 }
             }
             .tint(.green)
-            .onChange(of: sendAll) { _, isAll in
+            .onChange(of: model.sendsAllFromOnchainWallet) { _, isAll in
                 UISelectionFeedbackGenerator().selectionChanged()
                 if isAll {
                     UIApplication.shared.sendAction(

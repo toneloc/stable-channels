@@ -69,7 +69,7 @@ struct SendConfirmAddressCard: View {
     let headerTitle: String
     let representation: DestinationVisualRepresentation
     let rawAddress: String
-    var avatarData: Data?
+    var avatar: CGImage?
 
     @State private var hasCopiedAddress = false
 
@@ -90,8 +90,8 @@ struct SendConfirmAddressCard: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
-                    if let avatarData, let uiImage = UIImage(data: avatarData) {
-                        Image(uiImage: uiImage)
+                    if let avatar {
+                        Image(decorative: avatar, scale: 1)
                             .resizable()
                             .scaledToFill()
                             .frame(width: 32, height: 32)

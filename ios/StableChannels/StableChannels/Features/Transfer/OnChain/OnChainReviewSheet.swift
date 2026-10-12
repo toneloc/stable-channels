@@ -7,61 +7,17 @@ struct OnChainReviewSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let address: String
-    let sendAll: Bool
-    let amountSats: UInt64?
-    let feeRateSatVb: Double?
-    @Binding var selectedFeeTier: NetworkFeeSpeedTier
+    /// The send's single source of truth, owned by the presenting view.
+    @Bindable var model: SendFlowModel
     var onSent: (_ txid: String?, _ isSplice: Bool) -> Void
 
     @State private var isSending = false
     @State private var reviewErrorMessage: String?
     @State private var resetToken = 0
-    @State private var recommendedFees: RecommendedFees?
-
-    private var effectiveFeeRateSatVb: Double? {
-        if let rec = recommendedFees {
-            return selectedFeeTier.effectiveRate(baseRate: rec.halfHourFee, recommendedFees: rec)
-        }
-        guard let base = feeRateSatVb else { return nil }
-        return selectedFeeTier.effectiveRate(baseRate: base)
-    }
-
-    private var isFeeRateReady: Bool {
-        recommendedFees != nil || feeRateSatVb != nil || selectedFeeTier == .standard
-    }
-
-    private var isSpliceOut: Bool {
-        !sendAll && SendChannelSpendPolicy.isSpliceOut(
-            channels: appState.nodeService.channels,
-            isSweeping: appState.isSweeping
-        )
-    }
-
-    private var estimatedFeeSats: UInt64 {
-        let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10)
-        if isSpliceOut {
-            return PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
-        }
-        return PaymentFeeEstimator.estimateOnchainFee(
-            feeRateSatVb: rate,
-            isSendAll: sendAll
-        )
-    }
-
-    private var netReceivesSats: UInt64 {
-        if sendAll {
-            let fee = estimatedFeeSats
-            let bal = appState.spendableOnchainSats
-            return bal > fee ? bal - fee : 0
-        }
-        return amountSats ?? 0
-    }
-
-    private var totalDebitSats: UInt64 {
-        sendAll ? appState.spendableOnchainSats : (netReceivesSats + estimatedFeeSats)
-    }
 
     var body: some View {
+        let isSpliceOut = model.isSpliceOut(appState: appState)
+        let isInsufficientBalance = model.isInsufficientBalance(appState: appState)
         NavigationStack {
             VStack(spacing: 0) {
                 ScrollView(showsIndicators: false) {
@@ -77,17 +33,22 @@ struct OnChainReviewSheet: View {
                         )
 
                         SendConfirmReceivesCard(
-                            amountSats: netReceivesSats,
+                            amountSats: model.sendAmountSats(appState: appState),
                             btcPrice: appState.accountingBTCPrice
                         )
 
-                        NetworkFeeSelectorView(
-                            selectedTier: $selectedFeeTier,
-                            baseFeeRateSatVb: feeRateSatVb ?? 10,
-                            isSendAll: sendAll,
-                            btcPrice: appState.accountingBTCPrice,
-                            showExplanation: false
-                        )
+                        // Tier fees assume a regular on-chain spend; a splice-out is priced by the
+                        // splice fee in the total card below, as on the send review step.
+                        if !isSpliceOut {
+                            NetworkFeeSelectorView(
+                                selectedTier: $model.selectedFeeTier,
+                                baseFeeRateSatVb: model.baseFeeRateSatVb,
+                                isSendAll: model.sendsAllFromOnchainWallet,
+                                btcPrice: appState.accountingBTCPrice,
+                                showExplanation: false,
+                                recommendedFees: model.recommendedFees
+                            )
+                        }
 
                         SendConfirmFeeTotalCard(
                             feeLabel: isSpliceOut ? String(
@@ -98,26 +59,14 @@ struct OnChainReviewSheet: View {
                                     localized: "label_total_fees",
                                     defaultValue: "Network Fee"
                                 ),
-                            estimatedFeeSats: estimatedFeeSats,
-                            rateSatVb: effectiveFeeRateSatVb,
-                            totalDebitSats: totalDebitSats,
+                            estimatedFeeSats: model.estimatedFeeSats(appState: appState),
+                            rateSatVb: model.effectiveFeeRateSatVb,
+                            totalDebitSats: model.totalDebitSats(appState: appState),
                             btcPrice: appState.accountingBTCPrice
                         )
 
                         if let error = reviewErrorMessage {
-                            HStack(spacing: 8) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .foregroundStyle(.red)
-                                Text(error)
-                                    .font(.footnote)
-                                    .foregroundStyle(.red)
-                                Spacer()
-                            }
-                            .padding(12)
-                            .background(
-                                Color(uiColor: .secondarySystemGroupedBackground),
-                                in: RoundedRectangle(cornerRadius: 12)
-                            )
+                            SendErrorBanner(message: error)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -134,8 +83,8 @@ struct OnChainReviewSheet: View {
                     ) {
                         Task { await executeSend() }
                     }
-                    .disabled(!isFeeRateReady)
-                    .opacity(isFeeRateReady ? 1.0 : 0.5)
+                    .disabled(!model.isFeeRateReady || isInsufficientBalance)
+                    .opacity(model.isFeeRateReady && !isInsufficientBalance ? 1.0 : 0.5)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
@@ -156,8 +105,7 @@ struct OnChainReviewSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .task {
-            let rec = await appState.feeRateService.recommendedFees()
-            recommendedFees = rec
+            model.recommendedFees = await appState.feeRateService.recommendedFees()
         }
     }
 
@@ -169,8 +117,16 @@ struct OnChainReviewSheet: View {
             for: nil
         )
 
-        guard isFeeRateReady else {
-            reviewErrorMessage = "Waiting for network fee rate. Please wait a moment."
+        let sendAll = model.sendsAllFromOnchainWallet
+
+        guard model.isFeeRateReady else {
+            reviewErrorMessage = SendFlowModel.feeRateNotReadyMessage
+            resetToken += 1
+            return
+        }
+
+        guard !model.isInsufficientBalance(appState: appState) else {
+            reviewErrorMessage = "Amount plus estimated fee exceeds your balance."
             resetToken += 1
             return
         }
@@ -180,7 +136,7 @@ struct OnChainReviewSheet: View {
             let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
             let authPassed = await appState.authenticate(reason: authReason)
             guard authPassed else {
-                reviewErrorMessage = appState.authError ?? "Authentication required to send."
+                reviewErrorMessage = appState.authError ?? SendFlowModel.authenticationRequiredMessage
                 resetToken += 1
                 return
             }
@@ -193,13 +149,8 @@ struct OnChainReviewSheet: View {
             resetToken += 1
         }
 
-        let conversionPrice = sendAll ? nil : appState.accountingBTCPrice
-        let sats: UInt64
-        if sendAll {
-            sats = 0
-        } else if conversionPrice != nil, let converted = amountSats {
-            sats = converted
-        } else {
+        let sats = model.sendAmountSats(appState: appState)
+        if !sendAll, sats == 0 {
             reviewErrorMessage = String(
                 localized: "error_price_unavailable",
                 defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
@@ -212,8 +163,8 @@ struct OnChainReviewSheet: View {
             if sendAll {
                 let result = try await SendPaymentExecutor.sendAllOnchain(
                     address: address,
-                    price: appState.btcPrice,
-                    feeRateSatVb: effectiveFeeRateSatVb,
+                    price: appState.accountingBTCPrice,
+                    feeRateSatVb: model.effectiveFeeRateSatVb,
                     appState: appState
                 )
                 onSent(result.txid, false)
@@ -222,8 +173,8 @@ struct OnChainReviewSheet: View {
                 let result = try await SendPaymentExecutor.sendOnchain(
                     address: address,
                     effectiveSats: sats,
-                    price: conversionPrice ?? 0,
-                    feeRateSatVb: effectiveFeeRateSatVb,
+                    price: appState.accountingBTCPrice,
+                    feeRateSatVb: model.effectiveFeeRateSatVb,
                     appState: appState
                 )
                 if result.txid != nil {

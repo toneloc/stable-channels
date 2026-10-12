@@ -6,6 +6,9 @@ import SwiftUI
 @Observable
 @MainActor
 final class SendFlowModel {
+    static let feeRateNotReadyMessage = "Waiting for network fee rate. Please wait a moment."
+    static let authenticationRequiredMessage = "Authentication required to send."
+
     var step: SendFlowStep = .recipient
     var inputText: String = "" {
         didSet {
@@ -19,7 +22,12 @@ final class SendFlowModel {
     var amountUnit: SendAmountUnit = .usd
     var amountInputText: String = ""
 
-    var lnurlParams: LNURLPayParams?
+    var lnurlParams: LNURLPayParams? {
+        didSet { payeeAvatar = lnurlParams?.avatarImageData.flatMap(LNURLAvatar.thumbnail(from:)) }
+    }
+
+    /// Payee avatar decoded once per params change, bounded in bytes and pixels.
+    private(set) var payeeAvatar: CGImage?
     var lnurlComment: String = ""
     var isFetchingLNURL: Bool = false
     var isSending: Bool = false
@@ -32,13 +40,17 @@ final class SendFlowModel {
     var recommendedFees: RecommendedFees?
     var selectedFeeTier: NetworkFeeSpeedTier = .standard
     var resetToken: Int = 0
+    /// The user chose Max: the amount is derived from the balance and the selected fee, not typed.
+    var isMaxAmount: Bool = false
+    /// Settings "Send All": empties the on-chain wallet in one send-all transaction even when a
+    /// channel is ready, so unlike Max it is never a splice-out and spends the whole on-chain balance.
+    var sendsAllFromOnchainWallet: Bool = false
 
     /// In-flight recipient resolution; owned here so the view can cancel it.
     @ObservationIgnored private var recipientTask: Task<Void, Never>?
 
     var successStatus: SendSuccessStatus {
-        if isPendingSettlement { return .pending }
-        return successTxid != nil ? .awaitingConfirmation : .completed
+        .of(isPendingSettlement: isPendingSettlement, txid: successTxid)
     }
 
     /// Returns the effective fee rate using live recommended fees when available,
@@ -53,15 +65,27 @@ final class SendFlowModel {
         return selectedFeeTier.effectiveRate(baseRate: base)
     }
 
+    /// Base rate for the fee tiers: the loaded rate, or a placeholder until it loads.
+    var baseFeeRateSatVb: Double {
+        feeRateSatVb ?? 10
+    }
+
     /// True when the fee rate has loaded or the selected tier does not need one.
     var isFeeRateReady: Bool {
         if case .onchain = destination {
-            return recommendedFees != nil || feeRateSatVb != nil || selectedFeeTier == .standard
+            return recommendedFees != nil || feeRateSatVb != nil
         }
         return true
     }
 
-    let expectedNetwork: Network?
+    /// Network the node runs on; destinations for another network are rejected as typed.
+    var expectedNetwork: Network? {
+        didSet {
+            guard expectedNetwork != oldValue, !inputText.isEmpty else { return }
+            onInputChanged()
+        }
+    }
+
     let customLNURLService: LNURLServiceProtocol?
 
     var lnurlService: LNURLServiceProtocol? {
@@ -93,11 +117,12 @@ final class SendFlowModel {
 
     func onInputChanged() {
         errorMessage = nil
-        classification = PaymentDestinationClassifier.classify(inputText)
+        classification = PaymentDestinationClassifier.classify(inputText, network: expectedNetwork)
         switch classification {
         case .valid(let target):
             if destination != target {
                 destination = target
+                isMaxAmount = false
                 lnurlParams = nil
                 lnurlComment = ""
                 if case .onchain(_, let amountSats) = target, let amountSats, amountSats > 0 {
@@ -112,6 +137,7 @@ final class SendFlowModel {
             }
         case .invalid, .empty:
             destination = nil
+            isMaxAmount = false
             lnurlParams = nil
             lnurlComment = ""
             amountInputText = ""
@@ -160,9 +186,17 @@ final class SendFlowModel {
                 guard !Task.isCancelled else { return }
                 errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
             }
-        case .bolt11(_, _, let msat):
+        case .bolt11(let invoice, _, let msat):
+            let payability = InvoicePayability.evaluate(
+                isExpired: invoice.isExpired(),
+                existingOutboundPayment: appState.nodeService.outboundPaymentStatus(paymentHash: invoice.paymentHash())
+            )
+            if let message = payability.userMessage {
+                errorMessage = message
+                return
+            }
             if let msat, msat > 0 {
-                let requiredSats = msat / 1000
+                let requiredSats = PaymentFeeEstimator.maxLightningDebitSats(amountMsat: msat)
                 let available = availableSpendableSats(appState: appState)
                 if requiredSats > available || available == 0 {
                     errorMessage = "Amount exceeds your balance for this invoice. Available: \(available.btcSpacedFormatted) BTC"
@@ -184,6 +218,7 @@ final class SendFlowModel {
     }
 
     func availableSpendableSats(appState: AppState) -> UInt64 {
+        if sendsAllFromOnchainWallet { return appState.spendableOnchainSats }
         let balance = SendChannelSpendPolicy.availableSpendableSats(
             destination: destination,
             channels: appState.nodeService.channels,
@@ -199,37 +234,40 @@ final class SendFlowModel {
     }
 
     func estimatedFeeSats(appState: AppState) -> UInt64 {
-        let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        return estimatedFeeSatsForAmount(sats: sats, appState: appState)
+        // A fixed-amount invoice is priced from its exact msat amount so no sub-sat remainder escapes the ceiling.
+        if case .bolt11(_, _, let msat?) = destination, msat > 0 {
+            return PaymentFeeEstimator.maxLightningRoutingFeeSats(amountMsat: msat)
+        }
+        return estimatedFeeSatsForAmount(sats: sendAmountSats(appState: appState), appState: appState)
     }
 
     func estimatedFeeSatsForAmount(sats: UInt64, appState: AppState) -> UInt64 {
         switch destination {
         case .bolt11, .bolt12, .lightningAddress, .lnurlPay:
-            let (base, prop) = SendChannelSpendPolicy.forwardingFeeParameters(
-                channels: appState.nodeService.channels
-            )
-            return PaymentFeeEstimator.estimateLightningFee(
-                sats: sats,
-                baseMsat: base,
-                proportionalMillionths: prop
-            )
+            // The routing-fee ceiling the node enforces, so the shown and reserved fee is a real maximum.
+            return PaymentFeeEstimator.maxLightningRoutingFeeSats(sats: sats)
         case .onchain:
-            let rate = effectiveFeeRateSatVb ?? (feeRateSatVb ?? 10.0)
-            let isSplice = SendChannelSpendPolicy.isSpliceOut(
-                channels: appState.nodeService.channels,
-                isSweeping: appState.isSweeping
-            )
-            if isSplice {
+            let rate = effectiveFeeRateSatVb ?? baseFeeRateSatVb
+            if isSpliceOut(appState: appState) {
                 return PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
             }
+            // A Max or on-chain wallet send-all empties the wallet, which is a larger (send-all) transaction.
             return PaymentFeeEstimator.estimateOnchainFee(
                 feeRateSatVb: rate,
-                isSendAll: false
+                isSendAll: isMaxAmount || sendsAllFromOnchainWallet
             )
         case .none:
             return 0
         }
+    }
+
+    /// True when an on-chain send is dispatched as a splice-out: a ready channel, no sweep in
+    /// progress, and not the on-chain wallet send-all.
+    func isSpliceOut(appState: AppState) -> Bool {
+        !sendsAllFromOnchainWallet && SendChannelSpendPolicy.isSpliceOut(
+            channels: appState.nodeService.channels,
+            isSweeping: appState.isSweeping
+        )
     }
 
     /// Largest amount such that amount + fee(amount) fits inside the available balance.
@@ -244,9 +282,59 @@ final class SendFlowModel {
         return rawMax
     }
 
+    /// The amount this send moves: the typed amount, or for Max the largest amount that fits after
+    /// the fee at the currently selected tier, so every tier stays selectable and nothing is left over.
+    /// For the on-chain wallet send-all it is what the recipient receives: the balance less the fee.
+    func sendAmountSats(appState: AppState) -> UInt64 {
+        if sendsAllFromOnchainWallet {
+            let balance = availableSpendableSats(appState: appState)
+            let fee = estimatedFeeSatsForAmount(sats: balance, appState: appState)
+            return balance > fee ? balance - fee : 0
+        }
+        return isMaxAmount ? calculateMaxSendableSats(appState: appState) :
+            computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+    }
+
+    /// What leaves the wallet: amount plus fee, or the whole on-chain balance for the on-chain wallet send-all.
+    func totalDebitSats(appState: AppState) -> UInt64 {
+        if sendsAllFromOnchainWallet { return availableSpendableSats(appState: appState) }
+        return PaymentFeeEstimator.saturatingAdd(
+            sendAmountSats(appState: appState),
+            estimatedFeeSats(appState: appState)
+        )
+    }
+
+    /// Max to an on-chain address without a splice-out: the node builds one transaction that empties
+    /// the wallet and pays the selected fee out of it.
+    func sendsEntireOnchainBalance(appState: AppState) -> Bool {
+        SendChannelSpendPolicy.isOnchainSendAll(
+            isMax: isMaxAmount,
+            destination: destination,
+            channels: appState.nodeService.channels,
+            isSweeping: appState.isSweeping
+        )
+    }
+
+    /// The amount shown for this send: the whole spendable balance for the on-chain wallet send-all.
+    func displayedAmountSats(appState: AppState) -> UInt64 {
+        sendsAllFromOnchainWallet ? availableSpendableSats(appState: appState) : sendAmountSats(appState: appState)
+    }
+
+    /// True when a typed amount is larger than the spendable balance; the send-all never exceeds it.
+    func exceedsAvailableAmount(appState: AppState) -> Bool {
+        !sendsAllFromOnchainWallet && sendAmountSats(appState: appState) > availableSpendableSats(appState: appState)
+    }
+
+    /// True when the amount allows opening the on-chain review: the send-all, or a non-zero amount within balance.
+    func canReviewOnchainAmount(appState: AppState) -> Bool {
+        sendsAllFromOnchainWallet
+            || (sendAmountSats(appState: appState) > 0 && !exceedsAvailableAmount(appState: appState))
+    }
+
     func isInsufficientBalance(appState: AppState) -> Bool {
-        let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
-        let totalDebit = sats + estimatedFeeSats(appState: appState)
+        // The on-chain wallet send-all spends whatever the wallet holds; the node rejects an empty wallet.
+        if sendsAllFromOnchainWallet { return false }
+        let totalDebit = totalDebitSats(appState: appState)
         let available = availableSpendableSats(appState: appState)
         return totalDebit > available || available == 0
     }
@@ -261,7 +349,7 @@ final class SendFlowModel {
             return
         }
 
-        let sats = computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+        let sats = sendAmountSats(appState: appState)
         guard sats > 0 else {
             errorMessage = "Please enter an amount greater than 0."
             return
@@ -318,9 +406,10 @@ final class SendFlowModel {
 
     func applyPercentage(_ percent: Int, totalBalanceSats: UInt64, btcPrice: Double, appState: AppState? = nil) {
         if percent == 100, let appState {
-            let targetSats = calculateMaxSendableSats(appState: appState)
-            amountInputText = SendAmountCalculator.formatSatsForUnit(targetSats, unit: amountUnit, btcPrice: btcPrice)
+            isMaxAmount = true
+            refreshMaxAmountText(appState: appState)
         } else {
+            isMaxAmount = false
             amountInputText = SendAmountCalculator.calculatePercentageAmount(
                 percent: percent,
                 totalBalanceSats: totalBalanceSats,
@@ -328,6 +417,27 @@ final class SendFlowModel {
                 btcPrice: btcPrice
             )
         }
+    }
+
+    /// The user edited the amount field: Max holds only while the text still equals the Max amount.
+    func amountEdited(appState: AppState) {
+        guard isMaxAmount else { return }
+        let maxText = SendAmountCalculator.formatSatsForUnit(
+            calculateMaxSendableSats(appState: appState),
+            unit: amountUnit,
+            btcPrice: appState.accountingBTCPrice
+        )
+        if amountInputText != maxText { isMaxAmount = false }
+    }
+
+    /// Rewrites the amount field to the current Max amount (after a fee tier or rate change).
+    func refreshMaxAmountText(appState: AppState) {
+        guard isMaxAmount else { return }
+        amountInputText = SendAmountCalculator.formatSatsForUnit(
+            calculateMaxSendableSats(appState: appState),
+            unit: amountUnit,
+            btcPrice: appState.accountingBTCPrice
+        )
     }
 
     func resetFlow() {
@@ -339,6 +449,8 @@ final class SendFlowModel {
         classification = .empty
         amountInputText = ""
         amountUnit = .usd
+        isMaxAmount = false
+        sendsAllFromOnchainWallet = false
         lnurlParams = nil
         lnurlComment = ""
         errorMessage = nil

@@ -5,7 +5,6 @@ struct SendAmountStepView: View {
     @Bindable var model: SendFlowModel
     @Environment(AppState.self) private var appState
     @FocusState private var isAmountFocused: Bool
-    @State private var isMaxActive: Bool = false
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -36,7 +35,10 @@ struct SendAmountStepView: View {
             isAmountFocused = false
             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         }
-        .onAppear { isAmountFocused = true }
+        .onAppear {
+            isAmountFocused = true
+            model.refreshMaxAmountText(appState: appState)
+        }
         .onChange(of: isAmountFocused) { _, isFocused in
             if !isFocused { model.normalizeAmountInput() }
         }
@@ -44,7 +46,7 @@ struct SendAmountStepView: View {
 
     private var availableBalanceCard: some View {
         let available = model.availableSpendableSats(appState: appState)
-        let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+        let sats = model.sendAmountSats(appState: appState)
         // Fee-aware decision comes from the model; `sats > available` only picks the wording.
         let isInsufficient = sats > 0 && model.isInsufficientBalance(appState: appState)
         let insufficientLabel = sats > available
@@ -135,16 +137,7 @@ struct SendAmountStepView: View {
                 } else if sanitized != new {
                     model.amountInputText = sanitized
                 }
-                if isMaxActive, isAmountFocused {
-                    let maxText = SendAmountCalculator.formatSatsForUnit(
-                        model.calculateMaxSendableSats(appState: appState),
-                        unit: model.amountUnit,
-                        btcPrice: appState.accountingBTCPrice
-                    )
-                    if sanitized != maxText {
-                        isMaxActive = false
-                    }
-                }
+                if isAmountFocused { model.amountEdited(appState: appState) }
             }
 
             let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
@@ -202,9 +195,8 @@ struct SendAmountStepView: View {
 
     private func payeeMetadataCard(description: String) -> some View {
         HStack(spacing: 12) {
-            if let avatarData = model.lnurlParams?.avatarImageData,
-               let uiImage = UIImage(data: avatarData) {
-                Image(uiImage: uiImage)
+            if let avatar = model.payeeAvatar {
+                Image(decorative: avatar, scale: 1)
                     .resizable()
                     .scaledToFill()
                     .frame(width: 36, height: 36)
@@ -232,11 +224,6 @@ struct SendAmountStepView: View {
                     isAmountFocused = false
                     UISelectionFeedbackGenerator().selectionChanged()
                     withAnimation(.snappy(duration: 0.32, extraBounce: 0.04)) {
-                        if pct == 100 {
-                            isMaxActive = true
-                        } else {
-                            isMaxActive = false
-                        }
                         model.applyPercentage(
                             pct,
                             totalBalanceSats: available,
@@ -247,7 +234,7 @@ struct SendAmountStepView: View {
                 } label: {
                     if pct == 100 {
                         HStack(spacing: 6) {
-                            LemniscateBloomIcon(isActive: isMaxActive, size: 16, tint: Color.blue)
+                            LemniscateBloomIcon(isActive: model.isMaxAmount, size: 16, tint: Color.blue)
                             Text(String(localized: "button_max", defaultValue: "Max"))
                                 .font(.subheadline.weight(.medium))
                         }
@@ -286,7 +273,7 @@ struct SendAmountStepView: View {
     }
 
     private var continueButton: some View {
-        let sats = model.computeEffectiveSats(btcPrice: appState.accountingBTCPrice)
+        let sats = model.sendAmountSats(appState: appState)
         let isBlocked = sats == 0 || model.isInsufficientBalance(appState: appState)
 
         return Button {

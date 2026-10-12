@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import LDKNode
 
@@ -92,6 +91,13 @@ struct SendPaymentExecutor {
         price: Double,
         appState: AppState
     ) async throws -> SendPaymentResult {
+        guard !invoice.isExpired() else {
+            throw NSError(
+                domain: "Send",
+                code: 4,
+                userInfo: [NSLocalizedDescriptionKey: InvoicePayability.expired.userMessage ?? ""]
+            )
+        }
         let actualMsat: UInt64
         let paymentId: PaymentId
         if let msat, msat > 0 {
@@ -144,43 +150,8 @@ struct SendPaymentExecutor {
             amountMsat: msat,
             comment: trimmedComment.isEmpty ? nil : trimmedComment
         )
+        // Invoice validation is owned by LNURLService.validateBolt11Invoice inside fetchInvoice.
         let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: resp.pr)
-        guard let invoiceMsat = bolt11.amountMilliSatoshis() else {
-            throw LNURLError.errorResponse(reason: "Amountless invoices are not permitted for LNURL pay.")
-        }
-        if invoiceMsat != msat {
-            throw LNURLError.invoiceAmountMismatch(expectedMsat: msat, actualMsat: invoiceMsat)
-        }
-
-        // LUD-06 Security: Verify invoice description hash equals SHA256(metadata)
-        let metadataDigest = SHA256.hash(data: Data(params.metadata.utf8))
-        let expectedHashHex = metadataDigest.map { String(format: "%02x", $0) }.joined()
-        switch bolt11.invoiceDescription() {
-        case .hash(let hash):
-            guard hash.lowercased() == expectedHashHex.lowercased() else {
-                throw LNURLError.errorResponse(reason: "Invoice description hash does not match payee metadata.")
-            }
-        case .direct:
-            // LUD-06 requires h tag (description_hash). Invoices using a direct
-            // description field instead of a hash are non-compliant.
-            throw LNURLError
-                .errorResponse(reason: "Invoice uses direct description instead of required description hash (h tag).")
-        }
-
-        // Verify invoice has not expired
-        guard !bolt11.isExpired() else {
-            throw LNURLError.errorResponse(reason: "The invoice returned by the LNURL service has expired.")
-        }
-
-        // Verify invoice network matches active node network.
-        // Fail closed: if the node network is unknown, reject to avoid cross-network payment.
-        guard let activeNetwork = appState.nodeService.activeNetwork else {
-            throw LNURLError.errorResponse(reason: "Cannot verify invoice network: node network is unavailable.")
-        }
-        guard bolt11.network() == activeNetwork else {
-            throw LNURLError.errorResponse(reason: "Invoice network does not match the node network.")
-        }
-
         try appState.ensureNoUnsettledSurplus(amountMsat: msat)
         let paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: msat)
         recordPayment(id: "\(paymentId)", type: "lnurl", msat: msat, price: price, appState: appState)
@@ -201,18 +172,21 @@ struct SendPaymentExecutor {
                 userInfo: [NSLocalizedDescriptionKey: "Invalid amount"]
             )
         }
+        // A sweep has committed the whole on-chain balance to a splice-in; any on-chain send now
+        // (splice-out or plain) would spend the same UTXOs. Checked before the branch because
+        // isSpliceOut is false while sweeping, which would route the send around this guard.
+        guard !appState.isSweeping else {
+            throw NSError(
+                domain: "Send",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress"]
+            )
+        }
         if SendChannelSpendPolicy
             .isSpliceOut(channels: appState.nodeService.channels, isSweeping: appState.isSweeping) {
-            guard !appState.isSweeping else {
-                throw NSError(
-                    domain: "Send",
-                    code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress"]
-                )
-            }
             let rate = feeRateSatVb ?? 10.0
             let estimatedFee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
-            let requiredTotal = effectiveSats + estimatedFee
+            let requiredTotal = PaymentFeeEstimator.saturatingAdd(effectiveSats, estimatedFee)
             guard let channel = SendChannelSpendPolicy.selectSpliceChannel(
                 channels: appState.nodeService.channels,
                 requiredSats: requiredTotal
@@ -264,6 +238,13 @@ struct SendPaymentExecutor {
         feeRateSatVb: Double?,
         appState: AppState
     ) async throws -> SendPaymentResult {
+        guard !appState.isSweeping else {
+            throw NSError(
+                domain: "Send",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "A splice is already in progress"]
+            )
+        }
         let onchainSats = appState.spendableOnchainSats
         let txid = try appState.nodeService.sendAllOnchain(
             address: address,

@@ -27,6 +27,10 @@
 		490A1335304F1467005CDA39 /* SpliceBroadcastChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */; };
 		490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */; };
 		490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */; };
+		4910718C307CF186005314F1 /* InvoicePayability.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4910718A307CF186005314F1 /* InvoicePayability.swift */; };
+		4910718D307CF186005314F1 /* SendSuccessStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4910718B307CF186005314F1 /* SendSuccessStatus.swift */; };
+		4910718F307CF1A7005314F1 /* LNURLAvatar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4910718E307CF1A7005314F1 /* LNURLAvatar.swift */; };
+		49107191307CF1B6005314F1 /* SendDomainPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49107190307CF1B6005314F1 /* SendDomainPolicyTests.swift */; };
 		491D2E883008F96B0009FADF /* PaymentDetailCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */; };
 		49206DF53073A8A200217838 /* SendAmountCalculator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF43073A8A200217838 /* SendAmountCalculator.swift */; };
 		49206DF73073A8D100217838 /* LemniscateBloomIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */; };
@@ -308,6 +312,10 @@
 		490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastChecker.swift; sourceTree = "<group>"; };
 		490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceBroadcastCheckerTests.swift; sourceTree = "<group>"; };
 		490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeSyncParityTests.swift; sourceTree = "<group>"; };
+		4910718A307CF186005314F1 /* InvoicePayability.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InvoicePayability.swift; sourceTree = "<group>"; };
+		4910718B307CF186005314F1 /* SendSuccessStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendSuccessStatus.swift; sourceTree = "<group>"; };
+		4910718E307CF1A7005314F1 /* LNURLAvatar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LNURLAvatar.swift; sourceTree = "<group>"; };
+		49107190307CF1B6005314F1 /* SendDomainPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendDomainPolicyTests.swift; sourceTree = "<group>"; };
 		491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentDetailCoordinator.swift; sourceTree = "<group>"; };
 		49206DF43073A8A200217838 /* SendAmountCalculator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendAmountCalculator.swift; sourceTree = "<group>"; };
 		49206DF63073A8D100217838 /* LemniscateBloomIcon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LemniscateBloomIcon.swift; sourceTree = "<group>"; };
@@ -1003,10 +1011,12 @@
 			children = (
 				4993591C30712DDF00D6B50E /* AddressVisualChunker.swift */,
 				4993591D30712DDF00D6B50E /* Base58Check.swift */,
+				4910718A307CF186005314F1 /* InvoicePayability.swift */,
 				D20000000000000000000016 /* PaymentFeeEstimator.swift */,
 				49206DF43073A8A200217838 /* SendAmountCalculator.swift */,
 				49D7BFE630794B280089BF1C /* SendChannelSpendPolicy.swift */,
 				4993591E30712DDF00D6B50E /* SendDestination.swift */,
+				4910718B307CF186005314F1 /* SendSuccessStatus.swift */,
 			);
 			path = Send;
 			sourceTree = "<group>";
@@ -1014,11 +1024,12 @@
 		D20000000000000000000002 /* LNURL */ = {
 			isa = PBXGroup;
 			children = (
-				D20000000000000000000018 /* LNURLService.swift */,
+				D20000000000000000000020 /* HTTPResponseParser.swift */,
+				4910718E307CF1A7005314F1 /* LNURLAvatar.swift */,
 				D2000000000000000000001A /* LNURLModels.swift */,
+				D20000000000000000000018 /* LNURLService.swift */,
 				D2000000000000000000001C /* SecureEndpointValidator.swift */,
 				D2000000000000000000001E /* SecureHTTPTransport.swift */,
-				D20000000000000000000020 /* HTTPResponseParser.swift */,
 				D20000000000000000000022 /* URLSessionTransport.swift */,
 			);
 			path = LNURL;
@@ -1100,6 +1111,7 @@
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
 				49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */,
 				49D7BFE830795E8C0089BF1C /* SendChannelSpendPolicyTests.swift */,
+				49107190307CF1B6005314F1 /* SendDomainPolicyTests.swift */,
 				49206DFA3073A90200217838 /* SendFlowModelTests.swift */,
 				49206E223073C2F200217838 /* SendMultiStepViewTests.swift */,
 				49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */,
@@ -1285,6 +1297,7 @@
 				49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */,
 				49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */,
 				49DDD0223054000100B5A146 /* BalanceBarStateTests.swift in Sources */,
+				49107191307CF1B6005314F1 /* SendDomainPolicyTests.swift in Sources */,
 				49DDD0243054000100B5A146 /* BalanceBarTradeCalculatorTests.swift in Sources */,
 				49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */,
 				49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */,
@@ -1331,6 +1344,8 @@
 				49206E213073C2C100217838 /* OnChainAmountCard.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,
 				49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */,
+				4910718C307CF186005314F1 /* InvoicePayability.swift in Sources */,
+				4910718D307CF186005314F1 /* SendSuccessStatus.swift in Sources */,
 				49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */,
 				49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */,
 				499F1E503009F02300936944 /* BlockHeightProvider.swift in Sources */,
@@ -1358,6 +1373,7 @@
 				496A44462FCD5845005AF12F /* InputSanitizer.swift in Sources */,
 				49D7BFF130795F4A0089BF1C /* SendFlowExecution.swift in Sources */,
 				49DAFB3A2FDB5FEB003BE0EB /* FeeRateService.swift in Sources */,
+				4910718F307CF1A7005314F1 /* LNURLAvatar.swift in Sources */,
 				3E46529F1181F2F866A0A495 /* DatabaseService.swift in Sources */,
 				49DDB0012FF0000100000001 /* Models.swift in Sources */,
 				49DDB0022FF0000100000001 /* ChannelRepository.swift in Sources */,

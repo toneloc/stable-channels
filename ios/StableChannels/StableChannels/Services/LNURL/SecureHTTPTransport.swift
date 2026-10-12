@@ -150,16 +150,23 @@ final class NWConnectionTransport: SecureHTTPTransporting {
     private let nwQueue = DispatchQueue(label: "org.stablechannels.nwtransport")
 
     #if DEBUG
+        // Test-only: replaces the vetted endpoint and TLS parameters after validation, so it bypasses
+        // the private-address checks. Never ship a DEBUG build to users.
         var dialTargetOverride: ((_ endpoint: NWEndpoint, _ params: NWParameters) -> (NWEndpoint, NWParameters))?
     #endif
+
+    /// Upper bound for one request including redirects.
+    let requestDeadline: TimeInterval
 
     init(
         hostResolver: HostIPResolving = SystemHostIPResolver(),
         timeoutInterval: TimeInterval = 15.0,
+        requestDeadline: TimeInterval = 30.0,
         onionTransport: SecureHTTPTransporting? = nil
     ) {
         self.hostResolver = hostResolver
         self.timeoutInterval = timeoutInterval
+        self.requestDeadline = requestDeadline
         self.onionTransport = onionTransport
     }
 
@@ -179,6 +186,9 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         return requestData
     }
 
+    /// Most addresses raced per request.
+    static let maxDialCandidates = 4
+
     /// Pure function for selecting vetted candidate IP addresses from resolved host IPs.
     static func selectCandidateIPs(for host: String, resolvedIPs: [String]) throws -> [String] {
         let clean = SecureEndpointValidator.cleanHostString(host)
@@ -192,7 +202,14 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         }
         let v4 = resolvedIPs.filter { $0.contains(".") }
         let v6 = resolvedIPs.filter { !$0.contains(".") }
-        let candidates = v4 + v6
+        // Alternate families so a dead IPv4 set cannot delay the first IPv6 attempt, and cap the
+        // fan-out: each attempt holds a socket and TLS handshake for up to timeoutInterval.
+        var candidates: [String] = []
+        for index in 0..<max(v4.count, v6.count) {
+            if index < v4.count { candidates.append(v4[index]) }
+            if index < v6.count { candidates.append(v6[index]) }
+        }
+        candidates = Array(candidates.prefix(maxDialCandidates))
         guard !candidates.isEmpty else {
             throw LNURLError.insecureEndpoint
         }
@@ -248,8 +265,19 @@ final class NWConnectionTransport: SecureHTTPTransporting {
         return (endpoint, params)
     }
 
+    /// Bounds the whole request, redirects included; cancelling the race closes every socket.
     func executeGet(url: URL) async throws -> (Data, HTTPURLResponse) {
-        try await executeGetInternal(url: url, hop: 0)
+        let deadlineNanos = UInt64(requestDeadline * 1_000_000_000)
+        return try await withThrowingTaskGroup(of: (Data, HTTPURLResponse).self) { group in
+            group.addTask { try await self.executeGetInternal(url: url, hop: 0) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: deadlineNanos)
+                throw LNURLError.networkError("Request timed out.")
+            }
+            defer { group.cancelAll() }
+            guard let response = try await group.next() else { throw CancellationError() }
+            return response
+        }
     }
 
     private func dialCandidate(

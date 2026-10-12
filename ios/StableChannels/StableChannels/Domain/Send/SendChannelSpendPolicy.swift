@@ -1,7 +1,7 @@
 import Foundation
 import LDKNode
 
-/// Calculates spendable balances and channel routing fee parameters based on channel state.
+/// Calculates spendable balances and splice routing based on channel state.
 enum SendChannelSpendPolicy {
     /// Computes the spendable satoshis available for a given destination, taking into account
     /// channel outbound capacity for Lightning routing and splice-out constraints for on-chain.
@@ -23,15 +23,29 @@ enum SendChannelSpendPolicy {
             }
             return lightningBalanceSats
         case .onchain:
-            if !readyChannels.isEmpty && !isSweeping {
-                // An on-chain splice-out is executed against a single specific channel.
-                // Outbound capacity cannot be aggregated across channels; the spendable amount
-                // is bounded by the capacity of the largest ready channel.
-                let maxSingleChannelOutbound = readyChannels.map { $0.outboundCapacityMsat / 1000 }.max() ?? 0
-                return min(maxSingleChannelOutbound, lightningBalanceSats)
-            }
-            return onchainBalanceSats
+            return availableOnchainSpendableSats(
+                channels: channels,
+                lightningBalanceSats: lightningBalanceSats,
+                onchainBalanceSats: onchainBalanceSats,
+                isSweeping: isSweeping
+            )
         }
+    }
+
+    /// What an on-chain send can spend. A splice-out is executed against a single specific channel,
+    /// so outbound capacity cannot be aggregated across channels: it is bounded by the largest ready
+    /// channel and the Lightning balance. Without a ready channel, or during a sweep, the on-chain
+    /// wallet pays.
+    static func availableOnchainSpendableSats(
+        channels: [ChannelDetails],
+        lightningBalanceSats: UInt64,
+        onchainBalanceSats: UInt64,
+        isSweeping: Bool
+    ) -> UInt64 {
+        let readyChannels = channels.filter(\.isChannelReady)
+        guard !readyChannels.isEmpty, !isSweeping else { return onchainBalanceSats }
+        let maxSingleChannelOutbound = readyChannels.map { $0.outboundCapacityMsat / 1000 }.max() ?? 0
+        return min(maxSingleChannelOutbound, lightningBalanceSats)
     }
 
     /// Selects the best ready channel capable of funding an on-chain splice-out of `requiredSats` (including fee).
@@ -48,22 +62,21 @@ enum SendChannelSpendPolicy {
         return ready.max(by: { $0.outboundCapacityMsat < $1.outboundCapacityMsat })
     }
 
-    /// Resolves primary channel routing fee parameters from active channels, falling back to
-    /// safe system defaults when unconfigured or when channels are offline.
-    static func forwardingFeeParameters(
-        channels: [ChannelDetails]
-    ) -> (baseMsat: UInt64, proportionalMillionths: UInt64) {
-        let channel = channels.first(where: \.isChannelReady)
-        let base = channel?.counterpartyForwardingInfoFeeBaseMsat.map { UInt64($0) }
-            ?? UInt64(Constants.lightningDefaultForwardingFeeBaseMsat)
-        let prop = channel?.counterpartyForwardingInfoFeeProportionalMillionths.map { UInt64($0) }
-            ?? UInt64(Constants.lightningDefaultForwardingFeeProportionalMillionths)
-        return (base, prop)
-    }
-
     /// True if an on-chain destination will be dispatched as a splice-out from an open channel.
     static func isSpliceOut(channels: [ChannelDetails], isSweeping: Bool) -> Bool {
         channels.contains(where: \.isChannelReady) && !isSweeping
+    }
+
+    /// A Max send to an on-chain address with no splice-out empties the on-chain wallet in one
+    /// transaction whose fee is paid from the balance. A splice-out Max draws on one channel instead.
+    static func isOnchainSendAll(
+        isMax: Bool,
+        destination: SendDestination?,
+        channels: [ChannelDetails],
+        isSweeping: Bool
+    ) -> Bool {
+        guard isMax, case .onchain = destination else { return false }
+        return !isSpliceOut(channels: channels, isSweeping: isSweeping)
     }
 
     /// Computes the largest sendable amount such that amount + fee(amount) fits inside the available balance.
