@@ -495,7 +495,8 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    func testFetchInvoice_mismatchedDescriptionHash_throwsErrorResponse() async throws {
+    // A forwarder that rewrites the metadata returns an invoice whose hash no longer matches; it stays payable.
+    func testFetchInvoice_mismatchedDescriptionHash_succeeds() async throws {
         let (service, callbackURL) = makeMockService()
         MockURLProtocol.requestHandler = { _ in
             let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -504,21 +505,12 @@ final class LNURLServiceTests: XCTestCase {
         }
 
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
-        do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected errorResponse due to description hash mismatch")
-        } catch let LNURLError.errorResponse(reason) {
-            XCTAssertTrue(reason.contains("does not match payee metadata"))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+
+        XCTAssertEqual(result.pr, Self.valid50kInvoice)
     }
 
-    func testFetchInvoice_directDescription_throwsErrorResponse() async throws {
+    func testFetchInvoice_directDescription_succeeds() async throws {
         let (service, callbackURL) = makeMockService()
         MockURLProtocol.requestHandler = { _ in
             let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -527,18 +519,61 @@ final class LNURLServiceTests: XCTestCase {
         }
 
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+
+        XCTAssertEqual(result.pr, Self.directDescriptionInvoice)
+    }
+
+    // Relaxing the description check must not relax the amount check.
+    func testFetchInvoice_mismatchedAmountAndDescriptionHash_throwsInvoiceAmountMismatch() async throws {
+        let (service, callbackURL) = makeMockService()
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let json = "{\"pr\":\"\(Self.mismatchedAmountInvoice100k)\",\"status\":\"OK\"}"
+            return (response, Data(json.utf8))
+        }
+
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
         do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected errorResponse due to direct description")
-        } catch let LNURLError.errorResponse(reason) {
-            XCTAssertTrue(reason.contains("direct description"))
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+            XCTFail("Expected invoiceAmountMismatch error")
+        } catch LNURLError.invoiceAmountMismatch {
+            // Success
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testValidateBolt11Invoice_reportsDescriptionBinding() throws {
+        let otherHash = String(repeating: "0", count: 64)
+
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.valid50kInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: Self.metadataHashA
+            ),
+            .matchesMetadata
+        )
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.valid50kInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: otherHash
+            ),
+            .mismatchedHash(invoiceHash: Self.metadataHashA)
+        )
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.directDescriptionInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: Self.metadataHashA
+            ),
+            .direct
+        )
     }
 
     func testFetchInvoice_expiredInvoice_throwsErrorResponse() async throws {

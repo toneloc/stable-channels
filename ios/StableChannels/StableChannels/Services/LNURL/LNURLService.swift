@@ -198,13 +198,25 @@ final class LNURLService: LNURLServiceProtocol {
         return url
     }
 
+    /// How an LNURL-pay invoice's description relates to the payee metadata.
+    enum DescriptionBinding: Equatable {
+        case matchesMetadata
+        case mismatchedHash(invoiceHash: String)
+        case direct
+    }
+
     /// Pure domain validation function verifying BOLT11 invoice parameters against request expectations.
+    /// Network, amount, expiry and amountless invoices are enforced. The description is reported, not
+    /// enforced: LUD-06 asks for description_hash == sha256(metadata), but the metadata and the callback
+    /// come from the same server, so a hostile service can always produce a matching hash, while
+    /// custom-domain Lightning Address forwarders that rewrite the metadata would become unpayable.
+    @discardableResult
     static func validateBolt11Invoice(
         pr: String,
         amountMsat: UInt64,
         expectedNetwork: Network,
         expectedMetadataHashHex: String
-    ) throws {
+    ) throws -> DescriptionBinding {
         guard !pr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LNURLError.invalidResponse
         }
@@ -236,13 +248,11 @@ final class LNURLService: LNURLServiceProtocol {
 
         switch bolt11.invoiceDescription() {
         case .hash(let hash):
-            guard hash.lowercased() == expectedMetadataHashHex.lowercased() else {
-                throw LNURLError.errorResponse(reason: "Invoice description hash does not match payee metadata.")
-            }
+            return hash.lowercased() == expectedMetadataHashHex.lowercased()
+                ? .matchesMetadata
+                : .mismatchedHash(invoiceHash: hash)
         case .direct:
-            throw LNURLError.errorResponse(
-                reason: "Invoice uses direct description instead of required description hash (h tag)."
-            )
+            return .direct
         }
     }
 
@@ -271,12 +281,19 @@ final class LNURLService: LNURLServiceProtocol {
             throw LNURLError.errorResponse(reason: reason)
         }
 
-        try Self.validateBolt11Invoice(
+        let binding = try Self.validateBolt11Invoice(
             pr: invoiceResponse.pr,
             amountMsat: amountMsat,
             expectedNetwork: expectedNetwork,
             expectedMetadataHashHex: expectedMetadataHashHex
         )
+        if binding != .matchesMetadata {
+            AuditService.log("LNURL_INVOICE_DESCRIPTION_UNBOUND", data: [
+                "binding": "\(binding)",
+                "expected_hash": expectedMetadataHashHex,
+                "callback_host": URL(string: callback)?.host ?? ""
+            ])
+        }
 
         return invoiceResponse
     }
