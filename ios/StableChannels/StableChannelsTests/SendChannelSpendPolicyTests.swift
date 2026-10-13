@@ -152,6 +152,40 @@ final class SendChannelSpendPolicyTests: XCTestCase {
         XCTAssertEqual(selected?.userChannelId, "exact")
     }
 
+    func testSelectSpliceChannel_withAmount_requiresFeeHeadroom() {
+        let amount: UInt64 = 40000
+        let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: 10)
+        let short = createChannel(id: "short", outboundSats: amount + fee - 1)
+        let large = createChannel(id: "large", outboundSats: amount + fee + 10000)
+
+        let selected = SendChannelSpendPolicy.selectSpliceChannel(
+            channels: [short, large],
+            amountSats: amount,
+            feeRateSatVb: 10
+        )
+
+        XCTAssertEqual(
+            selected?.userChannelId,
+            "large",
+            "A channel one sat short of amount + fee cannot fund the splice"
+        )
+    }
+
+    func testSelectSpliceChannel_withAmount_exactAmountPlusFeeIsBestFit() {
+        let amount: UInt64 = 40000
+        let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: 10)
+        let exact = createChannel(id: "exact", outboundSats: amount + fee)
+        let large = createChannel(id: "large", outboundSats: amount + fee + 10000)
+
+        let selected = SendChannelSpendPolicy.selectSpliceChannel(
+            channels: [large, exact],
+            amountSats: amount,
+            feeRateSatVb: 10
+        )
+
+        XCTAssertEqual(selected?.userChannelId, "exact")
+    }
+
     func testAvailableOnchainSpendableSats_spliceOutIsBoundedByLargestChannel() {
         let channels = [
             createChannel(id: "a", outboundSats: 30000),

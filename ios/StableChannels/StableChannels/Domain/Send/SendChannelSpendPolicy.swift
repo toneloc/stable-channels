@@ -62,6 +62,20 @@ enum SendChannelSpendPolicy {
         return ready.max(by: { $0.outboundCapacityMsat < $1.outboundCapacityMsat })
     }
 
+    /// Selects the channel for an on-chain splice-out of `amountSats`, requiring capacity for the amount
+    /// plus the estimated splice-out fee at `feeRateSatVb`.
+    static func selectSpliceChannel(
+        channels: [ChannelDetails],
+        amountSats: UInt64,
+        feeRateSatVb: Double
+    ) -> ChannelDetails? {
+        let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: feeRateSatVb)
+        return selectSpliceChannel(
+            channels: channels,
+            requiredSats: PaymentFeeEstimator.saturatingAdd(amountSats, fee)
+        )
+    }
+
     /// True if an on-chain destination will be dispatched as a splice-out from an open channel.
     static func isSpliceOut(channels: [ChannelDetails], isSweeping: Bool) -> Bool {
         channels.contains(where: \.isChannelReady) && !isSweeping

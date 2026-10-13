@@ -185,11 +185,10 @@ struct SendPaymentExecutor {
         if SendChannelSpendPolicy
             .isSpliceOut(channels: appState.nodeService.channels, isSweeping: appState.isSweeping) {
             let rate = feeRateSatVb ?? 10.0
-            let estimatedFee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: rate)
-            let requiredTotal = PaymentFeeEstimator.saturatingAdd(effectiveSats, estimatedFee)
             guard let channel = SendChannelSpendPolicy.selectSpliceChannel(
                 channels: appState.nodeService.channels,
-                requiredSats: requiredTotal
+                amountSats: effectiveSats,
+                feeRateSatVb: rate
             ) else {
                 throw NSError(
                     domain: "Send",

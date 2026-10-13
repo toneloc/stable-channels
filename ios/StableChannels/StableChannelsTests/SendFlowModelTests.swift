@@ -1142,4 +1142,101 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertEqual(model.displayedAmountSats(appState: appState), 100)
         XCTAssertTrue(model.canReviewOnchainAmount(appState: appState), "Send-all is reviewable even below the fee")
     }
+
+    // MARK: - Settlement observer (database fast path)
+
+    private func makeAppStateWithDatabase() throws -> (AppState, DatabaseService) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let db = try DatabaseService(dataDir: dir)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let appState = AppState()
+        appState.databaseService = db
+        return (appState, db)
+    }
+
+    private func seedPayment(_ db: DatabaseService, id: String, status: String) throws {
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: id, paymentType: "lightning", direction: "sent", amountMsat: 1_000_000,
+            amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending"
+        )
+        if status != "pending" {
+            try db.paymentRepo.updatePaymentStatus(paymentId: id, status: status)
+        }
+    }
+
+    func testAwaitSettlement_returnsSettledImmediatelyWhenDatabaseRecordIsCompleted() async throws {
+        let (appState, db) = try makeAppStateWithDatabase()
+        try seedPayment(db, id: "pid-completed", status: "completed")
+
+        let start = ContinuousClock.now
+        let outcome = await PaymentSettlementObserver.awaitSettlement(
+            paymentId: "pid-completed", timeoutSeconds: 1, appState: appState
+        )
+        let elapsed = start.duration(to: .now)
+
+        guard case .settled = outcome else { return XCTFail("expected .settled, got \(outcome)") }
+        XCTAssertLessThan(elapsed, .milliseconds(500), "a settled record must resolve without waiting for the timeout")
+    }
+
+    func testAwaitSettlement_returnsFailedImmediatelyWhenDatabaseRecordIsFailed() async throws {
+        let (appState, db) = try makeAppStateWithDatabase()
+        try seedPayment(db, id: "pid-failed", status: "failed")
+
+        let start = ContinuousClock.now
+        let outcome = await PaymentSettlementObserver.awaitSettlement(
+            paymentId: "pid-failed", timeoutSeconds: 1, appState: appState
+        )
+        let elapsed = start.duration(to: .now)
+
+        guard case .failed = outcome else { return XCTFail("expected .failed, got \(outcome)") }
+        XCTAssertLessThan(elapsed, .milliseconds(500), "a failed record must resolve without waiting for the timeout")
+    }
+
+    func testAwaitSettlement_timesOutWhenDatabaseRecordIsStillPending() async throws {
+        let (appState, db) = try makeAppStateWithDatabase()
+        try seedPayment(db, id: "pid-pending", status: "pending")
+
+        let outcome = await PaymentSettlementObserver.awaitSettlement(
+            paymentId: "pid-pending", timeoutSeconds: 0.2, appState: appState
+        )
+
+        guard case .timedOut = outcome else { return XCTFail("expected .timedOut, got \(outcome)") }
+    }
+
+    // MARK: - Pre-dispatch balance guard and exact-msat pricing
+
+    func testExecuteSend_blocksOnchainAmountAboveBalanceWithoutDispatching() async throws {
+        let (appState, db) = try makeAppStateWithDatabase()
+        appState.spendableOnchainSats = 10_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.amountUnit = .sats
+        model.amountInputText = "50000"
+        model.feeRateSatVb = 10
+        model.step = .confirm
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(
+            model.errorMessage,
+            "Amount exceeds your balance. Available: \(UInt64(10_000).btcSpacedFormatted) BTC"
+        )
+        XCTAssertEqual(model.step, .confirm, "a blocked send must stay on the confirm step")
+        XCTAssertFalse(model.isSending)
+        let rows = try db.rawSQL.query("SELECT COUNT(*) FROM payments").first?.int64(0)
+        XCTAssertEqual(rows, 0, "nothing may be recorded before the balance guard passes")
+    }
+
+    func testEstimatedFeeSats_fixedAmountBolt11UsesExactMsatNotRoundedSats() throws {
+        let raw = "lnbc1pn8g249pp5f6ytj32ty90jhvw69enf30hwfgdhyymjewywcmfjevflg6s4z86qdqqcqzzgxqyz5vqrzjqwnvuc0u4txn35cafc7w94gxvq5p3cu9dd95f7hlrh0fvs46wpvhdfjjzh2j9f7ye5qqqqryqqqqthqqpysp5mm832athgcal3m7h35sc29j63lmgzvwc5smfjh2es65elc2ns7dq9qrsgqu2xcje2gsnjp0wn97aknyd3h58an7sjj6nhcrm40846jxphv47958c6th76whmec8ttr2wmg6sxwchvxmsc00kqrzqcga6lvsf9jtqgqy5yexa"
+        let invoice = try Bolt11Invoice.fromStr(invoiceStr: raw)
+        let model = SendFlowModel()
+        model.destination = .bolt11(invoice: invoice, raw: raw, amountMsat: 100_000_999)
+
+        // 100_000_999 / 100 + 50_000 = 1_050_009 msat -> rounds up to 1051 sats.
+        XCTAssertEqual(model.estimatedFeeSats(appState: AppState()), 1_051)
+        // Pricing the floored 100_000 sats would under-reserve by one sat.
+        XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 100_000, appState: AppState()), 1_050)
+    }
 }

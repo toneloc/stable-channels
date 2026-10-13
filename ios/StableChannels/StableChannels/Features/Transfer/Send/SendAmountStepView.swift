@@ -42,6 +42,12 @@ struct SendAmountStepView: View {
         .onChange(of: isAmountFocused) { _, isFocused in
             if !isFocused { model.normalizeAmountInput() }
         }
+        .task {
+            guard case .onchain = model.destination, model.feeRateSatVb == nil else { return }
+            let rec = await appState.feeRateService.recommendedFees()
+            model.recommendedFees = rec
+            model.feeRateSatVb = Double(rec.halfHourFee)
+        }
     }
 
     private var availableBalanceCard: some View {
