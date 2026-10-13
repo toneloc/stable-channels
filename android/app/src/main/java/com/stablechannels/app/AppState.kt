@@ -3949,12 +3949,14 @@ class AppState(private val context: Context) : ViewModel() {
         // of being lost. Not a complete fix if a splice sweeps the whole balance below the frozen
         // baseline — see #316. The websocket receive path below is the reliable catch-all now;
         // this is just a backstop.
+        // Recovery records by txid, so it can run during a splice: the DB skips the splice's own
+        // txid and refuses while a splice has no txid yet (#421).
+        recoverMissedReceive()
         if (isSweeping || pendingSplice != null) {
             return
         }
-        // Both only attach txids or add rows for deposits already received, so they wait for the
-        // same splice/close guard; they are retried on every tick.
-        recoverMissedReceive()
+        // Only attaches txids to rows for deposits already received, so it waits for the same
+        // splice/close guard; retried on every tick.
         resolveTxidlessReceives()
         if (currentSats > prevOnchainSats) {
             val depositSats = currentSats - prevOnchainSats
