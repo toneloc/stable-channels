@@ -1912,6 +1912,9 @@ class AppState(private val context: Context) : ViewModel() {
                     _stableChannel.update { it.copy(channelId = event.channelId) }
                 }
                 refreshBalances()
+                // A splice-in is spendable once locked, before it confirms. Persist the post-splice
+                // receiver balance now, or a trade sized against it cannot commit (#419).
+                updateStableBalances()
                 saveChannelToDB(preserveBacking = true)
                 // ChannelReady can precede confirmation: resume only the operation whose txid was
                 // durably attached, never a funding fallback.
