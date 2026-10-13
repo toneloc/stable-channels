@@ -213,6 +213,25 @@ class OnchainMissedReceiveDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun waitsWhileSpliceHasNoTxid() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "splice",
+            paymentType = "splice_out",
+            direction = "sent",
+            amountMsat = 25_000_000,
+            status = "pending",
+        )
+
+        assertEquals(-1L, service.recordMissedReceive("tx1", 5_991, null, null, "addr", since))
+        service.updatePaymentTxid("splice", "splicetx")
+        assertNotEquals(-1L, service.recordMissedReceive("tx1", 5_991, null, null, "addr", since))
+        assertEquals(-1L, service.recordMissedReceive("splicetx", 5_991, null, null, "addr", since))
+        assertEquals(listOf("tx1"), service.getPendingOnchainReceives().map { it.txid })
+        service.close()
+    }
+
     private fun nowSecs() = System.currentTimeMillis() / 1000
 
     @Test
