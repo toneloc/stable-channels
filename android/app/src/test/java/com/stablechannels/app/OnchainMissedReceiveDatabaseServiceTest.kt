@@ -232,6 +232,21 @@ class OnchainMissedReceiveDatabaseServiceTest {
         service.close()
     }
 
+    @Test
+    fun waitsWhileSpliceInHasNoTxid() {
+        val service = DatabaseService(context)
+        service.recordPayment(
+            paymentId = "splice",
+            paymentType = "splice_in",
+            direction = "sent",
+            amountMsat = 25_000_000,
+            status = "pending",
+        )
+
+        assertEquals(-1L, service.recordMissedReceive("tx1", 5_991, null, null, "addr", since))
+        service.close()
+    }
+
     private fun nowSecs() = System.currentTimeMillis() / 1000
 
     @Test
