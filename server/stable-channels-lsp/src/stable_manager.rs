@@ -2761,8 +2761,10 @@ impl StableChannelManager {
 
             // Balance-truth backstop: live balance below backing means a spend went unreconciled (no PaymentForwarded) — deduct + SYNC. Debounced so a forward's own event can deduct first, and so a payment the node has not listed yet is not read as a spend.
             let uid = sc.user_channel_id;
+            // None when the read failed or the report leaves this channel out, which a node does not do to an open channel.
+            let channel_held_msat = held_msat.as_ref().and_then(|held| held.get(&c.channel_id).copied());
             // Sats in a payment the user sent that has not resolved may come back, so only a balance they could not restore counts as a spend.
-            let recoverable_sats = (c.inbound_capacity_msat.saturating_add(held_msat.as_ref().and_then(|held| held.get(&c.channel_id)).copied().unwrap_or(0)) / 1000)
+            let recoverable_sats = (c.inbound_capacity_msat.saturating_add(channel_held_msat.unwrap_or(0)) / 1000)
                 .saturating_add(c.counterparty_unspendable_punishment_reserve);
             if matches!(scope, TickScope::WokenPeer(_)) {
                 // The debounce counts regular ticks 60s apart, so a wake pass must not advance it; nor may it top up a channel whose possible spend is still unreconciled.
@@ -2771,8 +2773,18 @@ impl StableChannelManager {
                 }
                 self.spend_debounce.remove(&uid);
             } else if recoverable_sats < sc.backing_sats {
-                // Without the node's report a held payment cannot be told from a spend: note the live balance, then leave the channel and its count to a tick that has it.
-                if held_msat.is_none() {
+                // Without the node's report on this channel a held payment cannot be told from a spend: note the live balance, then leave the channel and its count to a tick that has it.
+                if channel_held_msat.is_none() {
+                    // The key changes once a day, so the ledger keeps one record a day and not one per tick.
+                    stable_channels::audit::audit_event(
+                        "LDK_CALL_FAILED",
+                        serde_json::json!({
+                            "op": "get_balances", "context": "run_tick",
+                            "channel_id": c.channel_id, "user_channel_id": uid.to_string(),
+                            "error": if held_msat.is_none() { "read_failed" } else { "channel_not_in_report" },
+                            "dedup_key": format!("lsp:balance-report-missing:{uid}:{}", Self::unix_time_secs() / STABILITY_TOP_UP_ALARM_REPEAT_SECS),
+                        }),
+                    );
                     *sc = proposed;
                     continue;
                 }
@@ -4402,6 +4414,8 @@ mod tests {
         pub lightning_balances: StdMutex<Vec<GrpcLightningBalance>>,
         /// Whether reading balances fails.
         pub balances_fail: std::sync::atomic::AtomicBool,
+        /// Whether the report leaves out a channel no entry was set for, which a real node never does to an open channel.
+        pub balances_incomplete: std::sync::atomic::AtomicBool,
     }
 
     impl FakeLdkServer {
@@ -4427,6 +4441,7 @@ mod tests {
                 payments_page_size: StdMutex::new(None),
                 lightning_balances: StdMutex::new(Vec::new()),
                 balances_fail: std::sync::atomic::AtomicBool::new(false),
+                balances_incomplete: std::sync::atomic::AtomicBool::new(false),
             }
         }
         pub fn with_send_failure(mut self) -> Self {
@@ -4516,9 +4531,22 @@ mod tests {
             if self.balances_fail.load(Ordering::SeqCst) {
                 return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
             }
+            use ldk_server_client::ldk_server_grpc::types::{lightning_balance::BalanceType, ClaimableOnChannelClose};
+            let mut lightning_balances = self.lightning_balances.lock().unwrap().clone();
+            if !self.balances_incomplete.load(Ordering::SeqCst) {
+                // A node lists every open channel, so each one gets its own entry even when a test set none.
+                for channel in self.channels.lock().unwrap().iter() {
+                    let listed = lightning_balances.iter().any(|balance| matches!(&balance.balance_type, Some(BalanceType::ClaimableOnChannelClose(open)) if open.channel_id == channel.channel_id));
+                    if !listed {
+                        lightning_balances.push(GrpcLightningBalance { balance_type: Some(BalanceType::ClaimableOnChannelClose(ClaimableOnChannelClose {
+                            channel_id: channel.channel_id.clone(), amount_satoshis: channel.outbound_capacity_msat / 1000, ..Default::default()
+                        })) });
+                    }
+                }
+            }
             Ok(GetBalancesResponse {
                 pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(),
-                lightning_balances: self.lightning_balances.lock().unwrap().clone(),
+                lightning_balances,
                 ..Default::default()
             })
         }
@@ -8297,6 +8325,78 @@ mod tests {
         regular_ticks(&mut mgr, &fake, 3).await;
         assert_books(&mgr, 50.0, 50_000, 0);
         assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn held_payment_is_not_deducted_when_the_report_leaves_out_its_channel() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        // The read works but says nothing about this channel.
+        fake.lightning_balances.lock().unwrap().clear();
+        fake.balances_incomplete.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn settled_spend_waits_while_the_report_leaves_out_its_channel_then_is_deducted_once() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000 sats were spent with no forward reported, and the report covers only another channel.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        *fake.lightning_balances.lock().unwrap() = monitor_balances(ROUTING_CHANNEL_HEX, 50_000, &[], &[]);
+        fake.balances_incomplete.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty(), "a tick that cannot tell is not a sighting");
+        assert!(fake.sends.lock().unwrap().is_empty());
+
+        // It still takes two ticks whose report covers the channel.
+        fake.balances_incomplete.store(false, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert_book_sync(&fake, 40.0, 40_000);
+    }
+
+    #[tokio::test]
+    async fn channel_left_waiting_for_the_balance_report_raises_a_daily_alarm() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        let waiting = |events: &[(String, serde_json::Value)]| -> Vec<serde_json::Value> {
+            events.iter().filter(|(event, data)| event == "LDK_CALL_FAILED" && data["op"] == "get_balances").map(|(_, data)| data.clone()).collect()
+        };
+
+        // A channel at its backing is handled as usual, so a failed read holds nothing up.
+        fake.balances_fail.store(true, Ordering::SeqCst);
+        stable_channels::audit::enable_test_capture();
+        regular_ticks(&mut mgr, &fake, 1).await;
+        let events = stable_channels::audit::drain_test_capture();
+        assert!(waiting(&events).is_empty());
+
+        // Below its backing it waits, on every tick the read fails.
+        channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        let events = stable_channels::audit::drain_test_capture();
+        let failed = waiting(&events);
+        assert_eq!(failed.len(), 2);
+        assert_eq!(failed[0]["error"], "read_failed");
+        assert_eq!(failed[0]["user_channel_id"], USER_CHANNEL_ID_DECIMAL);
+        assert_eq!(failed[0]["dedup_key"], failed[1]["dedup_key"], "one key a day keeps one record a day");
+        assert_daily_key(&events, "LDK_CALL_FAILED");
+
+        // The same when the read works and leaves the channel out.
+        fake.balances_fail.store(false, Ordering::SeqCst);
+        fake.lightning_balances.lock().unwrap().clear();
+        fake.balances_incomplete.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let left_out = waiting(&events);
+        assert_eq!(left_out.len(), 1);
+        assert_eq!(left_out[0]["error"], "channel_not_in_report");
+        assert_books(&mgr, 50.0, 50_000, 0);
     }
 
     #[tokio::test]
