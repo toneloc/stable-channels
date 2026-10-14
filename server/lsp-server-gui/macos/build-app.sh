@@ -9,19 +9,33 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 PROFILE="${1:-release}"
 
-cargo build --profile "$PROFILE" --features native
+# Cargo reports the actual executable path, including custom target directories,
+# target triples, and profile directory names (for example, dev uses debug).
+BIN="$(cargo build --profile "$PROFILE" --features native --bin lsp-server-gui \
+	--message-format=json-render-diagnostics | python3 -c '
+import json
+import os
+import sys
 
-case "$PROFILE" in
-	release) BIN_DIR="../../target/release" ;;
-	dev|debug) BIN_DIR="../../target/debug" ;;
-	*) BIN_DIR="../../target/$PROFILE" ;;
-esac
+executable = None
+for line in sys.stdin:
+    message = json.loads(line)
+    target = message.get("target", {})
+    if (message.get("reason") == "compiler-artifact"
+            and target.get("name") == "lsp-server-gui"
+            and "bin" in target.get("kind", [])
+            and message.get("executable")):
+        executable = message["executable"]
+if executable is None:
+    sys.exit("Cargo did not report the lsp-server-gui executable")
+print(os.path.abspath(executable))
+')"
 
-APP="../../target/$PROFILE/bundle/macos/LSP Server GUI.app"
+APP="$(dirname "$BIN")/bundle/macos/LSP Server GUI.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "$BIN_DIR/lsp-server-gui" "$APP/Contents/MacOS/lsp-server-gui"
+cp "$BIN" "$APP/Contents/MacOS/lsp-server-gui"
 cp macos/Info.plist "$APP/Contents/Info.plist"
 cp macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
