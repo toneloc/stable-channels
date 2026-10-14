@@ -260,6 +260,7 @@ pub async fn reconcile_event_history(
 /// Retry terminal outcomes for protocol payments from LDK's durable payment store before live
 /// dispatch resumes. This closes the fire-and-forget stream gap when SQLite rejected the original
 /// PaymentSuccessful write: a successful payment cannot remain reversible in our database.
+/// Top-ups booked on claim are not listed here; the manager resolves those with the cached books.
 async fn reconcile_pending_settlement_outcomes(
     ldk: &dyn LdkServerCalls,
     db: &Database,

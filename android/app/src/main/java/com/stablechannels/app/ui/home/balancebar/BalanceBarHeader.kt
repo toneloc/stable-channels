@@ -26,6 +26,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.stablechannels.app.services.StabilizationPolicy
+import com.stablechannels.app.ui.components.OfflineBadgeView
+import com.stablechannels.app.util.OfflineMessages
 
 @Composable
 fun BalanceBarHeader(
@@ -38,6 +40,7 @@ fun BalanceBarHeader(
     stableColor: Color,
     nativeColor: Color,
     modifier: Modifier = Modifier,
+    isOnline: Boolean = true,
     onEmptyInteraction: (() -> Unit)? = null,
 ) {
     val density = LocalDensity.current
@@ -50,7 +53,7 @@ fun BalanceBarHeader(
             label = "conversionAlpha",
         )
 
-    val headerHeight = 34.dp
+    val minHeaderHeight = 34.dp
 
     val pillTextStyle =
         MaterialTheme.typography.labelSmall.copy(
@@ -70,10 +73,21 @@ fun BalanceBarHeader(
         }
 
     Box(
-        modifier = modifier.fillMaxWidth().height(headerHeight),
+        modifier =
+            if (isOnline) {
+                modifier.fillMaxWidth().height(minHeaderHeight)
+            } else {
+                modifier
+                    .fillMaxWidth()
+                    .wrapContentHeight()
+                    .defaultMinSize(minHeight = minHeaderHeight)
+                    .padding(vertical = 4.dp)
+            },
         contentAlignment = Alignment.Center,
     ) {
-        if (conversionAlpha > 0f) {
+        if (!isOnline) {
+            OfflineBadgeView(subtitle = OfflineMessages.CHECK_NETWORK)
+        } else if (conversionAlpha > 0f) {
             Row(
                 modifier =
                     Modifier.graphicsLayer { alpha = conversionAlpha }

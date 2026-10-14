@@ -2183,6 +2183,16 @@ class DatabaseService(context: Context) :
         address: String,
         sinceSecs: Long,
     ): Long {
+        // Until a splice has its txid, a payment to our address could be that splice (a
+        // self-send), not a deposit. Retried on a later check.
+        val spliceWithoutTxid =
+            readableDatabase
+                .rawQuery(
+                    "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in','splice_out') AND (txid IS NULL OR txid = '') LIMIT 1",
+                    null,
+                )
+                .use { it.moveToFirst() }
+        if (spliceWithoutTxid) return -1L
         val duplicate =
             readableDatabase
                 .rawQuery(

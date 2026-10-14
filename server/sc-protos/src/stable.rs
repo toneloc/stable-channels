@@ -85,6 +85,32 @@ pub struct EditStableChannelResponse {
 	pub status: ::prost::alloc::string::String,
 }
 
+// ReleaseStabilityPayment
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReleaseStabilityPaymentRequest {
+	#[prost(string, tag = "1")]
+	pub payment_id: ::prost::alloc::string::String,
+	/// "arrived" or "not_arrived"; anything else is refused, so an empty request can never drop a payment.
+	#[prost(string, tag = "2")]
+	pub decision: ::prost::alloc::string::String,
+	/// False returns the channel's figures and changes nothing; true applies the answer. The GUI sends true only for the answer whose figures it has shown.
+	#[prost(bool, tag = "3")]
+	pub acknowledged: bool,
+}
+
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ReleaseStabilityPaymentResponse {
+	#[prost(bool, tag = "1")]
+	pub ok: bool,
+	#[prost(string, tag = "2")]
+	pub status: ::prost::alloc::string::String,
+	/// True when nothing was done because the answer needs `acknowledged`.
+	#[prost(bool, tag = "3")]
+	pub needs_acknowledgement: bool,
+}
+
 // RegisterPush
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -292,6 +318,7 @@ pub struct ListSettlementPaymentsResponse {
 pub const GET_PRICE_PATH: &str = "GetPrice";
 pub const LIST_STABLE_CHANNELS_PATH: &str = "ListStableChannels";
 pub const EDIT_STABLE_CHANNEL_PATH: &str = "EditStableChannel";
+pub const RELEASE_STABILITY_PAYMENT_PATH: &str = "ReleaseStabilityPayment";
 pub const REGISTER_PUSH_PATH: &str = "RegisterPush";
 pub const AUDIT_LOG_PATH: &str = "AuditLog";
 pub const LDK_LOG_PATH: &str = "LdkLog";
@@ -302,6 +329,14 @@ pub const LIST_CHANNEL_LEDGER_EVENTS_PATH: &str = "ListChannelLedgerEvents";
 mod tests {
 	use super::*;
 	use prost::Message;
+
+	#[test]
+	fn release_messages_roundtrip() {
+		let request = ReleaseStabilityPaymentRequest { payment_id: "pay_a".into(), decision: "not_arrived".into(), acknowledged: true };
+		assert_eq!(ReleaseStabilityPaymentRequest::decode(request.encode_to_vec().as_slice()).unwrap(), request);
+		let response = ReleaseStabilityPaymentResponse { ok: false, status: "confirm".into(), needs_acknowledgement: true };
+		assert_eq!(ReleaseStabilityPaymentResponse::decode(response.encode_to_vec().as_slice()).unwrap(), response);
+	}
 
 	#[test]
 	fn settlement_messages_roundtrip() {

@@ -29,9 +29,11 @@ import com.stablechannels.app.ui.components.CurveProgressIndicator
 import com.stablechannels.app.ui.components.DoneButton
 import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.NeutralTextButton
+import com.stablechannels.app.ui.components.OfflineBadge
 import com.stablechannels.app.ui.components.PaymentResultControls
 import com.stablechannels.app.ui.theme.LocalDarkTheme
 import com.stablechannels.app.util.Constants
+import com.stablechannels.app.util.OfflineMessages
 import com.stablechannels.app.util.btcSpacedFormatted
 import com.stablechannels.app.util.usdFormatted
 import java.util.Locale
@@ -62,6 +64,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
     val sc by appState.stableChannel.collectAsState()
     // Trading fails closed while the displayed cache is stale or quarantined.
     val btcPrice by appState.priceService.accountingPrice.collectAsState()
+    val isOnline by appState.isOnline.collectAsState()
     val maxBuyUSD = BuyAmountPolicy.maximumUsd(sc.expectedUSD.amount)
     val amountUSD = amountText.toDoubleOrNull() ?: 0.0
     val feeUSD = amountUSD * Constants.STABLE_CHANNEL_TRADE_FEE_RATE
@@ -127,6 +130,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             amountText = String.format(Locale.US, "%.2f", maxBuyUSD)
                             error = null
                         },
+                        enabled = isOnline,
                         colors =
                             ButtonDefaults.textButtonColors(
                                 containerColor =
@@ -202,11 +206,15 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 }
 
                 Spacer(Modifier.height(8.dp))
-                Text(
-                    "Max: ${maxBuyUSD.usdFormatted()}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                if (!isOnline) {
+                    OfflineBadge()
+                } else {
+                    Text(
+                        "Max: ${maxBuyUSD.usdFormatted()}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
                 error?.let {
                     Spacer(Modifier.height(8.dp))
@@ -217,7 +225,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     )
                 }
 
-                if (btcPrice <= 0.0) {
+                if (isOnline && btcPrice <= 0.0) {
                     Spacer(Modifier.height(8.dp))
                     Text(
                         "A fresh BTC/USD consensus is required before trading",
@@ -236,7 +244,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             step = TradeStep.CONFIRM
                         }
                     },
-                    enabled = btcPrice > 0.0,
+                    enabled = btcPrice > 0.0 && isOnline,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Continue")
@@ -277,7 +285,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                     }
                 }
 
-                error?.let {
+                (error ?: OfflineMessages.TRADE.takeIf { !isOnline })?.let {
                     Spacer(Modifier.height(8.dp))
                     Text(
                         it,
@@ -289,6 +297,10 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                 Spacer(Modifier.height(24.dp))
                 InkButton(
                     onClick = {
+                        if (!appState.isOnline.value) {
+                            error = OfflineMessages.TRADE
+                            return@InkButton
+                        }
                         isExecuting = true
                         error = null
                         scope.launch(Dispatchers.IO) {
@@ -341,7 +353,7 @@ fun BuyScreen(appState: AppState, prefillAmountUSD: Double = 0.0, onDismiss: () 
                             isExecuting = false
                         }
                     },
-                    enabled = !isExecuting && btcPrice > 0.0,
+                    enabled = !isExecuting && btcPrice > 0.0 && isOnline,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     if (isExecuting) CircularProgressIndicator(Modifier.size(20.dp))

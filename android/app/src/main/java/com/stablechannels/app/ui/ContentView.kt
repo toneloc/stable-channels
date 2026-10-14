@@ -18,6 +18,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,19 +32,32 @@ import com.stablechannels.app.Phase
 import com.stablechannels.app.ui.components.BalanceScaleKinematics
 import com.stablechannels.app.ui.components.BalanceScaleKinematics.Stage
 import com.stablechannels.app.ui.components.InkButton
+import com.stablechannels.app.ui.components.OfflinePageView
 import com.stablechannels.app.ui.components.UnifiedBalanceLaunchView
 
 @Composable
 fun ContentView(appState: AppState) {
     val phase by appState.phase.collectAsState()
     val errorMessage by appState.errorMessage.collectAsState()
+    val isRetrying by appState.isRetrying.collectAsState()
 
-    when (phase) {
-        Phase.LOADING,
-        Phase.ONBOARDING,
-        Phase.SYNCING -> SyncingView()
-        Phase.WALLET -> MainTabView(appState)
-        Phase.ERROR -> ErrorView(errorMessage) { appState.start() }
+    Box(modifier = Modifier.fillMaxSize()) {
+        when (phase) {
+            Phase.LOADING,
+            Phase.ONBOARDING,
+            Phase.SYNCING -> SyncingView()
+            Phase.WALLET -> MainTabView(appState)
+            Phase.OFFLINE ->
+                OfflinePageView(
+                    isRetrying = isRetrying,
+                    onRetry = { appState.retryConnection() },
+                    onGoToHome =
+                        if (appState.hasExistingWallet()) {
+                            { appState.setPhaseWallet() }
+                        } else null,
+                )
+            Phase.ERROR -> ErrorView(errorMessage) { appState.start() }
+        }
     }
 }
 
