@@ -24,8 +24,8 @@ android {
         // Play has already consumed versionCodes 6 and 7 (0.9.5, released 2026-08-06
         // from the sheet-to-edge-fix branch); those bumps never landed on main, so
         // main's uploadable builds resumed at 8 (v0.9.6, 2026-09-03).
-        versionCode = 9
-        versionName = "0.9.7"
+        versionCode = 10
+        versionName = "0.9.9"
     }
 
     // Play upload signing. Reads STABLECHANNELS_UPLOAD_* Gradle properties

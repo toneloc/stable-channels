@@ -8003,7 +8003,7 @@ dependencies = [
 
 [[package]]
 name = "stable-channels"
-version = "0.9.0"
+version = "0.9.9"
 dependencies = [
  "a2",
  "anyhow",

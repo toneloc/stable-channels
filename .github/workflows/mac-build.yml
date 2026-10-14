@@ -43,7 +43,7 @@ jobs:
           APP_NAME="Stable Channels"
           APP_BUNDLE="${APP_NAME}.app"
           IDENTIFIER="com.stablechannels.mac"
-          VERSION="0.9.0"
+          VERSION="0.9.9"
           BIN_NAME="stable-channels"
           WRAPPER_NAME="$APP_NAME"
           PNG_ICON="photos/sc-icon-egui.png"

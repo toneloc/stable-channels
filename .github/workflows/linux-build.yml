@@ -60,7 +60,7 @@ jobs:
           # ─── config ──────────────────────────────────────────────────────
           APP_NAME="Stable Channels"
           BIN_NAME="stable-channels"
-          VERSION="0.9.0"
+          VERSION="0.9.9"
           PNG_ICON="photos/sc-icon-egui.png"      
           ARCHS=(x86_64 aarch64)           # build for x86‑64 & AArch64
           DIST_DIR="dist"

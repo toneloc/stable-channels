@@ -1,6 +1,6 @@
 [package]
 name = "stable-channels"
-version = "0.9.0"
+version = "0.9.9"
 edition = "2021"
 
 [features]
