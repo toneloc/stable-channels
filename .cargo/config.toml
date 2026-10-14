@@ -1,0 +1,6 @@
+# Makes `cargo run` (from anywhere in this workspace) launch lsp-server-gui
+# through a minimal .app bundle on macOS, so it picks up the Stable Channels
+# Dock icon instead of the generic "exec" placeholder. Every other workspace
+# binary passes straight through unchanged — see the runner script.
+[target.'cfg(target_os = "macos")']
+runner = "server/lsp-server-gui/macos/cargo-runner.sh"
