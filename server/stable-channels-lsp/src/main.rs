@@ -15,6 +15,8 @@ mod revenue;
 mod stability_tick;
 mod stable_manager;
 mod state;
+mod swap;
+mod swap_poller;
 mod tls;
 mod trade_response_retry;
 
@@ -136,6 +138,17 @@ async fn main() -> Result<()> {
     let push_service = crate::push::PushService::new(&push_cfg, &data_dir);
     info!("push service initialized");
 
+    let onboarding_swaps =
+        crate::swap::OnboardingSwaps::from_config(cfg.swap.as_ref(), &data_dir, &cfg.node.network)
+            .map_err(|e| anyhow::anyhow!(e))?;
+    match &onboarding_swaps {
+        Some(swaps) => info!(
+            "onboarding swaps enabled ({} provider(s))",
+            swaps.providers.len()
+        ),
+        None => info!("onboarding swaps disabled (no [swap] section)"),
+    }
+
     let mut stable_manager = crate::stable_manager::StableChannelManager::new(
         Arc::clone(&db_arc),
         data_dir.clone(),
@@ -156,12 +169,16 @@ async fn main() -> Result<()> {
         revenue: Arc::new(revenue::RevenueStore::default()),
         ldk_log_file,
         last_event_before_start_ms,
+        onboarding_swaps: onboarding_swaps.clone(),
     };
 
     let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
     tokio::spawn(async move {
         price_task::run(price_tx).await;
     });
+    if let Some(swaps) = onboarding_swaps {
+        swap_poller::spawn(swaps);
+    }
 
     // Reconcile from gRPC to catch up snapshots that changed while the daemon was down. The stable math needs a BTC/USD price, so wait (bounded) for the cache to warm first; spawned so the REST server and event loop come up immediately.
     {
@@ -299,7 +316,29 @@ async fn main() -> Result<()> {
             "/api/channel-exists",
             post(handlers::channel_exists::channel_exists),
         )
-        // Defense-in-depth body cap covering every route, including the two unsigned endpoints
+        // Stablecoin onboarding swaps (#391): wallets without a channel, so no HMAC. Create /
+        // status / refund carry a node-key signature; settled carries the payment preimage.
+        .route(
+            "/api/onboarding-swap/options",
+            post(handlers::onboarding_swap::options_handler),
+        )
+        .route(
+            "/api/onboarding-swap/create",
+            post(handlers::onboarding_swap::create_handler),
+        )
+        .route(
+            "/api/onboarding-swap/status",
+            post(handlers::onboarding_swap::status_handler),
+        )
+        .route(
+            "/api/onboarding-swap/settled",
+            post(handlers::onboarding_swap::settled_handler),
+        )
+        .route(
+            "/api/onboarding-swap/refund",
+            post(handlers::onboarding_swap::refund_handler),
+        )
+        // Defense-in-depth body cap covering every route, including the public wallet endpoints
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())

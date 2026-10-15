@@ -59,3 +59,12 @@ fcm_service_account_path = "/path/to/firebase-service-account.json"
 # country_db = "/path/to/dbip-country-lite.mmdb"
 # record_ips = true
 # retention_days = 90
+
+# Optional: stablecoin (USDT/USDC) onboarding through a FixedFloat-compatible swap provider.
+# A user without a channel pays the provider in stablecoins and the provider pays the wallet's
+# JIT invoice. Omit the section to disable it (/api/onboarding-swap/options returns enabled=false).
+# Each value is a Lightning Swap Connect URI — a bearer credential: keep it out of git and logs.
+# The backup is used only while the primary is unreachable.
+# [swap]
+# lsc_uri_primary = "lightning+swapconnect://ff.io?key=<api key>&secret=<api secret>"
+# lsc_uri_backup  = "lightning+swapconnect://other.example/api?key=<api key>&secret=<api secret>"

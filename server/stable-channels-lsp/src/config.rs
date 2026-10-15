@@ -17,6 +17,29 @@ pub struct Config {
     pub enforce_max_stabilization: bool,
     #[serde(default)]
     pub geoip: GeoIpSection,
+    /// Stablecoin onboarding swaps (#391). Absent = feature disabled.
+    #[serde(default)]
+    pub swap: Option<SwapConfig>,
+}
+
+/// Lightning Swap Connect credentials. The backup is used only while the primary is down.
+#[derive(Deserialize, Clone)]
+pub struct SwapConfig {
+    pub lsc_uri_primary: String,
+    pub lsc_uri_backup: Option<String>,
+}
+
+/// LSC URIs are bearer credentials: never print them, even via `{:?}` of the whole Config.
+impl std::fmt::Debug for SwapConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SwapConfig")
+            .field("lsc_uri_primary", &"<redacted>")
+            .field(
+                "lsc_uri_backup",
+                &self.lsc_uri_backup.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -220,5 +243,29 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(toml_text).unwrap();
         assert!(cfg.push.is_none());
+        assert!(cfg.swap.is_none());
+    }
+
+    #[test]
+    fn parses_swap_section_and_redacts_it() {
+        let toml_text = r#"
+            [node]
+            rest_service_address = "127.0.0.1:3002"
+            network              = "regtest"
+
+            [storage.disk]
+            dir_path = "/tmp/sc-data"
+
+            [ldk_server]
+            config_path = "/etc/ldk-server/config.toml"
+
+            [swap]
+            lsc_uri_primary = "lightning+swapconnect://ff.io?key=k&secret=topsecret"
+        "#;
+        let cfg: Config = toml::from_str(toml_text).unwrap();
+        let swap = cfg.swap.as_ref().expect("swap section parsed");
+        assert!(swap.lsc_uri_primary.starts_with("lightning+swapconnect://"));
+        assert!(swap.lsc_uri_backup.is_none());
+        assert!(!format!("{cfg:?}").contains("topsecret"));
     }
 }
