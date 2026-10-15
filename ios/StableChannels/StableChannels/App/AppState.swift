@@ -1158,18 +1158,33 @@ class AppState {
     /// chain-source failure, instead of stranding the user on the error screen.
     private func retryNodeStartLater(reason: String) {
         phase = .syncing
-        nodeStartup.scheduleRetry(maxDelay: Constants.nodeStartRetryMaxDelay, reason: reason) { [weak self] in
-            guard let self, !self.nodeService.isRunning else { return }
-            guard self.networkMonitor.isOnline else {
-                // Offline recovery belongs to the network monitor, which calls retryConnection when back online.
-                self.phase = .offline
-                return
-            }
-            // Re-probe providers so the retry doesn't start against the one that just stalled.
-            self.chainURL = await self.resolveChainURL()
-            await self.retryConnection()
-        }
+        nodeStartup.scheduleRetry(maxDelay: Constants.nodeStartRetryMaxDelay, reason: reason, run: nodeStartRetryRun())
     }
+
+    /// The node-start retry steps for `NodeStartupCoordinator`.
+    private func nodeStartRetryRun() -> NodeStartupCoordinator.RetryRun {
+        NodeStartupCoordinator.RetryRun(
+            shouldRun: { [weak self] in
+                guard let self, !self.nodeService.isRunning else { return false }
+                guard self.networkMonitor.isOnline else {
+                    // Offline recovery belongs to the network monitor, which calls retryConnection when back online.
+                    self.phase = .offline
+                    return false
+                }
+                return true
+            },
+            // Re-probe providers so the retry doesn't start against the one that just stalled.
+            probe: { [weak self] in await self?.resolveChainURL() ?? Constants.primaryChainURL },
+            start: { [weak self] url in
+                guard let self else { return }
+                self.chainURL = url
+                await self.retryConnection()
+            }
+        )
+    }
+
+    /// True while the 30s background stop is armed and has not run yet.
+    var hasPendingBackgroundStop: Bool { backgroundStopWorkItem != nil }
 
     /// Post-start steps shared by launch and recovered starts: resume a pending splice, start
     /// chain watchers and timers, and replay work queued while the node was down.
@@ -1371,7 +1386,13 @@ class AppState {
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
         if phase == .syncing, nodeStartup.isRetrying, !nodeService.isRunning {
-            retryNodeStartLater(reason: "resumed on foreground")
+            // Back in foreground: the pending background stop must not pause this retry again.
+            cancelBackgroundStop()
+            nodeStartup.resumeIfIdle(
+                maxDelay: Constants.nodeStartRetryMaxDelay,
+                reason: "resumed on foreground",
+                run: nodeStartRetryRun()
+            )
             return
         }
         guard case .wallet = phase else { return }
