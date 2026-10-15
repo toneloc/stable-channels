@@ -144,6 +144,10 @@
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
 		49C46D3F3080D63C005A2FF5 /* SendPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */; };
+		49C46D373080C465005A2FF5 /* NodeStartupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D363080C465005A2FF5 /* NodeStartupCoordinator.swift */; };
+		49C46D3A3080C47C005A2FF5 /* NodeStartupPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D393080C47C005A2FF5 /* NodeStartupPolicyTests.swift */; };
+		49C46D3B3080C47C005A2FF5 /* NodeStartupCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D383080C47C005A2FF5 /* NodeStartupCoordinatorTests.swift */; };
+		49C46D3D3080C492005A2FF5 /* NodeStartupPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3C3080C492005A2FF5 /* NodeStartupPolicy.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
 		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
 		49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */; };
@@ -427,6 +431,10 @@
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
 		49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPreflight.swift; sourceTree = "<group>"; };
+		49C46D363080C465005A2FF5 /* NodeStartupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupCoordinator.swift; sourceTree = "<group>"; };
+		49C46D383080C47C005A2FF5 /* NodeStartupCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupCoordinatorTests.swift; sourceTree = "<group>"; };
+		49C46D393080C47C005A2FF5 /* NodeStartupPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupPolicyTests.swift; sourceTree = "<group>"; };
+		49C46D3C3080C492005A2FF5 /* NodeStartupPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeStartupPolicy.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
 		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
 		49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNotificationBannerView.swift; sourceTree = "<group>"; };
@@ -817,6 +825,7 @@
 				49D9974C3074F6090024B3A7 /* NetworkMonitoring.swift */,
 				49D9974D3074F6090024B3A7 /* NetworkReachabilityEvaluator.swift */,
 				49D9974E3074F6090024B3A7 /* NetworkStatus.swift */,
+				49C46D3C3080C492005A2FF5 /* NodeStartupPolicy.swift */,
 			);
 			path = Network;
 			sourceTree = "<group>";
@@ -851,6 +860,7 @@
 				FFC40949E35E9317ACA30E35 /* AppState.swift */,
 				D62A82EA774DC10F10A6574A /* ContentView.swift */,
 				623F41D841B312F0C9AE01E6 /* MainTabView.swift */,
+				49C46D363080C465005A2FF5 /* NodeStartupCoordinator.swift */,
 				491D2E873008F96B0009FADF /* PaymentDetailCoordinator.swift */,
 				B785A33E02FD999CB62019AD /* StableChannelsApp.swift */,
 			);
@@ -1100,7 +1110,9 @@
 				D20000000000000000000042 /* LNURLServiceTests.swift */,
 				49FEF36C30124CEE0089850F /* MempoolWebSocketServiceTests.swift */,
 				49D997473074F5D10024B3A7 /* NetworkReachabilityTests.swift */,
+				49C46D383080C47C005A2FF5 /* NodeStartupCoordinatorTests.swift */,
 				D1A60F120000000000000010 /* NodeStartupFailoverTests.swift */,
+				49C46D393080C47C005A2FF5 /* NodeStartupPolicyTests.swift */,
 				49D997483074F5D10024B3A7 /* OfflineHandlingTests.swift */,
 				70CCF0012F9D46C70004CB73 /* OnChainConfirmationPolicyTests.swift */,
 				499DBE732FD2DADF003E89F9 /* OnchainTxidResolverTests.swift */,
@@ -1259,6 +1271,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				49C46D3A3080C47C005A2FF5 /* NodeStartupPolicyTests.swift in Sources */,
+				49C46D3B3080C47C005A2FF5 /* NodeStartupCoordinatorTests.swift in Sources */,
 				4993591830712D1500D6B50E /* AddressVisualChunkerTests.swift in Sources */,
 				4993591930712D1500D6B50E /* Base58CheckTests.swift in Sources */,
 				D20000000000000000000037 /* Bech32Tests.swift in Sources */,
@@ -1364,6 +1378,7 @@
 				8A8C427CEEC2C65DD31A6E88 /* BuyView.swift in Sources */,
 				49E4D8A12FED848F002AF338 /* BackupError.swift in Sources */,
 				7001A102AAC41DA0BAF0EFF8 /* Constants.swift in Sources */,
+				49C46D3D3080C492005A2FF5 /* NodeStartupPolicy.swift in Sources */,
 				DC5FA35343D89CB75FD4E402 /* ContentView.swift in Sources */,
 				49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */,
 				49206E063073A92D00217838 /* SendFlowModel.swift in Sources */,
@@ -1449,6 +1464,7 @@
 				4944458030540C1B00B5A146 /* BinarySearch.swift in Sources */,
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,
 				49F0B0E32FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift in Sources */,
+				49C46D373080C465005A2FF5 /* NodeStartupCoordinator.swift in Sources */,
 				49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */,
 				49206E123073C27600217838 /* AddressVisualChunkView.swift in Sources */,
 				49206E133073C27600217838 /* SendConfirmStepView.swift in Sources */,

@@ -687,6 +687,7 @@ class AppState {
         stabilityTimer?.cancel()
         stabilityTimer = nil
         txidResolutionService.cancelAllLaunchers()
+        nodeStartup.reset()
         nodeService.stop()
 
         resetInMemoryWalletState()
@@ -816,21 +817,7 @@ class AppState {
         config.network = .bitcoin
         let builder = Builder.fromConfig(config: config)
         // A chain source is required to build; nothing syncs without start().
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
-                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
-                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
-        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: syncConfig)
+        builder.setChainSourceEsplora(serverUrl: Constants.primaryChainURL, config: NodeService.esploraSyncConfig)
         let entropy = NodeEntropy.fromBip39Mnemonic(mnemonic: mnemonic, passphrase: nil)
         guard let node = try? builder.build(nodeEntropy: entropy) else { return nil }
         return node.nodeId()
@@ -989,13 +976,6 @@ class AppState {
                     }
                     refreshBalances()
                     updateStableBalances()
-                    // Restore fundingTxid from UserDefaults
-                    fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
-                        .string(forKey: "funding_txid")
-                    resumePendingSpliceConfirmation()
-                    blockHeightService.start()
-                    mempoolWebSocketService.connect()
-                    Task { await confirmationPollingService?.pollOnce() }
                 }
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
@@ -1007,27 +987,22 @@ class AppState {
                         }
                     }
                 }
-                startStabilityTimer()
                 // Ensure LSP connection shortly after startup — initial connect may not have completed
                 Task {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     await MainActor.run { ensureLSPConnected() }
                 }
-                // Re-register push token with node_id now that node is running
-                reregisterPushTokenIfNeeded()
-                // Check if NSE flagged a pending payment while app was killed
-                await processPendingPushPayment()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                await resumeAfterNodeStart()
             } catch {
-                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                    error: error,
-                    isNetworkOffline: !networkMonitor.isOnline
-                ) {
+                switch nodeStartFailureOutcome(for: error) {
+                case .offline:
                     AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                } else {
-                    await MainActor.run { phase = .error("Node start failed: \(error.localizedDescription)") }
+                case .retry:
+                    retryNodeStartLater(reason: error.localizedDescription)
+                case .fail:
+                    nodeStartup.reset()
+                    phase = .error("Node start failed: \(error.localizedDescription)")
                 }
             }
         } else {
@@ -1076,14 +1051,15 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
-                if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                    error: error,
-                    isNetworkOffline: !networkMonitor.isOnline
-                ) {
+                switch nodeStartFailureOutcome(for: error) {
+                case .offline:
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                } else {
-                    await MainActor.run { phase = .error("Wallet creation failed: \(error.localizedDescription)") }
+                case .retry:
+                    retryNodeStartLater(reason: error.localizedDescription)
+                case .fail:
+                    nodeStartup.reset()
+                    phase = .error("Wallet creation failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -1144,21 +1120,18 @@ class AppState {
                         .set(nodeId, forKey: "node_id")
                 }
                 await synchronizeActiveWalletState()
-                blockHeightService.start()
-                Task { await confirmationPollingService?.pollOnce() }
-                startStabilityTimer()
-                reregisterPushTokenIfNeeded()
-                await processPendingPushPayment()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                await resumeAfterNodeStart()
             } catch {
-                if previousPhase == .offline {
-                    if !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-                        error: error,
-                        isNetworkOffline: !networkMonitor.isOnline
-                    ) {
+                // .syncing here means a scheduled node-start retry (or the network monitor)
+                // is driving recovery from a failed launch, so failures route like .offline.
+                if previousPhase == .offline || previousPhase == .syncing {
+                    switch nodeStartFailureOutcome(for: error) {
+                    case .offline:
                         phase = .offline
-                    } else {
+                    case .retry:
+                        retryNodeStartLater(reason: error.localizedDescription)
+                    case .fail:
+                        nodeStartup.reset()
                         phase = .error("Node start failed: \(error.localizedDescription)")
                     }
                 } else {
@@ -1170,6 +1143,48 @@ class AppState {
         } else {
             await synchronizeActiveWalletState()
         }
+    }
+
+    /// Classifies a failed node start for `NodeStartupPolicy`.
+    private func nodeStartFailureOutcome(for error: Error) -> NodeStartupPolicy.FailureOutcome {
+        let isOffline = !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+            error: error,
+            isNetworkOffline: !networkMonitor.isOnline
+        )
+        return NodeStartupPolicy.failureOutcome(isOffline: isOffline, isRetryable: error.isRetryableNodeStartError)
+    }
+
+    /// Keeps the syncing screen up and retries node start with backoff after a transient
+    /// chain-source failure, instead of stranding the user on the error screen.
+    private func retryNodeStartLater(reason: String) {
+        phase = .syncing
+        nodeStartup.scheduleRetry(maxDelay: Constants.nodeStartRetryMaxDelay, reason: reason) { [weak self] in
+            guard let self, !self.nodeService.isRunning else { return }
+            guard self.networkMonitor.isOnline else {
+                // Offline recovery belongs to the network monitor, which calls retryConnection when back online.
+                self.phase = .offline
+                return
+            }
+            // Re-probe providers so the retry doesn't start against the one that just stalled.
+            self.chainURL = await self.resolveChainURL()
+            await self.retryConnection()
+        }
+    }
+
+    /// Post-start steps shared by launch and recovered starts: resume a pending splice, start
+    /// chain watchers and timers, and replay work queued while the node was down.
+    private func resumeAfterNodeStart() async {
+        fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
+            .string(forKey: "funding_txid")
+        resumePendingSpliceConfirmation()
+        blockHeightService.start()
+        mempoolWebSocketService.connect()
+        Task { await confirmationPollingService?.pollOnce() }
+        startStabilityTimer()
+        reregisterPushTokenIfNeeded()
+        await processPendingPushPayment()
+        txidResolutionService.replayPendingChannelCloses()
+        txidResolutionService.replayPendingOnchainReceives()
     }
 
     @MainActor
@@ -1239,6 +1254,7 @@ class AppState {
     // every launch then burned the full 30s ceiling waiting on a dead process.
 
     func stop() {
+        nodeStartup.reset()
         stabilityTimer?.cancel()
         stabilityTimer = nil
         heartbeatTimer?.cancel()
@@ -1267,6 +1283,9 @@ class AppState {
     /// out from under such a flow.
     private var nodeFlowInProgress = false
     private var pendingOnlineRetry = false
+    /// Backoff state for retrying a node start that failed on a transient chain-source error.
+    /// Node-start failover and automatic retry after transient chain-source failures.
+    let nodeStartup = NodeStartupCoordinator()
 
     private func finishNodeFlow() {
         nodeFlowInProgress = false
@@ -1310,6 +1329,9 @@ class AppState {
 
     private func performBackgroundStop() {
         backgroundStopWorkItem = nil
+        // A suspended app must not start the node and take the wallet dir from the NSE;
+        // foreground resumes the retry with the same backoff.
+        nodeStartup.pause()
         guard nodeService.isRunning else {
             // Backgrounded before the node came up. If no start/restore flow
             // is live, a held lock serves no one — release it so the NSE isn't
@@ -1348,6 +1370,10 @@ class AppState {
 
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
+        if phase == .syncing, nodeStartup.isRetrying, !nodeService.isRunning {
+            retryNodeStartLater(reason: "resumed on foreground")
+            return
+        }
         guard case .wallet = phase else { return }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
@@ -3873,9 +3899,9 @@ class AppState {
         }
     }
 
-    /// Starts the node with the current chainURL, and automatically falls back to the
-    /// secondary Esplora source (e.g. mempool.space) if primary startup encounters an
-    /// Esplora fee-rate estimation failure or timeout.
+    /// Starts the node with the current chainURL and, on an Esplora fee-rate estimation
+    /// failure or timeout, walks `NodeStartupPolicy.attempts`: every other provider once, then
+    /// the preferred provider again after a short delay.
     ///
     /// Two failover layers exist by design: `resolveChainURL()` probes connectivity once
     /// at launch and picks the starting provider; this helper covers failures that only
@@ -3896,56 +3922,21 @@ class AppState {
     }
 
     private func startNodeOrFailover(mnemonic: String) async throws {
-        let initialURL = chainURL
-        do {
-            try await nodeService.start(
+        let attempts = NodeStartupPolicy.attempts(
+            preferred: chainURL,
+            providers: Constants.esploraChainURLs,
+            retryDelay: Constants.nodeStartRetryDelay
+        )
+        let url = try await nodeStartup.start(attempts, isRetryable: { $0.isRetryableEsploraStartupError }) { url in
+            try await self.nodeService.start(
                 network: .bitcoin,
-                esploraURL: initialURL,
+                esploraURL: url,
                 mnemonic: mnemonic,
-                lspConfig: activeLSP
+                lspConfig: self.activeLSP
             )
-            publishWorkingChainURL(initialURL)
-        } catch {
-            guard error.isRetryableEsploraStartupError else {
-                // Non-Esplora errors (database, storage, lock, entropy, already running)
-                // must propagate immediately without retrying.
-                throw error
-            }
-
-            let initialError = error
-            AuditService.log("NODE_START_INITIAL_FAILED", data: [
-                "esploraURL": initialURL,
-                "error": initialError.localizedDescription
-            ])
-
-            let fallbackURL = (initialURL == Constants.primaryChainURL)
-                ? Constants.fallbackChainURL
-                : Constants.primaryChainURL
-
-            do {
-                try await nodeService.start(
-                    network: .bitcoin,
-                    esploraURL: fallbackURL,
-                    mnemonic: mnemonic,
-                    lspConfig: activeLSP
-                )
-                self.chainURL = fallbackURL
-                publishWorkingChainURL(fallbackURL)
-                AuditService.log("NODE_START_FAILOVER_SUCCESS", data: [
-                    "primary": initialURL,
-                    "using": fallbackURL
-                ])
-            } catch let fallbackError {
-                AuditService.log("NODE_START_FAILOVER_FAILED", data: [
-                    "primary": initialURL,
-                    "fallback": fallbackURL,
-                    "primary_error": initialError.localizedDescription,
-                    "fallback_error": fallbackError.localizedDescription
-                ])
-                // Preserve the original primary error when fallback also fails
-                throw initialError
-            }
         }
+        chainURL = url
+        publishWorkingChainURL(url)
     }
 
     /// Record the Esplora URL a node actually started against, so the NSE begins with a
