@@ -139,7 +139,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     private func run(
         shouldRun: @escaping @MainActor () -> Bool = { true },
         probe: @escaping @MainActor () async -> Void = {},
-        start: @escaping @MainActor (String) async -> Void = { _ in }
+        start: @escaping @MainActor (String) async -> Void = { _ in },
+        stop: @escaping @MainActor () -> Void = {}
     ) -> NodeStartupCoordinator.RetryRun {
         NodeStartupCoordinator.RetryRun(
             shouldRun: shouldRun,
@@ -147,7 +148,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
                 await probe()
                 return self.fallback
             },
-            start: start
+            start: start,
+            stop: stop
         )
     }
 
@@ -295,6 +297,56 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         await waitUntilIdle(coordinator)
 
         XCTAssertFalse(coordinator.hasRetryRunning)
+    }
+
+    func testPauseDuringStart_stopsTheStartedNode() async {
+        let coordinator = makeCoordinator()
+        let stopped = expectation(description: "node stopped")
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
+            // Stands in for backgrounding while LDK's uncancellable start blocks.
+            start: { _ in coordinator.pause() },
+            stop: { stopped.fulfill() }
+        ))
+
+        await fulfillment(of: [stopped], timeout: 1)
+        coordinator.reset()
+    }
+
+    func testForegroundDuringStart_keepsTheStartedNode() async {
+        let coordinator = makeCoordinator()
+        let finished = expectation(description: "start returned")
+        var stopped = false
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
+            start: { _ in
+                coordinator.pause()
+                coordinator.resumeIfIdle(maxDelay: self.maxDelay, reason: "resumed on foreground", run: self.run())
+                finished.fulfill()
+            },
+            stop: { stopped = true }
+        ))
+        await fulfillment(of: [finished], timeout: 1)
+
+        XCTAssertFalse(stopped, "A start that finishes after foreground must keep the node")
+        coordinator.reset()
+    }
+
+    func testSuccessfulStartInsideARetry_doesNotCancelTheRetry() async {
+        let coordinator = makeCoordinator()
+        let finished = expectation(description: "retry finished")
+        var cancelledAfterStart = true
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in
+            _ = try? await coordinator.start(self.plan, isRetryable: { _ in true }) { _ in }
+            // The wallet sync after the start runs in this task, so success must not cancel it.
+            cancelledAfterStart = Task.isCancelled
+            finished.fulfill()
+        }))
+        await fulfillment(of: [finished], timeout: 1)
+
+        XCTAssertFalse(cancelledAfterStart)
+        XCTAssertFalse(coordinator.isRetrying)
     }
 
     func testCancelledRetry_doesNotRun() async throws {

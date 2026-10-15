@@ -56,7 +56,7 @@ final class NodeDirLock: @unchecked Sendable {
     }
 
     /// Polling variant of `tryAcquireReportingNew` — see that method for the
-    /// ownership semantics.
+    /// ownership semantics. Returns not held as soon as the calling task is cancelled.
     func acquireReportingNew(dataDir: URL, timeout: TimeInterval) async -> (held: Bool, newlyAcquired: Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -67,7 +67,11 @@ final class NodeDirLock: @unchecked Sendable {
             if Date() >= deadline {
                 return (held: false, newlyAcquired: false)
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+            } catch {
+                return (held: false, newlyAcquired: false)
+            }
         }
     }
 
@@ -189,6 +193,8 @@ class NodeService: NodeServiceProtocol {
         // process (the NSE) has a node on it. No-op if already held.
         let lease = await NodeDirLock.shared.acquireReportingNew(dataDir: Constants.userDataDir, timeout: 35)
         guard lease.held else {
+            // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+            try Task.checkCancellation()
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
             throw NodeServiceError.dataDirLocked
         }
