@@ -73,12 +73,39 @@ final class NodeStartupPolicyTests: XCTestCase {
     // MARK: - Failure outcome
 
     func testFailureOutcome_offlineWinsOverRetryable() {
-        XCTAssertEqual(NodeStartupPolicy.failureOutcome(isOffline: true, isRetryable: true), .offline)
-        XCTAssertEqual(NodeStartupPolicy.failureOutcome(isOffline: true, isRetryable: false), .offline)
+        for looksOffline in [true, false] {
+            for isRetryable in [true, false] {
+                XCTAssertEqual(
+                    NodeStartupPolicy.failureOutcome(
+                        isNetworkOffline: true,
+                        looksOffline: looksOffline,
+                        isRetryable: isRetryable
+                    ),
+                    .offline
+                )
+            }
+        }
     }
 
     func testFailureOutcome_onlineRetriesTransientAndFailsTheRest() {
-        XCTAssertEqual(NodeStartupPolicy.failureOutcome(isOffline: false, isRetryable: true), .retry)
-        XCTAssertEqual(NodeStartupPolicy.failureOutcome(isOffline: false, isRetryable: false), .fail)
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: false, isRetryable: true),
+            .retry
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: false, isRetryable: false),
+            .fail
+        )
+    }
+
+    func testFailureOutcome_onlineTransientBeatsOfflineLookingText() {
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: true, isRetryable: true),
+            .retry
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.failureOutcome(isNetworkOffline: false, looksOffline: true, isRetryable: false),
+            .offline
+        )
     }
 }

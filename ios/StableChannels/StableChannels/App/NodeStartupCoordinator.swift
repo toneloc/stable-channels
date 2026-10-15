@@ -34,7 +34,7 @@ final class NodeStartupCoordinator {
     @ObservationIgnored private var retryGeneration = 0
     @ObservationIgnored private var runningGeneration: Int?
     /// Set by background, cleared by foreground: a start that finishes while paused is stopped.
-    @ObservationIgnored private var isPaused = false
+    @ObservationIgnored private(set) var isPaused = false
     /// True while a fired retry is still running (probing providers or starting the node).
     var hasRetryRunning: Bool { runningRetry != nil }
     @ObservationIgnored private let sleep: (Duration) async throws -> Void
@@ -61,6 +61,8 @@ final class NodeStartupCoordinator {
         var lastError: Error?
 
         for (index, attempt) in attempts.enumerated() {
+            // A paused retry must not run further LDK starts while the app is suspended.
+            try Task.checkCancellation()
             if attempt.delayBefore > .zero {
                 try await sleep(attempt.delayBefore)
             }
@@ -111,8 +113,11 @@ final class NodeStartupCoordinator {
         log("NODE_START_RETRY_SCHEDULED", [
             "attempt": "\(retryAttempt)",
             "delay_s": "\(delay.components.seconds)",
-            "error": reason
+            "error": reason,
+            "armed": isPaused ? "false" : "true"
         ])
+        // A suspended app must not start the node; the attempt is counted and foreground arms it.
+        guard !isPaused else { return }
         let sleep = sleep
         retryGeneration &+= 1
         let generation = retryGeneration
@@ -133,7 +138,7 @@ final class NodeStartupCoordinator {
     /// Resumes a paused retry on foreground unless one is still running, so returning to the app
     /// never starts a second node-start attempt alongside the first.
     func resumeIfIdle(maxDelay: Duration, reason: String, run: RetryRun) {
-        isPaused = false
+        resume()
         guard runningRetry == nil else { return }
         scheduleRetry(maxDelay: maxDelay, reason: reason, run: run)
     }
@@ -148,6 +153,11 @@ final class NodeStartupCoordinator {
         // LDK's start can't be cancelled, so a retry paused mid-start may still bring the node up
         // in a suspended app; stop it so the NSE gets the wallet dir.
         if isPaused { run.stop() }
+    }
+
+    /// Back in foreground: a start that finishes from now on keeps its node.
+    func resume() {
+        isPaused = false
     }
 
     /// Stops a pending or running retry but keeps the backoff, so foreground can resume where it

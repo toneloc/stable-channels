@@ -1124,6 +1124,11 @@ class AppState {
             } catch is CancellationError {
                 // Background paused the retry mid-start; the backoff is kept and foreground resumes it.
                 AuditService.log("NODE_START_RETRY_PAUSED", data: [:])
+                // Foreground already came back: the retry it armed may have been turned away while
+                // this one was still running, so arm the next one here.
+                if !nodeStartup.isPaused {
+                    retryNodeStartLater(reason: "resumed after pause")
+                }
             } catch {
                 // .syncing here means a scheduled node-start retry (or the network monitor)
                 // is driving recovery from a failed launch, so failures route like .offline.
@@ -1150,11 +1155,15 @@ class AppState {
 
     /// Classifies a failed node start for `NodeStartupPolicy`.
     private func nodeStartFailureOutcome(for error: Error) -> NodeStartupPolicy.FailureOutcome {
-        let isOffline = !networkMonitor.isOnline || NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
-            error: error,
-            isNetworkOffline: !networkMonitor.isOnline
+        let isNetworkOffline = !networkMonitor.isOnline
+        return NodeStartupPolicy.failureOutcome(
+            isNetworkOffline: isNetworkOffline,
+            looksOffline: NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                error: error,
+                isNetworkOffline: isNetworkOffline
+            ),
+            isRetryable: error.isRetryableNodeStartError
         )
-        return NodeStartupPolicy.failureOutcome(isOffline: isOffline, isRetryable: error.isRetryableNodeStartError)
     }
 
     /// Keeps the syncing screen up and retries node start with backoff after a transient
@@ -1302,7 +1311,6 @@ class AppState {
     /// out from under such a flow.
     private var nodeFlowInProgress = false
     private var pendingOnlineRetry = false
-    /// Backoff state for retrying a node start that failed on a transient chain-source error.
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup = NodeStartupCoordinator()
 
@@ -1389,6 +1397,8 @@ class AppState {
 
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
+        // Every foreground ends the pause, whatever the phase, so a later start keeps its node.
+        nodeStartup.resume()
         if phase == .syncing, nodeStartup.isRetrying, !nodeService.isRunning {
             // Back in foreground: the pending background stop must not pause this retry again.
             cancelBackgroundStop()
