@@ -1291,4 +1291,187 @@ final class SendFlowModelTests: XCTestCase {
         // Pricing the floored 100_000 sats would under-reserve by one sat.
         XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 100_000, appState: AppState()), 1_050)
     }
+
+    // MARK: - Send preflight
+
+    private func preflightInput(
+        isOnline: Bool = true,
+        isFeeRateReady: Bool = true,
+        amountSats: UInt64 = 1_000,
+        totalDebitSats: UInt64 = 2_000,
+        availableSats: UInt64 = 10_000,
+        sendsAllFromOnchainWallet: Bool = false
+    ) -> SendPreflight.Input {
+        SendPreflight.Input(
+            isOnline: isOnline,
+            isFeeRateReady: isFeeRateReady,
+            amountSats: amountSats,
+            totalDebitSats: totalDebitSats,
+            availableSats: availableSats,
+            sendsAllFromOnchainWallet: sendsAllFromOnchainWallet
+        )
+    }
+
+    func testSendPreflight_offlineBlocksBeforeAnyOtherRule() {
+        let input = preflightInput(isOnline: false, isFeeRateReady: false, amountSats: 0)
+        XCTAssertEqual(SendPreflight.evaluate(input), .offline)
+    }
+
+    func testSendPreflight_feeRateNotReadyBlocks() {
+        XCTAssertEqual(SendPreflight.evaluate(preflightInput(isFeeRateReady: false)), .feeRateNotReady)
+    }
+
+    func testSendPreflight_zeroAmountIsInvalid() {
+        XCTAssertEqual(SendPreflight.evaluate(preflightInput(amountSats: 0, totalDebitSats: 0)), .invalidAmount)
+    }
+
+    func testSendPreflight_debitAboveBalanceOrEmptyBalanceBlocks() {
+        XCTAssertEqual(
+            SendPreflight.evaluate(preflightInput(totalDebitSats: 10_001)),
+            .exceedsBalance(availableSats: 10_000)
+        )
+        XCTAssertEqual(
+            SendPreflight.evaluate(preflightInput(totalDebitSats: 0, availableSats: 0)),
+            .exceedsBalance(availableSats: 0)
+        )
+    }
+
+    func testSendPreflight_debitEqualToBalanceProceeds() {
+        XCTAssertEqual(SendPreflight.evaluate(preflightInput(totalDebitSats: 10_000)), .proceed)
+    }
+
+    func testSendPreflight_onchainWalletSendAllSkipsAmountAndBalanceButNotConnectivity() {
+        let empty = preflightInput(amountSats: 0, totalDebitSats: 0, availableSats: 0, sendsAllFromOnchainWallet: true)
+        XCTAssertEqual(SendPreflight.evaluate(empty), .proceed)
+        let offline = preflightInput(isOnline: false, sendsAllFromOnchainWallet: true)
+        XCTAssertEqual(SendPreflight.evaluate(offline), .offline)
+        let noFee = preflightInput(isFeeRateReady: false, sendsAllFromOnchainWallet: true)
+        XCTAssertEqual(SendPreflight.evaluate(noFee), .feeRateNotReady)
+    }
+
+    // MARK: - In-flight guard and the shared send gate
+
+    private func enableTransactionAuth() {
+        UserDefaults.standard.set(true, forKey: Constants.transactionAuthEnabledKey)
+        addTeardownBlock { UserDefaults.standard.removeObject(forKey: Constants.transactionAuthEnabledKey) }
+    }
+
+    /// A 1000 sat on-chain send on the confirm step with a loaded fee rate.
+    private func makeOnchainSendModel() -> SendFlowModel {
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.amountUnit = .sats
+        model.amountInputText = "1000"
+        model.feeRateSatVb = 10
+        model.step = .confirm
+        return model
+    }
+
+    func testExecuteSend_marksSendInFlightBeforeAwaitingAuthentication() async {
+        enableTransactionAuth()
+        let appState = AppState()
+        appState.spendableOnchainSats = 100_000
+        let model = makeOnchainSendModel()
+        let probe = AuthProbe()
+        probe.model = model
+        appState.biometricAuth = probe
+        let initialToken = model.resetToken
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(probe.calls, 1)
+        XCTAssertEqual(probe.wasSendingDuringAuth, true, "the send must be in flight while authentication is awaited")
+        XCTAssertFalse(model.isSending)
+        XCTAssertEqual(model.errorMessage, SendFlowModel.authenticationRequiredMessage)
+        XCTAssertEqual(model.resetToken, initialToken + 1)
+    }
+
+    func testExecuteSend_secondSlideDuringAuthenticationIsIgnored() async {
+        enableTransactionAuth()
+        let appState = AppState()
+        appState.spendableOnchainSats = 100_000
+        let model = makeOnchainSendModel()
+        let probe = AuthProbe()
+        // The second slide arrives while the first send is still waiting on authentication.
+        probe.duringAuth = { await model.executeSend(appState: appState) }
+        appState.biometricAuth = probe
+        let initialToken = model.resetToken
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(probe.calls, 1, "the second slide must not reach authentication")
+        XCTAssertEqual(model.resetToken, initialToken + 1, "only the first send resets the slider")
+        XCTAssertFalse(model.isSending)
+    }
+
+    func testPerformSend_concurrentSendDispatchesOnce() async {
+        enableTransactionAuth()
+        let appState = AppState()
+        appState.spendableOnchainSats = 100_000
+        let model = makeOnchainSendModel()
+        let probe = AuthProbe()
+        probe.allows = true
+        appState.biometricAuth = probe
+        var dispatched: [UInt64] = []
+        probe.duringAuth = {
+            await model.performSend(appState: appState, authReason: "second") { dispatched.append($0) }
+        }
+
+        await model.performSend(appState: appState, authReason: "first") { dispatched.append($0) }
+
+        XCTAssertEqual(dispatched, [1_000])
+        XCTAssertEqual(probe.calls, 1)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.isSending)
+    }
+
+    func testPerformSend_onchainWalletSendAllRefusesOffline() async {
+        let appState = AppState()
+        appState.isOnline = false
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.destination = .onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
+        model.sendsAllFromOnchainWallet = true
+        model.feeRateSatVb = 10
+        let initialToken = model.resetToken
+        var dispatched = false
+
+        await model.performSend(appState: appState, authReason: "Confirm onchain withdrawal") { _ in dispatched = true }
+
+        XCTAssertFalse(dispatched, "an offline send-all must not reach the node")
+        XCTAssertTrue(model.errorMessage?.localizedCaseInsensitiveContains("offline") == true)
+        XCTAssertEqual(model.resetToken, initialToken + 1, "the slider resets exactly once")
+        XCTAssertFalse(model.isSending)
+    }
+
+    func testPerformSend_mapsDispatchErrorsThroughWalletMessages() async {
+        let appState = AppState()
+        appState.spendableOnchainSats = 100_000
+        let model = makeOnchainSendModel()
+        let error = NSError(domain: "Send", code: 9, userInfo: [NSLocalizedDescriptionKey: "boom"])
+
+        await model.performSend(appState: appState, authReason: "send") { _ in throw error }
+
+        XCTAssertEqual(model.errorMessage, WalletErrorMessages.operation(error, fallback: "boom"))
+        XCTAssertFalse(model.isSending)
+    }
+}
+
+/// Stands in for biometrics: counts prompts, records whether the send was in flight, runs an
+/// optional hook while the prompt is open, then answers with `allows`.
+@MainActor
+private final class AuthProbe: BiometricAuthenticating {
+    var allows = false
+    var model: SendFlowModel?
+    var duringAuth: (() async -> Void)?
+    private(set) var calls = 0
+    private(set) var wasSendingDuringAuth: Bool?
+
+    func authenticate(reason _: String, allowPasscodeFallback _: Bool) async throws -> Bool {
+        calls += 1
+        wasSendingDuringAuth = model?.isSending
+        await duringAuth?()
+        return allows
+    }
 }

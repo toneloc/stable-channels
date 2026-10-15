@@ -67,7 +67,7 @@ final class SendFlowModel {
 
     /// Base rate for the fee tiers: the loaded rate, or a placeholder until it loads.
     var baseFeeRateSatVb: Double {
-        feeRateSatVb ?? 10
+        feeRateSatVb ?? Constants.placeholderFeeRateSatVb
     }
 
     /// True when the fee rate has loaded or the selected tier does not need one.

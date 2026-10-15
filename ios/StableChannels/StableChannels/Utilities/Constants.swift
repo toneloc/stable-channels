@@ -28,6 +28,10 @@ enum Constants {
     /// Single fee-rate floor for the app: 1 sat/vB is the minimum relay rate, so lower rates would not propagate.
     static let minAllowedFeeRateSatVb: Double = 1.0
     static let maxAllowedFeeRateSatVb: Double = 10_000.0
+    /// Rate used for estimates before a real rate loads; sends are gated on a real rate.
+    static let placeholderFeeRateSatVb: Double = 10
+    /// UserDefaults key for the Payment Confirmation setting (authenticate before each send).
+    static let transactionAuthEnabledKey = "transactionAuthEnabled"
 
     // MARK: - Service Endpoints
 

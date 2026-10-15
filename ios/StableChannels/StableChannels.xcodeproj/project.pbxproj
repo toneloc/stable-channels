@@ -143,6 +143,7 @@
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
+		49C46D3F3080D63C005A2FF5 /* SendPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
 		49D13059527F63344795B77C /* HomeSavingsSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */; };
 		49D14393B7D122254E3EBBD4 /* HomeNotificationBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */; };
@@ -425,6 +426,7 @@
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
+		49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPreflight.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
 		49D2229F078D1812443B9072 /* ActionButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionButton.swift; sourceTree = "<group>"; };
 		49D27DDAAF62D43344798ADC /* HomeNotificationBannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeNotificationBannerView.swift; sourceTree = "<group>"; };
@@ -1016,6 +1018,7 @@
 				49206DF43073A8A200217838 /* SendAmountCalculator.swift */,
 				49D7BFE630794B280089BF1C /* SendChannelSpendPolicy.swift */,
 				4993591E30712DDF00D6B50E /* SendDestination.swift */,
+				49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */,
 				4910718B307CF186005314F1 /* SendSuccessStatus.swift */,
 			);
 			path = Send;
@@ -1489,6 +1492,7 @@
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
 				495CB3FF3017724E00560837 /* ReconnectionManager.swift in Sources */,
 				495CB4003017724E00560837 /* ProcessedTxStore.swift in Sources */,
+				49C46D3F3080D63C005A2FF5 /* SendPreflight.swift in Sources */,
 				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
 				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
 				498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */,

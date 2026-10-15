@@ -29,7 +29,7 @@ struct SendConfirmStepView: View {
                     if case .onchain = model.destination, !isSpliceOut {
                         NetworkFeeSelectorView(
                             selectedTier: $model.selectedFeeTier,
-                            baseFeeRateSatVb: model.feeRateSatVb ?? 10,
+                            baseFeeRateSatVb: model.baseFeeRateSatVb,
                             isSendAll: model.sendsEntireOnchainBalance(appState: appState),
                             btcPrice: appState.accountingBTCPrice,
                             showExplanation: false,

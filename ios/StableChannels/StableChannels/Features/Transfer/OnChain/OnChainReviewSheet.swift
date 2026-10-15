@@ -11,10 +11,6 @@ struct OnChainReviewSheet: View {
     @Bindable var model: SendFlowModel
     var onDone: () -> Void
 
-    @State private var isSending = false
-    @State private var reviewErrorMessage: String?
-    @State private var resetToken = 0
-
     var body: some View {
         Group {
             if model.step == .success {
@@ -27,6 +23,8 @@ struct OnChainReviewSheet: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .task {
+            // The model outlives the sheet, so each presentation starts without a previous attempt's error.
+            model.errorMessage = nil
             model.recommendedFees = await appState.feeRateService.recommendedFees()
         }
     }
@@ -83,7 +81,7 @@ struct OnChainReviewSheet: View {
                             btcPrice: appState.accountingBTCPrice
                         )
 
-                        if let error = reviewErrorMessage {
+                        if let error = model.errorMessage {
                             SendErrorBanner(message: error)
                         }
                     }
@@ -96,8 +94,8 @@ struct OnChainReviewSheet: View {
                 VStack(spacing: 4) {
                     SlideToSendButton(
                         title: String(localized: "button_slide_to_send", defaultValue: "Slide to Send"),
-                        isSending: isSending,
-                        resetToken: resetToken
+                        isSending: model.isSending,
+                        resetToken: model.resetToken
                     ) {
                         Task { await executeSend() }
                     }
@@ -116,7 +114,7 @@ struct OnChainReviewSheet: View {
                     Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
                         dismiss()
                     }
-                    .disabled(isSending)
+                    .disabled(model.isSending)
                 }
             }
         }
@@ -131,48 +129,8 @@ struct OnChainReviewSheet: View {
         )
 
         let sendAll = model.sendsAllFromOnchainWallet
-
-        guard model.isFeeRateReady else {
-            reviewErrorMessage = SendFlowModel.feeRateNotReadyMessage
-            resetToken += 1
-            return
-        }
-
-        guard !model.isInsufficientBalance(appState: appState) else {
-            reviewErrorMessage = "Amount plus estimated fee exceeds your balance."
-            resetToken += 1
-            return
-        }
-
-        let transactionAuth = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-        if transactionAuth {
-            let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
-            let authPassed = await appState.authenticate(reason: authReason)
-            guard authPassed else {
-                reviewErrorMessage = appState.authError ?? SendFlowModel.authenticationRequiredMessage
-                resetToken += 1
-                return
-            }
-        }
-
-        isSending = true
-        reviewErrorMessage = nil
-        defer {
-            isSending = false
-            resetToken += 1
-        }
-
-        let sats = model.sendAmountSats(appState: appState)
-        if !sendAll, sats == 0 {
-            reviewErrorMessage = String(
-                localized: "error_price_unavailable",
-                defaultValue: "The BTC price is unavailable or stale. Refresh and try again."
-            )
-            resetToken += 1
-            return
-        }
-
-        do {
+        let authReason = sendAll ? "Confirm onchain withdrawal" : "Confirm onchain send"
+        await model.performSend(appState: appState, authReason: authReason) { sats in
             let result: SendPaymentResult
             if sendAll {
                 result = try await SendPaymentExecutor.sendAllOnchain(
@@ -196,9 +154,6 @@ struct OnChainReviewSheet: View {
                 txid: result.txid,
                 isPending: result.txid == nil
             )
-        } catch {
-            reviewErrorMessage = error.localizedDescription
-            resetToken += 1
         }
     }
 }

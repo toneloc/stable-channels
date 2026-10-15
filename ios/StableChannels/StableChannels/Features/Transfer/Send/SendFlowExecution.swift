@@ -9,24 +9,6 @@ extension SendFlowModel {
             resetToken += 1
             return
         }
-        guard !isSending else { return }
-        errorMessage = nil
-
-        guard appState.isOnline else {
-            errorMessage = String(
-                localized: "error_offline_send",
-                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
-            )
-            resetToken += 1
-            return
-        }
-
-        // For onchain sends, block if fee rate has not loaded (non-standard tier)
-        if case .onchain = dest, !isFeeRateReady {
-            errorMessage = Self.feeRateNotReadyMessage
-            resetToken += 1
-            return
-        }
 
         switch dest {
         case .lightningAddress, .lnurlPay:
@@ -39,38 +21,8 @@ extension SendFlowModel {
             break
         }
 
-        let authReason = "Confirm payment to \(dest.displayTitle)"
-        let authEnabled = UserDefaults.standard.bool(forKey: "transactionAuthEnabled")
-        if authEnabled {
-            let passed = await appState.authenticate(reason: authReason)
-            guard passed else {
-                errorMessage = appState.authError ?? Self.authenticationRequiredMessage
-                resetToken += 1
-                return
-            }
-        }
-
-        isSending = true
-        defer {
-            isSending = false
-            resetToken += 1
-        }
-
-        appState.ensureLSPConnected()
-        let sats = sendAmountSats(appState: appState)
         let sendsAll = sendsEntireOnchainBalance(appState: appState)
-        guard sats > 0 else {
-            errorMessage = "Invalid amount."
-            return
-        }
-        let available = availableSpendableSats(appState: appState)
-        let totalDebit = PaymentFeeEstimator.saturatingAdd(sats, estimatedFeeSats(appState: appState))
-        guard totalDebit <= available, available > 0 else {
-            errorMessage = "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
-            return
-        }
-
-        do {
+        await performSend(appState: appState, authReason: "Confirm payment to \(dest.displayTitle)") { sats in
             let result: SendPaymentResult
             if sendsAll, case .onchain(let address, _) = dest {
                 result = try await SendPaymentExecutor.sendAllOnchain(
@@ -116,8 +68,70 @@ extension SendFlowModel {
                 )
                 applySettlement(outcome, sentSats: result.sentAmountSats, paymentId: pid)
             }
+        }
+    }
+
+    /// The single pre-dispatch gate for every send screen. The send is marked in flight before the
+    /// first await, so a second slide during authentication cannot dispatch twice. Runs the preflight
+    /// rules, transaction authentication, and the LSP reconnect, then hands the amount to `dispatch`.
+    /// Failures land in `errorMessage`; the slider resets once the attempt ends.
+    func performSend(
+        appState: AppState,
+        authReason: String,
+        dispatch: (_ amountSats: UInt64) async throws -> Void
+    ) async {
+        guard !isSending else { return }
+        isSending = true
+        errorMessage = nil
+        defer {
+            isSending = false
+            resetToken += 1
+        }
+
+        let sats = sendAmountSats(appState: appState)
+        let decision = SendPreflight.evaluate(SendPreflight.Input(
+            isOnline: appState.isOnline,
+            isFeeRateReady: isFeeRateReady,
+            amountSats: sats,
+            totalDebitSats: totalDebitSats(appState: appState),
+            availableSats: availableSpendableSats(appState: appState),
+            sendsAllFromOnchainWallet: sendsAllFromOnchainWallet
+        ))
+        if let message = Self.message(for: decision) {
+            errorMessage = message
+            return
+        }
+
+        if UserDefaults.standard.bool(forKey: Constants.transactionAuthEnabledKey) {
+            guard await appState.authenticate(reason: authReason) else {
+                errorMessage = appState.authError ?? Self.authenticationRequiredMessage
+                return
+            }
+        }
+
+        appState.ensureLSPConnected()
+        do {
+            try await dispatch(sats)
         } catch {
             errorMessage = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
+        }
+    }
+
+    private static func message(for decision: SendPreflight.Decision) -> String? {
+        switch decision {
+        case .proceed:
+            nil
+        case .offline:
+            String(
+                localized: "error_offline_send",
+                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
+            )
+        case .feeRateNotReady:
+            feeRateNotReadyMessage
+        case .invalidAmount:
+            "Invalid amount."
+        case .exceedsBalance(let available):
+            "Amount exceeds your balance. Available: \(available.btcSpacedFormatted) BTC"
         }
     }
 

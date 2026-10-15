@@ -39,7 +39,7 @@ class AppState {
 
     /// Injected biometric authenticator — defaults to `BiometricService.shared`.
     /// Depend on the `BiometricAuthenticating` protocol, not the concrete type (DI).
-    let biometricAuth: BiometricAuthenticating = BiometricService.shared
+    @ObservationIgnored var biometricAuth: BiometricAuthenticating = BiometricService.shared
 
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
