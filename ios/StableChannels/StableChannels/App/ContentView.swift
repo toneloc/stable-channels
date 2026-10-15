@@ -28,6 +28,7 @@ struct ContentView: View {
             case .loading, .onboarding, .syncing:
                 SyncingView(
                     isSyncComplete: appState.hasCompletedInitialSync,
+                    isRetrying: appState.nodeStartup.isRetrying,
                     onBalanced: {
                         withAnimation(.easeInOut(duration: 0.35)) {
                             appState.phase = .wallet
@@ -185,6 +186,7 @@ struct ContentView: View {
 
 struct SyncingView: View {
     var isSyncComplete: Bool = false
+    var isRetrying: Bool = false
     var onBalanced: (() -> Void)?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -237,7 +239,12 @@ struct SyncingView: View {
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 
-                        Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
+                        Text(isRetrying
+                            ? String(
+                                localized: "status_network_retrying",
+                                defaultValue: "Network unstable. Retrying wallet sync..."
+                            )
+                            : String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
