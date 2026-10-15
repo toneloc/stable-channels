@@ -69,7 +69,7 @@ checksum = "f47983a1084940ba9a39c077a8c63e55c619388be5476ac04c804cfbd1e63459"
 dependencies = [
  "accesskit",
  "hashbrown 0.15.5",
- "immutable-chunkmap",sh
+ "immutable-chunkmap",
 ]
 
 [[package]]
