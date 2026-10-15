@@ -555,6 +555,120 @@ async fn test_jit_onboarding() {
 }
 
 // ==================================================================
+// Test 4b: Third-party payer settles a fixed-amount JIT invoice
+// ==================================================================
+
+/// Feasibility proof for stablecoin onboarding (#391): a swap exchange only ever pays the
+/// user's fixed-amount LSPS2 JIT bolt11 from its own node. Same invoice call the Android app
+/// makes when it has no channel; the payer is an unrelated node with a channel to the LSP.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires bitcoind + electrs (run with --ignored)"]
+async fn test_third_party_pays_fixed_jit_invoice() {
+    let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+    let lsp_node = setup_lsp_node(&electrsd);
+    let lsp_pubkey = lsp_node.node_id();
+    let lsp_addr = lsp_node
+        .listening_addresses()
+        .unwrap()
+        .first()
+        .unwrap()
+        .clone();
+    let user_node = setup_user_node(&electrsd, lsp_pubkey, lsp_addr);
+    let payer_node = setup_node(&electrsd, "exchange", true);
+
+    let addr_lsp = lsp_node.onchain_payment().new_address().unwrap();
+    let addr_payer = payer_node.onchain_payment().new_address().unwrap();
+    premine_and_distribute_funds(
+        &bitcoind.client,
+        &electrsd.client,
+        vec![addr_lsp, addr_payer],
+        Amount::from_sat(2_125_000),
+    )
+    .await;
+    lsp_node.sync_wallets().unwrap();
+    payer_node.sync_wallets().unwrap();
+
+    open_channel_and_confirm(
+        &payer_node,
+        &lsp_node,
+        2_000_000,
+        Some(1_000_000_000),
+        &bitcoind.client,
+        &electrsd,
+    )
+    .await;
+
+    // Fixed amount + 1h expiry, as Android's NodeService.receiveViaJitChannel.
+    let amount_msat = 300_000 * 1000;
+    let description = ldk_node::lightning_invoice::Bolt11InvoiceDescription::Direct(
+        ldk_node::lightning_invoice::Description::new("Stablecoin onboarding".to_string()).unwrap(),
+    );
+    let invoice = user_node
+        .bolt11_payment()
+        .receive_via_jit_channel(amount_msat, &description, 3600, None)
+        .expect("user failed to create fixed-amount JIT invoice");
+    assert_eq!(invoice.amount_milli_satoshis(), Some(amount_msat));
+    assert_eq!(invoice.recover_payee_pub_key(), user_node.node_id());
+
+    // The exchange pays the bolt11 as-is: no amount override, no knowledge of LSPS2.
+    payer_node
+        .bolt11_payment()
+        .send(&invoice, None)
+        .expect("payer failed to pay JIT invoice");
+    expect_payment_successful_event!(payer_node);
+
+    // ChannelPending / ChannelReady / PaymentReceived order is not guaranteed; drain until both seen.
+    let mut received_msat = None;
+    let mut channel_ready = false;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while (received_msat.is_none() || !channel_ready) && std::time::Instant::now() < deadline {
+        let event = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            user_node.next_event_async(),
+        )
+        .await
+        {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        println!("[event] User: {:?}", event);
+        match event {
+            ldk_node::Event::PaymentReceived {
+                payment_hash,
+                amount_msat,
+                ..
+            } => {
+                assert_eq!(payment_hash, invoice.payment_hash());
+                received_msat = Some(amount_msat);
+            }
+            ldk_node::Event::ChannelReady {
+                counterparty_node_id,
+                ..
+            } => {
+                assert_eq!(counterparty_node_id, Some(lsp_pubkey));
+                channel_ready = true;
+            }
+            _ => {}
+        }
+        user_node.event_handled().unwrap();
+    }
+    assert!(channel_ready, "user JIT channel should be ready");
+    let received_msat = received_msat.expect("user should receive the third-party payment");
+    // The LSP may skim its opening fee (0 ppm in setup_lsp_node), never more than the amount.
+    assert!(received_msat > 0 && received_msat <= amount_msat);
+
+    let user_channels = user_node.list_channels();
+    assert_eq!(user_channels.len(), 1);
+    assert!(user_channels[0].is_channel_ready);
+    assert_eq!(user_channels[0].counterparty_node_id, lsp_pubkey);
+
+    user_node.stop().unwrap();
+    lsp_node.stop().unwrap();
+    payer_node.stop().unwrap();
+}
+
+// ==================================================================
 // Test 5: Outgoing payment from stabilized channel
 // ==================================================================
 

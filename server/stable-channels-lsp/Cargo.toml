@@ -42,6 +42,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # HMAC + TLS
 bitcoin_hashes   = "0.14"
+# Keccak-256 for EIP-55 refund-address checksums (onboarding swaps).
+sha3             = "0.10"
 # NOTE: ldk-server-client pulls in rustls 0.21; we only declare tokio-rustls
 # here (which bundles rustls 0.23 via the post-0.26 API) and rely on Cargo
 # to unify. Do NOT add a direct `rustls` dep to avoid the 0.21/0.23 split.

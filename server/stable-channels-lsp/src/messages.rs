@@ -1,4 +1,5 @@
-//! TRADE_V1 / SYNC_V1 / RegisterPush signed-message codec over custom TLV 13377331.
+//! TRADE_V1 / SYNC_V1 / RegisterPush signed-message codec over custom TLV 13377331, plus the
+//! ONBOARDING_SWAP_V1 signed HTTP body.
 
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +44,24 @@ pub struct RegisterPushSigned {
     pub token: String,
     pub ts: u64,
 }
+
+/// Onboarding-swap signed body (create / status / refund). One struct for all three: `action`
+/// separates them so a signature for one cannot be replayed as another. Fields an action does
+/// not use are "". Field declaration order IS the canonical order the wallet must reproduce.
+/// `payment_hash` (not the bolt11) is signed; create checks it against the parsed invoice.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingSwapSigned {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub action: String,
+    pub node_id: String,
+    pub payment_hash: String,
+    pub pay_in_asset: String,
+    pub refund_address: String,
+    pub ts: u64,
+}
+
+pub const ONBOARDING_SWAP_MESSAGE_TYPE: &str = "ONBOARDING_SWAP_V1";
 
 /// Build the SYNC_V1 payload string (the exact bytes the daemon signs and ships).
 pub fn build_sync_payload(
@@ -152,6 +171,27 @@ pub fn register_push_signed_bytes(node_id: &str, token: &str, ts: u64) -> Vec<u8
     .unwrap_or_default()
 }
 
+/// Canonical ONBOARDING_SWAP_V1 signed bytes. Must match the wallet's serialization exactly.
+pub fn onboarding_swap_signed_bytes(
+    action: &str,
+    node_id: &str,
+    payment_hash: &str,
+    pay_in_asset: &str,
+    refund_address: &str,
+    ts: u64,
+) -> Vec<u8> {
+    serde_json::to_vec(&OnboardingSwapSigned {
+        kind: ONBOARDING_SWAP_MESSAGE_TYPE.to_string(),
+        action: action.to_string(),
+        node_id: node_id.to_string(),
+        payment_hash: payment_hash.to_string(),
+        pay_in_asset: pay_in_asset.to_string(),
+        refund_address: refund_address.to_string(),
+        ts,
+    })
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +275,17 @@ mod tests {
         assert_eq!(String::from_utf8(a.clone()).unwrap(), expected);
         let b = register_push_signed_bytes("nodehex", "tok:en", 1717000000);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn onboarding_swap_bytes_are_canonical() {
+        // Android's OnboardingSwapService must produce these exact bytes.
+        let bytes =
+            onboarding_swap_signed_bytes("create", "02ab", "ff00", "USDT_TRON", "", 1717000000);
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            r#"{"type":"ONBOARDING_SWAP_V1","action":"create","node_id":"02ab","payment_hash":"ff00","pay_in_asset":"USDT_TRON","refund_address":"","ts":1717000000}"#
+        );
     }
 
     #[test]
