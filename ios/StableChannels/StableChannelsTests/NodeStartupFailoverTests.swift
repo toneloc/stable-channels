@@ -39,6 +39,22 @@ final class NodeStartupFailoverTests: XCTestCase {
         }
     }
 
+    /// The reported failure: an online fee-rate timeout whose text says "timed out" must retry,
+    /// not land on the offline page.
+    func testOnlineFeeRateTimeout_retriesDespiteTimedOutText() {
+        let error = NodeError.FeerateEstimationUpdateTimeout(message: "Connection timed out")
+        let outcome = NodeStartupPolicy.failureOutcome(
+            isNetworkOffline: false,
+            looksOffline: NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                error: error,
+                isNetworkOffline: false
+            ),
+            isRetryable: error.isRetryableNodeStartError
+        )
+
+        XCTAssertEqual(outcome, .retry)
+    }
+
     func testBridgedErrorsCarryingCaseNameTextAreNotRetryable() {
         // Only typed NodeError cases qualify. A foreign error whose description happens to
         // contain the case name must not trigger a provider retry.
