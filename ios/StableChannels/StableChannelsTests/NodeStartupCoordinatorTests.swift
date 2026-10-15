@@ -124,7 +124,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     func testSuccessfulStart_resetsRetryBackoff() async throws {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .seconds(60)) })
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") {}
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
         XCTAssertTrue(coordinator.isRetrying)
 
         _ = try await start(coordinator, results: [nil])
@@ -135,34 +135,80 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     // MARK: - Retry scheduling
 
-    func testScheduleRetry_waitsPolicyDelayThenRuns() async {
-        let coordinator = makeCoordinator()
-        let ran = expectation(description: "retry ran")
+    /// A retry run with fakes: `shouldRun` gates it, `probe` returns `url` after `probe` runs.
+    private func run(
+        shouldRun: @escaping @MainActor () -> Bool = { true },
+        probe: @escaping @MainActor () async -> Void = {},
+        start: @escaping @MainActor (String) async -> Void = { _ in }
+    ) -> NodeStartupCoordinator.RetryRun {
+        NodeStartupCoordinator.RetryRun(
+            shouldRun: shouldRun,
+            probe: {
+                await probe()
+                return self.fallback
+            },
+            start: start
+        )
+    }
 
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") { ran.fulfill() }
-        await fulfillment(of: [ran], timeout: 1)
+    private func waitUntilIdle(_ coordinator: NodeStartupCoordinator) async {
+        // The running handle is cleared just after the run returns.
+        for _ in 0 ..< 100 where coordinator.hasRetryRunning {
+            await Task.yield()
+        }
+    }
+
+    func testScheduleRetry_waitsPolicyDelayThenProbesAndStarts() async {
+        let coordinator = makeCoordinator()
+        let started = expectation(description: "node started")
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { url in
+            self.startedURLs.append(url)
+            started.fulfill()
+        }))
+        await fulfillment(of: [started], timeout: 1)
 
         XCTAssertEqual(sleeps, [.seconds(1)])
+        XCTAssertEqual(startedURLs, [fallback])
         XCTAssertEqual(coordinator.retryAttempt, 1)
         XCTAssertEqual(eventNames(), ["NODE_START_RETRY_SCHEDULED"])
         XCTAssertEqual(events[0].data["attempt"] as? String, "1")
         XCTAssertEqual(events[0].data["delay_s"] as? String, "1")
     }
 
+    func testScheduleRetry_gateCanStopTheRunBeforeProbing() async {
+        let coordinator = makeCoordinator()
+        var probed = false
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
+            shouldRun: { false },
+            probe: { probed = true }
+        ))
+        for _ in 0 ..< 100 where sleeps.isEmpty {
+            await Task.yield()
+        }
+        await waitUntilIdle(coordinator)
+
+        XCTAssertFalse(probed)
+        XCTAssertFalse(coordinator.hasRetryRunning)
+    }
+
     func testScheduleRetry_failureInsideRetryBacksOffFurther() async {
         let coordinator = makeCoordinator()
-        let second = expectation(description: "second retry ran")
+        let second = expectation(description: "second retry started")
         var runs = 0
 
-        func retry() {
-            runs += 1
-            if runs == 1 {
-                coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall again") { retry() }
-            } else {
-                second.fulfill()
-            }
+        func retryRun() -> NodeStartupCoordinator.RetryRun {
+            run(start: { _ in
+                runs += 1
+                if runs == 1 {
+                    coordinator.scheduleRetry(maxDelay: self.maxDelay, reason: "stall again", run: retryRun())
+                } else {
+                    second.fulfill()
+                }
+            })
         }
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") { retry() }
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: retryRun())
         await fulfillment(of: [second], timeout: 1)
 
         XCTAssertEqual(sleeps, [.seconds(1), .seconds(2)])
@@ -172,8 +218,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     func testScheduleRetry_pendingRetryIsNotDuplicated() {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .seconds(60)) })
 
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") {}
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") {}
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
 
         XCTAssertEqual(coordinator.retryAttempt, 1)
         XCTAssertEqual(eventNames(), ["NODE_START_RETRY_SCHEDULED"])
@@ -182,11 +228,11 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     func testPause_keepsBackoffAndReset_clearsIt() {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .seconds(60)) })
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") {}
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
 
         coordinator.pause()
         XCTAssertTrue(coordinator.isRetrying)
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "resumed") {}
+        coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed", run: run())
         XCTAssertEqual(coordinator.retryAttempt, 2)
 
         coordinator.reset()
@@ -194,14 +240,87 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isRetrying)
     }
 
+    func testPauseDuringProbe_neverStartsTheNode() async {
+        let coordinator = makeCoordinator()
+        let probing = expectation(description: "probe started")
+        let probeEnded = expectation(description: "probe ended")
+        var started = false
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
+            probe: {
+                probing.fulfill()
+                // Stands in for the provider probe; cancellation cuts it short.
+                try? await Task.sleep(for: .seconds(5))
+                probeEnded.fulfill()
+            },
+            start: { _ in started = true }
+        ))
+        await fulfillment(of: [probing], timeout: 1)
+        XCTAssertTrue(coordinator.hasRetryRunning)
+
+        coordinator.pause()
+        await fulfillment(of: [probeEnded], timeout: 1)
+        await waitUntilIdle(coordinator)
+
+        XCTAssertFalse(started, "A retry paused mid-probe must not start the node")
+        XCTAssertFalse(coordinator.hasRetryRunning)
+        XCTAssertTrue(coordinator.isRetrying, "Pause keeps the backoff for foreground to resume")
+    }
+
+    func testResumeIfIdle_doesNotScheduleWhileARetryIsRunning() async {
+        let coordinator = makeCoordinator()
+        let probing = expectation(description: "probe started")
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(
+            probe: {
+                probing.fulfill()
+                try? await Task.sleep(for: .seconds(5))
+            }
+        ))
+        await fulfillment(of: [probing], timeout: 1)
+
+        coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed on foreground", run: run())
+
+        XCTAssertEqual(coordinator.retryAttempt, 1)
+        XCTAssertEqual(eventNames(), ["NODE_START_RETRY_SCHEDULED"])
+        coordinator.reset()
+    }
+
+    func testRunningRetry_isClearedWhenItFinishes() async {
+        let coordinator = makeCoordinator()
+        let started = expectation(description: "node started")
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in started.fulfill() }))
+        await fulfillment(of: [started], timeout: 1)
+        await waitUntilIdle(coordinator)
+
+        XCTAssertFalse(coordinator.hasRetryRunning)
+    }
+
     func testCancelledRetry_doesNotRun() async throws {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .milliseconds(50)) })
-        var ran = false
+        var started = false
 
-        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall") { ran = true }
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in started = true }))
         coordinator.reset()
         try await Task.sleep(for: .milliseconds(150))
 
-        XCTAssertFalse(ran)
+        XCTAssertFalse(started)
+    }
+
+    // MARK: - App wiring
+
+    func testForegroundWhileRetrying_disarmsTheBackgroundStop() async {
+        let appState = AppState()
+        appState.phase = .syncing
+        appState.nodeStartup.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(shouldRun: { false }))
+        appState.stopNodeForBackground()
+        XCTAssertTrue(appState.hasPendingBackgroundStop)
+
+        await appState.restartNodeFromForeground()
+
+        XCTAssertFalse(appState.hasPendingBackgroundStop, "Foreground must disarm the pending background stop")
+        XCTAssertTrue(appState.nodeStartup.isRetrying)
+        appState.nodeStartup.reset()
     }
 }
