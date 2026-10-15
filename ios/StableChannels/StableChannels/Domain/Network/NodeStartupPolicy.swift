@@ -37,10 +37,12 @@ enum NodeStartupPolicy {
         return min(.seconds(1 << exponent), maxDelay)
     }
 
-    /// Offline wins, so the user sees the offline page instead of retries that cannot succeed;
-    /// otherwise transient chain-source failures retry and everything else is surfaced.
-    static func failureOutcome(isOffline: Bool, isRetryable: Bool) -> FailureOutcome {
-        if isOffline { return .offline }
-        return isRetryable ? .retry : .fail
+    /// No network wins, so the user sees the offline page instead of retries that cannot succeed.
+    /// Online, a transient chain-source failure retries even when its text looks like a network
+    /// drop ("timed out"); other offline-looking errors go offline and the rest are surfaced.
+    static func failureOutcome(isNetworkOffline: Bool, looksOffline: Bool, isRetryable: Bool) -> FailureOutcome {
+        if isNetworkOffline { return .offline }
+        if isRetryable { return .retry }
+        return looksOffline ? .offline : .fail
     }
 }

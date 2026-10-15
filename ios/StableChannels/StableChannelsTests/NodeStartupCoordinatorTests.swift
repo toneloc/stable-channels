@@ -349,6 +349,46 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isRetrying)
     }
 
+    func testScheduleWhilePaused_countsTheAttemptAndForegroundArmsIt() async {
+        let coordinator = makeCoordinator()
+        let started = expectation(description: "node started")
+        var startedWhilePaused = false
+
+        coordinator.pause()
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in
+            startedWhilePaused = true
+        }))
+        for _ in 0 ..< 20 {
+            await Task.yield()
+        }
+        XCTAssertFalse(startedWhilePaused, "A suspended app must not start the node")
+        XCTAssertTrue(sleeps.isEmpty)
+        XCTAssertTrue(coordinator.isRetrying, "The attempt is kept for foreground")
+
+        coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed on foreground", run: run(start: { _ in
+            started.fulfill()
+        }))
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertEqual(coordinator.retryAttempt, 2)
+    }
+
+    func testCancelledStart_runsNoFurtherAttempts() async {
+        let coordinator = makeCoordinator()
+        let task = Task { () -> Error? in
+            do {
+                _ = try await self.start(coordinator, results: [nil])
+                return nil
+            } catch {
+                return error
+            }
+        }
+        task.cancel()
+        let error = await task.value
+
+        XCTAssertTrue(error is CancellationError)
+        XCTAssertTrue(startedURLs.isEmpty)
+    }
+
     func testCancelledRetry_doesNotRun() async throws {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .milliseconds(50)) })
         var started = false
@@ -361,6 +401,16 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     }
 
     // MARK: - App wiring
+
+    func testForegroundInAnyPhase_endsThePause() async {
+        let appState = AppState()
+        appState.phase = .offline
+        appState.nodeStartup.pause()
+
+        await appState.restartNodeFromForeground()
+
+        XCTAssertFalse(appState.nodeStartup.isPaused, "A later retry must keep its node in foreground")
+    }
 
     func testForegroundWhileRetrying_disarmsTheBackgroundStop() async {
         let appState = AppState()
