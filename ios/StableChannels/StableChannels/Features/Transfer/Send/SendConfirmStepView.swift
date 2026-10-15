@@ -93,9 +93,7 @@ struct SendConfirmStepView: View {
             )
         }
         .task {
-            let rec = await appState.feeRateService.recommendedFees()
-            model.recommendedFees = rec
-            model.feeRateSatVb = Double(rec.halfHourFee)
+            await model.applyRecommendedFees(appState.feeRateService.recommendedFees(), appState: appState)
         }
     }
 

@@ -438,7 +438,7 @@ final class SendFlowModelTests: XCTestCase {
 
     /// A ready channel with the given outbound balance. Mirrors the
     /// fixture in StabilityServiceTests; only the fields the send flow reads are meaningful.
-    private func readyChannel(outboundSats: UInt64) -> ChannelDetails {
+    private func readyChannel(outboundSats: UInt64, id: String = "send-flow-test-chan") -> ChannelDetails {
         ChannelDetails(
             channelId: "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             counterpartyNodeId: "020202020202020202020202020202020202020202020202020202020202020202",
@@ -449,7 +449,7 @@ final class SendFlowModelTests: XCTestCase {
             inboundScidAlias: nil,
             channelValueSats: outboundSats + 100_000,
             unspendablePunishmentReserve: 1_000,
-            userChannelId: "send-flow-test-chan",
+            userChannelId: id,
             feerateSatPer1000Weight: 253,
             outboundCapacityMsat: outboundSats * 1_000,
             inboundCapacityMsat: 100_000_000,
@@ -850,6 +850,58 @@ final class SendFlowModelTests: XCTestCase {
         } catch {
             XCTAssertEqual(error.localizedDescription, "A splice is already in progress")
         }
+    }
+
+    func testSendOnchain_spliceOutPicksTheChannelThatCoversAmountPlusFee() async throws {
+        let (appState, _) = try makeAppStateWithDatabase()
+        let amount: UInt64 = 40000
+        let fee = PaymentFeeEstimator.estimateSpliceOutFee(feeRateSatVb: 5)
+        // The smaller channel covers the amount but is one sat short of amount + fee.
+        appState.nodeService.channelsOverride = [
+            readyChannel(outboundSats: amount + fee - 1, id: "short"),
+            readyChannel(outboundSats: amount + fee + 10000, id: "large")
+        ]
+        var splicedChannels: [String] = []
+        appState.nodeService.spliceOutOverride = { userChannelId, _, _, _ in
+            splicedChannels.append(userChannelId)
+        }
+
+        let result = try await SendPaymentExecutor.sendOnchain(
+            address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            effectiveSats: amount,
+            price: 0,
+            feeRateSatVb: 5,
+            appState: appState
+        )
+
+        XCTAssertEqual(splicedChannels, ["large"], "The executor must reserve the splice fee when picking a channel")
+        XCTAssertEqual(result.outcome, .spliceOut)
+    }
+
+    func testApplyRecommendedFees_setsBaseRateAndRefreshesMaxText() {
+        let appState = AppState()
+        appState.spendableOnchainSats = 100_000
+        let model = SendFlowModel()
+        model.inputText = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        model.onInputChanged()
+        model.amountUnit = .sats
+        model.applyPercentage(100, totalBalanceSats: 100_000, btcPrice: 0, appState: appState)
+        let placeholderText = model.amountInputText
+        let fees = RecommendedFees(fastestFee: 3, halfHourFee: 2, hourFee: 1, minimumFee: 1)
+
+        model.applyRecommendedFees(fees, appState: appState)
+
+        XCTAssertEqual(model.recommendedFees, fees)
+        XCTAssertEqual(model.feeRateSatVb, 2)
+        XCTAssertNotEqual(model.amountInputText, placeholderText, "Max must be re-derived at the real rate")
+        XCTAssertEqual(
+            model.amountInputText,
+            SendAmountCalculator.formatSatsForUnit(
+                model.calculateMaxSendableSats(appState: appState),
+                unit: .sats,
+                btcPrice: 0
+            )
+        )
     }
 
     func testLnurlParams_cachesDownsampledPayeeAvatar() throws {

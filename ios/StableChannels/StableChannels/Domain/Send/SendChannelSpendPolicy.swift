@@ -50,7 +50,8 @@ enum SendChannelSpendPolicy {
 
     /// Selects the best ready channel capable of funding an on-chain splice-out of `requiredSats` (including fee).
     /// Chooses the smallest channel that has sufficient outbound capacity (best fit), or falls back to the largest.
-    static func selectSpliceChannel(
+    /// Private so callers go through the fee-inclusive overload and cannot drop the fee.
+    private static func selectSpliceChannel(
         channels: [ChannelDetails],
         requiredSats: UInt64
     ) -> ChannelDetails? {

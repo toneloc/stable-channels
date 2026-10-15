@@ -466,6 +466,11 @@ class NodeService: NodeServiceProtocol {
         address: String,
         amountSats: UInt64
     ) throws {
+        #if DEBUG
+            if let spliceOutOverride {
+                return try spliceOutOverride(userChannelId, counterpartyNodeId, address, amountSats)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
         try node.spliceOut(
             userChannelId: userChannelId,
@@ -569,6 +574,7 @@ class NodeService: NodeServiceProtocol {
         var lightningSyncAgeSecsOverride: UInt64?
         var sendStabilityPaymentOverride: ((UInt64, PublicKey, [CustomTlvRecord]) throws -> PaymentId)?
         var signMessageOverride: (([UInt8]) throws -> String)?
+        var spliceOutOverride: ((UserChannelId, PublicKey, String, UInt64) throws -> Void)?
     #endif
 
     /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the

@@ -25,7 +25,7 @@ enum Constants {
     static let feeRateBlockstreamURL = primaryChainURL
     static let feeRateMempoolURL = "https://mempool.space"
 
-    /// Single fee-rate floor for the app: the node sends whole sat/vB, so anything below 1 cannot be broadcast.
+    /// Single fee-rate floor for the app: 1 sat/vB is the minimum relay rate, so lower rates would not propagate.
     static let minAllowedFeeRateSatVb: Double = 1.0
     static let maxAllowedFeeRateSatVb: Double = 10_000.0
 

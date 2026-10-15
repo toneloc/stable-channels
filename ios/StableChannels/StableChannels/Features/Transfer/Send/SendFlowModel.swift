@@ -431,6 +431,14 @@ final class SendFlowModel {
     }
 
     /// Rewrites the amount field to the current Max amount (after a fee tier or rate change).
+    /// Applies fetched recommended fees: the selector's tiers and the base rate (the half-hour
+    /// tier), then refreshes a Max amount so its text reflects the real rate, not the placeholder.
+    func applyRecommendedFees(_ fees: RecommendedFees, appState: AppState) {
+        recommendedFees = fees
+        feeRateSatVb = Double(fees.halfHourFee)
+        refreshMaxAmountText(appState: appState)
+    }
+
     func refreshMaxAmountText(appState: AppState) {
         guard isMaxAmount else { return }
         amountInputText = SendAmountCalculator.formatSatsForUnit(

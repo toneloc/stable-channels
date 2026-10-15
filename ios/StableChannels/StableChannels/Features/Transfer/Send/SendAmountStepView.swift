@@ -44,9 +44,7 @@ struct SendAmountStepView: View {
         }
         .task {
             guard case .onchain = model.destination, model.feeRateSatVb == nil else { return }
-            let rec = await appState.feeRateService.recommendedFees()
-            model.recommendedFees = rec
-            model.feeRateSatVb = Double(rec.halfHourFee)
+            await model.applyRecommendedFees(appState.feeRateService.recommendedFees(), appState: appState)
         }
     }
 

@@ -109,7 +109,8 @@ final class SendChannelSpendPolicyTests: XCTestCase {
         // Required 40,000 sats: chMedium fits and is closer than chLarge
         let selected = SendChannelSpendPolicy.selectSpliceChannel(
             channels: [chSmall, chLarge, chMedium],
-            requiredSats: 40_000
+            amountSats: 40_000,
+            feeRateSatVb: 0
         )
 
         XCTAssertEqual(selected?.userChannelId, "medium")
@@ -121,7 +122,8 @@ final class SendChannelSpendPolicyTests: XCTestCase {
 
         let selected = SendChannelSpendPolicy.selectSpliceChannel(
             channels: [chUnready, chReady],
-            requiredSats: 25_000
+            amountSats: 25_000,
+            feeRateSatVb: 0
         )
 
         XCTAssertEqual(selected?.userChannelId, "ready")
@@ -133,7 +135,8 @@ final class SendChannelSpendPolicyTests: XCTestCase {
 
         let selected = SendChannelSpendPolicy.selectSpliceChannel(
             channels: [ch1, ch2],
-            requiredSats: 50_000
+            amountSats: 50_000,
+            feeRateSatVb: 0
         )
 
         XCTAssertEqual(selected?.userChannelId, "ch2")
@@ -146,7 +149,8 @@ final class SendChannelSpendPolicyTests: XCTestCase {
 
         let selected = SendChannelSpendPolicy.selectSpliceChannel(
             channels: [small, large, exact],
-            requiredSats: 40000
+            amountSats: 40000,
+            feeRateSatVb: 0
         )
 
         XCTAssertEqual(selected?.userChannelId, "exact")
