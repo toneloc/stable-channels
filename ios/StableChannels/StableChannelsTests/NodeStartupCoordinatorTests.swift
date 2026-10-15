@@ -402,6 +402,32 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     // MARK: - App wiring
 
+    /// A recovered start reloads the books the NSE wrote while the app was suspended, so
+    /// stability work never resumes on the launch-time snapshot.
+    func testReloadAfterSuspend_picksUpBooksTheNSEWrote() throws {
+        let dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataDir) }
+        let appState = AppState()
+        let db = try DatabaseService(dataDir: dataDir)
+        appState.databaseService = db
+        appState.stableChannel.userChannelId = "user-channel"
+        appState.stableChannel.expectedUSD = USD(amount: 100)
+
+        // The NSE settles a stability payment while the app is suspended.
+        try db.channelRepo.saveChannel(
+            channelId: "channel",
+            userChannelId: "user-channel",
+            expectedUSD: 150,
+            backingSats: 150_000,
+            note: nil
+        )
+        appState.reloadStateWrittenWhileSuspended()
+
+        XCTAssertEqual(appState.stableChannel.expectedUSD.amount, 150)
+        XCTAssertEqual(appState.stableChannel.backingSats, 150_000)
+    }
+
     func testForegroundInAnyPhase_endsThePause() async {
         let appState = AppState()
         appState.phase = .offline

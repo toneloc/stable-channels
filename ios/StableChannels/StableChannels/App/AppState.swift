@@ -1119,6 +1119,9 @@ class AppState {
                     UserDefaults(suiteName: Constants.appGroupIdentifier)?
                         .set(nodeId, forKey: "node_id")
                 }
+                // The NSE may have written the wallet DB while this start waited; reload it now
+                // that this process holds the lock, before stability work resumes.
+                reloadStateWrittenWhileSuspended()
                 await synchronizeActiveWalletState()
                 await resumeAfterNodeStart()
             } catch is CancellationError {
@@ -1413,13 +1416,7 @@ class AppState {
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
         cancelBackgroundStop()
-        loadChannelFromDB()
-        // Payments received while backgrounded are recorded by the NSE, not the foreground
-        // event loop — so refresh the banner from the newest DB row instead of leaving it stale.
-        refreshLatestPaymentStatus()
-        // Same story for trade results: the NSE writes accepted/rejected to SQLite while
-        // we're backgrounded, so pull any terminal outcomes into the in-memory map.
-        refreshAllTradeOutcomes()
+        reloadStateWrittenWhileSuspended()
         if nodeService.isRunning {
             // Node never stopped, so gossip was never extracted — do NOT touch
             // ldk_node_data.sqlite while LDK has it open (a stale
@@ -4253,6 +4250,15 @@ class AppState {
         } catch {
             AuditService.log("DB_SAVE_CHANNEL_FAILED", data: ["error": error.localizedDescription])
         }
+    }
+
+    /// Pulls in what the NSE wrote to SQLite while the app was suspended, before stability work
+    /// resumes: the channel books, the newest received payment for the banner, and terminal
+    /// trade outcomes (the NSE records accepted/rejected, not the foreground event loop).
+    func reloadStateWrittenWhileSuspended() {
+        loadChannelFromDB()
+        refreshLatestPaymentStatus()
+        refreshAllTradeOutcomes()
     }
 
     @discardableResult
