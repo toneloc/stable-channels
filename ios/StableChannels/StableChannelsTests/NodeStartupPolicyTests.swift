@@ -108,4 +108,11 @@ final class NodeStartupPolicyTests: XCTestCase {
             .offline
         )
     }
+
+    func testHasRetriesLeft_stopsAtTheBudget() {
+        XCTAssertTrue(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 0, maxRetries: 6))
+        XCTAssertTrue(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 5, maxRetries: 6))
+        XCTAssertFalse(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 6, maxRetries: 6))
+        XCTAssertFalse(NodeStartupPolicy.hasRetriesLeft(retryAttempt: 0, maxRetries: 0))
+    }
 }
