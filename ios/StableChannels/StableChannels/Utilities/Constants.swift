@@ -28,6 +28,15 @@ enum Constants {
         }
     }
 
+    // Caps how long a stalled Esplora provider holds node start; the background refresh retries later.
+    static let nodeStartFeeRateTimeoutSecs: UInt64 = 8
+    static let nodeStartRetryDelay: Duration = .seconds(2)
+    // Ceiling for the launch-time backoff that keeps retrying node start after every provider failed.
+    static let nodeStartRetryMaxDelay: Duration = .seconds(60)
+    static let onchainWalletSyncTimeoutSecs: UInt64 = 60
+    static let lightningWalletSyncTimeoutSecs: UInt64 = 60
+    static let txBroadcastTimeoutSecs: UInt64 = 30
+    static let esploraRequestTimeoutSecs: UInt8 = 15
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL
