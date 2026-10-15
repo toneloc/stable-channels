@@ -68,8 +68,8 @@ struct OnChainReviewSheet: View {
 
                         SendConfirmFeeTotalCard(
                             feeLabel: isSpliceOut ? String(
-                                localized: "label_splice_fee",
-                                defaultValue: "Splice Fee"
+                                localized: "label_estimated_splice_fee",
+                                defaultValue: "Estimated Splice Fee"
                             ) :
                                 String(
                                     localized: "label_total_fees",

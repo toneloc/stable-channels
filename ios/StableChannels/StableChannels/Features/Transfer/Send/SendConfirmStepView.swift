@@ -26,6 +26,15 @@ struct SendConfirmStepView: View {
                         btcPrice: appState.accountingBTCPrice
                     )
 
+                    if isLNURL {
+                        SendConfirmLNURLInvoiceCard(
+                            isLoading: model.isFetchingLNURLQuote,
+                            errorMessage: model.lnurlQuoteError
+                        ) {
+                            model.startLNURLQuoteFetch(appState: appState)
+                        }
+                    }
+
                     if case .onchain = model.destination, !isSpliceOut {
                         NetworkFeeSelectorView(
                             selectedTier: $model.selectedFeeTier,
@@ -71,8 +80,8 @@ struct SendConfirmStepView: View {
                 ) {
                     Task { await model.executeSend(appState: appState) }
                 }
-                .disabled(isInsufficientBalance || !model.isFeeRateReady)
-                .opacity(isInsufficientBalance || !model.isFeeRateReady ? 0.5 : 1.0)
+                .disabled(isSlideDisabled)
+                .opacity(isSlideDisabled ? 0.5 : 1.0)
 
                 if !model.isFeeRateReady {
                     Text(String(localized: "label_loading_network_fee", defaultValue: "Loading network fee..."))
@@ -93,6 +102,7 @@ struct SendConfirmStepView: View {
             )
         }
         .task {
+            model.loadLNURLQuoteIfNeeded(appState: appState)
             await model.applyRecommendedFees(appState.feeRateService.recommendedFees(), appState: appState)
         }
     }
@@ -105,6 +115,18 @@ struct SendConfirmStepView: View {
         }
     }
 
+    private var isLNURL: Bool {
+        switch model.destination {
+        case .lightningAddress, .lnurlPay: true
+        default: false
+        }
+    }
+
+    /// The slide waits for funds, the network fee rate, and for an LNURL send the invoice to pay.
+    private var isSlideDisabled: Bool {
+        isInsufficientBalance || !model.isFeeRateReady || !model.isLNURLQuoteReady
+    }
+
     private var isSpliceOut: Bool {
         guard case .onchain = model.destination else { return false }
         return SendChannelSpendPolicy.isSpliceOut(
@@ -115,7 +137,7 @@ struct SendConfirmStepView: View {
 
     private var feeCardLabel: String {
         if isSpliceOut {
-            return String(localized: "label_splice_fee", defaultValue: "Splice Fee")
+            return String(localized: "label_estimated_splice_fee", defaultValue: "Estimated Splice Fee")
         }
         if isLightning {
             return String(localized: "label_max_routing_fee", defaultValue: "Max Routing Fee")

@@ -221,6 +221,22 @@ final class SendChannelSpendPolicyTests: XCTestCase {
         XCTAssertEqual(noChannels, 7000)
     }
 
+    func testCalculateMaxSendable_principalCapBoundsAmountNotFee() {
+        let fee: (UInt64) -> UInt64 = { $0 / 100 + 50 }
+        // Cap fits with its fee inside the balance: the cap itself.
+        XCTAssertEqual(SendChannelSpendPolicy.calculateMaxSendable(
+            available: 100_000,
+            principalCap: 50_000,
+            feeEstimator: fee
+        ), 50_000)
+        // Balance binds first: the fee-inclusive max, unaffected by the cap.
+        XCTAssertEqual(SendChannelSpendPolicy.calculateMaxSendable(
+            available: 30_000,
+            principalCap: 50_000,
+            feeEstimator: fee
+        ), SendChannelSpendPolicy.calculateMaxSendable(available: 30_000, feeEstimator: fee))
+    }
+
     func testIsOnchainSendAll_onlyForMaxOnchainWithoutSpliceOut() {
         let onchain = SendDestination.onchain(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amountSats: nil)
         let ready = [createChannel(id: "a", outboundSats: 50000)]

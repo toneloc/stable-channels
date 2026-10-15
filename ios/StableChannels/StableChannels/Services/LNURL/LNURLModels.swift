@@ -5,18 +5,19 @@ import Foundation
 
 protocol LNURLServiceProtocol: Sendable {
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams
+    /// Fetches and validates the payee's invoice; network, amount, expiry and amountless invoices throw.
     func fetchInvoice(
         params: LNURLPayParams,
         amountMsat: UInt64,
         comment: String?
-    ) async throws -> LNURLPayInvoiceResponse
+    ) async throws -> LNURLInvoiceQuote
 }
 
 extension LNURLServiceProtocol {
     func fetchInvoice(
         params: LNURLPayParams,
         amountMsat: UInt64
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
         try await fetchInvoice(params: params, amountMsat: amountMsat, comment: nil)
     }
 }

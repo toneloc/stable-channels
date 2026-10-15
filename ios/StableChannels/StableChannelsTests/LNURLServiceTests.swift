@@ -8,15 +8,34 @@ import XCTest
 
 actor MockLNURLService: LNURLServiceProtocol {
     private var stubbedParams: LNURLPayParams?
-    private var stubbedInvoiceResponse: LNURLPayInvoiceResponse?
+    /// Returned per call in order; the last one repeats.
+    private var stubbedQuotes: [LNURLInvoiceQuote] = []
     private var shouldThrowError: Error?
+    private var holdsInvoiceFetches = false
+    private var heldInvoiceFetches: [CheckedContinuation<Void, Never>] = []
+    private(set) var fetchInvoiceCallCount = 0
 
     func setStubbedParams(_ params: LNURLPayParams?) {
         self.stubbedParams = params
     }
 
-    func setStubbedInvoiceResponse(_ response: LNURLPayInvoiceResponse?) {
-        self.stubbedInvoiceResponse = response
+    func setStubbedQuotes(_ quotes: [LNURLInvoiceQuote]) {
+        self.stubbedQuotes = quotes
+    }
+
+    /// While set, each invoice fetch suspends until `releaseInvoiceFetches()`.
+    func setHoldsInvoiceFetches(_ holds: Bool) {
+        self.holdsInvoiceFetches = holds
+    }
+
+    var heldInvoiceFetchCount: Int {
+        heldInvoiceFetches.count
+    }
+
+    func releaseInvoiceFetches() {
+        let held = heldInvoiceFetches
+        heldInvoiceFetches = []
+        held.forEach { $0.resume() }
     }
 
     func setShouldThrowError(_ error: Error?) {
@@ -37,14 +56,19 @@ actor MockLNURLService: LNURLServiceProtocol {
         params _: LNURLPayParams,
         amountMsat _: UInt64,
         comment _: String?
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
+        let callIndex = fetchInvoiceCallCount
+        fetchInvoiceCallCount += 1
+        if holdsInvoiceFetches {
+            await withCheckedContinuation { heldInvoiceFetches.append($0) }
+        }
         if let error = shouldThrowError {
             throw error
         }
-        guard let response = stubbedInvoiceResponse else {
+        guard !stubbedQuotes.isEmpty else {
             throw LNURLError.invalidResponse
         }
-        return response
+        return stubbedQuotes[min(callIndex, stubbedQuotes.count - 1)]
     }
 }
 
@@ -376,7 +400,7 @@ final class LNURLServiceTests: XCTestCase {
     private static let metadataHashA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
     // 50,000 msat invoice matching metadataHashA
-    private static let valid50kInvoice =
+    static let valid50kInvoice =
         "lnbcrt500n1p4tku6ghp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp5w4qq8tyxn20d5f67jghar9zq9d426geks40etmyn8yzkn8mpqltqsp5aryyc4xdqfpgswmjzxudq96dgyy7yl9ulxrrg2kmzsvaxszvc4zs9qyysgqcqzp2xq97zvuqxzzzqpwe94dfnmrnuaz067kd2jpmggwvgxgy9hfnx6qxcwhcexdxw65qw286uvnpn59nw3k82y94ga76pn7cujulr8ddhmja5atzjjqqcu9kyg"
 
     // 100,000 msat invoice matching metadataHashA
@@ -384,7 +408,7 @@ final class LNURLServiceTests: XCTestCase {
         "lnbcrt1u1p4tku6ghp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp5gwmcnhr25vzznnky7j9fkn6jhytwnjfdjhugf9tts5vanr8hkscqsp5j5araz875hhj74qa6v9vjwaktzjmlz34yr46nfxl032hcg444yxs9qyysgqcqzp2xq97zvuqv4l34uxylnpl2s59krt4yxrhct6v9yqn6f4uk7egxxg7n3xtu50pqtxfuxg5swcqzhg9nkj07z6ggtflrz0evte9g9tpq8smskq44agq8qjnhu"
 
     // 50,000 msat invoice with direct text description instead of h tag
-    private static let directDescriptionInvoice =
+    static let directDescriptionInvoice =
         "lnbcrt500n1p4tku6gdqjg35hyetrwssygetnvvnp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp530vltuvw6z2cjxtjgqtk89w9aa9tkjs7kjmn3p00u9lg6lvqfscssp5x6kv3wggegd35thl2h7cfv27vgxf6dfgmg9gy4uy9wa3r2y6e82s9qyysgqcqzp2xq97zvuqpaxgcxn97nu274q09u8r93xh3mee2ep78j5c8vgd0a3zvlpuwysqx2ezm9mm8uasuyw3r0xua6wy0vd20zkkynpepzkz3n5jyrlt4zgpe8hhg3"
 
     // Expired invoice (expirySecs: 1)
@@ -439,8 +463,11 @@ final class LNURLServiceTests: XCTestCase {
             comment: "Tip"
         )
 
-        XCTAssertEqual(result.pr, Self.valid50kInvoice)
-        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.invoice, Self.valid50kInvoice)
+        XCTAssertEqual(result.amountMsat, 50_000)
+        XCTAssertEqual(result.comment, "Tip")
+        XCTAssertEqual(result.binding, .matchesMetadata)
+        XCTAssertGreaterThan(result.expiresAt, Date())
     }
 
     func testFetchInvoice_amountOutOfBounds_throwsError() async throws {
@@ -507,7 +534,9 @@ final class LNURLServiceTests: XCTestCase {
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
         let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
 
-        XCTAssertEqual(result.pr, Self.valid50kInvoice)
+        XCTAssertEqual(result.invoice, Self.valid50kInvoice)
+        XCTAssertEqual(result.binding, .mismatchedHash(invoiceHash: Self.metadataHashA))
+        XCTAssertTrue(result.isDescriptionUnbound)
     }
 
     func testFetchInvoice_directDescription_succeeds() async throws {
@@ -521,7 +550,9 @@ final class LNURLServiceTests: XCTestCase {
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
         let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
 
-        XCTAssertEqual(result.pr, Self.directDescriptionInvoice)
+        XCTAssertEqual(result.invoice, Self.directDescriptionInvoice)
+        XCTAssertEqual(result.binding, .direct)
+        XCTAssertTrue(result.isDescriptionUnbound)
     }
 
     // Relaxing the description check must not relax the amount check.
@@ -747,7 +778,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(params.callback, "http://service.onion/callback")
         let torInvoiceParams = makeParams(callback: "http://service.onion/callback", metadata: "")
         let invoiceResult = try await service.fetchInvoice(params: torInvoiceParams, amountMsat: 50_000, comment: nil)
-        XCTAssertEqual(invoiceResult.pr, Self.valid50kInvoice)
+        XCTAssertEqual(invoiceResult.invoice, Self.valid50kInvoice)
 
         // Clearnet endpoint over HTTP is rejected for both stages
         do {

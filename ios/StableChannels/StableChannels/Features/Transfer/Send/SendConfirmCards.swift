@@ -144,6 +144,34 @@ struct SendConfirmReceivesCard: View {
     }
 }
 
+/// The LNURL invoice the slide pays: a loading row, a retryable error, or its amount and description,
+/// Status of the LNURL invoice the slide will pay: a loading row while it is fetched and validated,
+/// or a retryable error. A valid invoice shows nothing extra; its amount is the one already shown.
+struct SendConfirmLNURLInvoiceCard: View {
+    let isLoading: Bool
+    let errorMessage: String?
+    let onRetry: () -> Void
+
+    var body: some View {
+        if let errorMessage {
+            VStack(alignment: .leading, spacing: 8) {
+                SendErrorBanner(message: errorMessage)
+                Button(String(localized: "button_retry", defaultValue: "Retry"), action: onRetry)
+                    .buttonStyle(.bordered)
+            }
+        } else if isLoading {
+            HStack(spacing: 8) {
+                ProgressView()
+                Text(String(localized: "label_fetching_invoice", defaultValue: "Fetching invoice..."))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .sendCard()
+        }
+    }
+}
+
 /// Displays the fee breakdown and total debit from user's balance.
 struct SendConfirmFeeTotalCard: View {
     var feeLabel: String = .init(localized: "label_total_fees", defaultValue: "Network Fee")

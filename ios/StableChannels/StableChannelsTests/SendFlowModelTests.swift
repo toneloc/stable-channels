@@ -175,6 +175,64 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    private func lnurlModel(balanceSats: UInt64, maxSendableSats: UInt64) throws -> (SendFlowModel, AppState) {
+        let model = SendFlowModel()
+        let appState = AppState()
+        appState.lightningBalanceSats = balanceSats
+        model.destination = .lnurlPay(url: try XCTUnwrap(URL(string: "https://ln.tips/user")))
+        model.lnurlParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://ln.tips/cb",
+            minSendable: 1_000_000,
+            maxSendable: maxSendableSats * 1_000,
+            metadata: "[]",
+            commentAllowed: nil
+        )
+        model.step = .amount
+        model.amountUnit = .sats
+        return (model, appState)
+    }
+
+    func testLNURL_balanceAboveMax_amountEqualToMaxProceeds() throws {
+        let (model, appState) = try lnurlModel(balanceSats: 100_000, maxSendableSats: 50_000)
+        // The payee max bounds the principal only; the 550 sat routing fee is debited on top.
+        XCTAssertEqual(model.availableSpendableSats(appState: appState), 100_000)
+        model.amountInputText = "50000"
+        model.proceedFromAmount(appState: appState)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.step, .confirm)
+    }
+
+    func testLNURL_balanceAboveMax_maxIsPayeeMax() throws {
+        let (model, appState) = try lnurlModel(balanceSats: 100_000, maxSendableSats: 50_000)
+        XCTAssertEqual(model.calculateMaxSendableSats(appState: appState), 50_000)
+    }
+
+    func testLNURL_percentageOfBalanceIsBoundedByPayeeMax() throws {
+        let (model, _) = try lnurlModel(balanceSats: 100_000, maxSendableSats: 50_000)
+
+        model.applyPercentage(50, totalBalanceSats: 100_000, btcPrice: 100_000)
+
+        XCTAssertEqual(model.amountInputText, "25000")
+        XCTAssertFalse(model.isMaxAmount)
+    }
+
+    func testLNURL_balanceBelowMax_maxIsFeeInclusiveAndOverBalanceRejected() throws {
+        let (model, appState) = try lnurlModel(balanceSats: 30_000, maxSendableSats: 50_000)
+        // 29,653 + ceil(1% + 50 = 346.53) = 29,653 + 347 = 30,000.
+        XCTAssertEqual(model.calculateMaxSendableSats(appState: appState), 29_653)
+        XCTAssertEqual(model.estimatedFeeSatsForAmount(sats: 29_653, appState: appState), 347)
+
+        // 29,700 + 347 = 30,047 > 30,000.
+        model.amountInputText = "29700"
+        model.proceedFromAmount(appState: appState)
+        XCTAssertEqual(model.step, .amount)
+        XCTAssertTrue(
+            model.errorMessage?.hasPrefix("Amount plus estimated fee exceeds your balance.") == true,
+            model.errorMessage ?? "nil"
+        )
+    }
+
     func testProceedFromAmount_blocksWhenBalanceIsZero() throws {
         let model = SendFlowModel()
         let appState = AppState()
@@ -721,6 +779,226 @@ final class SendFlowModelTests: XCTestCase {
         XCTAssertFalse(model.isFetchingLNURL)
     }
 
+    // MARK: - LNURL invoice quote
+
+    private func lnurlQuote(
+        _ binding: LNURLDescriptionBinding = .matchesMetadata,
+        amountMsat: UInt64 = 50_000,
+        comment: String? = nil,
+        expiresAt: Date = .distantFuture
+    ) -> LNURLInvoiceQuote {
+        LNURLInvoiceQuote(
+            invoice: LNURLServiceTests.valid50kInvoice,
+            amountMsat: amountMsat,
+            comment: comment,
+            binding: binding,
+            expiresAt: expiresAt
+        )
+    }
+
+    /// A 50 sat LNURL send on the amount step, ready to enter confirm.
+    private func lnurlAmountStepModel(service: MockLNURLService) throws -> (SendFlowModel, AppState) {
+        let (appState, _) = try makeAppStateWithDatabase()
+        appState.lightningBalanceSats = 100_000
+        let model = SendFlowModel(expectedNetwork: .regtest, lnurlService: service)
+        model.destination = .lnurlPay(url: try XCTUnwrap(URL(string: "https://ln.tips/user")))
+        model.lnurlParams = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://ln.tips/cb",
+            minSendable: 1000,
+            maxSendable: 50_000_000,
+            metadata: "[]",
+            commentAllowed: nil
+        )
+        model.step = .amount
+        model.amountUnit = .sats
+        model.amountInputText = "50"
+        return (model, appState)
+    }
+
+    func testLNURLInvoiceQuote_noticeOnlyWhenDescriptionIsUnbound() {
+        XCTAssertFalse(lnurlQuote(.matchesMetadata).isDescriptionUnbound)
+        XCTAssertTrue(lnurlQuote(.mismatchedHash(invoiceHash: "00")).isDescriptionUnbound)
+        XCTAssertTrue(lnurlQuote(.direct).isDescriptionUnbound)
+    }
+
+    func testLNURLInvoiceQuote_payableOnlyWhileUnexpiredWithSafetyMargin() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let margin = LNURLInvoiceQuote.expiryMarginSecs
+        let quote = lnurlQuote(comment: "hi", expiresAt: now.addingTimeInterval(60))
+
+        XCTAssertFalse(quote.isExpired(at: now))
+        XCTAssertFalse(quote.isExpired(at: now.addingTimeInterval(60 - margin - 1)))
+        XCTAssertTrue(quote.isExpired(at: now.addingTimeInterval(60 - margin)), "expired exactly at the margin")
+        XCTAssertTrue(quote.isExpired(at: now.addingTimeInterval(60)))
+        XCTAssertNil(LNURLInvoiceQuote.normalizedComment("   "))
+    }
+
+    func testLNURLQuote_fixesTheAmountShownCheckedAndPaid() throws {
+        let (model, appState) = try lnurlModel(balanceSats: 100_000, maxSendableSats: 50_000)
+        model.amountInputText = "40000"
+        model.step = .confirm
+        model.lnurlQuote = lnurlQuote(amountMsat: 25_000_000)
+
+        // Once quoted, the invoice amount (not the live input) drives the confirm step and the balance check.
+        XCTAssertEqual(model.sendAmountSats(appState: appState), 25000)
+        XCTAssertEqual(model.displayedAmountSats(appState: appState), 25000)
+        XCTAssertEqual(model.estimatedFeeSats(appState: appState), 300)
+        XCTAssertEqual(model.totalDebitSats(appState: appState), 25300)
+    }
+
+    func testApplySettlement_failedLNURLPaymentRefreshesQuoteForRetry() async throws {
+        let service = MockLNURLService()
+        await service.setStubbedQuotes([lnurlQuote()])
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+        model.proceedFromAmount(appState: appState)
+        model.loadLNURLQuoteIfNeeded(appState: appState)
+        await waitUntil { model.lnurlQuote != nil }
+
+        model.applySettlement(.failed(reason: "Route not found"), sentSats: 50, paymentId: "pid", appState: appState)
+
+        XCTAssertEqual(model.errorMessage, "Route not found")
+        await waitUntil { await service.fetchInvoiceCallCount == 2 }
+        await waitUntil { model.lnurlQuote != nil }
+        XCTAssertNotNil(model.lnurlQuote)
+    }
+
+    func testEnteringConfirm_fetchesLNURLQuoteOnceAndGatesSlideUntilLoaded() async throws {
+        let service = MockLNURLService()
+        await service.setStubbedQuotes([lnurlQuote()])
+        await service.setHoldsInvoiceFetches(true)
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+
+        model.proceedFromAmount(appState: appState)
+        model.loadLNURLQuoteIfNeeded(appState: appState) // the confirm view's task
+        await waitUntil { await service.heldInvoiceFetchCount == 1 }
+
+        XCTAssertEqual(model.step, .confirm)
+        XCTAssertTrue(model.isFetchingLNURLQuote)
+        XCTAssertFalse(model.isLNURLQuoteReady, "the slide waits for the invoice")
+
+        await service.releaseInvoiceFetches()
+        await waitUntil { model.lnurlQuote != nil }
+        model.loadLNURLQuoteIfNeeded(appState: appState)
+
+        XCTAssertEqual(model.lnurlQuote, lnurlQuote())
+        XCTAssertTrue(model.isLNURLQuoteReady)
+        XCTAssertFalse(model.isFetchingLNURLQuote)
+        let calls = await service.fetchInvoiceCallCount
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testLNURLQuote_unboundBindingIsKeptForTheNotice() async throws {
+        for binding in [LNURLDescriptionBinding.mismatchedHash(invoiceHash: "00"), .direct, .matchesMetadata] {
+            let service = MockLNURLService()
+            await service.setStubbedQuotes([lnurlQuote(binding)])
+            let (model, appState) = try lnurlAmountStepModel(service: service)
+
+            model.proceedFromAmount(appState: appState)
+            await waitUntil { model.lnurlQuote != nil }
+
+            XCTAssertEqual(model.lnurlQuote?.binding, binding)
+            XCTAssertEqual(model.lnurlQuote?.isDescriptionUnbound, binding != .matchesMetadata)
+        }
+    }
+
+    func testLNURLQuote_fetchFailureShowsErrorAndRetryLoadsQuote() async throws {
+        let service = MockLNURLService()
+        await service.setShouldThrowError(LNURLError.invalidResponse)
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+
+        model.proceedFromAmount(appState: appState)
+        await waitUntil { model.lnurlQuoteError != nil }
+        XCTAssertFalse(model.isLNURLQuoteReady)
+        XCTAssertFalse(model.isFetchingLNURLQuote)
+
+        await service.setShouldThrowError(nil)
+        await service.setStubbedQuotes([lnurlQuote()])
+        model.startLNURLQuoteFetch(appState: appState)
+        await waitUntil { model.lnurlQuote != nil }
+        XCTAssertNil(model.lnurlQuoteError)
+        XCTAssertTrue(model.isLNURLQuoteReady)
+    }
+
+    func testExecuteSend_LNURLPaysQuotedInvoiceWithoutRefetching() async throws {
+        let service = MockLNURLService()
+        await service.setStubbedQuotes([lnurlQuote(.direct)])
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+        var paid: [(Bolt11Invoice, UInt64)] = []
+        appState.nodeService.sendPaymentUsingAmountOverride = { invoice, amountMsat in
+            paid.append((invoice, amountMsat))
+            // Settled before the executor records it, so settlement resolves without waiting.
+            try self.seedPayment(XCTUnwrap(appState.databaseService), id: "lnurl-pid", status: "completed")
+            return "lnurl-pid"
+        }
+        model.proceedFromAmount(appState: appState)
+        await waitUntil { model.lnurlQuote != nil }
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(paid.count, 1)
+        XCTAssertEqual(paid.first?.0, try Bolt11Invoice.fromStr(invoiceStr: LNURLServiceTests.valid50kInvoice))
+        XCTAssertEqual(paid.first?.1, 50_000)
+        let calls = await service.fetchInvoiceCallCount
+        XCTAssertEqual(calls, 1, "the slide pays the quoted invoice, never a second fetch")
+        XCTAssertEqual(model.step, .success)
+        XCTAssertNil(model.lnurlQuote, "leaving confirm drops the quote")
+    }
+
+    func testExecuteSend_expiredLNURLQuoteRefreshesAndWaitsForAnotherSlide() async throws {
+        let service = MockLNURLService()
+        await service.setStubbedQuotes([lnurlQuote()])
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+        var paymentAttempts = 0
+        appState.nodeService.sendPaymentUsingAmountOverride = { _, _ in
+            paymentAttempts += 1
+            throw NodeServiceError.notRunning
+        }
+        model.step = .confirm
+        model.lnurlQuote = lnurlQuote(expiresAt: Date(timeIntervalSinceNow: -1))
+        let token = model.resetToken
+
+        await model.executeSend(appState: appState)
+
+        XCTAssertEqual(paymentAttempts, 0, "an expired quote is never paid nor swapped for a new one silently")
+        XCTAssertEqual(model.resetToken, token + 1, "the slider snaps back for another slide")
+        XCTAssertNotNil(model.errorMessage)
+        XCTAssertEqual(model.step, .confirm)
+        await waitUntil { model.lnurlQuote != nil }
+        XCTAssertEqual(model.lnurlQuote, lnurlQuote(), "the fresh quote is shown for review")
+        let calls = await service.fetchInvoiceCallCount
+        XCTAssertEqual(calls, 1)
+    }
+
+    func testLNURLQuote_staleFetchAfterLeavingConfirmIsIgnored() async throws {
+        let service = MockLNURLService()
+        let stale = lnurlQuote(.direct)
+        let fresh = lnurlQuote()
+        await service.setStubbedQuotes([stale, fresh])
+        await service.setHoldsInvoiceFetches(true)
+        let (model, appState) = try lnurlAmountStepModel(service: service)
+
+        model.proceedFromAmount(appState: appState)
+        await waitUntil { await service.heldInvoiceFetchCount == 1 }
+        let staleTask = try XCTUnwrap(model.lnurlQuoteTask)
+
+        model.step = .amount // back
+        XCTAssertNil(model.lnurlQuoteTask)
+        XCTAssertFalse(model.isFetchingLNURLQuote)
+
+        model.proceedFromAmount(appState: appState)
+        await waitUntil { await service.heldInvoiceFetchCount == 2 }
+        let freshTask = try XCTUnwrap(model.lnurlQuoteTask)
+
+        await service.releaseInvoiceFetches()
+        await staleTask.value
+        await freshTask.value
+
+        XCTAssertEqual(model.lnurlQuote, fresh, "the stale fetch must not overwrite the newer quote")
+        XCTAssertFalse(model.isFetchingLNURLQuote)
+        XCTAssertNil(model.lnurlQuoteTask)
+    }
+
     private func waitUntil(timeout: Duration = .seconds(3), _ condition: () async -> Bool) async {
         let deadline = ContinuousClock.now + timeout
         while await !condition(), ContinuousClock.now < deadline {
@@ -755,14 +1033,14 @@ final class SendFlowModelTests: XCTestCase {
         }
 
         func fetchInvoice(params _: LNURLPayParams, amountMsat _: UInt64,
-                          comment _: String?) async throws -> LNURLPayInvoiceResponse {
+                          comment _: String?) async throws -> LNURLInvoiceQuote {
             throw LNURLError.invalidResponse
         }
     }
 
     func testApplySettlement_timedOutStaysPendingNotCompleted() {
         let model = SendFlowModel()
-        model.applySettlement(.timedOut, sentSats: 21000, paymentId: "pid")
+        model.applySettlement(.timedOut, sentSats: 21000, paymentId: "pid", appState: AppState())
 
         XCTAssertEqual(model.step, .success)
         XCTAssertEqual(model.successStatus, .pending)
@@ -772,28 +1050,33 @@ final class SendFlowModelTests: XCTestCase {
 
     func testApplySettlement_settledCompletesAndFailedStaysOnStep() {
         let settled = SendFlowModel()
-        settled.applySettlement(.settled, sentSats: 1000, paymentId: "pid")
+        settled.applySettlement(.settled, sentSats: 1000, paymentId: "pid", appState: AppState())
         XCTAssertEqual(settled.successStatus, .completed)
 
         let failed = SendFlowModel()
         failed.step = .confirm
-        failed.applySettlement(.failed(reason: "Route not found"), sentSats: 1000, paymentId: "pid")
+        failed.applySettlement(
+            .failed(reason: "Route not found"),
+            sentSats: 1000,
+            paymentId: "pid",
+            appState: AppState()
+        )
         XCTAssertEqual(failed.step, .confirm)
         XCTAssertEqual(failed.errorMessage, "Route not found")
     }
 
     func testApplyLateSettlement_pendingReceiptFollowsOutcome() {
         let settled = SendFlowModel()
-        settled.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid")
-        settled.applyLateSettlement(.timedOut)
+        settled.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid", appState: AppState())
+        settled.applyLateSettlement(.timedOut, appState: AppState())
         XCTAssertEqual(settled.successStatus, .pending)
-        settled.applyLateSettlement(.settled)
+        settled.applyLateSettlement(.settled, appState: AppState())
         XCTAssertEqual(settled.step, .success)
         XCTAssertEqual(settled.successStatus, .completed)
 
         let failed = SendFlowModel()
-        failed.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid")
-        failed.applyLateSettlement(.failed(reason: "Route not found"))
+        failed.applySettlement(.timedOut, sentSats: 1000, paymentId: "pid", appState: AppState())
+        failed.applyLateSettlement(.failed(reason: "Route not found"), appState: AppState())
         XCTAssertEqual(failed.step, .confirm)
         XCTAssertEqual(failed.errorMessage, "Route not found")
         XCTAssertFalse(failed.isPendingSettlement)
@@ -801,8 +1084,8 @@ final class SendFlowModelTests: XCTestCase {
 
     func testApplyLateSettlement_ignoredWhenReceiptIsNotPending() {
         let model = SendFlowModel()
-        model.applySettlement(.settled, sentSats: 1000, paymentId: "pid")
-        model.applyLateSettlement(.failed(reason: "Route not found"))
+        model.applySettlement(.settled, sentSats: 1000, paymentId: "pid", appState: AppState())
+        model.applyLateSettlement(.failed(reason: "Route not found"), appState: AppState())
         XCTAssertEqual(model.step, .success)
         XCTAssertEqual(model.successStatus, .completed)
         XCTAssertNil(model.errorMessage)

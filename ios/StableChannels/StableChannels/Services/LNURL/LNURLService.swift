@@ -152,7 +152,7 @@ final class LNURLService: LNURLServiceProtocol {
         params: LNURLPayParams,
         amountMsat: UInt64,
         comment: String? = nil
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
         guard params.isAmountValid(msat: amountMsat) else {
             throw LNURLError.amountOutOfBounds(minSats: params.minSats, maxSats: params.maxSats)
         }
@@ -198,13 +198,6 @@ final class LNURLService: LNURLServiceProtocol {
         return url
     }
 
-    /// How an LNURL-pay invoice's description relates to the payee metadata.
-    enum DescriptionBinding: Equatable {
-        case matchesMetadata
-        case mismatchedHash(invoiceHash: String)
-        case direct
-    }
-
     /// Pure domain validation function verifying BOLT11 invoice parameters against request expectations.
     /// Network, amount, expiry and amountless invoices are enforced. The description is reported, not
     /// enforced: LUD-06 asks for description_hash == sha256(metadata), but the metadata and the callback
@@ -216,7 +209,7 @@ final class LNURLService: LNURLServiceProtocol {
         amountMsat: UInt64,
         expectedNetwork: Network,
         expectedMetadataHashHex: String
-    ) throws -> DescriptionBinding {
+    ) throws -> LNURLDescriptionBinding {
         guard !pr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw LNURLError.invalidResponse
         }
@@ -261,7 +254,7 @@ final class LNURLService: LNURLServiceProtocol {
         amountMsat: UInt64,
         comment: String?,
         expectedMetadataHashHex: String
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
         let url = try Self.buildInvoiceCallbackURL(callback: callback, amountMsat: amountMsat, comment: comment)
         let (data, httpResponse) = try await executeSecureGet(url: url)
 
@@ -295,7 +288,16 @@ final class LNURLService: LNURLServiceProtocol {
             ])
         }
 
-        return invoiceResponse
+        // Parsed by the validation above.
+        let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: invoiceResponse.pr)
+        let expiresAt = Double(bolt11.secondsSinceEpoch()) + Double(bolt11.expiryTimeSeconds())
+        return LNURLInvoiceQuote(
+            invoice: invoiceResponse.pr,
+            amountMsat: amountMsat,
+            comment: comment.flatMap(LNURLInvoiceQuote.normalizedComment),
+            binding: binding,
+            expiresAt: Date(timeIntervalSince1970: expiresAt)
+        )
     }
 
     private func throwIfErrorResponse(data: Data) throws {

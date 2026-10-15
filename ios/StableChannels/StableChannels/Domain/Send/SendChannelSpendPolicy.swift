@@ -96,17 +96,22 @@ enum SendChannelSpendPolicy {
 
     /// Computes the largest sendable amount such that amount + fee(amount) fits inside the available balance.
     /// Runs a monotonic contraction mapping fixed-point iteration to handle non-linear/proportional routing fees.
+    /// `principalCap` (an LNURL payee's `maxSendable`) bounds the amount only; the fee is debited on top of it
+    /// from `available`, so the cap never shrinks the balance the fee must fit in.
     static func calculateMaxSendable(
         available: UInt64,
+        principalCap: UInt64 = .max,
         feeEstimator: (UInt64) -> UInt64
     ) -> UInt64 {
-        guard available > 0 else { return 0 }
+        guard available > 0, principalCap > 0 else { return 0 }
 
         func fits(_ amount: UInt64) -> Bool {
             let fee = feeEstimator(amount)
             return fee <= available && amount <= available - fee
         }
 
+        // A monotonic fee means any amount at or below a fitting amount also fits.
+        if fits(min(principalCap, available)) { return min(principalCap, available) }
         var candidate = available
         for _ in 0..<8 {
             let fee = feeEstimator(candidate)
@@ -119,6 +124,7 @@ enum SendChannelSpendPolicy {
             candidate -= 1
             steps += 1
         }
-        return fits(candidate) ? candidate : 0
+        // The fallback ignores the cap, so clamp it in case the fee estimate is not monotonic.
+        return fits(candidate) ? min(candidate, principalCap) : 0
     }
 }

@@ -9,7 +9,13 @@ final class SendFlowModel {
     static let feeRateNotReadyMessage = "Waiting for network fee rate. Please wait a moment."
     static let authenticationRequiredMessage = "Authentication required to send."
 
-    var step: SendFlowStep = .recipient
+    var step: SendFlowStep = .recipient {
+        didSet {
+            // A quote belongs to one visit of the confirm step.
+            if oldValue == .confirm, step != .confirm { invalidateLNURLQuote() }
+        }
+    }
+
     var inputText: String = "" {
         didSet {
             guard inputText != oldValue else { return }
@@ -45,6 +51,13 @@ final class SendFlowModel {
     /// Settings "Send All": empties the on-chain wallet in one send-all transaction even when a
     /// channel is ready, so unlike Max it is never a splice-out and spends the whole on-chain balance.
     var sendsAllFromOnchainWallet: Bool = false
+
+    /// The LNURL invoice shown on the confirm step; the slide pays exactly this invoice.
+    var lnurlQuote: LNURLInvoiceQuote?
+    var isFetchingLNURLQuote: Bool = false
+    var lnurlQuoteError: String?
+    /// In-flight quote fetch; replaced or cancelled so a stale result never lands.
+    @ObservationIgnored var lnurlQuoteTask: Task<Void, Never>?
 
     /// In-flight recipient resolution; owned here so the view can cancel it.
     @ObservationIgnored private var recipientTask: Task<Void, Never>?
@@ -217,9 +230,11 @@ final class SendFlowModel {
         }
     }
 
+    /// What the wallet can debit for this send (amount plus fee). An LNURL payee's `maxSendable`
+    /// bounds only the principal, so it is applied to the amount, never to this balance.
     func availableSpendableSats(appState: AppState) -> UInt64 {
         if sendsAllFromOnchainWallet { return appState.spendableOnchainSats }
-        let balance = SendChannelSpendPolicy.availableSpendableSats(
+        return SendChannelSpendPolicy.availableSpendableSats(
             destination: destination,
             channels: appState.nodeService.channels,
             lightningBalanceSats: appState.lightningBalanceSats,
@@ -227,10 +242,6 @@ final class SendFlowModel {
             totalBalanceSats: appState.totalBalanceSats,
             isSweeping: appState.isSweeping
         )
-        if let params = lnurlParams {
-            return min(balance, params.maxSats)
-        }
-        return balance
     }
 
     func estimatedFeeSats(appState: AppState) -> UInt64 {
@@ -270,22 +281,23 @@ final class SendFlowModel {
         )
     }
 
-    /// Largest amount such that amount + fee(amount) fits inside the available balance.
+    /// Largest amount such that amount + fee(amount) fits inside the available balance, capped at an
+    /// LNURL payee's `maxSendable`.
     func calculateMaxSendableSats(appState: AppState) -> UInt64 {
-        let available = availableSpendableSats(appState: appState)
-        let rawMax = SendChannelSpendPolicy.calculateMaxSendable(available: available) { [weak self] amount in
+        SendChannelSpendPolicy.calculateMaxSendable(
+            available: availableSpendableSats(appState: appState),
+            principalCap: lnurlParams?.maxSats ?? .max
+        ) { [weak self] amount in
             self?.estimatedFeeSatsForAmount(sats: amount, appState: appState) ?? 0
         }
-        if let params = lnurlParams {
-            return min(rawMax, params.maxSats)
-        }
-        return rawMax
     }
 
     /// The amount this send moves: the typed amount, or for Max the largest amount that fits after
     /// the fee at the currently selected tier, so every tier stays selectable and nothing is left over.
     /// For the on-chain wallet send-all it is what the recipient receives: the balance less the fee.
     func sendAmountSats(appState: AppState) -> UInt64 {
+        // A quoted LNURL invoice fixes the amount, so what is shown, checked and paid cannot drift apart.
+        if let lnurlQuote { return lnurlQuote.amountMsat / 1000 }
         if sendsAllFromOnchainWallet {
             let balance = availableSpendableSats(appState: appState)
             let fee = estimatedFeeSatsForAmount(sats: balance, appState: appState)
@@ -374,6 +386,7 @@ final class SendFlowModel {
         }
 
         self.step = .confirm
+        loadLNURLQuoteIfNeeded(appState: appState)
     }
 
     /// "0.00 012 000 BTC (≈ $7.80)", omitting fiat when no price is available.
@@ -410,9 +423,11 @@ final class SendFlowModel {
             refreshMaxAmountText(appState: appState)
         } else {
             isMaxAmount = false
+            // An LNURL payee's max bounds the principal, so a share of the balance never exceeds it.
+            let base = lnurlParams.map { min(totalBalanceSats, $0.maxSats) } ?? totalBalanceSats
             amountInputText = SendAmountCalculator.calculatePercentageAmount(
                 percent: percent,
-                totalBalanceSats: totalBalanceSats,
+                totalBalanceSats: base,
                 unit: amountUnit,
                 btcPrice: btcPrice
             )
@@ -451,6 +466,7 @@ final class SendFlowModel {
     func resetFlow() {
         recipientTask?.cancel()
         recipientTask = nil
+        invalidateLNURLQuote()
         step = .recipient
         inputText = ""
         destination = nil

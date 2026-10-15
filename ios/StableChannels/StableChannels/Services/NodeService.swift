@@ -516,6 +516,11 @@ class NodeService: NodeServiceProtocol {
     }
 
     func sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64) throws -> PaymentId {
+        #if DEBUG
+            if let sendPaymentUsingAmountOverride {
+                return try sendPaymentUsingAmountOverride(invoice, amountMsat)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
         return try node.bolt11Payment().sendUsingAmount(
             invoice: invoice,
@@ -575,6 +580,7 @@ class NodeService: NodeServiceProtocol {
         var sendStabilityPaymentOverride: ((UInt64, PublicKey, [CustomTlvRecord]) throws -> PaymentId)?
         var signMessageOverride: (([UInt8]) throws -> String)?
         var spliceOutOverride: ((UserChannelId, PublicKey, String, UInt64) throws -> Void)?
+        var sendPaymentUsingAmountOverride: ((Bolt11Invoice, UInt64) throws -> PaymentId)?
     #endif
 
     /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the

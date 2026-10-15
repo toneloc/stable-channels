@@ -5,11 +5,13 @@ import SwiftUI
 extension SendFlowModel {
     /// Coordinates authentication, balance checks, payment dispatch, and settlement observation.
     func executeSend(appState: AppState) async {
+        guard !isSending else { return }
         guard let dest = destination else {
             resetToken += 1
             return
         }
 
+        let quotedInvoice: LNURLInvoiceQuote?
         switch dest {
         case .lightningAddress, .lnurlPay:
             guard resolvedLNURLService(appState: appState) != nil else {
@@ -17,8 +19,13 @@ extension SendFlowModel {
                 resetToken += 1
                 return
             }
+            guard let quote = payableLNURLQuote(appState: appState) else {
+                resetToken += 1
+                return
+            }
+            quotedInvoice = quote
         default:
-            break
+            quotedInvoice = nil
         }
 
         let sendsAll = sendsEntireOnchainBalance(appState: appState)
@@ -32,15 +39,18 @@ extension SendFlowModel {
                     appState: appState
                 )
             } else {
-                result = try await SendPaymentExecutor.execute(
-                    destination: dest,
-                    effectiveSats: sats,
-                    feeRateSatVb: effectiveFeeRateSatVb,
-                    lnurlParams: lnurlParams,
-                    lnurlComment: lnurlComment,
-                    appState: appState,
-                    lnurlService: resolvedLNURLService(appState: appState)
-                )
+                do {
+                    result = try await SendPaymentExecutor.execute(
+                        destination: dest,
+                        effectiveSats: sats,
+                        feeRateSatVb: effectiveFeeRateSatVb,
+                        lnurlQuote: quotedInvoice,
+                        appState: appState
+                    )
+                } catch {
+                    refreshLNURLQuoteAfterFailure(appState: appState)
+                    throw error
+                }
             }
 
             switch result.outcome {
@@ -66,9 +76,98 @@ extension SendFlowModel {
                     timeoutSeconds: timeout,
                     appState: appState
                 )
-                applySettlement(outcome, sentSats: result.sentAmountSats, paymentId: pid)
+                applySettlement(outcome, sentSats: result.sentAmountSats, paymentId: pid, appState: appState)
             }
         }
+    }
+
+    // MARK: - LNURL invoice quote
+
+    /// False while an LNURL send has no invoice to show, so the slide stays disabled.
+    var isLNURLQuoteReady: Bool {
+        switch destination {
+        case .lightningAddress, .lnurlPay: lnurlQuote != nil
+        default: true
+        }
+    }
+
+    /// Fetches the invoice for the confirm step unless a quote is shown or a fetch is in flight.
+    func loadLNURLQuoteIfNeeded(appState: AppState) {
+        guard step == .confirm, lnurlQuote == nil, lnurlQuoteTask == nil else { return }
+        switch destination {
+        case .lightningAddress, .lnurlPay: startLNURLQuoteFetch(appState: appState)
+        default: return
+        }
+    }
+
+    /// Replaces any quote with a fresh fetch for the current amount and comment. A replaced or
+    /// cancelled fetch checks cancellation after its await, so its late result never lands.
+    func startLNURLQuoteFetch(appState: AppState) {
+        invalidateLNURLQuote()
+        guard let service = resolvedLNURLService(appState: appState) else {
+            lnurlQuoteError = "Wallet network is not initialized. Please wait until connected."
+            return
+        }
+        guard let params = lnurlParams else {
+            lnurlQuoteError = "Missing LNURL parameters"
+            return
+        }
+        let amountMsat = sendAmountSats(appState: appState) * 1000
+        let comment = LNURLInvoiceQuote.normalizedComment(lnurlComment)
+        isFetchingLNURLQuote = true
+        lnurlQuoteTask = Task { [weak self] in
+            let result: Result<LNURLInvoiceQuote, Error>
+            do {
+                result = try await .success(service.fetchInvoice(
+                    params: params,
+                    amountMsat: amountMsat,
+                    comment: comment
+                ))
+            } catch {
+                result = .failure(error)
+            }
+            guard let self, !Task.isCancelled else { return }
+            switch result {
+            case .success(let quote):
+                lnurlQuote = quote
+            case .failure(let error):
+                lnurlQuoteError = WalletErrorMessages.operation(error, fallback: error.localizedDescription)
+            }
+            isFetchingLNURLQuote = false
+            lnurlQuoteTask = nil
+        }
+    }
+
+    /// A failed LNURL payment leaves the user on confirm; a retry must pay a fresh invoice, not the failed one.
+    func refreshLNURLQuoteAfterFailure(appState: AppState) {
+        switch destination {
+        case .lightningAddress, .lnurlPay: startLNURLQuoteFetch(appState: appState)
+        default: return
+        }
+    }
+
+    /// Drops the quote and abandons any in-flight fetch.
+    func invalidateLNURLQuote() {
+        lnurlQuoteTask?.cancel()
+        lnurlQuoteTask = nil
+        lnurlQuote = nil
+        lnurlQuoteError = nil
+        isFetchingLNURLQuote = false
+    }
+
+    /// The quote the slide may pay. An expired quote is
+    /// replaced by a fresh fetch the user must review and slide again for: never auto-paid.
+    private func payableLNURLQuote(appState: AppState) -> LNURLInvoiceQuote? {
+        guard let quote = lnurlQuote else { return nil }
+        guard !quote.isExpired(at: Date()) else {
+            startLNURLQuoteFetch(appState: appState)
+            errorMessage = String(
+                localized: "error_lnurl_invoice_refreshed",
+                defaultValue: "The invoice expired. Review the new invoice and slide again."
+            )
+            return nil
+        }
+        return quote
     }
 
     /// The single pre-dispatch gate for every send screen. The send is marked in flight before the
@@ -137,12 +236,18 @@ extension SendFlowModel {
 
     /// Maps a Lightning settlement outcome to the result screen. A timeout is not a settlement:
     /// it must stay pending so an unconfirmed payment never renders as "Payment Sent".
-    func applySettlement(_ outcome: PaymentSettlementOutcome, sentSats: UInt64, paymentId: String) {
+    func applySettlement(
+        _ outcome: PaymentSettlementOutcome,
+        sentSats: UInt64,
+        paymentId: String,
+        appState: AppState
+    ) {
         switch outcome {
         case .settled:
             showSuccess(sentSats: sentSats, paymentId: paymentId, isPending: false)
         case .failed(let reason):
             errorMessage = reason
+            refreshLNURLQuoteAfterFailure(appState: appState)
         case .timedOut:
             showSuccess(sentSats: sentSats, paymentId: paymentId, isPending: true)
         }
@@ -150,7 +255,7 @@ extension SendFlowModel {
 
     /// A receipt shown as pending follows the payment to its outcome: settled completes it, failed
     /// returns to confirm with the reason, and a timeout keeps it pending.
-    func applyLateSettlement(_ outcome: PaymentSettlementOutcome) {
+    func applyLateSettlement(_ outcome: PaymentSettlementOutcome, appState: AppState) {
         guard isPendingSettlement, step == .success else { return }
         switch outcome {
         case .settled:
@@ -159,6 +264,7 @@ extension SendFlowModel {
             isPendingSettlement = false
             errorMessage = reason
             step = .confirm
+            refreshLNURLQuoteAfterFailure(appState: appState)
         case .timedOut:
             break
         }
@@ -172,7 +278,7 @@ extension SendFlowModel {
                 timeoutSeconds: 60,
                 appState: appState
             )
-            applyLateSettlement(outcome)
+            applyLateSettlement(outcome, appState: appState)
         }
     }
 

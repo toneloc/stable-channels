@@ -36,10 +36,8 @@ struct SendPaymentExecutor {
         destination: SendDestination,
         effectiveSats: UInt64,
         feeRateSatVb: Double? = nil,
-        lnurlParams: LNURLPayParams?,
-        lnurlComment: String,
-        appState: AppState,
-        lnurlService: LNURLServiceProtocol?
+        lnurlQuote: LNURLInvoiceQuote?,
+        appState: AppState
     ) async throws -> SendPaymentResult {
         let price = appState.accountingBTCPrice
 
@@ -55,24 +53,7 @@ struct SendPaymentExecutor {
         case .bolt12(let offer, _):
             return try await sendBolt12(offer: offer, effectiveSats: effectiveSats, price: price, appState: appState)
         case .lightningAddress, .lnurlPay:
-            // Fail closed: without a known wallet network there is no validator for the invoice.
-            guard let lnurlService else {
-                throw NSError(
-                    domain: "Send",
-                    code: 3,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "Wallet network is not initialized. Please wait until connected."
-                    ]
-                )
-            }
-            return try await sendLNURL(
-                params: lnurlParams,
-                comment: lnurlComment,
-                effectiveSats: effectiveSats,
-                price: price,
-                appState: appState,
-                lnurlService: lnurlService
-            )
+            return try sendLNURL(quote: lnurlQuote, price: price, appState: appState)
         case .onchain(let address, _):
             return try await sendOnchain(
                 address: address,
@@ -132,30 +113,27 @@ struct SendPaymentExecutor {
         return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
+    /// Pays exactly the invoice the confirm step showed; it was validated by LNURLService when quoted.
     private static func sendLNURL(
-        params: LNURLPayParams?,
-        comment: String,
-        effectiveSats: UInt64,
+        quote: LNURLInvoiceQuote?,
         price: Double,
-        appState: AppState,
-        lnurlService: LNURLServiceProtocol
-    ) async throws -> SendPaymentResult {
-        guard let params else {
-            throw NSError(domain: "LNURL", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing LNURL parameters"])
+        appState: AppState
+    ) throws -> SendPaymentResult {
+        guard let quote else {
+            throw NSError(domain: "LNURL", code: 1, userInfo: [NSLocalizedDescriptionKey: "Missing LNURL invoice"])
         }
-        let msat = effectiveSats * 1000
-        let trimmedComment = comment.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resp = try await lnurlService.fetchInvoice(
-            params: params,
-            amountMsat: msat,
-            comment: trimmedComment.isEmpty ? nil : trimmedComment
-        )
-        // Invoice validation is owned by LNURLService.validateBolt11Invoice inside fetchInvoice.
-        let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: resp.pr)
+        let msat = quote.amountMsat
+        let bolt11 = try Bolt11Invoice.fromStr(invoiceStr: quote.invoice)
         try appState.ensureNoUnsettledSurplus(amountMsat: msat)
         let paymentId = try appState.nodeService.sendPaymentUsingAmount(invoice: bolt11, amountMsat: msat)
+        if quote.isDescriptionUnbound {
+            AuditService.log("LNURL_UNBOUND_INVOICE_PAID", data: [
+                "binding": "\(quote.binding)",
+                "payment_id": "\(paymentId)"
+            ])
+        }
         recordPayment(id: "\(paymentId)", type: "lnurl", msat: msat, price: price, appState: appState)
-        return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .lightning(paymentId: "\(paymentId)"))
+        return SendPaymentResult(sentAmountSats: msat / 1000, outcome: .lightning(paymentId: "\(paymentId)"))
     }
 
     static func sendOnchain(
