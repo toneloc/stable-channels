@@ -1121,6 +1121,9 @@ class AppState {
                 }
                 await synchronizeActiveWalletState()
                 await resumeAfterNodeStart()
+            } catch is CancellationError {
+                // Background paused the retry mid-start; the backoff is kept and foreground resumes it.
+                AuditService.log("NODE_START_RETRY_PAUSED", data: [:])
             } catch {
                 // .syncing here means a scheduled node-start retry (or the network monitor)
                 // is driving recovery from a failed launch, so failures route like .offline.
@@ -1179,7 +1182,8 @@ class AppState {
                 guard let self else { return }
                 self.chainURL = url
                 await self.retryConnection()
-            }
+            },
+            stop: { [weak self] in self?.performBackgroundStop() }
         )
     }
 
