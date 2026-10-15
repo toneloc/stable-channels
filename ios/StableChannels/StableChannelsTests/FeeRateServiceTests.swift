@@ -24,10 +24,10 @@ struct StubFeeRateSource: FeeRateSource {
         }
         guard let rate else { throw FeeRateError.parseFailed(source: "stub") }
         return RecommendedFees(
-            fastestFee: max(0.1, rate * 1.3),
+            fastestFee: max(Constants.minAllowedFeeRateSatVb, rate * 1.3),
             halfHourFee: rate,
-            hourFee: max(0.1, rate * 0.8),
-            minimumFee: max(0.1, rate * 0.5)
+            hourFee: max(Constants.minAllowedFeeRateSatVb, rate * 0.8),
+            minimumFee: max(Constants.minAllowedFeeRateSatVb, rate * 0.5)
         )
     }
 }
@@ -306,6 +306,15 @@ final class FeeRateServiceTests: XCTestCase {
         let afterFailure = await cache.currentRate()
         XCTAssertEqual(afterFailure, 45.0, "Should preserve last known good rate instead of dropping to 2.0 fallback")
     }
+
+    func testSubMinimumFallback_isClampedToMinAllowedFeeRate() async {
+        let failing = StubFeeRateSource(rate: nil)
+        let cache = FeeRateCache(sources: [failing], cacheTTL: .seconds(60), fallback: 0.5)
+
+        let fees = await cache.recommendedFees()
+        XCTAssertGreaterThanOrEqual(fees.rate(for: .economy), Constants.minAllowedFeeRateSatVb)
+        XCTAssertGreaterThanOrEqual(fees.minimumFee, Constants.minAllowedFeeRateSatVb)
+    }
 }
 
 // MARK: - Counting helpers
@@ -347,10 +356,10 @@ struct CountingSource: FeeRateSource {
             throw err
         }
         return RecommendedFees(
-            fastestFee: max(0.1, rate * 1.3),
+            fastestFee: max(Constants.minAllowedFeeRateSatVb, rate * 1.3),
             halfHourFee: rate,
-            hourFee: max(0.1, rate * 0.8),
-            minimumFee: max(0.1, rate * 0.5)
+            hourFee: max(Constants.minAllowedFeeRateSatVb, rate * 0.8),
+            minimumFee: max(Constants.minAllowedFeeRateSatVb, rate * 0.5)
         )
     }
 }

@@ -39,7 +39,7 @@ class AppState {
 
     /// Injected biometric authenticator — defaults to `BiometricService.shared`.
     /// Depend on the `BiometricAuthenticating` protocol, not the concrete type (DI).
-    let biometricAuth: BiometricAuthenticating = BiometricService.shared
+    @ObservationIgnored var biometricAuth: BiometricAuthenticating = BiometricService.shared
 
     /// Whether user has passed biometric/passcode auth this session.
     /// Reset to false on app termination (no persistence = no bypass on restart).
@@ -1824,6 +1824,8 @@ class AppState {
                     try? databaseService?.paymentRepo.updatePaymentStatus(
                         paymentId: "\(pid)", status: "failed"
                     )
+                    // History and payment details reload only when this epoch moves.
+                    confirmationUpdateEpoch += 1
                     NotificationCenter.default.post(
                         name: .paymentFailed,
                         object: nil,
@@ -2387,6 +2389,8 @@ class AppState {
                 status: "completed",
                 feeMsat: feePaidMsat
             )
+            // History and payment details reload only when this epoch moves.
+            confirmationUpdateEpoch += 1
             var userInfo: [String: Any] = ["paymentId": pidStr, "paymentHash": paymentHashStr]
             if let fee = feePaidMsat { userInfo["feePaidMsat"] = fee }
             NotificationCenter.default.post(

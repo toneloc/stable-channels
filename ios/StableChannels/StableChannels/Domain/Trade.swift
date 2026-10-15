@@ -134,6 +134,14 @@ struct PaymentRecord: Codable, Equatable, Identifiable {
     var isIncoming: Bool {
         direction == "received"
     }
+
+    var isSettled: Bool {
+        status == "completed"
+    }
+
+    var isFailed: Bool {
+        status == "failed"
+    }
 }
 
 struct PriceRecord: Codable, Identifiable {

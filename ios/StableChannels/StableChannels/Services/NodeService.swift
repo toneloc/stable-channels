@@ -466,6 +466,11 @@ class NodeService: NodeServiceProtocol {
         address: String,
         amountSats: UInt64
     ) throws {
+        #if DEBUG
+            if let spliceOutOverride {
+                return try spliceOutOverride(userChannelId, counterpartyNodeId, address, amountSats)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
         try node.spliceOut(
             userChannelId: userChannelId,
@@ -477,23 +482,65 @@ class NodeService: NodeServiceProtocol {
 
     // MARK: - Payments
 
+    /// Status of an outbound BOLT11 payment for this payment hash, if the node has one.
+    func outboundPaymentStatus(paymentHash: PaymentHash) -> PaymentStatus? {
+        node?.listPayments().first { payment in
+            guard payment.direction == .outbound, case let .bolt11(hash, _, _, _) = payment.kind else { return false }
+            return hash == paymentHash
+        }?.status
+    }
+
+    // User-facing Lightning sends pass an explicit fee cap so the ceiling the send screen
+    // shows and reserves is the one LDK enforces. Spontaneous/stability/trade sends below
+    // keep `routeParameters: nil` (LDK defaults): their fees are not displayed or reserved.
+
+    // LDK defaults for the non-fee route limits, kept so payment success is unchanged.
+    private static let defaultMaxTotalCltvExpiryDelta: UInt32 = 1008
+    private static let defaultMaxPathCount: UInt8 = 10
+    private static let defaultMaxChannelSaturationPowerOfHalf: UInt8 = 2
+
+    private func userRouteParameters(amountMsat: UInt64) -> RouteParametersConfig {
+        RouteParametersConfig(
+            maxTotalRoutingFeeMsat: PaymentFeeEstimator.maxLightningRoutingFeeMsat(amountMsat: amountMsat),
+            maxTotalCltvExpiryDelta: Self.defaultMaxTotalCltvExpiryDelta,
+            maxPathCount: Self.defaultMaxPathCount,
+            maxChannelSaturationPowerOfHalf: Self.defaultMaxChannelSaturationPowerOfHalf
+        )
+    }
+
     func sendPayment(invoice: Bolt11Invoice) throws -> PaymentId {
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.bolt11Payment().send(invoice: invoice, routeParameters: nil)
+        // Amountless invoices are rejected by LDK's send(); don't fabricate an amount for the cap.
+        let routeParameters = invoice.amountMilliSatoshis().map { userRouteParameters(amountMsat: $0) }
+        return try node.bolt11Payment().send(invoice: invoice, routeParameters: routeParameters)
     }
 
     func sendPaymentUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64) throws -> PaymentId {
+        #if DEBUG
+            if let sendPaymentUsingAmountOverride {
+                return try sendPaymentUsingAmountOverride(invoice, amountMsat)
+            }
+        #endif
         guard let node else { throw NodeServiceError.notRunning }
-        return try node.bolt11Payment().sendUsingAmount(invoice: invoice, amountMsat: amountMsat, routeParameters: nil)
+        return try node.bolt11Payment().sendUsingAmount(
+            invoice: invoice,
+            amountMsat: amountMsat,
+            routeParameters: userRouteParameters(amountMsat: amountMsat)
+        )
     }
 
     func sendBolt12(offer: Offer, amountMsat _: UInt64) throws -> PaymentId {
         guard let node else { throw NodeServiceError.notRunning }
+        // Cap on the offer's own BTC amount; currency-denominated or amountless offers keep LDK defaults.
+        var routeParameters: RouteParametersConfig?
+        if case let .bitcoin(amountMsats) = offer.amount() {
+            routeParameters = userRouteParameters(amountMsat: amountMsats)
+        }
         return try node.bolt12Payment().send(
             offer: offer,
             quantity: nil,
             payerNote: nil,
-            routeParameters: nil
+            routeParameters: routeParameters
         )
     }
 
@@ -504,7 +551,7 @@ class NodeService: NodeServiceProtocol {
             amountMsat: amountMsat,
             quantity: nil,
             payerNote: nil,
-            routeParameters: nil
+            routeParameters: userRouteParameters(amountMsat: amountMsat)
         )
     }
 
@@ -532,6 +579,8 @@ class NodeService: NodeServiceProtocol {
         var lightningSyncAgeSecsOverride: UInt64?
         var sendStabilityPaymentOverride: ((UInt64, PublicKey, [CustomTlvRecord]) throws -> PaymentId)?
         var signMessageOverride: (([UInt8]) throws -> String)?
+        var spliceOutOverride: ((UserChannelId, PublicKey, String, UInt64) throws -> Void)?
+        var sendPaymentUsingAmountOverride: ((Bolt11Invoice, UInt64) throws -> PaymentId)?
     #endif
 
     /// Age in seconds of LDK's last successful Lightning-wallet chain sync, or nil when the
@@ -617,7 +666,7 @@ class NodeService: NodeServiceProtocol {
         else {
             throw NodeServiceError.invalidFeeRate
         }
-        return FeeRate.fromSatPerVbU32(satVb: UInt32(round(rate)))
+        return FeeRate.fromSatPerKwu(satKwu: PaymentFeeEstimator.satPerKwu(fromSatPerVb: rate))
     }
 
     func sendOnchain(address: String, amountSats: UInt64, feeRateSatVb: Double? = nil) throws -> Txid {

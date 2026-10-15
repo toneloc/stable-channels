@@ -2,8 +2,8 @@ import Foundation
 
 /// Multi-tier recommended fee rates (sat/vB) matching target confirmation block conventions.
 struct RecommendedFees: Codable, Equatable, Sendable {
-    static let minAllowedFeeRate: Double = 0.1
-    static let maxAllowedFeeRate: Double = 10_000.0
+    static let minAllowedFeeRate = Constants.minAllowedFeeRateSatVb
+    static let maxAllowedFeeRate = Constants.maxAllowedFeeRateSatVb
 
     let fastestFee: Double
     let halfHourFee: Double
@@ -11,7 +11,7 @@ struct RecommendedFees: Codable, Equatable, Sendable {
     let economyFee: Double?
     let minimumFee: Double
 
-    static func sanitizeRate(_ rate: Double, fallback: Double = 1.0) -> Double {
+    static func sanitizeRate(_ rate: Double, fallback: Double) -> Double {
         guard rate.isFinite && rate > 0 else { return fallback }
         return max(minAllowedFeeRate, min(rate, maxAllowedFeeRate))
     }
@@ -45,7 +45,7 @@ struct RecommendedFees: Codable, Equatable, Sendable {
         economyFee: Double? = nil,
         minimumFee: Double
     ) {
-        let cleanMin = Self.sanitizeRate(minimumFee, fallback: 1.0)
+        let cleanMin = Self.sanitizeRate(minimumFee, fallback: Self.minAllowedFeeRate)
         self.minimumFee = cleanMin
         self.fastestFee = Self.sanitizeRate(fastestFee, fallback: cleanMin)
         self.halfHourFee = Self.sanitizeRate(halfHourFee, fallback: cleanMin)
@@ -111,7 +111,7 @@ struct BlockstreamFeeSource: FeeRateSource {
             fastestFee: block1,
             halfHourFee: block3,
             hourFee: block6,
-            minimumFee: max(0.1, minFee)
+            minimumFee: max(RecommendedFees.minAllowedFeeRate, minFee)
         )
     }
 }
@@ -139,7 +139,7 @@ struct MempoolV1FeeSource: FeeRateSource {
             halfHourFee: halfHour,
             hourFee: hour,
             economyFee: economy,
-            minimumFee: max(0.1, minimumFee)
+            minimumFee: max(RecommendedFees.minAllowedFeeRate, minimumFee)
         )
     }
 }
@@ -242,10 +242,10 @@ actor FeeRateCache {
                         }
                     }
                     let fallbackFees = RecommendedFees(
-                        fastestFee: max(0.1, fallback * 1.3),
+                        fastestFee: fallback * 1.3,
                         halfHourFee: fallback,
-                        hourFee: max(0.1, fallback * 0.8),
-                        minimumFee: max(0.1, fallback * 0.5)
+                        hourFee: fallback * 0.8,
+                        minimumFee: fallback * 0.5
                     )
                     return (fees: fallbackFees, isFallback: true)
                 }
@@ -326,9 +326,10 @@ final class FeeRateService: Sendable {
 
     func currentRateSatVb() async -> UInt64 {
         let rate = await currentRate()
-        guard rate.isFinite && rate > 0 else { return 1 }
+        let floor = RecommendedFees.minAllowedFeeRate
+        guard rate.isFinite && rate > 0 else { return UInt64(floor) }
         if rate >= Double(UInt64.max) { return UInt64.max }
-        return UInt64(max(1.0, rate.rounded()))
+        return UInt64(max(floor, rate.rounded()))
     }
 
     func recommendedFees() async -> RecommendedFees {

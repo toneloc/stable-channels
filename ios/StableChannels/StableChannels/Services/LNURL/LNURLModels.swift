@@ -5,18 +5,19 @@ import Foundation
 
 protocol LNURLServiceProtocol: Sendable {
     func fetchPayParams(from url: URL) async throws -> LNURLPayParams
+    /// Fetches and validates the payee's invoice; network, amount, expiry and amountless invoices throw.
     func fetchInvoice(
         params: LNURLPayParams,
         amountMsat: UInt64,
         comment: String?
-    ) async throws -> LNURLPayInvoiceResponse
+    ) async throws -> LNURLInvoiceQuote
 }
 
 extension LNURLServiceProtocol {
     func fetchInvoice(
         params: LNURLPayParams,
         amountMsat: UInt64
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
         try await fetchInvoice(params: params, amountMsat: amountMsat, comment: nil)
     }
 }
@@ -90,6 +91,12 @@ struct LNURLPayParams: Codable, Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    /// Decodes the base64 avatar image data if present in metadata.
+    var avatarImageData: Data? {
+        guard let (_, base64Data) = imageDescription else { return nil }
+        return Data(base64Encoded: base64Data, options: [.ignoreUnknownCharacters])
     }
 
     /// Validates whether a comment satisfies the payee comment character limit per LUD-12.

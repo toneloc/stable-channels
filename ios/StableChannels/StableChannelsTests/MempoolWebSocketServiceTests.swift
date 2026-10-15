@@ -963,6 +963,31 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(service.reconnectAttempts, 0)
     }
 
+    func testConnectWhileHandshakeInFlightKeepsSameTask() throws {
+        service.connect()
+        let firstTask = try XCTUnwrap(service.currentWebSocketTask)
+
+        service.connect()
+
+        XCTAssertTrue(
+            service.currentWebSocketTask === firstTask,
+            "Second connect() must not replace the in-flight task"
+        )
+    }
+
+    func testConnectAfterDisconnectCreatesNewTask() throws {
+        service.connect()
+        let firstTask = try XCTUnwrap(service.currentWebSocketTask)
+
+        service.disconnect()
+        XCTAssertNil(service.currentWebSocketTask)
+
+        service.connect()
+
+        let secondTask = try XCTUnwrap(service.currentWebSocketTask)
+        XCTAssertFalse(secondTask === firstTask, "connect() after disconnect() must create a new task")
+    }
+
     // MARK: - ProcessedTxStore Tests
 
     @MainActor

@@ -1,21 +1,41 @@
 import CryptoKit
 import LDKNode
 import Network
+import os
 import Security
 import XCTest
 @testable import StableChannels
 
 actor MockLNURLService: LNURLServiceProtocol {
     private var stubbedParams: LNURLPayParams?
-    private var stubbedInvoiceResponse: LNURLPayInvoiceResponse?
+    /// Returned per call in order; the last one repeats.
+    private var stubbedQuotes: [LNURLInvoiceQuote] = []
     private var shouldThrowError: Error?
+    private var holdsInvoiceFetches = false
+    private var heldInvoiceFetches: [CheckedContinuation<Void, Never>] = []
+    private(set) var fetchInvoiceCallCount = 0
 
     func setStubbedParams(_ params: LNURLPayParams?) {
         self.stubbedParams = params
     }
 
-    func setStubbedInvoiceResponse(_ response: LNURLPayInvoiceResponse?) {
-        self.stubbedInvoiceResponse = response
+    func setStubbedQuotes(_ quotes: [LNURLInvoiceQuote]) {
+        self.stubbedQuotes = quotes
+    }
+
+    /// While set, each invoice fetch suspends until `releaseInvoiceFetches()`.
+    func setHoldsInvoiceFetches(_ holds: Bool) {
+        self.holdsInvoiceFetches = holds
+    }
+
+    var heldInvoiceFetchCount: Int {
+        heldInvoiceFetches.count
+    }
+
+    func releaseInvoiceFetches() {
+        let held = heldInvoiceFetches
+        heldInvoiceFetches = []
+        held.forEach { $0.resume() }
     }
 
     func setShouldThrowError(_ error: Error?) {
@@ -36,14 +56,19 @@ actor MockLNURLService: LNURLServiceProtocol {
         params _: LNURLPayParams,
         amountMsat _: UInt64,
         comment _: String?
-    ) async throws -> LNURLPayInvoiceResponse {
+    ) async throws -> LNURLInvoiceQuote {
+        let callIndex = fetchInvoiceCallCount
+        fetchInvoiceCallCount += 1
+        if holdsInvoiceFetches {
+            await withCheckedContinuation { heldInvoiceFetches.append($0) }
+        }
         if let error = shouldThrowError {
             throw error
         }
-        guard let response = stubbedInvoiceResponse else {
+        guard !stubbedQuotes.isEmpty else {
             throw LNURLError.invalidResponse
         }
-        return response
+        return stubbedQuotes[min(callIndex, stubbedQuotes.count - 1)]
     }
 }
 
@@ -76,6 +101,21 @@ final class LNURLServiceTests: XCTestCase {
 
         let expectedDigest = SHA256.hash(data: Data(metadataJSON.utf8)).map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(params.metadataHashHex, expectedDigest)
+    }
+
+    func testAvatarImageDataDecoding() {
+        let sampleData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let base64 = sampleData.base64EncodedString()
+        let metadataJSON = "[[\"text/plain\",\"Coffee Tip\"],[\"image/png;base64\",\"\(base64)\"]]"
+        let params = LNURLPayParams(
+            tag: "payRequest",
+            callback: "https://service.com/callback",
+            minSendable: 1000,
+            maxSendable: 2_100_000_000_000_000_000,
+            metadata: metadataJSON,
+            commentAllowed: 140
+        )
+        XCTAssertEqual(params.avatarImageData, sampleData)
     }
 
     func testCustomBoundsDetectionAndValidation() {
@@ -360,7 +400,7 @@ final class LNURLServiceTests: XCTestCase {
     private static let metadataHashA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
     // 50,000 msat invoice matching metadataHashA
-    private static let valid50kInvoice =
+    static let valid50kInvoice =
         "lnbcrt500n1p4tku6ghp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp5w4qq8tyxn20d5f67jghar9zq9d426geks40etmyn8yzkn8mpqltqsp5aryyc4xdqfpgswmjzxudq96dgyy7yl9ulxrrg2kmzsvaxszvc4zs9qyysgqcqzp2xq97zvuqxzzzqpwe94dfnmrnuaz067kd2jpmggwvgxgy9hfnx6qxcwhcexdxw65qw286uvnpn59nw3k82y94ga76pn7cujulr8ddhmja5atzjjqqcu9kyg"
 
     // 100,000 msat invoice matching metadataHashA
@@ -368,7 +408,7 @@ final class LNURLServiceTests: XCTestCase {
         "lnbcrt1u1p4tku6ghp5uwcvgs5clswpfxhm7nyfjmaeysn6us0yvjdexn9yjkv3k7zjhp2snp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp5gwmcnhr25vzznnky7j9fkn6jhytwnjfdjhugf9tts5vanr8hkscqsp5j5araz875hhj74qa6v9vjwaktzjmlz34yr46nfxl032hcg444yxs9qyysgqcqzp2xq97zvuqv4l34uxylnpl2s59krt4yxrhct6v9yqn6f4uk7egxxg7n3xtu50pqtxfuxg5swcqzhg9nkj07z6ggtflrz0evte9g9tpq8smskq44agq8qjnhu"
 
     // 50,000 msat invoice with direct text description instead of h tag
-    private static let directDescriptionInvoice =
+    static let directDescriptionInvoice =
         "lnbcrt500n1p4tku6gdqjg35hyetrwssygetnvvnp4qd0e5h2zerw5ftxv43r40z7vecunmwk55jvs2wr822zve50el2apvpp530vltuvw6z2cjxtjgqtk89w9aa9tkjs7kjmn3p00u9lg6lvqfscssp5x6kv3wggegd35thl2h7cfv27vgxf6dfgmg9gy4uy9wa3r2y6e82s9qyysgqcqzp2xq97zvuqpaxgcxn97nu274q09u8r93xh3mee2ep78j5c8vgd0a3zvlpuwysqx2ezm9mm8uasuyw3r0xua6wy0vd20zkkynpepzkz3n5jyrlt4zgpe8hhg3"
 
     // Expired invoice (expirySecs: 1)
@@ -423,8 +463,11 @@ final class LNURLServiceTests: XCTestCase {
             comment: "Tip"
         )
 
-        XCTAssertEqual(result.pr, Self.valid50kInvoice)
-        XCTAssertFalse(result.isError)
+        XCTAssertEqual(result.invoice, Self.valid50kInvoice)
+        XCTAssertEqual(result.amountMsat, 50_000)
+        XCTAssertEqual(result.comment, "Tip")
+        XCTAssertEqual(result.binding, .matchesMetadata)
+        XCTAssertGreaterThan(result.expiresAt, Date())
     }
 
     func testFetchInvoice_amountOutOfBounds_throwsError() async throws {
@@ -479,7 +522,8 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
-    func testFetchInvoice_mismatchedDescriptionHash_throwsErrorResponse() async throws {
+    // A forwarder that rewrites the metadata returns an invoice whose hash no longer matches; it stays payable.
+    func testFetchInvoice_mismatchedDescriptionHash_succeeds() async throws {
         let (service, callbackURL) = makeMockService()
         MockURLProtocol.requestHandler = { _ in
             let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -488,21 +532,14 @@ final class LNURLServiceTests: XCTestCase {
         }
 
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
-        do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected errorResponse due to description hash mismatch")
-        } catch let LNURLError.errorResponse(reason) {
-            XCTAssertTrue(reason.contains("does not match payee metadata"))
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+
+        XCTAssertEqual(result.invoice, Self.valid50kInvoice)
+        XCTAssertEqual(result.binding, .mismatchedHash(invoiceHash: Self.metadataHashA))
+        XCTAssertTrue(result.isDescriptionUnbound)
     }
 
-    func testFetchInvoice_directDescription_throwsErrorResponse() async throws {
+    func testFetchInvoice_directDescription_succeeds() async throws {
         let (service, callbackURL) = makeMockService()
         MockURLProtocol.requestHandler = { _ in
             let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
@@ -511,18 +548,63 @@ final class LNURLServiceTests: XCTestCase {
         }
 
         let params = makeParams(callback: callbackURL.absoluteString, metadata: "")
+        let result = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+
+        XCTAssertEqual(result.invoice, Self.directDescriptionInvoice)
+        XCTAssertEqual(result.binding, .direct)
+        XCTAssertTrue(result.isDescriptionUnbound)
+    }
+
+    // Relaxing the description check must not relax the amount check.
+    func testFetchInvoice_mismatchedAmountAndDescriptionHash_throwsInvoiceAmountMismatch() async throws {
+        let (service, callbackURL) = makeMockService()
+        MockURLProtocol.requestHandler = { _ in
+            let response = HTTPURLResponse(url: callbackURL, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            let json = "{\"pr\":\"\(Self.mismatchedAmountInvoice100k)\",\"status\":\"OK\"}"
+            return (response, Data(json.utf8))
+        }
+
+        let params = makeParams(callback: callbackURL.absoluteString, metadata: "[[\"text/plain\",\"Coffee\"]]")
         do {
-            _ = try await service.fetchInvoice(
-                params: params,
-                amountMsat: 50_000,
-                comment: nil
-            )
-            XCTFail("Expected errorResponse due to direct description")
-        } catch let LNURLError.errorResponse(reason) {
-            XCTAssertTrue(reason.contains("direct description"))
+            _ = try await service.fetchInvoice(params: params, amountMsat: 50_000, comment: nil)
+            XCTFail("Expected invoiceAmountMismatch error")
+        } catch LNURLError.invoiceAmountMismatch {
+            // Success
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testValidateBolt11Invoice_reportsDescriptionBinding() throws {
+        let otherHash = String(repeating: "0", count: 64)
+
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.valid50kInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: Self.metadataHashA
+            ),
+            .matchesMetadata
+        )
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.valid50kInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: otherHash
+            ),
+            .mismatchedHash(invoiceHash: Self.metadataHashA)
+        )
+        XCTAssertEqual(
+            try LNURLService.validateBolt11Invoice(
+                pr: Self.directDescriptionInvoice,
+                amountMsat: 50_000,
+                expectedNetwork: .regtest,
+                expectedMetadataHashHex: Self.metadataHashA
+            ),
+            .direct
+        )
     }
 
     func testFetchInvoice_expiredInvoice_throwsErrorResponse() async throws {
@@ -696,7 +778,7 @@ final class LNURLServiceTests: XCTestCase {
         XCTAssertEqual(params.callback, "http://service.onion/callback")
         let torInvoiceParams = makeParams(callback: "http://service.onion/callback", metadata: "")
         let invoiceResult = try await service.fetchInvoice(params: torInvoiceParams, amountMsat: 50_000, comment: nil)
-        XCTAssertEqual(invoiceResult.pr, Self.valid50kInvoice)
+        XCTAssertEqual(invoiceResult.invoice, Self.valid50kInvoice)
 
         // Clearnet endpoint over HTTP is rejected for both stages
         do {
@@ -1778,6 +1860,63 @@ final class LNURLServiceTests: XCTestCase {
         }
     }
 
+    func testDialRaceClaim_grantsOnlyFirstClaim() {
+        let claim = DialRaceClaim()
+        XCTAssertTrue(claim.claim())
+        XCTAssertFalse(claim.claim())
+    }
+
+    func testNWConnectionSession_lostDialRace_sendsNothing() async throws {
+        let receivedBytes = OSAllocatedUnfairLock(initialState: 0)
+        let listener = try NWListener(using: .tcp, on: .any)
+        listener.newConnectionHandler = { incoming in
+            incoming.start(queue: .global())
+            incoming.receive(minimumIncompleteLength: 1, maximumLength: 65536) { data, _, _, _ in
+                receivedBytes.withLock { $0 += data?.count ?? 0 }
+            }
+        }
+        let listenerQueue = DispatchQueue(label: "org.stablechannels.testrace")
+        listener.start(queue: listenerQueue)
+        defer { listener.cancel() }
+
+        var portValue: UInt16?
+        for _ in 0..<100 {
+            if let p = listener.port?.rawValue, p > 0 {
+                portValue = p
+                break
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let port = try XCTUnwrap(portValue)
+
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)))
+        let connection = NWConnection(to: endpoint, using: .tcp)
+        let requestData = Data("GET /callback HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".utf8)
+        let claim = DialRaceClaim()
+        XCTAssertTrue(claim.claim(), "Another candidate already won the race")
+
+        do {
+            _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<
+                (data: Data, cleanClose: Bool),
+                Error
+            >) in
+                NWConnectionSession(
+                    connection: connection,
+                    requestData: requestData,
+                    timeoutInterval: 2,
+                    queue: listenerQueue,
+                    sendClaim: claim,
+                    continuation: continuation
+                ).start()
+            }
+            XCTFail("Expected the losing candidate to cancel")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(receivedBytes.withLock { $0 }, 0)
+    }
+
     func testNWConnectionSession_taskCancellation_abortsConnection() async throws {
         let listener = try NWListener(using: .tcp, on: .any)
         listener.newConnectionHandler = { incoming in
@@ -2522,6 +2661,25 @@ final class LNURLServiceTests: XCTestCase {
 
     private static let testCertP12Base64B =
         "MIIFyQIBAzCCBY8GCSqGSIb3DQEHAaCCBYAEggV8MIIFeDCCAncGCSqGSIb3DQEHBqCCAmgwggJkAgEAMIICXQYJKoZIhvcNAQcBMBwGCiqGSIb3DQEMAQYwDgQImo8r39534IwCAggAgIICMLbMuWYIkPGABDcFj4QFxbzBR4j07G5RmW+2snCk+wSX/s+kXRWX1AZOKgZ4h6ICZL7dGCueZ2QopbB1L39q1I0GYNB5Yq6WacbepBJB04vEcpJx1r8WqVLBlTBRROK9J2rLOtrT1G84rPsIdZ3irFZesullNqWA8N9X/ZJoam6mnBa2SNdh7bVbbdt/EnEx5Y6n6/I3DYScfMy4eA0ApEf06zg2ObuHsOHNbYg1KYJrt8DkZVkfP+u1bndz+ERhPNeU5P8yEoFRkcMcofG+bgv5/UQoy68GQat7H+fwgZbnEmo9swjOrc2AYTUjM+c2k4os2uesKfpZbFAyL19f0VcqfZos6vWob8/4ICccLXv52jOk4uTR2jO8tD63rtpc2LpfUgF6oef2T8bn40e52t5ZijOgi+xGNkr/c1B8rDGMWRwQE/YOOFYG63Kuy9YBq3H45mIGmpdJFIYS9JmEQpXWNVzss7oyBfdCyVPyKq7EbWP9ya92fQZDbNf2mQlsRIL/9sZfBSUFUke39vyhYLL3yOyH+c3qdSbN1lFgtGEdzoxeLnqw4+K0yNAvEeqYi7wFWUcxH8d3ZOS6nR3EQ0K2xEEXpydZmwuIHMIIdF8Q9UhNbhQmtyGqHIOwJXFqQlQzjGI3jHiLLTuxCQRAaHXcFRdRO9Mdikjr2y/QfrsvokvEQjarBFvRwJgWCOlcX2CxFrMEO1YUo7mb3dKh3XG0MMj1OoCTDXWIsClZEA+QMIIC+QYJKoZIhvcNAQcBoIIC6gSCAuYwggLiMIIC3gYLKoZIhvcNAQwKAQKgggKmMIICojAcBgoqhkiG9w0BDAEDMA4ECPbRJVMOs7QiAgIIAASCAoArJ43gpQVEBiKPOXIuXRIbAULQanYPTRS5Gnmm4GDOcSox2jDuv4E1xyGWim54LEzZoB7hSHOroXgDxlO2nnQu+4uuMZe6TMzMtGllPVlbkfUpVTzYO/Wop8ZZq9eNIm01YuFy9SWazYkf0JxegjuA/XXZl6NBUokRZC/I0E3wyzMQfYEdqfhnhBH+z9M3BpRfGf76ULcucFjBQouFOQn6g2yBv3xsJ64aSXETzYA362xYEGwqmWuEBPVR0BT39vJms3cliAv+Gt+W9WVIEnFir4g/O9L8vyb+ZJ7VBVbPyiYHUhr6tcZV1wjO/QstoZr3myAI7SQ6A7eSTNp/e/rCz1v1WaZFcqkgWo7uyeRA4emGQdvnkghfDeI9RebOYqR3TWegsaJRIp2lab+MtPS7z+l3rtB05YxYipo+fTBTX9dW09kgRb7HGK8b/O6QydiBWAxhzusNUS4KM6rkZtd4P5VNOrtX3rFgw6XvQNfa1w3WUtdkPHgXE1wv5/MQ82QWboSIQM6A3EYDRn8vnQUxdyYYqSYCubC5RKiFyF7f2wvDEb6QWtnrcl3TA9LFmthP/Rw0Da2p0pFH3QbUqJFIyCe/dEaGhWlSRl3crUMEC3p390+2jp3ipNzcCliXfiC+EEClrdkY9W0u0+NBuRaGT2gTNf+20cwiP0PigU2oKtaN7Rpvd1vOd6QUyPEPbR89BkGglve9lRS7XFqn3RqSlNEVg6bRlH31ZnBFAaHcxg5r1OUOaTzmVkkzIox+KvFwSM+YxM+8EgKz65XEHiBmLNHZPsh9CYz/zdsZjTVCRBdFchsnjMpm/AZEl9OmJxRrUqChkCz4q2ZmS7oOqB+qMSUwIwYJKoZIhvcNAQkVMRYEFC+CfGcnUSKE/a1fx5i96bzSP48jMDEwITAJBgUrDgMCGgUABBRPxLdParpuWEquhRWWWFXHjYJVGQQIT/mzWW41YxoCAggA"
+
+    func testLNURLAvatar_rejectsNonImageAndOversizedBytes() {
+        XCTAssertNil(LNURLAvatar.thumbnail(from: Data("not an image".utf8)))
+        var oversized = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        oversized.append(Data(count: LNURLAvatar.maxEncodedBytes))
+        XCTAssertNil(LNURLAvatar.thumbnail(from: oversized))
+    }
+
+    func testNWConnectionTransport_selectCandidateIPs_interleavesFamiliesAndCaps() throws {
+        let resolved = [
+            "93.184.216.34",
+            "93.184.216.35",
+            "93.184.216.36",
+            "2606:2800:220:1::1",
+            "2606:2800:220:1::2"
+        ]
+        let candidates = try NWConnectionTransport.selectCandidateIPs(for: "example.com", resolvedIPs: resolved)
+        XCTAssertEqual(candidates, ["93.184.216.34", "2606:2800:220:1::1", "93.184.216.35", "2606:2800:220:1::2"])
+    }
 }
 
 private struct MockHostIPResolver: HostIPResolving {
