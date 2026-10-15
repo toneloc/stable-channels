@@ -56,7 +56,7 @@ final class NodeDirLock: @unchecked Sendable {
     }
 
     /// Polling variant of `tryAcquireReportingNew` — see that method for the
-    /// ownership semantics.
+    /// ownership semantics. Returns not held as soon as the calling task is cancelled.
     func acquireReportingNew(dataDir: URL, timeout: TimeInterval) async -> (held: Bool, newlyAcquired: Bool) {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
@@ -67,7 +67,11 @@ final class NodeDirLock: @unchecked Sendable {
             if Date() >= deadline {
                 return (held: false, newlyAcquired: false)
             }
-            try? await Task.sleep(nanoseconds: 200_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 200_000_000)
+            } catch {
+                return (held: false, newlyAcquired: false)
+            }
         }
     }
 
@@ -119,6 +123,24 @@ protocol NodeServiceProtocol {
 
 @Observable
 class NodeService: NodeServiceProtocol {
+    /// The app node's Esplora sync intervals and timeouts, shared by every builder in the app.
+    static var esploraSyncConfig: EsploraSyncConfig {
+        EsploraSyncConfig(
+            backgroundSyncConfig: BackgroundSyncConfig(
+                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
+                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
+                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
+            ),
+            timeoutsConfig: SyncTimeoutsConfig(
+                onchainWalletSyncTimeoutSecs: Constants.onchainWalletSyncTimeoutSecs,
+                lightningWalletSyncTimeoutSecs: Constants.lightningWalletSyncTimeoutSecs,
+                feeRateCacheUpdateTimeoutSecs: Constants.nodeStartFeeRateTimeoutSecs,
+                txBroadcastTimeoutSecs: Constants.txBroadcastTimeoutSecs,
+                perRequestTimeoutSecs: Constants.esploraRequestTimeoutSecs
+            )
+        )
+    }
+
     static let shared = NodeService()
 
     private(set) var node: Node?
@@ -171,6 +193,8 @@ class NodeService: NodeServiceProtocol {
         // process (the NSE) has a node on it. No-op if already held.
         let lease = await NodeDirLock.shared.acquireReportingNew(dataDir: Constants.userDataDir, timeout: 35)
         guard lease.held else {
+            // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+            try Task.checkCancellation()
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "NodeService.start"])
             throw NodeServiceError.dataDirLocked
         }
@@ -216,21 +240,7 @@ class NodeService: NodeServiceProtocol {
         let logPath = Constants.userDataDir.appendingPathComponent("ldk-node.log").path
         builder.setFilesystemLogger(logFilePath: logPath, maxLogLevel: .debug)
 
-        let syncConfig = EsploraSyncConfig(
-            backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
-                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
-                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
-            ),
-            timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 60,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
-            )
-        )
-        builder.setChainSourceEsplora(serverUrl: esploraURL, config: syncConfig)
+        builder.setChainSourceEsplora(serverUrl: esploraURL, config: Self.esploraSyncConfig)
 
         switch network {
         case .bitcoin:
@@ -796,6 +806,19 @@ extension Error {
         guard let nodeError = self as? NodeError else { return false }
         switch nodeError {
         case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Determines whether a failed node start is a transient chain-source failure (fee
+    /// estimation or wallet sync) worth retrying with backoff instead of showing the error
+    /// screen. Typed match only, for the same reason as `isRetryableEsploraStartupError`.
+    var isRetryableNodeStartError: Bool {
+        guard let nodeError = self as? NodeError else { return false }
+        switch nodeError {
+        case .FeerateEstimationUpdateFailed, .FeerateEstimationUpdateTimeout, .TxSyncFailed, .TxSyncTimeout:
             return true
         default:
             return false
