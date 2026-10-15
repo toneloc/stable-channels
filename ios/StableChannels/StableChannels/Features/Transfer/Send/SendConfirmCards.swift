@@ -144,7 +144,6 @@ struct SendConfirmReceivesCard: View {
     }
 }
 
-/// The LNURL invoice the slide pays: a loading row, a retryable error, or its amount and description,
 /// Status of the LNURL invoice the slide will pay: a loading row while it is fetched and validated,
 /// or a retryable error. A valid invoice shows nothing extra; its amount is the one already shown.
 struct SendConfirmLNURLInvoiceCard: View {
