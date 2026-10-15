@@ -1170,8 +1170,24 @@ class AppState {
     }
 
     /// Keeps the syncing screen up and retries node start with backoff after a transient
-    /// chain-source failure, instead of stranding the user on the error screen.
+    /// chain-source failure. Once the retry budget is spent, shows the error screen, whose
+    /// Try Again starts a fresh launch.
     private func retryNodeStartLater(reason: String) {
+        guard NodeStartupPolicy.hasRetriesLeft(
+            retryAttempt: nodeStartup.retryAttempt,
+            maxRetries: Constants.nodeStartMaxRetries
+        ) else {
+            AuditService.log("NODE_START_RETRIES_EXHAUSTED", data: [
+                "attempts": "\(nodeStartup.retryAttempt)",
+                "error": reason
+            ])
+            nodeStartup.reset()
+            phase = .error(String(
+                localized: "error_network_unstable_sync",
+                defaultValue: "Could not sync your wallet. The network is unstable right now. Please try again."
+            ))
+            return
+        }
         phase = .syncing
         nodeStartup.scheduleRetry(maxDelay: Constants.nodeStartRetryMaxDelay, reason: reason, run: nodeStartRetryRun())
     }

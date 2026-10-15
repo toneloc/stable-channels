@@ -45,4 +45,10 @@ enum NodeStartupPolicy {
         if isRetryable { return .retry }
         return looksOffline ? .offline : .fail
     }
+
+    /// Whether another automatic retry is allowed. Once the budget is spent the user gets the
+    /// error screen with Try Again instead of a syncing screen that retries forever.
+    static func hasRetriesLeft(retryAttempt: Int, maxRetries: Int) -> Bool {
+        retryAttempt < maxRetries
+    }
 }

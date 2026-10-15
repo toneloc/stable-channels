@@ -26,6 +26,8 @@ enum Constants {
     static let nodeStartRetryDelay: Duration = .seconds(2)
     // Ceiling for the launch-time backoff that keeps retrying node start after every provider failed.
     static let nodeStartRetryMaxDelay: Duration = .seconds(60)
+    // Automatic node-start retries before the error screen (backoff 1+2+4+8+16+32s, about 1-3 minutes).
+    static let nodeStartMaxRetries = 6
     static let onchainWalletSyncTimeoutSecs: UInt64 = 60
     static let lightningWalletSyncTimeoutSecs: UInt64 = 60
     static let txBroadcastTimeoutSecs: UInt64 = 30
