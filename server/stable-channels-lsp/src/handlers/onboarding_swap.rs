@@ -32,11 +32,12 @@ const SIG_WINDOW_SECS: u64 = 300;
 /// 5m (OpenReceive fixedfloat.ts). A shorter invoice could expire after the user has paid.
 pub const MIN_INVOICE_EXPIRY_SECS: u64 = (10 + 15 + 5) * 60;
 
+/// Status, `error` message, and optional extra fields merged into the JSON error body.
 #[derive(Debug)]
-pub struct ApiError(pub StatusCode, pub String);
+pub struct ApiError(pub StatusCode, pub String, pub Option<Value>);
 
 fn err(status: StatusCode, message: impl Into<String>) -> ApiError {
-    ApiError(status, message.into())
+    ApiError(status, message.into(), None)
 }
 
 fn bad(message: impl Into<String>) -> ApiError {
@@ -51,6 +52,8 @@ fn store_err(e: rusqlite::Error) -> ApiError {
 fn provider_err(e: ProviderError) -> ApiError {
     match e {
         ProviderError::Api(m) => err(StatusCode::BAD_GATEWAY, m),
+        ProviderError::RateLimited(m) => err(StatusCode::TOO_MANY_REQUESTS, m),
+        ProviderError::Conflict(m) => err(StatusCode::CONFLICT, m),
         other => err(StatusCode::SERVICE_UNAVAILABLE, other.to_string()),
     }
 }
@@ -448,6 +451,18 @@ pub async fn refund(
     if row.settled_at.is_some() {
         return Err(err(StatusCode::CONFLICT, "swap already settled"));
     }
+    // A provider accepts one refund address per order, so a stored address is final: answer
+    // from it and never call emergency again.
+    if let Some(stored) = &row.refund_address {
+        if stored == address {
+            return Ok(public_json(&row, None));
+        }
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "refund already requested to a different address".into(),
+            Some(json!({ "refund_address": stored })),
+        ));
+    }
     let (state, _) = swaps.refresh(&row).await.map_err(provider_err)?;
     if state != SwapState::RefundRequired {
         return Err(err(
@@ -458,10 +473,34 @@ pub async fn refund(
     let provider = swaps
         .provider(&row.provider_id)
         .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "provider not configured"))?;
-    provider
+    match provider
         .emergency_refund(&row.provider_order_id, &row.provider_token, address)
         .await
-        .map_err(provider_err)?;
+    {
+        Ok(()) => {}
+        // The provider already holds a refund address we never stored (e.g. our write failed
+        // after it accepted). We cannot tell which address it has, so a human must check.
+        Err(ProviderError::Conflict(detail)) => {
+            stable_channels::audit::audit_event(
+                "ONBOARDING_SWAP_ATTENTION",
+                json!({
+                    "payment_hash": payment_hash,
+                    "node_id": node_id,
+                    "provider_id": row.provider_id,
+                    "provider_order_id": row.provider_order_id,
+                    "reason": "refund_address_out_of_sync",
+                    "requested_refund_address": address,
+                    "provider_detail": detail,
+                }),
+            );
+            return Err(err(
+                StatusCode::CONFLICT,
+                "refund already requested, contact support",
+            ));
+        }
+        Err(e) => return Err(provider_err(e)),
+    }
+    // Saved only after the provider accepted it, so the store never claims a refund it does not have.
     swaps
         .store
         .set_refund_address(&payment_hash, address)
@@ -498,7 +537,13 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 fn respond(result: Result<Value, ApiError>) -> Response {
     match result {
         Ok(body) => json_response(StatusCode::OK, body),
-        Err(ApiError(status, message)) => json_response(status, json!({ "error": message })),
+        Err(ApiError(status, message, extra)) => {
+            let mut body = json!({ "error": message });
+            if let Some(Value::Object(fields)) = extra {
+                body.as_object_mut().unwrap().extend(fields);
+            }
+            json_response(status, body)
+        }
     }
 }
 
@@ -577,7 +622,7 @@ pub async fn refund_handler(State(state): State<AppState>, body: Bytes) -> Respo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::swap::fake::{FakeProvider, ETH_ADDRESS, TRON_ADDRESS};
+    use crate::swap::fake::{FakeProvider, FakeShape, ETH_ADDRESS, TRON_ADDRESS};
     use crate::swap::store::SwapStore;
     use async_trait::async_trait;
     use ldk_node::bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
@@ -592,6 +637,9 @@ mod tests {
     use std::time::Duration;
 
     const NOW: u64 = 1_800_000_000;
+    /// Audit capture is process-global; tests that capture take this so they cannot steal it
+    /// from each other (same pattern as stable_manager's AUDIT_TEST_GUARD).
+    static AUDIT_TEST_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     const PREIMAGE: [u8; 32] = [7; 32];
     const AMOUNT_MSAT: u64 = 150_000_000;
 
@@ -748,7 +796,11 @@ mod tests {
     }
 
     async fn setup() -> (FakeProvider, OnboardingSwaps, tempfile::TempDir) {
-        let fake = FakeProvider::start().await;
+        setup_shaped(FakeShape::FixedFloat).await
+    }
+
+    async fn setup_shaped(shape: FakeShape) -> (FakeProvider, OnboardingSwaps, tempfile::TempDir) {
+        let fake = FakeProvider::start_shaped(shape).await;
         let dir = tempfile::tempdir().unwrap();
         let swaps = OnboardingSwaps::new(
             SwapStore::open(dir.path()).unwrap(),
@@ -969,6 +1021,7 @@ mod tests {
         let (sk, node_id) = user_key();
         let invoice = invoice_with(&sk, PREIMAGE, Some(AMOUNT_MSAT), 3600);
         let hash = hex::encode(invoice.payment_hash().0);
+        let _audit = AUDIT_TEST_GUARD.lock().await;
         stable_channels::audit::enable_test_capture();
         create(
             &swaps,
@@ -1219,7 +1272,8 @@ mod tests {
     #[tokio::test]
     async fn create_is_rate_limited_per_node_and_globally() {
         let (fake, mut swaps, _dir) = setup().await;
-        swaps.rate_limit = std::sync::Mutex::new(crate::swap::CreateRateLimit::new(3600, 2, 3));
+        swaps.rate_limit =
+            std::sync::Mutex::new(crate::swap::CreateRateLimit::new(3600, 2, 3, 100));
         let (sk, node_id) = user_key();
         let other_sk = SecretKey::from_slice(&[0x55; 32]).unwrap();
         let other_id = PublicKey::from_secret_key(&Secp256k1::new(), &other_sk).to_string();
@@ -1286,6 +1340,193 @@ mod tests {
         assert!(err.1.contains("right now"));
 
         assert_eq!(*fake.state.creates.lock().unwrap(), 3);
+    }
+
+    /// A swap in refund_required, ready for refund tests.
+    async fn refund_required_swap(
+        shape: FakeShape,
+    ) -> (
+        FakeProvider,
+        OnboardingSwaps,
+        tempfile::TempDir,
+        String,
+        String,
+    ) {
+        let (fake, swaps, dir) = setup_shaped(shape).await;
+        let (sk, node_id) = user_key();
+        let invoice = invoice_with(&sk, PREIMAGE, Some(AMOUNT_MSAT), 3600);
+        let hash = hex::encode(invoice.payment_hash().0);
+        create(
+            &swaps,
+            &SigFake,
+            &lsp(),
+            create_req(&node_id, &invoice, "USDT_TRON"),
+            NOW,
+        )
+        .await
+        .unwrap();
+        fake.force_state("refund_required");
+        (fake, swaps, dir, node_id, hash)
+    }
+
+    const OTHER_TRON: &str = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+
+    async fn same_refund_address_twice_calls_provider_once(shape: FakeShape) {
+        let (fake, swaps, _dir, node_id, hash) = refund_required_swap(shape).await;
+        let first = refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, TRON_ADDRESS),
+            NOW,
+        )
+        .await
+        .unwrap();
+        let second = refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, TRON_ADDRESS),
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(first["refund_address"], TRON_ADDRESS);
+        assert_eq!(second["refund_address"], TRON_ADDRESS);
+        assert_eq!(*fake.state.emergencies.lock().unwrap(), 1);
+    }
+
+    async fn different_refund_address_is_our_409_without_provider_call(shape: FakeShape) {
+        let (fake, swaps, _dir, node_id, hash) = refund_required_swap(shape).await;
+        refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, TRON_ADDRESS),
+            NOW,
+        )
+        .await
+        .unwrap();
+        let ApiError(status, message, extra) = refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, OTHER_TRON),
+            NOW,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(message.contains("different address"));
+        assert_eq!(extra.unwrap()["refund_address"], TRON_ADDRESS);
+        assert_eq!(
+            *fake.state.emergencies.lock().unwrap(),
+            1,
+            "no second emergency call"
+        );
+        // The JSON error body carries the stored address next to the message.
+        let response = respond(Err(ApiError(
+            StatusCode::CONFLICT,
+            "x".into(),
+            Some(json!({ "refund_address": TRON_ADDRESS })),
+        )));
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn provider_409_without_stored_address_is_409_and_attention() {
+        let (fake, swaps, _dir, node_id, hash) =
+            refund_required_swap(FakeShape::LightningSwap).await;
+        // The provider accepted an earlier request, but our write of refund_address was lost.
+        fake.state.orders.lock().unwrap()[0].refund_address = Some(OTHER_TRON.into());
+
+        let _audit = AUDIT_TEST_GUARD.lock().await;
+        stable_channels::audit::enable_test_capture();
+        let err = refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, TRON_ADDRESS),
+            NOW,
+        )
+        .await
+        .unwrap_err();
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert_eq!(err.0, StatusCode::CONFLICT, "never 503 for a provider 409");
+        assert_eq!(err.1, "refund already requested, contact support");
+        let attention: Vec<_> = events
+            .iter()
+            .filter(|(e, _)| e == "ONBOARDING_SWAP_ATTENTION")
+            .collect();
+        assert_eq!(attention.len(), 1);
+        assert_eq!(attention[0].1["reason"], "refund_address_out_of_sync");
+        assert_no_token(&attention[0].1);
+        assert!(!events
+            .iter()
+            .any(|(e, _)| e == "ONBOARDING_SWAP_REFUND_REQUESTED"));
+        // Nothing stored: the address the provider holds is unknown to us.
+        assert!(swaps
+            .store
+            .get(&hash)
+            .unwrap()
+            .unwrap()
+            .refund_address
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn stored_refund_address_is_final_on_both_provider_shapes() {
+        for shape in FakeShape::ALL {
+            same_refund_address_twice_calls_provider_once(shape).await;
+            different_refund_address_is_our_409_without_provider_call(shape).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn fixedfloat_shape_accepts_refund_when_our_store_is_out_of_sync() {
+        // FixedFloat-shaped providers (OpenReceive's fake) replace the address instead of 409.
+        let (fake, swaps, _dir, node_id, hash) = refund_required_swap(FakeShape::FixedFloat).await;
+        fake.state.orders.lock().unwrap()[0].refund_address = Some(OTHER_TRON.into());
+        let body = refund(
+            &swaps,
+            &SigFake,
+            refund_req(&node_id, &hash, TRON_ADDRESS),
+            NOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(body["refund_address"], TRON_ADDRESS);
+        assert_eq!(
+            fake.orders()[0].refund_address.as_deref(),
+            Some(TRON_ADDRESS)
+        );
+    }
+
+    #[tokio::test]
+    async fn both_provider_shapes_list_rails_and_create_eth_orders() {
+        for shape in FakeShape::ALL {
+            let (fake, swaps, _dir) = setup_shaped(shape).await;
+            let body = options(Some(&swaps)).await;
+            let assets: Vec<&str> = body["rails"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["asset"].as_str().unwrap())
+                .collect();
+            assert_eq!(assets, ["USDT_TRON", "USDT_ETH"], "{shape:?}");
+
+            let (sk, node_id) = user_key();
+            let invoice = invoice_with(&sk, PREIMAGE, Some(AMOUNT_MSAT), 3600);
+            let body = create(
+                &swaps,
+                &SigFake,
+                &lsp(),
+                create_req(&node_id, &invoice, "USDT_ETH"),
+                NOW,
+            )
+            .await
+            .unwrap();
+            assert_eq!(body["deposit_address"], ETH_ADDRESS, "{shape:?}");
+            // The provider's own code for USDT on Ethereum went into /create.
+            assert_eq!(fake.orders()[0].from_ccy, shape.usdt_eth_code());
+        }
     }
 
     #[tokio::test]

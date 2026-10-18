@@ -25,6 +25,11 @@ pub enum ProviderError {
     Api(String),
     /// The provider answered but broke the response contract.
     Invalid(String),
+    /// HTTP 429. Providers meter calls by weight (a create costs far more than a status poll),
+    /// so a 429 must not be retried in a loop.
+    RateLimited(String),
+    /// HTTP 409. On `emergency` it means a refund address is already set for the order.
+    Conflict(String),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -33,8 +38,17 @@ impl std::fmt::Display for ProviderError {
             Self::Unavailable(m) => write!(f, "provider unavailable: {m}"),
             Self::Api(m) => write!(f, "provider error: {m}"),
             Self::Invalid(m) => write!(f, "provider response invalid: {m}"),
+            Self::RateLimited(m) => write!(f, "provider rate limited: {m}"),
+            Self::Conflict(m) => write!(f, "provider conflict: {m}"),
         }
     }
+}
+
+/// One raw provider HTTP answer, kept apart from parsing so a dev tool can show the body when the
+/// real API does not match what we expect. Bodies can carry an order token: never log them as-is.
+pub struct RawResponse {
+    pub status: u16,
+    pub body: String,
 }
 
 /// One stablecoin → Lightning rail the provider currently offers, with invoice-side limits.
@@ -108,9 +122,9 @@ impl FixedFloatClient {
         }
     }
 
-    /// Signed POST; returns the envelope's `data`. The key and signature travel in headers and
-    /// are never logged; bodies may carry the order token, so they are not logged either.
-    async fn post(&self, path: &str, body: Value) -> Result<Value, ProviderError> {
+    /// Signed `POST {base}/api/v2/{path}`, transport only. The key and signature travel in headers
+    /// and are never logged; bodies may carry the order token, so they are not logged either.
+    pub async fn post_raw(&self, path: &str, body: &Value) -> Result<RawResponse, ProviderError> {
         let body = body.to_string();
         let response = self
             .http
@@ -122,48 +136,47 @@ impl FixedFloatClient {
             .send()
             .await
             .map_err(|e| ProviderError::Unavailable(format!("{path}: {}", e.without_url())))?;
-        let status = response.status();
-        let text = response
+        let status = response.status().as_u16();
+        let body = response
             .text()
             .await
             .map_err(|e| ProviderError::Unavailable(format!("{path}: {}", e.without_url())))?;
-        let envelope: Value = if text.is_empty() {
-            json!({})
-        } else {
-            serde_json::from_str(&text)
-                .map_err(|_| ProviderError::Unavailable(format!("{path} returned invalid JSON")))?
-        };
-        let msg = coerced_string(&envelope["msg"]).unwrap_or_default();
-        if !status.is_success() {
-            return Err(ProviderError::Unavailable(format!(
-                "{path} HTTP {status} {msg}"
-            )));
-        }
-        if envelope["code"].as_i64() != Some(0) {
-            return Err(ProviderError::Api(if msg.is_empty() {
-                format!("{path} failed")
-            } else {
-                msg
-            }));
-        }
-        Ok(envelope["data"].clone())
+        Ok(RawResponse { status, body })
+    }
+
+    /// The public, unsigned rates export (`GET {base}/rates/fixed.xml`), transport only.
+    pub async fn rates_raw(&self) -> Result<RawResponse, ProviderError> {
+        let response = self
+            .http
+            .get(format!("{}/rates/fixed.xml", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ProviderError::Unavailable(format!("rates: {}", e.without_url())))?;
+        let status = response.status().as_u16();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| ProviderError::Unavailable(format!("rates: {}", e.without_url())))?;
+        Ok(RawResponse { status, body })
+    }
+
+    /// Signed POST; returns the envelope's `data`.
+    async fn post(&self, path: &str, body: Value) -> Result<Value, ProviderError> {
+        envelope_data(path, &self.post_raw(path, &body).await?)
     }
 
     /// `/ccies` resolution joined with the public rates XML: the stablecoin rails this provider
     /// accepts deposits for, each with invoice-side min/max derived from the pair rate.
     pub async fn catalog(&self) -> Result<Catalog, ProviderError> {
         let ccies = self.post("ccies", json!({})).await?;
-        let xml = self
-            .http
-            .get(format!("{}/rates/fixed.xml", self.base_url))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status())
-            .map_err(|e| ProviderError::Unavailable(format!("rates: {}", e.without_url())))?
-            .text()
-            .await
-            .map_err(|e| ProviderError::Unavailable(format!("rates: {}", e.without_url())))?;
-        build_catalog(&ccies, &xml)
+        let rates = self.rates_raw().await?;
+        if !(200..300).contains(&rates.status) {
+            return Err(ProviderError::Unavailable(format!(
+                "rates HTTP {}",
+                rates.status
+            )));
+        }
+        build_catalog(&ccies, &rates.body)
     }
 
     pub async fn create(
@@ -173,20 +186,8 @@ impl FixedFloatClient {
         bolt11: &str,
         amount_msat: u64,
     ) -> Result<ProviderOrder, ProviderError> {
-        let data = self
-            .post(
-                "create",
-                json!({
-                    "type": "fixed",
-                    "fromCcy": rail.code,
-                    "toCcy": lightning_code,
-                    "direction": "to",
-                    "amount": msat_to_btc_string(amount_msat),
-                    "toAddress": bolt11,
-                }),
-            )
-            .await?;
-        let mut order = parse_order(&data)?;
+        let request = create_request(&rail.code, lightning_code, bolt11, amount_msat);
+        let mut order = parse_order(&self.post("create", request).await?)?;
         if order.fee.is_none() {
             order.fee = self.price(rail, lightning_code, amount_msat).await;
         }
@@ -195,20 +196,8 @@ impl FixedFloatClient {
 
     /// Best-effort fee lookup for the same trade; a failure just leaves the fee off.
     pub async fn price(&self, rail: &Rail, lightning_code: &str, amount_msat: u64) -> Option<Fee> {
-        let data = self
-            .post(
-                "price",
-                json!({
-                    "type": "fixed",
-                    "fromCcy": rail.code,
-                    "toCcy": lightning_code,
-                    "direction": "to",
-                    "amount": msat_to_btc_string(amount_msat),
-                }),
-            )
-            .await
-            .ok()?;
-        read_fee(&data)
+        let request = price_request(&rail.code, lightning_code, amount_msat);
+        read_fee(&self.post("price", request).await.ok()?)
     }
 
     /// Current provider status, or `None` for a thin body with no `status` (keep the persisted one).
@@ -234,6 +223,69 @@ impl FixedFloatClient {
     }
 }
 
+/// Unwrap a `{code, msg, data}` envelope: non-2xx is `Unavailable` (429 is `RateLimited`, 409 is
+/// `Conflict`), a non-zero `code` is `Api`, otherwise `data`.
+pub fn envelope_data(path: &str, raw: &RawResponse) -> Result<Value, ProviderError> {
+    let envelope: Option<Value> = if raw.body.is_empty() {
+        Some(json!({}))
+    } else {
+        serde_json::from_str(&raw.body).ok()
+    };
+    let msg = envelope
+        .as_ref()
+        .and_then(|e| coerced_string(&e["msg"]))
+        .unwrap_or_default();
+    if raw.status == 429 {
+        return Err(ProviderError::RateLimited(format!("{path} HTTP 429 {msg}")));
+    }
+    if raw.status == 409 {
+        return Err(ProviderError::Conflict(format!("{path} HTTP 409 {msg}")));
+    }
+    if !(200..300).contains(&raw.status) {
+        return Err(ProviderError::Unavailable(format!(
+            "{path} HTTP {} {msg}",
+            raw.status
+        )));
+    }
+    let envelope = envelope
+        .ok_or_else(|| ProviderError::Unavailable(format!("{path} returned invalid JSON")))?;
+    if envelope["code"].as_i64() != Some(0) {
+        return Err(ProviderError::Api(if msg.is_empty() {
+            format!("{path} failed")
+        } else {
+            msg
+        }));
+    }
+    Ok(envelope["data"].clone())
+}
+
+/// `/create` body: fixed rate, `direction: to` = exactly this much BTC must arrive at the bolt11.
+pub fn create_request(
+    from_code: &str,
+    lightning_code: &str,
+    bolt11: &str,
+    amount_msat: u64,
+) -> Value {
+    json!({
+        "type": "fixed",
+        "fromCcy": from_code,
+        "toCcy": lightning_code,
+        "direction": "to",
+        "amount": msat_to_btc_string(amount_msat),
+        "toAddress": bolt11,
+    })
+}
+
+pub fn price_request(from_code: &str, lightning_code: &str, amount_msat: u64) -> Value {
+    json!({
+        "type": "fixed",
+        "fromCcy": from_code,
+        "toCcy": lightning_code,
+        "direction": "to",
+        "amount": msat_to_btc_string(amount_msat),
+    })
+}
+
 /// Lowercase hex HMAC-SHA256(secret, body): the `X-API-SIGN` header.
 pub fn sign(secret: &str, body: &str) -> String {
     let mut engine: HmacEngine<sha256::Hash> = HmacEngine::new(secret.as_bytes());
@@ -254,7 +306,7 @@ fn required(value: &Value, label: &str) -> Result<String, ProviderError> {
     coerced_string(value).ok_or_else(|| ProviderError::Invalid(format!("missing {label}")))
 }
 
-fn read_fee(record: &Value) -> Option<Fee> {
+pub fn read_fee(record: &Value) -> Option<Fee> {
     Some(Fee {
         pay_in_usd: coerced_string(&record["from"]["usd"])?,
         payout_usd: coerced_string(&record["to"]["usd"])?,
@@ -262,7 +314,7 @@ fn read_fee(record: &Value) -> Option<Fee> {
 }
 
 /// Parse a `/create` body. Every deposit field is required: no invented deadline or amount.
-fn parse_order(data: &Value) -> Result<ProviderOrder, ProviderError> {
+pub fn parse_order(data: &Value) -> Result<ProviderOrder, ProviderError> {
     let deposit_amount = required(&data["from"]["amount"], "from.amount")?;
     if parse_decimal(&deposit_amount).is_none() {
         return Err(ProviderError::Invalid(
@@ -367,6 +419,33 @@ fn refund_reason(statuses: &Value) -> Option<&'static str> {
 /// Resolve `/ccies` + rates XML into the stablecoin rails (OpenReceive `resolveFixedFloatCurrencies`
 /// + `invoiceLimitsFromFixedFloatRate`). A rail with no rate pair is temporarily unavailable.
 pub fn build_catalog(ccies: &Value, rates_xml: &str) -> Result<Catalog, ProviderError> {
+    let (lightning_code, codes) = resolve_currencies(ccies)?;
+    let pairs = parse_rates_xml(rates_xml);
+    let rails = codes
+        .into_iter()
+        .filter_map(|(asset, code)| {
+            let pair = pairs.iter().find(|p| {
+                p.from.eq_ignore_ascii_case(&code) && p.to.eq_ignore_ascii_case(&lightning_code)
+            })?;
+            Some(Rail {
+                asset,
+                min_msat: pay_to_invoice_msat(&pair.min, pair, true)?,
+                max_msat: pay_to_invoice_msat(&pair.max, pair, false)?,
+                code,
+            })
+        })
+        .collect();
+    Ok(Catalog {
+        lightning_code,
+        rails,
+    })
+}
+
+/// `/ccies` alone: the Lightning payout code and the provider code of each stablecoin rail that
+/// accepts deposits (`recv=false` is omitted rather than failing at create). No limits here.
+pub fn resolve_currencies(
+    ccies: &Value,
+) -> Result<(String, Vec<(PayInAsset, String)>), ProviderError> {
     let items = ccies
         .as_array()
         .or_else(|| ccies["ccies"].as_array())
@@ -396,31 +475,18 @@ pub fn build_catalog(ccies: &Value, rates_xml: &str) -> Result<Catalog, Provider
             ProviderError::Invalid("/ccies has no BTC Lightning payout currency".into())
         })?;
 
-    let pairs = parse_rates_xml(rates_xml);
-    let rails = PayInAsset::ALL
+    let codes = PayInAsset::ALL
         .into_iter()
         .filter_map(|asset| {
-            // recv=false means the provider will not accept deposits: omit rather than fail at create.
             let (code, ..) = currencies.iter().find(|(_, coin, network, item)| {
                 coin == asset.coin()
                     && network_matches(asset.network(), network)
                     && item["recv"].as_bool() != Some(false)
             })?;
-            let pair = pairs.iter().find(|p| {
-                p.from.eq_ignore_ascii_case(code) && p.to.eq_ignore_ascii_case(&lightning_code)
-            })?;
-            Some(Rail {
-                asset,
-                code: code.clone(),
-                min_msat: pay_to_invoice_msat(&pair.min, pair, true)?,
-                max_msat: pay_to_invoice_msat(&pair.max, pair, false)?,
-            })
+            Some((asset, code.clone()))
         })
         .collect();
-    Ok(Catalog {
-        lightning_code,
-        rails,
-    })
+    Ok((lightning_code, codes))
 }
 
 #[derive(Debug)]
@@ -433,36 +499,70 @@ struct RatePair {
     max: String,
 }
 
-/// Minimal reader for FixedFloat's flat `<rates><item><from>..</from>..</item></rates>` export.
+/// Reader for the flat `<rates><item><from>..</from>..</item></rates>` export, matching
+/// OpenReceive's `parseFixedFloatRatesXml`: tags may carry attributes and any case, text is
+/// trimmed, and amounts keep only their leading number ("10 USDT" and "10USDT" → "10").
 fn parse_rates_xml(xml: &str) -> Vec<RatePair> {
-    let tag = |item: &str, name: &str| -> Option<String> {
-        let open = format!("<{name}>");
-        let start = item.find(&open)? + open.len();
-        let end = item[start..].find(&format!("</{name}>"))? + start;
-        // "10 USDT" → "10": limits and rates carry a currency suffix.
-        item[start..end]
-            .split_whitespace()
-            .next()
-            .map(str::to_string)
+    let text = |item: &str, name: &str| -> Option<String> {
+        let value = tag_contents(item, name).into_iter().next()?.trim();
+        (!value.is_empty()).then(|| value.to_string())
     };
-    xml.split("<item>")
-        .skip(1)
-        .filter_map(|chunk| {
-            let item = &chunk[..chunk.find("</item>")?];
-            let to = tag(item, "to")?;
+    let number = |item: &str, name: &str| -> Option<String> {
+        let value = text(item, name)?;
+        let digits: String = value
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        Some(if digits.is_empty() { value } else { digits })
+    };
+    tag_contents(xml, "item")
+        .into_iter()
+        .filter_map(|item| {
+            let to = text(item, "to")?;
             if !is_lightning_network(&to) {
                 return None;
             }
             Some(RatePair {
-                from: tag(item, "from")?,
+                from: text(item, "from")?,
                 to,
-                rate_in: tag(item, "in")?,
-                rate_out: tag(item, "out")?,
-                min: tag(item, "minamount")?,
-                max: tag(item, "maxamount")?,
+                rate_in: number(item, "in")?,
+                rate_out: number(item, "out")?,
+                min: number(item, "minamount")?,
+                max: number(item, "maxamount")?,
             })
         })
         .collect()
+}
+
+/// Contents of every `<name …>…</name>` in `xml`, case-insensitive and attribute-tolerant
+/// (OpenReceive `matchTags`). `<to>` never matches `<tofee>`: the name must end at `>` or a space.
+fn tag_contents<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
+    // ASCII lowercasing keeps byte offsets, so indexes into `lower` are valid in `xml`.
+    let lower = xml.to_ascii_lowercase();
+    let open = format!("<{}", name.to_ascii_lowercase());
+    let close = format!("</{}>", name.to_ascii_lowercase());
+    let mut found = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = lower[pos..].find(&open) {
+        let after_name = pos + i + open.len();
+        match lower[after_name..].chars().next() {
+            Some(c) if c == '>' || c.is_whitespace() => {}
+            _ => {
+                pos = after_name;
+                continue;
+            }
+        }
+        let Some(gt) = lower[after_name..].find('>') else {
+            break;
+        };
+        let start = after_name + gt + 1;
+        let Some(len) = lower[start..].find(&close) else {
+            break;
+        };
+        found.push(&xml[start..start + len]);
+        pos = start + len + close.len();
+    }
+    found
 }
 
 /// Positive decimal string → (units, scale).
@@ -583,6 +683,35 @@ mod tests {
     }
 
     #[test]
+    fn envelope_maps_http_and_api_errors() {
+        let raw = |status, body: &str| RawResponse {
+            status,
+            body: body.to_string(),
+        };
+        let ok = envelope_data(
+            "order",
+            &raw(200, r#"{"code":0,"msg":"OK","data":{"id":"A"}}"#),
+        );
+        assert_eq!(ok.unwrap()["id"], "A");
+        assert!(matches!(
+            envelope_data("create", &raw(429, "Too Many Requests")),
+            Err(ProviderError::RateLimited(_))
+        ));
+        assert!(matches!(
+            envelope_data("emergency", &raw(409, r#"{"code":409,"msg":"address already set"}"#)),
+            Err(ProviderError::Conflict(m)) if m.contains("address already set")
+        ));
+        assert!(matches!(
+            envelope_data("create", &raw(200, r#"{"code":1,"msg":"bad amount"}"#)),
+            Err(ProviderError::Api(m)) if m == "bad amount"
+        ));
+        assert!(matches!(
+            envelope_data("ccies", &raw(200, "<html>")),
+            Err(ProviderError::Unavailable(_))
+        ));
+    }
+
+    #[test]
     fn hmac_signature_is_lower_hex_sha256() {
         // RFC 4231 test case 2.
         assert_eq!(
@@ -624,6 +753,24 @@ mod tests {
         // 10 USDT * 0.00001 / 1.01 BTC = 9900.99 sats → ceil 9901; max 10000 USDT → floor 9900990.
         assert_eq!(rail.min_msat, 9_901_000);
         assert_eq!(rail.max_msat, 9_900_990_000);
+    }
+
+    #[test]
+    fn rates_xml_accepts_attributes_case_and_glued_units() {
+        // Same pair as RATES, written the way other FixedFloat-compatible exports may be.
+        let variant = "<?xml version=\"1.0\"?><Rates>\n<ITEM id=\"1\">\n  <From> USDTTRC </From>\
+            <TO>BTCLN</TO><tofee>0.0001 BTC</tofee><In>1.01</In><Out>0.00001 BTC</Out>\
+            <MinAmount>10USDT</MinAmount><MaxAmount type=\"x\">10000 USDT</MaxAmount>\n</ITEM></Rates>";
+        let catalog = build_catalog(&ccies(), variant).unwrap();
+        let rail = catalog.rail(PayInAsset::UsdtTron).unwrap();
+        // Identical limits to the plain FixedFloat shape in RATES.
+        assert_eq!(rail.min_msat, 9_901_000);
+        assert_eq!(rail.max_msat, 9_900_990_000);
+        // <tofee> appearing before <to> must not be read as the payout code.
+        assert_eq!(
+            tag_contents("<tofee>1</tofee><to>BTCLN</to>", "to"),
+            ["BTCLN"]
+        );
     }
 
     #[test]

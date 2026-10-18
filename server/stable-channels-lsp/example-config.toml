@@ -68,3 +68,6 @@ fcm_service_account_path = "/path/to/firebase-service-account.json"
 # [swap]
 # lsc_uri_primary = "lightning+swapconnect://ff.io?key=<api key>&secret=<api secret>"
 # lsc_uri_backup  = "lightning+swapconnect://other.example/api?key=<api key>&secret=<api secret>"
+# New provider orders per minute across all wallets (default 3). Keep it at or below the
+# provider's create budget (e.g. Lightning Swap: 50 weight per create, blocked at 150/min).
+# max_creates_per_minute = 3

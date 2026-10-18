@@ -1,6 +1,10 @@
 //! In-process FixedFloat-compatible fake provider for tests (axum on 127.0.0.1:0), modelled on
 //! OpenReceive's `FakeLscProviderCore`: signed `/api/v2` subset + `/rates/fixed.xml`, with a
 //! control to force an order into any swap state. No real network.
+//!
+//! Two shapes, so code written against one provider keeps working with the other:
+//! - `FixedFloat` (default): OpenReceive's fake, itself written against real FixedFloat.
+//! - `LightningSwap`: what the live Lightning Swap API showed where it differs.
 
 use std::sync::{Arc, Mutex};
 
@@ -28,10 +32,32 @@ pub struct FakeOrder {
     pub refund_address: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FakeShape {
+    /// Ethereum USDT is `USDTETH`; a second emergency for an order overwrites the address.
+    #[default]
+    FixedFloat,
+    /// Ethereum USDT is plain `USDT`; a second emergency is HTTP 409 (address already set).
+    LightningSwap,
+}
+
+impl FakeShape {
+    pub const ALL: [FakeShape; 2] = [FakeShape::FixedFloat, FakeShape::LightningSwap];
+
+    pub fn usdt_eth_code(self) -> &'static str {
+        match self {
+            FakeShape::FixedFloat => "USDTETH",
+            FakeShape::LightningSwap => "USDT",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct FakeState {
+    pub shape: FakeShape,
     pub orders: Mutex<Vec<FakeOrder>>,
     pub creates: Mutex<usize>,
+    pub emergencies: Mutex<usize>,
 }
 
 pub struct FakeProvider {
@@ -40,8 +66,16 @@ pub struct FakeProvider {
 }
 
 impl FakeProvider {
+    /// FixedFloat-shaped fake.
     pub async fn start() -> Self {
-        let state = Arc::new(FakeState::default());
+        Self::start_shaped(FakeShape::FixedFloat).await
+    }
+
+    pub async fn start_shaped(shape: FakeShape) -> Self {
+        let state = Arc::new(FakeState {
+            shape,
+            ..FakeState::default()
+        });
         let app = Router::new()
             .route("/rates/fixed.xml", get(rates))
             .route("/api/v2/{path}", post(api))
@@ -71,7 +105,7 @@ impl FakeProvider {
     }
 }
 
-async fn rates() -> String {
+async fn rates(State(state): State<Arc<FakeState>>) -> String {
     let item = |code: &str| {
         format!(
             "<item><from>{code}</from><to>BTCLN</to><in>1.01</in><out>0.00001</out>\
@@ -79,7 +113,11 @@ async fn rates() -> String {
              <maxamount>10000 USDT</maxamount><tofee>0 BTC</tofee></item>"
         )
     };
-    format!("<rates>{}{}</rates>", item("USDTTRC"), item("USDTETH"))
+    format!(
+        "<rates>{}{}</rates>",
+        item("USDTTRC"),
+        item(state.shape.usdt_eth_code())
+    )
 }
 
 fn envelope(status: StatusCode, code: i64, msg: &str, data: Value) -> (StatusCode, Json<Value>) {
@@ -115,7 +153,7 @@ async fn api(
     match path.as_str() {
         "ccies" => ok(json!([
             {"code": "USDTTRC", "coin": "USDT", "network": "TRC20", "recv": true, "send": true},
-            {"code": "USDTETH", "coin": "USDT", "network": "ERC20", "recv": true, "send": true},
+            {"code": state.shape.usdt_eth_code(), "coin": "USDT", "network": "ERC20", "recv": true, "send": true},
             {"code": "USDCSOL", "coin": "USDC", "network": "SOL", "recv": false, "send": true},
             {"code": "BTCLN", "coin": "BTC", "network": "Lightning", "recv": true, "send": true}
         ])),
@@ -131,7 +169,7 @@ async fn api(
                 state: "awaiting_deposit",
                 refund_address: None,
             };
-            let rendered = render(&order);
+            let rendered = render(&order, state.shape);
             state.orders.lock().unwrap().push(order);
             ok(rendered)
         }
@@ -144,6 +182,17 @@ async fn api(
                 return envelope(StatusCode::OK, 1, "Order not found", Value::Null);
             };
             if path == "emergency" {
+                *state.emergencies.lock().unwrap() += 1;
+                // Lightning Swap: once a refund address is set, a second request is a 409.
+                // FixedFloat shape (OpenReceive's fake): the new address simply replaces it.
+                if state.shape == FakeShape::LightningSwap && order.refund_address.is_some() {
+                    return envelope(
+                        StatusCode::CONFLICT,
+                        409,
+                        "Refund address already set",
+                        Value::Null,
+                    );
+                }
                 if req["choice"] != "REFUND"
                     || req["address"].as_str().unwrap_or_default().is_empty()
                 {
@@ -153,13 +202,13 @@ async fn api(
                 order.state = "refund_pending";
                 return ok(json!(true));
             }
-            ok(render(order))
+            ok(render(order, state.shape))
         }
         _ => envelope(StatusCode::NOT_FOUND, 404, "Not found", Value::Null),
     }
 }
 
-fn render(order: &FakeOrder) -> Value {
+fn render(order: &FakeOrder, shape: FakeShape) -> Value {
     let (status, choice) = match order.state {
         "awaiting_deposit" => ("NEW", "NONE"),
         "confirming" => ("PENDING", "NONE"),
@@ -171,7 +220,7 @@ fn render(order: &FakeOrder) -> Value {
         "refund_pending" | "refunded" => ("EMERGENCY", "REFUND"),
         _ => ("SOMETHING_NEW", "NONE"),
     };
-    let address = if order.from_ccy == "USDTETH" {
+    let address = if order.from_ccy == shape.usdt_eth_code() {
         ETH_ADDRESS
     } else {
         TRON_ADDRESS

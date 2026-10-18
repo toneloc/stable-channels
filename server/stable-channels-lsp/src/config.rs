@@ -27,6 +27,9 @@ pub struct Config {
 pub struct SwapConfig {
     pub lsc_uri_primary: String,
     pub lsc_uri_backup: Option<String>,
+    /// New provider orders allowed per minute across all wallets (default 3). Set it at or below
+    /// the provider's own create budget so a burst cannot get the LSP's key blocked.
+    pub max_creates_per_minute: Option<usize>,
 }
 
 /// LSC URIs are bearer credentials: never print them, even via `{:?}` of the whole Config.
@@ -38,6 +41,7 @@ impl std::fmt::Debug for SwapConfig {
                 "lsc_uri_backup",
                 &self.lsc_uri_backup.as_ref().map(|_| "<redacted>"),
             )
+            .field("max_creates_per_minute", &self.max_creates_per_minute)
             .finish()
     }
 }
@@ -266,6 +270,11 @@ mod tests {
         let swap = cfg.swap.as_ref().expect("swap section parsed");
         assert!(swap.lsc_uri_primary.starts_with("lightning+swapconnect://"));
         assert!(swap.lsc_uri_backup.is_none());
+        assert!(swap.max_creates_per_minute.is_none(), "absent → default 3 in OnboardingSwaps");
         assert!(!format!("{cfg:?}").contains("topsecret"));
+
+        let tuned: Config =
+            toml::from_str(&format!("{toml_text}max_creates_per_minute = 2\n")).unwrap();
+        assert_eq!(tuned.swap.unwrap().max_creates_per_minute, Some(2));
     }
 }

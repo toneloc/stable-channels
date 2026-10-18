@@ -244,6 +244,10 @@ pub struct OnboardingSwaps {
 const CREATE_WINDOW_SECS: u64 = 3600;
 const CREATES_PER_NODE: usize = 5;
 const CREATES_GLOBAL: usize = 120;
+/// Default `[swap] max_creates_per_minute`. Providers meter by weight per minute; e.g. Lightning
+/// Swap charges 50 weight per create and blocks creates at 150/min, i.e. 3 creates a minute.
+/// Staying under the provider's cap keeps one burst from locking every user out.
+pub const DEFAULT_CREATES_PER_MINUTE: usize = 3;
 
 /// In-memory sliding-window limiter for new provider orders (resets on restart, which is fine:
 /// it bounds bursts, not lifetime usage).
@@ -251,24 +255,37 @@ pub struct CreateRateLimit {
     window_secs: u64,
     per_node: usize,
     global: usize,
+    per_minute: usize,
     recent: VecDeque<(u64, String)>,
 }
 
 impl CreateRateLimit {
-    pub fn new(window_secs: u64, per_node: usize, global: usize) -> Self {
+    /// `window_secs` must be at least 60 so the per-minute count sees every recent create.
+    pub fn new(window_secs: u64, per_node: usize, global: usize, per_minute: usize) -> Self {
         Self {
-            window_secs,
+            window_secs: window_secs.max(60),
             per_node,
             global,
+            per_minute,
             recent: VecDeque::new(),
         }
     }
 
-    /// Record one create for `node_id` if both limits allow it.
+    /// Record one create for `node_id` if every limit allows it.
     pub fn try_acquire(&mut self, node_id: &str, now: u64) -> Result<(), &'static str> {
         let cutoff = now.saturating_sub(self.window_secs);
         while self.recent.front().is_some_and(|(at, _)| *at <= cutoff) {
             self.recent.pop_front();
+        }
+        let minute_ago = now.saturating_sub(60);
+        if self
+            .recent
+            .iter()
+            .filter(|(at, _)| *at > minute_ago)
+            .count()
+            >= self.per_minute
+        {
+            return Err("too many swaps right now, try again in a minute");
         }
         if self.recent.len() >= self.global {
             return Err("too many swaps right now, try again later");
@@ -303,6 +320,7 @@ impl OnboardingSwaps {
                 CREATE_WINDOW_SECS,
                 CREATES_PER_NODE,
                 CREATES_GLOBAL,
+                DEFAULT_CREATES_PER_MINUTE,
             )),
             catalog: Mutex::new(None),
             create_lock: Mutex::new(()),
@@ -319,6 +337,12 @@ impl OnboardingSwaps {
         let Some(cfg) = cfg else { return Ok(None) };
         let currency = currency_for_network(network)
             .ok_or_else(|| format!("[swap] unsupported node network {network:?}"))?;
+        let per_minute = cfg
+            .max_creates_per_minute
+            .unwrap_or(DEFAULT_CREATES_PER_MINUTE);
+        if per_minute == 0 {
+            return Err("[swap] max_creates_per_minute must be at least 1".into());
+        }
         let mut providers: Vec<FixedFloatClient> = Vec::new();
         for (name, uri) in [
             ("lsc_uri_primary", Some(&cfg.lsc_uri_primary)),
@@ -343,7 +367,14 @@ impl OnboardingSwaps {
             return Ok(None);
         }
         let store = SwapStore::open(data_dir).map_err(|e| format!("onboarding_swaps.db: {e}"))?;
-        Ok(Some(Arc::new(Self::new(store, providers, currency))))
+        let swaps = Self::new(store, providers, currency);
+        *swaps.rate_limit.lock().unwrap_or_else(|e| e.into_inner()) = CreateRateLimit::new(
+            CREATE_WINDOW_SECS,
+            CREATES_PER_NODE,
+            CREATES_GLOBAL,
+            per_minute,
+        );
+        Ok(Some(Arc::new(swaps)))
     }
 
     pub fn provider(&self, id: &str) -> Option<&FixedFloatClient> {
@@ -440,8 +471,27 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_caps_creates_per_minute_across_wallets() {
+        let mut limit = CreateRateLimit::new(3600, 5, 120, DEFAULT_CREATES_PER_MINUTE);
+        for (i, node) in ["a", "b", "c"].into_iter().enumerate() {
+            assert!(limit.try_acquire(node, 1_000 + i as u64).is_ok());
+        }
+        // A 4th create inside the same minute is refused, whoever asks.
+        assert!(limit
+            .try_acquire("d", 1_030)
+            .unwrap_err()
+            .contains("minute"));
+        // 60s after the first one, a slot frees up again.
+        assert!(limit.try_acquire("d", 1_060).is_ok());
+        assert!(limit
+            .try_acquire("e", 1_060)
+            .unwrap_err()
+            .contains("minute"));
+    }
+
+    #[test]
     fn rate_limit_is_per_node_and_global_within_window() {
-        let mut limit = CreateRateLimit::new(60, 2, 3);
+        let mut limit = CreateRateLimit::new(60, 2, 3, 100);
         assert!(limit.try_acquire("a", 100).is_ok());
         assert!(limit.try_acquire("a", 101).is_ok());
         assert!(limit.try_acquire("a", 102).unwrap_err().contains("wallet"));
