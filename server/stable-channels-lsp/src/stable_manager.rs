@@ -321,6 +321,36 @@ struct PendingBookUpdate {
     needs_sync: bool,
 }
 
+/// A run of regular ticks that found a stable channel's balance below its backing.
+#[derive(Debug, Default)]
+struct SpendCheck {
+    /// Ticks whose balance report showed the shortfall; a tick without the report leaves the count as it is.
+    sightings: u8,
+    /// The shortfall the first of them showed, so a payment started after it is not charged on the next one.
+    seen_sats: u64,
+    /// Msat the user received into the channel since the check opened, which cannot cover a spend made before.
+    received_msat: u64,
+}
+
+/// The user's balance on `channel` with `held_msat` of their unresolved payments returned and without the msat they received during an open spend check.
+fn user_sats_without_received(channel: &Channel, held_msat: u64, received_msat: u64) -> u64 {
+    (channel.inbound_capacity_msat.saturating_add(held_msat).saturating_sub(received_msat) / 1000)
+        .saturating_add(channel.counterparty_unspendable_punishment_reserve)
+}
+
+/// Ends the spend check on a channel whose balance, without what the user received during it, covers the backing again.
+fn close_spend_check_if_covered(
+    checks: &mut std::collections::HashMap<u128, SpendCheck>,
+    uid: u128,
+    channel: &Channel,
+    backing_sats: u64,
+) {
+    let received_msat = checks.get(&uid).map_or(0, |check| check.received_msat);
+    if user_sats_without_received(channel, 0, received_msat) >= backing_sats {
+        checks.remove(&uid);
+    }
+}
+
 /// A top-up with no outcome for longer than this is reported; it still waits for its outcome.
 const STABILITY_TOP_UP_STALE_SECS: i64 = 3600;
 /// Fourteen days, well past a top-up's own expiry (about four days of blocks) even when blocks are slow: one sent longer ago can no longer be in flight, and only then may it be released as not arrived or despite a failing lookup.
@@ -380,8 +410,8 @@ pub struct StableChannelManager {
     pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
-    /// Per-channel consecutive low-balance tick count for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
-    spend_debounce: std::collections::HashMap<u128, u8>,
+    /// Per-channel open balance check for the balance-truth backstop debounce (ignores transient in-flight HTLCs).
+    spend_debounce: std::collections::HashMap<u128, SpendCheck>,
     /// When each alarm for a top-up that keeps waiting was last raised, by (payment id, alarm), so it repeats daily and not every tick.
     top_up_alarms: std::collections::HashMap<(String, &'static str), i64>,
     /// Whether the last pass over the top-ups on the way could not read them or could not ask the node about one of them.
@@ -495,7 +525,10 @@ impl StableChannelManager {
         self.stable_channels[idx] = pending.proposed;
         self.pending_book_updates.remove(&uid);
         self.pending_splices.remove(&uid);
-        self.spend_debounce.remove(&uid);
+        // The backstop already left its check as the saved books need it.
+        if pending.context != "backstop" {
+            self.spend_debounce.remove(&uid);
+        }
         for (event, data) in pending.audits {
             stable_channels::audit::audit_event(event, data);
         }
@@ -1269,6 +1302,10 @@ impl StableChannelManager {
         self.stable_channels
             .retain(|sc| format!("{}", sc.user_channel_id) != user_channel_id_str);
         self.stable_channels.push(new_sc);
+        if expected_usd_in.is_some() {
+            // New books set from the live balance start any open spend check over.
+            self.spend_debounce.remove(&user_channel_id_u128);
+        }
 
         info!(
             "[stable] edited channel={} user_channel_id={} expected_usd={}",
@@ -2459,9 +2496,7 @@ impl StableChannelManager {
             stable.native_sats = native_after;
             stable_channels::stable::recompute_native(stable);
             // A gap this payment left behind is still the backstop's to count.
-            if backing_after <= their_sats {
-                self.spend_debounce.remove(&stable.user_channel_id);
-            }
+            close_spend_check_if_covered(&mut self.spend_debounce, stable.user_channel_id, &channel, backing_after);
         }
         stable_channels::audit::audit_event(
             "STABILITY_PAYMENT_V1_APPLIED",
@@ -2626,9 +2661,7 @@ impl StableChannelManager {
         sc.native_sats = their_sats.saturating_sub(sc.backing_sats);
         stable_channels::stable::recompute_native(sc);
         // Once the drop is settled the backstop forgets any ticks it counted. A gap left behind keeps its count.
-        if settled_backing <= their_sats {
-            self.spend_debounce.remove(&uid);
-        }
+        close_spend_check_if_covered(&mut self.spend_debounce, uid, live, settled_backing);
 
         if let Err(e) = self.db.save_channel(
             &channel_id,
@@ -2763,9 +2796,9 @@ impl StableChannelManager {
             let uid = sc.user_channel_id;
             // None when the read failed or the report leaves this channel out, which a node does not do to an open channel.
             let channel_held_msat = held_msat.as_ref().and_then(|held| held.get(&c.channel_id).copied());
-            // Sats in a payment the user sent that has not resolved may come back, so only a balance they could not restore counts as a spend.
-            let recoverable_sats = (c.inbound_capacity_msat.saturating_add(channel_held_msat.unwrap_or(0)) / 1000)
-                .saturating_add(c.counterparty_unspendable_punishment_reserve);
+            // Sats in a payment the user sent that has not resolved may come back, so only a balance they could not restore counts as a spend. Sats received while a check is open cannot cover it.
+            let received_msat = self.spend_debounce.get(&uid).map_or(0, |check| check.received_msat);
+            let recoverable_sats = user_sats_without_received(c, channel_held_msat.unwrap_or(0), received_msat);
             if matches!(scope, TickScope::WokenPeer(_)) {
                 // The debounce counts regular ticks 60s apart, so a wake pass must not advance it; nor may it top up a channel whose possible spend is still unreconciled.
                 if recoverable_sats < sc.backing_sats {
@@ -2788,16 +2821,30 @@ impl StableChannelManager {
                     *sc = proposed;
                     continue;
                 }
-                let count = {
-                    let cnt = self.spend_debounce.entry(uid).or_insert(0);
-                    *cnt = cnt.saturating_add(1);
-                    *cnt
+                let shortfall_sats = sc.backing_sats - recoverable_sats;
+                let (count, seen_sats) = {
+                    let check = self.spend_debounce.entry(uid).or_default();
+                    check.sightings = check.sightings.saturating_add(1);
+                    if check.sightings == 1 {
+                        check.seen_sats = shortfall_sats;
+                    }
+                    (check.sightings, check.seen_sats)
                 };
                 if count >= BACKSTOP_DEBOUNCE_TICKS {
-                    // Deduct down to the balance the user would hold with every unresolved payment returned, then put the live balance back.
-                    proposed.stable_receiver_btc = Bitcoin::from_sats(recoverable_sats);
+                    // Deduct the smaller shortfall the two ticks saw, with every unresolved payment returned, then put the live balance back.
+                    proposed.stable_receiver_btc = Bitcoin::from_sats(sc.backing_sats - shortfall_sats.min(seen_sats));
                     let usd_deducted = stable_channels::stable::reconcile_outgoing(&mut proposed, btc_price);
                     proposed.stable_receiver_btc = Bitcoin::from_sats(their_sats);
+                    // Sats received during the check stay native.
+                    proposed.native_sats = their_sats.saturating_sub(proposed.backing_sats);
+                    stable_channels::stable::recompute_native(&mut proposed);
+                    // Any gap left is what this tick saw beyond the first sighting: a first sighting of its own, which receives before this tick may have covered.
+                    let unseen_sats = proposed.backing_sats.saturating_sub(user_sats_without_received(c, channel_held_msat.unwrap_or(0), 0));
+                    if unseen_sats > 0 {
+                        self.spend_debounce.insert(uid, SpendCheck { sightings: 1, seen_sats: unseen_sats, received_msat: 0 });
+                    } else {
+                        self.spend_debounce.remove(&uid);
+                    }
                     if let Some(usd_deducted) = usd_deducted {
                         if let Err(e) = self.db.save_channel(
                             &c.channel_id,
@@ -2814,7 +2861,7 @@ impl StableChannelManager {
                             );
                             let data = serde_json::json!({
                                 "channel_id": c.channel_id, "user_channel_id": uid.to_string(),
-                                "their_sats": their_sats, "usd_deducted": usd_deducted,
+                                "their_sats": their_sats, "received_msat": received_msat, "usd_deducted": usd_deducted,
                                 "new_expected_usd": proposed.expected_usd.0,
                                 "new_backing_sats": proposed.backing_sats,
                             });
@@ -2833,6 +2880,7 @@ impl StableChannelManager {
                                 "channel_id": c.channel_id,
                                 "user_channel_id": format!("{}", uid),
                                 "their_sats": their_sats,
+                                "received_msat": received_msat,
                                 "usd_deducted": usd_deducted,
                                 "new_expected_usd": proposed.expected_usd.0,
                                 "new_backing_sats": proposed.backing_sats,
@@ -2851,7 +2899,6 @@ impl StableChannelManager {
                             self.startup_sync_pending.insert(uid);
                         }
                     }
-                    self.spend_debounce.remove(&uid);
                 }
             } else {
                 self.spend_debounce.remove(&uid);
@@ -3370,6 +3417,15 @@ impl StableChannelManager {
             );
         }
 
+        // A payment to a user with an open spend check cannot cover a spend made before it.
+        if let Some(check) = next_user_channel_id
+            .as_deref()
+            .and_then(parse_user_channel_id)
+            .and_then(|uid| self.spend_debounce.get_mut(&uid))
+        {
+            check.received_msat = check.received_msat.saturating_add(outbound_amount_forwarded_msat);
+        }
+
         let Some(target_uid) = parse_user_channel_id(&prev_user_channel_id) else {
             return;
         };
@@ -3379,6 +3435,10 @@ impl StableChannelManager {
             .any(|sc| sc.user_channel_id == target_uid)
         {
             return; // forward was not on a stable channel
+        }
+        if let Some(check) = self.spend_debounce.get_mut(&target_uid) {
+            // Sats received during the check are native, so a spend uses them first, even one this handler cannot book.
+            check.received_msat = check.received_msat.saturating_sub(total_msat);
         }
 
         // gRPC ForwardedPayment carries no balance, so reconstruct the pre-forward balance as live-post + total.
@@ -3488,6 +3548,8 @@ impl StableChannelManager {
                 serde_json::json!({ "op": "save_channel", "channel_id": channel_id_hex, "context": "handle_payment_forwarded", "user_channel_id": ucid_str, "error": e.to_string() }),
             );
         }
+        // A forward that explains the shortfall a tick saw ends its check.
+        close_spend_check_if_covered(&mut self.spend_debounce, target_uid, &chan, backing_sats);
         if deducted {
             // Backing above the live balance still holds an unreconciled spend. Publish once the books match it.
             let sent = backing_sats <= post_user_sats
@@ -3989,6 +4051,8 @@ impl StableChannelManager {
                     {
                         *in_memory = updated.clone();
                     }
+                    // A trade can move received sats into backing, so an open spend check starts over.
+                    self.spend_debounce.remove(&target_uid);
                     stable_channels::audit::audit_event(
                         "TRADE_ACCEPTED",
                         serde_json::json!({
@@ -4207,6 +4271,8 @@ impl StableChannelManager {
                 return;
             }
             *sc = updated;
+            // A trade can move received sats into backing, so an open spend check starts over.
+            self.spend_debounce.remove(&target_uid);
             (
                 format!("{}", sc.user_channel_id),
                 sc.expected_usd.0,
@@ -7956,7 +8022,7 @@ mod tests {
 
         assert!((mgr.stable_channels[0].expected_usd.0 - 10.0).abs() < 1e-6, "a wake pass must not deduct");
         assert!(low.sends.lock().unwrap().is_empty(), "a wake pass must neither SYNC a deduction nor top up the undeducted target");
-        assert_eq!(mgr.spend_debounce.values().copied().collect::<Vec<_>>(), vec![1]);
+        assert_eq!(mgr.spend_debounce.values().map(|check| check.sightings).collect::<Vec<_>>(), vec![1]);
         assert_eq!(mgr.stable_channels[0].last_stability_payment, 0);
     }
 
@@ -8523,12 +8589,12 @@ mod tests {
         channel_reports(&fake, 30_000_000, &[], &[]);
         regular_ticks(&mut mgr, &fake, 1).await;
         let uid = mgr.stable_channels[0].user_channel_id;
-        assert_eq!(mgr.spend_debounce.get(&uid).copied(), Some(1));
+        assert_eq!(mgr.spend_debounce.get(&uid).map(|check| check.sightings), Some(1));
 
         fake.balances_fail.store(true, Ordering::SeqCst);
         mgr.run_tick_plan(&fake as &dyn LdkServerCalls, 80_000.0, TickScope::WokenPeer(COUNTERPARTY_HEX)).await;
         assert!(fake.sends.lock().unwrap().is_empty(), "no top-up from a wake pass that cannot tell a held payment from a spend");
-        assert_eq!(mgr.spend_debounce.get(&uid).copied(), Some(1), "the count is left to the regular tick");
+        assert_eq!(mgr.spend_debounce.get(&uid).map(|check| check.sightings), Some(1), "the count is left to the regular tick");
         assert_books(&mgr, 50.0, 50_000, 0);
     }
 
@@ -8540,7 +8606,7 @@ mod tests {
         *fake.lightning_balances.lock().unwrap() = monitor_balances(CHANNEL_ID_HEX, 50_000, &[], &[]);
         regular_ticks(&mut mgr, &fake, 1).await;
         let uid = mgr.stable_channels[0].user_channel_id;
-        assert_eq!(mgr.spend_debounce.get(&uid).copied(), Some(1));
+        assert_eq!(mgr.spend_debounce.get(&uid).map(|check| check.sightings), Some(1));
 
         // The next tick sees it listed, so the gap is explained.
         channel_reports(&fake, 30_000_000, &[20_000_000], &[]);
@@ -8551,6 +8617,298 @@ mod tests {
         *fake.lightning_balances.lock().unwrap() = monitor_balances(CHANNEL_ID_HEX, 50_000, &[], &[]);
         regular_ticks(&mut mgr, &fake, 1).await;
         assert_books(&mgr, 50.0, 50_000, 0);
+    }
+
+    // A payment to the user forwarded in from a routing channel, after which the user side holds `user_msat`.
+    async fn forward_in(mgr: &mut StableChannelManager, fake: &FakeLdkServer, msat: u64, user_msat: u64) {
+        channel_reports(fake, user_msat, &[], &[]);
+        mgr.handle_payment_forwarded(
+            "77162951604739255617201343530838311422".to_string(), Some(USER_CHANNEL_ID_DECIMAL.to_string()),
+            ROUTING_CHANNEL_HEX.to_string(), CHANNEL_ID_HEX.to_string(),
+            ROUTING_PEER_HEX.to_string(), COUNTERPARTY_HEX.to_string(),
+            msat, 0, None, fake as &dyn LdkServerCalls, 100_000.0,
+        ).await;
+    }
+
+    #[tokio::test]
+    async fn receive_after_a_sighting_does_not_cover_the_spend_it_saw() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000 sats were spent with no forward reported.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // The user receives 10,000 sats before the second tick.
+        forward_in(&mut mgr, &fake, 10_000_000, 50_000_000).await;
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 10_000);
+        assert_book_sync(&fake, 40.0, 40_000);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 40.0, 40_000, 10_000);
+        assert!(mgr.spend_debounce.is_empty());
+    }
+
+    #[tokio::test]
+    async fn balance_back_with_no_receive_reported_ends_the_check() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // The sats come back with no forward: a payment the node had not listed yet failed.
+        channel_reports(&fake, 50_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty());
+        assert!(fake.sends.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn receive_while_balance_reads_fail_does_not_cover_a_spend_already_seen() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        fake.balances_fail.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        forward_in(&mut mgr, &fake, 10_000_000, 50_000_000).await;
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        fake.balances_fail.store(false, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 10_000);
+    }
+
+    #[tokio::test]
+    async fn native_spend_left_unbooked_during_a_check_uses_the_received_sats() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // A 10,000-sat payment the node does not list yet is seen once.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // 20,000 sats come in and the payment fails, so 30,000 are native.
+        forward_in(&mut mgr, &fake, 20_000_000, 60_000_000).await;
+        channel_reports(&fake, 70_000_000, &[], &[]);
+        // 15,000 of them go out, but the forward handler cannot read the channel list.
+        channel_reports(&fake, 55_000_000, &[], &[]);
+        fake.list_channels_fails.store(true, Ordering::SeqCst);
+        forward_out(&mut mgr, &fake, 15_000).await;
+        fake.list_channels_fails.store(false, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spend_of_received_sats_with_no_gap_seen_stays_native() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 0, None).unwrap();
+        mgr.reconcile_from_grpc(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        forward_in(&mut mgr, &fake, 20_000_000, 70_000_000).await;
+        // 15,000 go out while the forward handler cannot read the channel list.
+        channel_reports(&fake, 55_000_000, &[], &[]);
+        fake.list_channels_fails.store(true, Ordering::SeqCst);
+        forward_out(&mut mgr, &fake, 15_000).await;
+        fake.list_channels_fails.store(false, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        assert!(mgr.spend_debounce.is_empty());
+    }
+
+    #[tokio::test]
+    async fn second_sighting_charges_no_more_than_the_first_saw() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // A 5,000-sat payment then leaves the balance before the node lists it.
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        // It fails and its sats come back.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+    }
+
+    #[tokio::test]
+    async fn gap_beyond_the_first_sighting_stays_checked_after_the_deduction() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // Two spends go unreported: 10,000 sats before the first tick and 5,000 before the second.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        // The user receives 5,000 sats before the next tick.
+        forward_in(&mut mgr, &fake, 5_000_000, 40_000_000).await;
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 35.0, 35_000, 5_000);
+        regular_ticks(&mut mgr, &fake, 2).await;
+        assert_books(&mgr, 35.0, 35_000, 5_000);
+    }
+
+    #[tokio::test]
+    async fn sats_received_before_the_second_tick_can_cover_what_only_it_saw() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // 3,000 sats come in, then 5,000 go out unreported, before the second tick: the 3,000 pay for part of it.
+        forward_in(&mut mgr, &fake, 3_000_000, 43_000_000).await;
+        channel_reports(&fake, 38_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 38.0, 38_000, 0);
+        assert!(mgr.spend_debounce.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wake_pass_leaves_a_seen_gap_alone_when_received_sats_raise_the_balance() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        // At $80k the undeducted $50 would call for a top-up.
+        mgr.run_tick_plan(&fake as &dyn LdkServerCalls, 80_000.0, TickScope::WokenPeer(COUNTERPARTY_HEX)).await;
+        assert_eq!(top_ups_sent(&fake), 0, "no top-up on a target a seen spend may still cut");
+        let uid = mgr.stable_channels[0].user_channel_id;
+        assert_eq!(mgr.spend_debounce.get(&uid).map(|check| check.sightings), Some(1));
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 20_000);
+    }
+
+    #[tokio::test]
+    async fn gap_beyond_the_first_sighting_stays_checked_across_a_failed_save() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 0, None).unwrap();
+        let conn = save_test_connection(&mgr);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        conn.execute_batch(
+            "CREATE TRIGGER reject_book_save BEFORE INSERT ON ledger_events
+             WHEN NEW.event_type = 'CHANNEL_ACCOUNTING_STATE_COMMITTED'
+             BEGIN SELECT RAISE(ABORT, 'forced ledger failure'); END;",
+        )
+        .unwrap();
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 50.0, 50_000, 0);
+        conn.execute_batch("DROP TRIGGER reject_book_save").unwrap();
+        forward_in(&mut mgr, &fake, 5_000_000, 40_000_000).await;
+        // The first tick saves the $40 correction, the next sees the rest of the gap again.
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 35.0, 35_000, 5_000);
+    }
+
+    #[tokio::test]
+    async fn forward_that_explains_a_sighting_ends_the_check() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // A tick runs between a payment settling and its forward event.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        forward_out(&mut mgr, &fake, 10_000).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        assert!(mgr.spend_debounce.is_empty(), "the event explains what the tick saw");
+        // A later 5,000-sat gap is a first sighting, not the second.
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 40.0, 40_000, 0);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 35.0, 35_000, 0);
+    }
+
+    #[tokio::test]
+    async fn forward_beside_an_unexplained_gap_keeps_the_check() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // Another 5,000 sats go out with their event; the missed 10,000 are still unexplained.
+        channel_reports(&fake, 35_000_000, &[], &[]);
+        forward_out(&mut mgr, &fake, 5_000).await;
+        assert_books(&mgr, 45.0, 45_000, 0);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert_books(&mgr, 35.0, 35_000, 0);
+    }
+
+    #[tokio::test]
+    async fn spend_during_a_check_uses_the_received_sats_first() {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        // 10,000 sats spent with no forward reported, seen once.
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // 15,000 sats come in, then 8,000 go out with their event, so 7,000 of the received sats are left.
+        forward_in(&mut mgr, &fake, 15_000_000, 55_000_000).await;
+        channel_reports(&fake, 47_000_000, &[], &[]);
+        forward_out(&mut mgr, &fake, 8_000).await;
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // Only the missed $10 comes off the target.
+        assert_books(&mgr, 40.0, 40_000, 7_000);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_books(&mgr, 40.0, 40_000, 7_000);
+    }
+
+    // The wallet spent $10 with no forward reported, a tick saw it, then 20,000 sats came in.
+    async fn check_open_with_a_receive() -> (StableChannelManager, FakeLdkServer) {
+        let (mut mgr, fake) = settled_forwards_fixture(0, 50_000);
+        mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 50.0, 50_000, 0, None).unwrap();
+        channel_reports(&fake, 40_000_000, &[], &[]);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        forward_in(&mut mgr, &fake, 20_000_000, 60_000_000).await;
+        (mgr, fake)
+    }
+
+    #[tokio::test]
+    async fn legacy_trade_made_during_a_check_is_not_cut_by_it() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        // By its own books the wallet holds $40 and 20,000 native sats, and moves $15 of them into stable.
+        let trade = trade_envelope_with_ts(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, 55.0, test_unix_now());
+        handle_trade_with_valid_fee(&mut mgr, &trade, &fake as &dyn LdkServerCalls, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 55.0);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 55.0, "the trade's target stands");
+    }
+
+    #[tokio::test]
+    async fn correlated_trade_made_during_a_check_is_not_cut_by_it() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        let envelope = correlated_trade_envelope(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, &"d".repeat(64), 55.0, 100_000.0);
+        let fee = expected_trade_fee_msat(50.0, 55.0, 100_000.0).unwrap();
+        mgr.handle_trade_payment(&envelope, Some(&"e".repeat(64)), Some(fee), &fake, 100_000.0).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 55.0);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 55.0, "the trade's target stands");
+    }
+
+    #[tokio::test]
+    async fn signed_pay_back_during_a_check_leaves_the_spend_it_saw() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        // At $110k the books read above par, and the wallet pays back 4,545 sats.
+        wallet_pays_back(&mut mgr, &fake, "c2", 4_545, 55_455, 110_000.0).await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 45_455);
+        assert_eq!(mgr.spend_debounce.len(), 1, "the received sats do not cover the gap");
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert!((mgr.stable_channels[0].expected_usd.0 - 40.0).abs() < 1e-6, "{}", mgr.stable_channels[0].expected_usd.0);
+    }
+
+    #[tokio::test]
+    async fn unsigned_pay_back_during_a_check_leaves_the_spend_it_saw() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        // A tick that cannot read the balance report notes the balance the received sats raised.
+        fake.balances_fail.store(true, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        // At $110k the books read above par, and the wallet pays back 4,545 sats with the unsigned marker.
+        set_receiver_sats(&fake, 55_455);
+        mgr.handle_payment_received(
+            vec![stability_marker()], Some("pay-back-unsigned".to_string()), Some(4_545_000),
+            &fake as &dyn LdkServerCalls, 110_000.0,
+        ).await;
+        assert_eq!(mgr.stable_channels[0].backing_sats, 45_455);
+        assert_eq!(mgr.spend_debounce.len(), 1, "the received sats do not cover the gap");
+        fake.balances_fail.store(false, Ordering::SeqCst);
+        regular_ticks(&mut mgr, &fake, 1).await;
+        assert!((mgr.stable_channels[0].expected_usd.0 - 40.0).abs() < 1e-6, "{}", mgr.stable_channels[0].expected_usd.0);
+    }
+
+    #[tokio::test]
+    async fn operator_target_set_during_a_check_is_not_cut_by_it() {
+        let (mut mgr, fake) = check_open_with_a_receive().await;
+        let outcome = mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(55.0), None, &fake, 100_000.0).await;
+        assert!(outcome.ok, "{}", outcome.status);
+        regular_ticks(&mut mgr, &fake, 3).await;
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 55.0, "the operator's target stands");
     }
 
     #[tokio::test]
