@@ -217,6 +217,7 @@ class AppState {
     }()
 
     var pendingSweepBalanceSats: UInt64 = 0
+    var closedChannelFunds: ClosedChannelFunds?
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -4086,6 +4087,12 @@ class AppState {
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
         spendableOnchainSats = spendable
+        closedChannelFunds = ClosedChannelFunds.from(
+            lightningBalances: balances.lightningBalances,
+            pendingSweeps: balances.pendingBalancesFromChannelClosures,
+            openChannelIds: Set(nodeService.channels.map(\.channelId)),
+            currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
+        )
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {

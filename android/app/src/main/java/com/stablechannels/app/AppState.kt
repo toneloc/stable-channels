@@ -794,6 +794,9 @@ class AppState(private val context: Context) : ViewModel() {
         )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
 
+    private val _closedChannelFunds = MutableStateFlow<ClosedChannelFunds?>(null)
+    val closedChannelFunds: StateFlow<ClosedChannelFunds?> = _closedChannelFunds
+
     private val pendingLock = Any()
 
     /**
@@ -4663,6 +4666,13 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
+        _closedChannelFunds.value =
+            ClosedChannelFunds.from(
+                lightningBalances = balances.lightningBalances,
+                pendingSweeps = balances.pendingBalancesFromChannelClosures,
+                openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
+                currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
+            )
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
         // confirm. Check this close's confirmations specifically, not aggregate spendable
