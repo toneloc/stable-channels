@@ -84,6 +84,8 @@ fi
 
 LARGE_FILES=false
 for file in $STAGED; do
+    # String catalogs are plain-text JSON that grows with every language; git diffs them well.
+    case "$file" in *.xcstrings) continue ;; esac
     if [ -f "$file" ]; then
         SIZE=$(wc -c < "$file" 2>/dev/null | tr -d ' ')
         if [ "$SIZE" -gt 1048576 ]; then
