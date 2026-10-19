@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		49F36400000000000000B001 /* Secp256k1.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F36400000000000000A001 /* Secp256k1.swift */; };
+		49F36400000000000000B002 /* ToRemoteKeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F36400000000000000A002 /* ToRemoteKeys.swift */; };
+		49F36400000000000000B003 /* ToRemoteSweep.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F36400000000000000A003 /* ToRemoteSweep.swift */; };
+		49F36400000000000000B004 /* ToRemoteRecovery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F36400000000000000A004 /* ToRemoteRecovery.swift */; };
+		49F36400000000000000B005 /* ToRemoteRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49F36400000000000000A005 /* ToRemoteRecoveryTests.swift */; };
+		49F36400000000000000B006 /* libsecp256k1 in Frameworks */ = {isa = PBXBuildFile; productRef = 49F36400000000000000C001 /* libsecp256k1 */; };
 		02EB2F2AFFACF5F588CF7912 /* CodeScanner in Frameworks */ = {isa = PBXBuildFile; productRef = C5B41595048B8AA9D3617B42 /* CodeScanner */; };
 		05856856E6E8EF9E688EFA20 /* PriceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0446A88D1E083A380EDC5436 /* PriceService.swift */; };
 		06C3B1697681F176DD44C146 /* StableChannelsApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B785A33E02FD999CB62019AD /* StableChannelsApp.swift */; };
@@ -301,6 +307,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		49F36400000000000000A001 /* Secp256k1.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Secp256k1.swift; sourceTree = "<group>"; };
+		49F36400000000000000A002 /* ToRemoteKeys.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToRemoteKeys.swift; sourceTree = "<group>"; };
+		49F36400000000000000A003 /* ToRemoteSweep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToRemoteSweep.swift; sourceTree = "<group>"; };
+		49F36400000000000000A004 /* ToRemoteRecovery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToRemoteRecovery.swift; sourceTree = "<group>"; };
+		49F36400000000000000A005 /* ToRemoteRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToRemoteRecoveryTests.swift; sourceTree = "<group>"; };
 		0446A88D1E083A380EDC5436 /* PriceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceService.swift; sourceTree = "<group>"; };
 		07579A3C5174C8FED2BFCFBF /* NotificationService.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = NotificationService.entitlements; sourceTree = "<group>"; };
 		134775C01F3C51CA39B262FC /* LSPSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LSPSettingsView.swift; sourceTree = "<group>"; };
@@ -569,6 +580,7 @@
 				BE362D96DB2063959BD092BC /* LDKNode in Frameworks */,
 				96F38A820CB6644940199C95 /* KeychainAccess in Frameworks */,
 				02EB2F2AFFACF5F588CF7912 /* CodeScanner in Frameworks */,
+				49F36400000000000000B006 /* libsecp256k1 in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -938,6 +950,10 @@
 				49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
+				49F36400000000000000A001 /* Secp256k1.swift */,
+				49F36400000000000000A002 /* ToRemoteKeys.swift */,
+				49F36400000000000000A003 /* ToRemoteSweep.swift */,
+				49F36400000000000000A004 /* ToRemoteRecovery.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				49DDD0153054000100B5A146 /* StabilityStatusAdapters.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
@@ -1129,6 +1145,7 @@
 				49206DFB3073A90200217838 /* SlideToSendButtonTests.swift */,
 				490A1336304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift */,
 				49F363020000000000000A /* ClosedChannelFundsTests.swift */,
+				49F36400000000000000A005 /* ToRemoteRecoveryTests.swift */,
 				5C279A012FEA00010074ACD2 /* SpliceRepositoryTests.swift */,
 				D1A60F120000000000000004 /* SPVHeaderChainServiceTests.swift */,
 				4993591730712D1500D6B50E /* SQLitePaymentDatabaseTests.swift */,
@@ -1200,6 +1217,7 @@
 				79D34B41CFF9ABC3C914B624 /* KeychainAccess */,
 				C5B41595048B8AA9D3617B42 /* CodeScanner */,
 				49E4567D2FCA3E8B00B0CA85 /* QRCode */,
+				49F36400000000000000C001 /* libsecp256k1 */,
 			);
 			productName = StableChannels;
 			productReference = AAE0551124703F8BAA9C44C0 /* StableChannels.app */;
@@ -1239,6 +1257,7 @@
 				5C44A4ACEB5EFD7C2E78B8A6 /* XCRemoteSwiftPackageReference "KeychainAccess" */,
 				70EEE76071EE59F64A24FD4F /* XCRemoteSwiftPackageReference "ldk-node" */,
 				49E4567C2FCA3E8B00B0CA85 /* XCRemoteSwiftPackageReference "QRCode" */,
+				49F36400000000000000D001 /* XCRemoteSwiftPackageReference "swift-secp256k1" */,
 			);
 			productRefGroup = 052E4A6FC61BFB06E0A2A974 /* Products */;
 			projectDirPath = "";
@@ -1282,6 +1301,7 @@
 				49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */,
 				490A1339304F147D005CDA39 /* SpliceBroadcastCheckerTests.swift in Sources */,
 				49F363020000000000000B /* ClosedChannelFundsTests.swift in Sources */,
+				49F36400000000000000B005 /* ToRemoteRecoveryTests.swift in Sources */,
 				4993591A30712D1500D6B50E /* SQLitePaymentDatabaseTests.swift in Sources */,
 				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
 				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
@@ -1341,6 +1361,10 @@
 				4993592030712DDF00D6B50E /* SendDestination.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49F363000000000000000B /* ClosedChannelFunds.swift in Sources */,
+				49F36400000000000000B001 /* Secp256k1.swift in Sources */,
+				49F36400000000000000B002 /* ToRemoteKeys.swift in Sources */,
+				49F36400000000000000B003 /* ToRemoteSweep.swift in Sources */,
+				49F36400000000000000B004 /* ToRemoteRecovery.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,
 				49DDD0083054000100B5A146 /* TactileCardButtonStyle.swift in Sources */,
@@ -1848,6 +1872,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		49F36400000000000000D001 /* XCRemoteSwiftPackageReference "swift-secp256k1" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/21-DOT-DEV/swift-secp256k1.git";
+			requirement = {
+				kind = exactVersion;
+				version = 0.23.2;
+			};
+		};
 		42173C82F7AE7108B707E5F8 /* XCRemoteSwiftPackageReference "CodeScanner" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/twostraws/CodeScanner.git";
@@ -1883,6 +1915,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		49F36400000000000000C001 /* libsecp256k1 */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 49F36400000000000000D001 /* XCRemoteSwiftPackageReference "swift-secp256k1" */;
+			productName = libsecp256k1;
+		};
 		49E4567D2FCA3E8B00B0CA85 /* QRCode */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 49E4567C2FCA3E8B00B0CA85 /* XCRemoteSwiftPackageReference "QRCode" */;

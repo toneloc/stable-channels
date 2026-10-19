@@ -193,4 +193,15 @@ final class ClosedChannelFundsTests: XCTestCase {
         ])
         XCTAssertEqual(funds, ClosedChannelFunds(amountSats: 10000, blocksLeft: nil))
     }
+
+    /// Case B funds show only when LDK tracks no close itself.
+    func testLdkFundsComeBeforeRecoveredFunds() {
+        let ldk = ClosedChannelFunds(amountSats: 50000, blocksLeft: 3)
+        XCTAssertEqual(ClosedChannelFunds.orRecovered(ldk, recoveredSats: 94467), ldk)
+        XCTAssertEqual(
+            ClosedChannelFunds.orRecovered(nil, recoveredSats: 94467),
+            ClosedChannelFunds(amountSats: 94467, blocksLeft: nil)
+        )
+        XCTAssertNil(ClosedChannelFunds.orRecovered(nil, recoveredSats: 0))
+    }
 }

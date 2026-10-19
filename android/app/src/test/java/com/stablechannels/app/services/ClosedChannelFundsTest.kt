@@ -245,4 +245,13 @@ class ClosedChannelFundsTest {
     fun aCooperativeCloseNeverShowsOnceConfirmed() {
         assertNull(from(listOf(awaiting(50_000, 900_001, BalanceSource.COOP_CLOSE))))
     }
+
+    /** Case B funds show only when LDK tracks no close itself. */
+    @Test
+    fun ldkFundsComeBeforeRecoveredFunds() {
+        val ldk = ClosedChannelFunds(50_000, 3)
+        assertEquals(ldk, ClosedChannelFunds.orRecovered(ldk, 94_467))
+        assertEquals(ClosedChannelFunds(94_467, null), ClosedChannelFunds.orRecovered(null, 94_467))
+        assertNull(ClosedChannelFunds.orRecovered(null, 0))
+    }
 }

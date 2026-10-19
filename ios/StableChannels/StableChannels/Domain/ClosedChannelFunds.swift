@@ -70,6 +70,11 @@ struct ClosedChannelFunds: Equatable {
         n == 1 ? "1 \(unit)" : "\(n) \(unit)s"
     }
 
+    /// LDK's funds when it tracks a close, else what the on-chain recovery found (#364).
+    static func orRecovered(_ ldk: ClosedChannelFunds?, recoveredSats: UInt64) -> ClosedChannelFunds? {
+        ldk ?? (recoveredSats > 0 ? ClosedChannelFunds(amountSats: recoveredSats, blocksLeft: nil) : nil)
+    }
+
     func message(btcPrice: Double) -> String {
         let amount = btcPrice > 0
             ? (Double(amountSats) / Double(Constants.satsInBTC) * btcPrice).usdFormatted

@@ -47,14 +47,18 @@ fun BackupView(appState: AppState) {
     var showRestoreForceCloseConfirm by remember { mutableStateOf(false) }
     var restoreGuardUnavailable by remember { mutableStateOf(false) }
 
-    /** Wipe + restart the node with the entered seed (post restore-guard). */
-    fun performRestore(input: String) {
+    /**
+     * Wipe + restart the node with the entered seed (post restore-guard), then look on chain for
+     * the LSP's close of an old channel (#364).
+     */
+    fun performRestore(input: String, channelMayExist: Boolean) {
         isRestoring = true
         restoreError = null
         scope.launch(Dispatchers.IO) {
             try {
                 appState.nodeService.stop()
                 appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
+                appState.startRecoveryAfterRestore(channelMayExist)
                 withContext(Dispatchers.Main) {
                     isRestoring = false
                     showRestore = false
@@ -387,7 +391,7 @@ fun BackupView(appState: AppState) {
                                         restoreGuardUnavailable = true
                                         showRestoreForceCloseConfirm = true
                                     }
-                                    false -> performRestore(input)
+                                    false -> performRestore(input, channelMayExist = false)
                                 }
                             }
                         }
@@ -443,8 +447,9 @@ fun BackupView(appState: AppState) {
                     } else {
                         "This wallet still has an open Lightning channel with the LSP. " +
                             "Restoring from seed alone cannot restore the channel and it will " +
-                            "be force-closed on-chain; funds return after a timelock. Only " +
-                            "continue if this is your only way back into the wallet."
+                            "be force-closed on-chain. The app then moves your funds to your " +
+                            "onchain wallet automatically. Only continue if this is your only " +
+                            "way back into the wallet."
                     }
                 )
             },
@@ -452,7 +457,7 @@ fun BackupView(appState: AppState) {
                 NeutralTextButton(
                     onClick = {
                         showRestoreForceCloseConfirm = false
-                        performRestore(restoreMnemonic.trim())
+                        performRestore(restoreMnemonic.trim(), channelMayExist = true)
                     }
                 ) {
                     Text(

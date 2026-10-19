@@ -29,6 +29,10 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
 
         private fun count(n: Int, unit: String) = if (n == 1) "1 $unit" else "$n ${unit}s"
 
+        /** LDK's funds when it tracks a close, else what the on-chain recovery found (#364). */
+        fun orRecovered(ldk: ClosedChannelFunds?, recoveredSats: Long): ClosedChannelFunds? =
+            ldk ?: recoveredSats.takeIf { it > 0 }?.let { ClosedChannelFunds(it, null) }
+
         fun from(
             lightningBalances: List<LightningBalance>,
             pendingSweeps: List<PendingSweepBalance>,

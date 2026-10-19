@@ -796,6 +796,7 @@ class AppState(private val context: Context) : ViewModel() {
 
     private val _closedChannelFunds = MutableStateFlow<ClosedChannelFunds?>(null)
     val closedChannelFunds: StateFlow<ClosedChannelFunds?> = _closedChannelFunds
+    @Volatile private var ldkClosedChannelFunds: ClosedChannelFunds? = null
 
     private val pendingLock = Any()
 
@@ -1069,6 +1070,29 @@ class AppState(private val context: Context) : ViewModel() {
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
     private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
+
+    // Funds of a channel the LSP force-closed after this app lost its channel data (#364).
+    private val toRemoteRecovery =
+        ToRemoteRecovery(
+            http = httpClient,
+            chainUrls = {
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            },
+            loadState = {
+                context
+                    .getSharedPreferences("to_remote_recovery", Context.MODE_PRIVATE)
+                    .getString("state", null)
+            },
+            saveState = {
+                context
+                    .getSharedPreferences("to_remote_recovery", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("state", it)
+                    .apply()
+            },
+        )
+    private var toRemoteKeys: Pair<String, ToRemoteKeys>? = null
     private val paymentConfirmationPass =
         PaymentConfirmationPass(
             httpClient = httpClient,
@@ -4338,6 +4362,40 @@ class AppState(private val context: Context) : ViewModel() {
     /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
 
+    /**
+     * After a restore from seed LDK starts with no channel data, so the LSP's close of an old
+     * channel is looked for on chain instead (#364). [channelMayExist] is false when the LSP said
+     * there is no channel: one scan then covers a close that already happened.
+     */
+    fun startRecoveryAfterRestore(channelMayExist: Boolean) {
+        toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
+    }
+
+    private fun publishClosedChannelFunds() {
+        _closedChannelFunds.value =
+            ClosedChannelFunds.orRecovered(ldkClosedChannelFunds, toRemoteRecovery.pendingSats)
+    }
+
+    /** Keys from the wallet seed, or from the keys_seed file of wallets made before mnemonics. */
+    @Synchronized
+    private fun toRemoteKeys(): ToRemoteKeys? {
+        val words = nodeService.savedMnemonic
+        val source = words ?: "keys_seed"
+        toRemoteKeys?.let { if (it.first == source) return it.second }
+        val keys =
+            if (words != null) {
+                ToRemoteKeys.fromMnemonic(words)
+            } else {
+                File(Constants.userDataDir(context), "keys_seed")
+                    .takeIf { it.exists() }
+                    ?.readBytes()
+                    ?.takeIf { it.size == 64 }
+                    ?.let { ToRemoteKeys.fromSeed(it) }
+            } ?: return null
+        toRemoteKeys = source to keys
+        return keys
+    }
+
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
     private suspend fun resolveChainUrl(): String {
         return withContext(Dispatchers.IO) {
@@ -4666,13 +4724,34 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
-        _closedChannelFunds.value =
+        ldkClosedChannelFunds =
             ClosedChannelFunds.from(
                 lightningBalances = balances.lightningBalances,
                 pendingSweeps = balances.pendingBalancesFromChannelClosures,
                 openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
                 currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
             )
+        publishClosedChannelFunds()
+        // Funds of a channel LDK no longer knows, found on chain (#364).
+        if (
+            toRemoteRecovery.onRefresh(
+                savedFundingTxid = fundingTxid,
+                savedFundingVout = fundingVout,
+                ldkHasChannels = nodeService.channels.isNotEmpty(),
+                ldkHandlesClose = ldkClosedChannelFunds != null,
+            )
+        ) {
+            viewModelScope.launch(Dispatchers.IO) {
+                toRemoteRecovery.run(
+                    keys = ::toRemoteKeys,
+                    destination = { runCatching { nodeService.newOnchainAddress() }.getOrNull() },
+                    feeRateSatVb = ::fetchFeeRate,
+                    liveFundingTxids =
+                        nodeService.channels.mapNotNull { it.fundingTxo?.txid }.toSet(),
+                )
+                publishClosedChannelFunds()
+            }
+        }
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
         // confirm. Check this close's confirmations specifically, not aggregate spendable
