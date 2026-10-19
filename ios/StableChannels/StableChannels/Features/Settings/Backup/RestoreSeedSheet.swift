@@ -64,10 +64,10 @@ struct RestoreSeedSheet: View {
                         if isRestoring {
                             HStack(spacing: 8) {
                                 ProgressView()
-                                Text(String(localized: "restoring", defaultValue: "Restoring..."))
+                                Text(String(localized: .restoring))
                             }
                         } else {
-                            Text(String(localized: "button_restore", defaultValue: "Restore"))
+                            Text(String(localized: .buttonRestore))
                         }
                     }
                     .frame(maxWidth: .infinity)
@@ -87,45 +87,39 @@ struct RestoreSeedSheet: View {
             }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                    Button(String(localized: .buttonCancel)) {
                         onCancel()
                         dismiss()
                     }
                 }
             }
             .alert(
-                String(localized: "title_open_channel_detected", defaultValue: "Open Channel Detected"),
+                String(localized: .titleOpenChannelDetected),
                 isPresented: $showForceCloseConfirm
             ) {
-                Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
+                Button(String(localized: .buttonCancel), role: .cancel) {}
                 Button(
-                    String(localized: "button_restore_anyway", defaultValue: "Restore Anyway"),
+                    String(localized: .buttonRestoreAnyway),
                     role: .destructive
                 ) {
                     Task { await restoreWallet(acknowledgeForceClose: true) }
                 }
             } message: {
-                Text(String(
-                    localized: "message_restore_force_close",
-                    defaultValue: "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain; funds return after a timelock. Only continue if this is your only way back into the wallet."
-                ))
+                Text(String(localized: .messageRestoreForceClose))
             }
             .alert(
-                String(localized: "title_channel_check_unavailable", defaultValue: "Couldn't Verify Channel Status"),
+                String(localized: .titleChannelCheckUnavailable),
                 isPresented: $showGuardUnavailableConfirm
             ) {
-                Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
+                Button(String(localized: .buttonCancel), role: .cancel) {}
                 Button(
-                    String(localized: "button_continue_anyway", defaultValue: "Continue Anyway"),
+                    String(localized: .buttonContinueAnyway),
                     role: .destructive
                 ) {
                     Task { await restoreWallet(acknowledgeForceClose: true) }
                 }
             } message: {
-                Text(String(
-                    localized: "message_channel_check_unavailable",
-                    defaultValue: "The server couldn't be reached to check whether this wallet still has an open Lightning channel. If it does, restoring from seed alone will force-close it on-chain. Continue only if you're sure, or try again with a network connection."
-                ))
+                Text(String(localized: .messageChannelCheckUnavailable))
             }
         }
     }
@@ -138,18 +132,15 @@ struct RestoreSeedSheet: View {
                 .font(.system(size: 48))
                 .foregroundStyle(.orange)
 
-            Text(String(localized: "title_restore_seed", defaultValue: "Restore from Seed"))
+            Text(String(localized: .titleRestoreSeed))
                 .font(.title2.bold())
 
             warningBanner
 
-            Text(String(
-                localized: "instruction_restore",
-                defaultValue: "Enter your 12 or 24-word seed phrase."
-            ))
-            .font(.callout)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
+            Text(String(localized: .instructionRestore))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
     }
 
@@ -183,7 +174,7 @@ struct RestoreSeedSheet: View {
 
     private var seedTextField: some View {
         TextField(
-            String(localized: "placeholder_seed", defaultValue: "Paste your seed phrase here"),
+            String(localized: .placeholderSeed),
             text: $restoreMnemonic,
             axis: .vertical
         )
@@ -222,7 +213,7 @@ struct RestoreSeedSheet: View {
 
         guard MnemonicUtils.isValidWordCount(input) else {
             isRestoring = false
-            restoreError = String(localized: "error_seed_word_count")
+            restoreError = String(localized: .errorSeedWordCount)
             return
         }
 
@@ -247,7 +238,7 @@ struct RestoreSeedSheet: View {
             isRestoring = false
             showGuardUnavailableConfirm = true
         } catch {
-            restoreError = String(localized: "error_restore_failed") + error.localizedDescription
+            restoreError = String(localized: .errorRestoreFailed(error.localizedDescription))
             isRestoring = false
         }
     }

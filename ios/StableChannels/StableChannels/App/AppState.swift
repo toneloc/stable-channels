@@ -1810,7 +1810,7 @@ class AppState {
             if let pid = paymentId, let trade = failedTrade {
                 pendingTradePayments.removeValue(forKey: "\(pid)")
                 _ = try? databaseService?.channelRepo.markTradeSendFailed(tradeDbId: trade.tradeDbId)
-                statusMessage = "Order failed"
+                statusMessage = String(localized: .statusStabilityFailed)
 
                 AuditService.log("TRADE_FAILED", data: [
                     "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
@@ -2235,7 +2235,7 @@ class AppState {
                     statusMessage = TradeProtocol.rejectionMessage(rejection.reasonCode)
                 case .sync:
                     if result.paymentId != nil {
-                        statusMessage = "Order confirmed"
+                        statusMessage = String(localized: .statusStabilityConfirmed)
                         paymentFlash = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                             self?.paymentFlash = false
@@ -2329,7 +2329,7 @@ class AppState {
                 }
                 if !recognizedTrade, eventAmountMsat == nil,
                    (try? databaseService.channelRepo.hasUnattachedPreparedTrade()) == true {
-                    statusMessage = "Payment confirmed; awaiting signed trade result"
+                    statusMessage = String(localized: .statusAwaitingSignedResult)
                     AuditService.log("TRADE_FEE_ID_UNRESOLVED", data: [
                         "payment_id": paymentIdString
                     ])
@@ -2352,7 +2352,7 @@ class AppState {
                     "new_expected_usd": trade.map { "\($0.newExpectedUSD)" } ?? "unknown",
                     "fee_paid_msat": feePaidMsat.map { "\($0)" } ?? "nil"
                 ])
-                statusMessage = "Trade fee paid; awaiting signed result"
+                statusMessage = String(localized: .statusFeePaidAwaitingResult)
                 return
             }
         }
@@ -3162,7 +3162,7 @@ class AppState {
         if let restored = try? databaseService.channelRepo.unresolvedTradePayments() {
             pendingTradePayments = restored
         }
-        statusMessage = "Trade result delayed; it will still be accepted when received"
+        statusMessage = String(localized: .statusResultDelayed)
         AuditService.log("TRADE_RESULT_UNCERTAIN", data: [
             "reason": "no_response",
             "count": "\(changed)"
