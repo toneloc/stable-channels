@@ -1,6 +1,7 @@
 package com.stablechannels.app.services.websocket
 
 import android.util.Log
+import com.stablechannels.app.domain.send.RecommendedFees
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -47,6 +48,11 @@ class MempoolWebSocketService(
 
     override var onTransactionDetected: ((WebSocketEvent) -> Unit)? = null
     override var onBlockHeader: ((Int) -> Unit)? = null
+    override var onFeesUpdated: ((RecommendedFees) -> Unit)? = null
+
+    @Volatile
+    override var latestFees: RecommendedFees? = null
+        private set
 
     init {
         reconnectManager.onReconnect = {
@@ -191,7 +197,7 @@ class MempoolWebSocketService(
     }
 
     private fun subscribeToBlocks() {
-        send("""{ "action": "want", "data": ["blocks", "mempool-blocks"] }""")
+        send("""{ "action": "want", "data": ["blocks", "mempool-blocks", "stats"] }""")
     }
 
     private fun send(text: String) {
@@ -274,6 +280,8 @@ class MempoolWebSocketService(
             notifyBlock(blockHeight)
         }
 
+        msg.fees?.toRecommendedFees()?.let(::handleFees)
+
         val tracked = msg.trackedTxs ?: emptyMap()
         tracked.forEach { (trackedTxid, trackingInfo) ->
             if (!trackedTxidsSnapshot.contains(trackedTxid)) {
@@ -345,6 +353,14 @@ class MempoolWebSocketService(
         serviceScope.launch(Dispatchers.Main.immediate) {
             callback(event)
         }
+    }
+
+    private fun handleFees(fees: RecommendedFees) {
+        if (fees == latestFees) return
+        latestFees = fees
+        logInfo("Fees updated: $fees")
+        val callback = onFeesUpdated ?: return
+        serviceScope.launch(Dispatchers.Main.immediate) { callback(fees) }
     }
 
     private fun notifyBlock(height: Int) {
