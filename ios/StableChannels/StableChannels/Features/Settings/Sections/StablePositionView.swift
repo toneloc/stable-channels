@@ -32,7 +32,7 @@ struct StablePositionView: View {
                     HStack {
                         Text(String(localized: .labelStatus))
                         Spacer()
-                        Text(result.action.rawValue)
+                        Text(result.action.displayName)
                             .foregroundStyle(stabilityColor(result.action))
                             .fontWeight(.medium)
                     }
@@ -85,6 +85,18 @@ struct StablePositionView: View {
         case .pay: return .orange
         case .checkOnly: return .blue
         case .highRiskNoAction: return .red
+        }
+    }
+}
+
+private extension StabilityService.StabilityAction {
+    /// What the status means for the user; the raw values are internal codes.
+    var displayName: LocalizedStringResource {
+        switch self {
+        case .stable: .statusActionStable
+        case .highRiskNoAction: .statusActionWaiting
+        case .checkOnly: .statusActionChecking
+        case .pay: .statusActionAdjusting
         }
     }
 }

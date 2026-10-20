@@ -7181,71 +7181,6 @@
         }
       }
     },
-    "Download logs" : {
-      "comment" : "Settings row to export app diagnostic log files for support.",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "تنزيل السجلات"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "লগ ডাউনলোড করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Protokolle herunterladen"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Descargar registros"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Télécharger les journaux"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "लॉग डाउनलोड करें"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ログをダウンロード"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Baixar logs"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Скачать логи"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "下载日志"
-          }
-        }
-      }
-    },
     "empty_payments_desc" : {
       "comment" : "Empty-state description in History when there are no payments yet.",
       "extractionState" : "manual",
@@ -18211,73 +18146,73 @@
       }
     },
     "label_backing_sats" : {
-      "comment" : "Row label on Home or stable position details: the bitcoin amount (in sats) backing the stable USD value.",
+      "comment" : "Stability Details row label: bitcoin set aside to hold the stable USD value.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reserved BTC"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC الداعمة (Backing)"
+            "value" : "BTC المحجوز"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ব্যাকিং BTC"
+            "value" : "সংরক্ষিত BTC"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Absichernde BTC"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Backing BTC"
+            "value" : "Reservierte BTC"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC de Respaldo"
+            "value" : "BTC reservado"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC de soutien"
+            "value" : "BTC réservés"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "बैकिंग BTC"
+            "value" : "आरक्षित BTC"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "裏付けBTC"
+            "value" : "確保済みBTC"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC de Apoio"
+            "value" : "BTC reservado"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Обеспечение в BTC"
+            "value" : "Зарезервированные BTC"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "支持的 BTC"
+            "value" : "预留 BTC"
           }
         }
       }
@@ -19435,49 +19370,49 @@
       }
     },
     "label_counterparty" : {
-      "comment" : "Row label in Channel settings for the other node in the channel (the LSP).",
+      "comment" : "Stability Details and connection rows: label for the Lightning node on the other side of the channel.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Channel Peer"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الطرف الآخر"
+            "value" : "نظير القناة"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "কাউন্টারপার্টি"
+            "value" : "চ্যানেল পিয়ার"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Gegenpartei"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Counterparty"
+            "value" : "Kanalpartner"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Contraparte"
+            "value" : "Par del canal"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Contrepartie"
+            "value" : "Pair du canal"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "काउंटरपार्टी"
+            "value" : "चैनल पीयर"
           }
         },
         "ja" : {
@@ -19489,13 +19424,13 @@
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Contraparte"
+            "value" : "Par do canal"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Контрагент"
+            "value" : "Узел-партнёр канала"
           }
         },
         "zh-Hans" : {
@@ -19939,73 +19874,73 @@
       }
     },
     "label_distance_from_par" : {
-      "comment" : "Row label for how far the stable value is from its USD target (par). Technical term.",
+      "comment" : "Stability Details row label: how far the channel is from its target stable value, shown as a percentage.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Distance from Target"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "البعد عن نقطة التعادل (PAR)"
+            "value" : "البعد عن الهدف"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "PAR থেকে দূরত্ব"
+            "value" : "লক্ষ্য থেকে দূরত্ব"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Entfernung von PAR"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Distance from PAR"
+            "value" : "Abstand zum Ziel"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Distancia de PAR"
+            "value" : "Distancia al objetivo"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Distance de PAR"
+            "value" : "Écart par rapport à la cible"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "PAR से दूरी"
+            "value" : "लक्ष्य से दूरी"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "PARからの距離"
+            "value" : "目標との差"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Distância de PAR"
+            "value" : "Distância do alvo"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Отклонение от PAR"
+            "value" : "Отклонение от цели"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "距面值的距离 (PAR)"
+            "value" : "与目标的偏差"
           }
         }
       }
@@ -20227,73 +20162,73 @@
       }
     },
     "label_expected_usd" : {
-      "comment" : "Row label for the expected USD value after a stability adjustment.",
+      "comment" : "Stability Details row label: the USD value the stabilized part of the balance holds.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Value (USD)"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "المتوقع USD"
+            "value" : "القيمة المستقرة (USD)"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "প্রত্যাশিত USD"
+            "value" : "স্থিতিশীল মূল্য (USD)"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Erwartete USD"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Expected USD"
+            "value" : "Stabiler Wert (USD)"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "USD Esperado"
+            "value" : "Valor estable (USD)"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "USD attendu"
+            "value" : "Valeur stable (USD)"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "अपेक्षित USD"
+            "value" : "स्थिर मूल्य (USD)"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "予想USD"
+            "value" : "安定価値 (USD)"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "USD Esperado"
+            "value" : "Valor estável (USD)"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ожидается USD"
+            "value" : "Стабильная стоимость (USD)"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "预期 USD"
+            "value" : "稳定价值(USD)"
           }
         }
       }
@@ -21163,73 +21098,73 @@
       }
     },
     "label_native_btc" : {
-      "comment" : "Row label for bitcoin held onchain, outside the stable portion.",
+      "comment" : "Stability Details row label: bitcoin in the channel that is not stabilized.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Unstabilized BTC"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC الأصلي"
+            "value" : "BTC غير المثبّت"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "নেটিভ BTC"
+            "value" : "স্থিতিশীল না করা BTC"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-Chain BTC"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Native BTC"
+            "value" : "Nicht stabilisierte BTC"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC Nativo"
+            "value" : "BTC no estabilizado"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC natif"
+            "value" : "BTC non stabilisés"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "नेटिव BTC"
+            "value" : "स्थिर न किया गया BTC"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ネイティブBTC"
+            "value" : "未安定化のBTC"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "BTC Nativo"
+            "value" : "BTC não estabilizado"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "On-chain BTC"
+            "value" : "Нестабилизированные BTC"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "原生 BTC"
+            "value" : "未稳定化的 BTC"
           }
         }
       }
@@ -24694,70 +24629,70 @@
       "comment" : "Settings menu row title for the stable USD position details.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stability Details"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الوضع المستقر"
+            "value" : "تفاصيل الاستقرار"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্থিতিশীল অবস্থান"
+            "value" : "স্থিতিশীলতার বিবরণ"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Stabile Position"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Stable Position"
+            "value" : "Stabilitätsdetails"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posición Estable"
+            "value" : "Detalles de estabilidad"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Position stable"
+            "value" : "Détails de stabilité"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्थिर स्थिति"
+            "value" : "स्थिरता विवरण"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安定ポジション"
+            "value" : "安定性の詳細"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posição Estável"
+            "value" : "Detalhes de estabilidade"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Стабильная позиция"
+            "value" : "Сведения о стабильности"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "稳定仓位"
+            "value" : "稳定性详情"
           }
         }
       }
@@ -24830,71 +24765,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在加载余额..."
-          }
-        }
-      }
-    },
-    "Logs & Diagnostics" : {
-      "comment" : "Settings menu row title for logs and diagnostic info for troubleshooting.",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "السجلات والتشخيص"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "লগ ও ডায়াগনস্টিক্স"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Protokolle & Diagnose"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Registros y diagnóstico"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Journaux et diagnostics"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "लॉग और डायग्नोस्टिक्स"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ログと診断"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Logs e diagnósticos"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Логи и диагностика"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "日志与诊断"
           }
         }
       }
@@ -24975,70 +24845,70 @@
       "comment" : "Footer in LSP settings explaining why the provider cannot change while a channel is open.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Lightning Service Provider cannot be changed while a channel is open. The channel peer is part of the channel's funding transaction."
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "لا يمكن تغيير مزود خدمة Lightning أثناء وجود قناة مفتوحة. العقدة المقابلة جزء من معاملة تمويل القناة."
+            "value" : "لا يمكن تغيير مزود خدمة Lightning أثناء فتح قناة. نظير القناة جزء من معاملة تمويل القناة."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "চ্যানেল খোলা থাকাকালীন Lightning সার্ভিস প্রোভাইডার পরিবর্তন করা যায় না। কাউন্টারপার্টি নোড চ্যানেলের ফান্ডিং ট্রানজ্যাকশনের অংশ।"
+            "value" : "চ্যানেল খোলা থাকা অবস্থায় Lightning সার্ভিস প্রোভাইডার পরিবর্তন করা যায় না। চ্যানেল পিয়ার চ্যানেলের ফান্ডিং লেনদেনের অংশ।"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Der Lightning Service Provider kann nicht geändert werden, solange ein Kanal geöffnet ist. Der Gegenknoten ist Teil der Funding-Transaktion des Kanals."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "The Lightning Service Provider cannot be changed while a channel is open. The counterparty node is part of the channel's funding transaction."
+            "value" : "Der Lightning Service Provider kann nicht geändert werden, solange ein Kanal offen ist. Der Kanalpartner ist Teil der Finanzierungstransaktion des Kanals."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El proveedor de servicios Lightning no se puede cambiar mientras haya un canal abierto. El nodo contraparte forma parte de la transacción de financiación del canal."
+            "value" : "El proveedor de servicios Lightning no se puede cambiar mientras haya un canal abierto. El par del canal forma parte de la transacción de financiación del canal."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le fournisseur de services Lightning ne peut pas être modifié tant qu'un canal est ouvert. Le nœud homologue fait partie de la transaction de financement du canal."
+            "value" : "Le fournisseur de services Lightning ne peut pas être modifié tant qu'un canal est ouvert. Le pair du canal fait partie de la transaction de financement du canal."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "चैनल खुला होने पर Lightning सर्विस प्रोवाइडर बदला नहीं जा सकता। काउंटरपार्टी नोड चैनल के फंडिंग लेन-देन का हिस्सा है।"
+            "value" : "चैनल खुला रहने तक Lightning सर्विस प्रोवाइडर नहीं बदला जा सकता। चैनल पीयर चैनल के फ़ंडिंग लेन-देन का हिस्सा है।"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "チャネルが開いている間は、Lightning Service Providerを変更できません。相手のノードはチャネルの資金調達トランザクションの一部であるためです。"
+            "value" : "チャネルが開いている間はLightningサービスプロバイダーを変更できません。チャネル相手はチャネルの資金トランザクションの一部です。"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O provedor de serviços Lightning não pode ser alterado enquanto houver um canal aberto. O nó da contraparte faz parte da transação de financiamento do canal."
+            "value" : "O provedor de serviços Lightning não pode ser alterado enquanto houver um canal aberto. O par do canal faz parte da transação de financiamento do canal."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Провайдера услуг Lightning нельзя изменить, пока канал открыт. Узел контрагента входит в фондирующую транзакцию канала."
+            "value" : "Провайдера Lightning нельзя сменить, пока канал открыт. Узел-партнёр входит в транзакцию открытия канала."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "通道开启期间无法更改 Lightning Service Provider。对手节点是通道注资转账的一部分。"
+            "value" : "通道打开期间无法更换 Lightning 服务提供商。通道对方是通道注资交易的一部分。"
           }
         }
       }
@@ -25332,73 +25202,73 @@
       }
     },
     "maximum_additional_trade" : {
-      "comment" : "Hint on Stabilize amount input. %.2f is a US dollar amount still available to move into stable value.",
+      "comment" : "Shown on the Stabilize sheet and Home: the most the user can stabilize now. %@ is a dollar amount with two decimals, after the dollar sign.",
       "extractionState" : "manual",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "المتاح للتثبيت: $%.2f"
+            "value" : "المتاح للتثبيت: $%@"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্থিতিশীল করার জন্য উপলব্ধ: $%.2f"
+            "value" : "স্থিতিশীল করার জন্য উপলব্ধ: $%@"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Zum Stabilisieren verfügbar: $%.2f"
+            "value" : "Zum Stabilisieren verfügbar: $%@"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Available to stabilize: $%.2f"
+            "value" : "Available to stabilize: $%@"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disponible para estabilizar: $%.2f"
+            "value" : "Disponible para estabilizar: $%@"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disponible à stabiliser : $%.2f"
+            "value" : "Disponible à stabiliser : $%@"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्थिर करने के लिए उपलब्ध: $%.2f"
+            "value" : "स्थिर करने के लिए उपलब्ध: $%@"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安定化できる金額: $%.2f"
+            "value" : "安定化できる金額: $%@"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Disponível para estabilizar: $%.2f"
+            "value" : "Disponível para estabilizar: $%@"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Доступно для стабилизации: $%.2f"
+            "value" : "Доступно для стабилизации: $%@"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "可稳定化金额:$%.2f"
+            "value" : "可稳定化金额:$%@"
           }
         }
       }
@@ -30121,217 +29991,217 @@
       }
     },
     "rejection_invalid_fee" : {
-      "comment" : "Error message: the fee in the price quote was invalid; user should refresh the quote and retry.",
+      "comment" : "Error after a stability change: the provider rejected the fee; the user should refresh the price and retry.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The fee was invalid. Refresh the price and retry."
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الرسوم غير صالحة. حدّث عرض السعر قبل إعادة المحاولة."
+            "value" : "الرسوم غير صالحة. حدّث السعر وأعد المحاولة."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "ফি বৈধ ছিল না। আবার চেষ্টা করার আগে কোট রিফ্রেশ করুন।"
+            "value" : "ফি বৈধ ছিল না। মূল্য রিফ্রেশ করে আবার চেষ্টা করুন।"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Die Gebühr war ungültig. Aktualisieren Sie das Angebot, bevor Sie es erneut versuchen."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The fee was invalid. Refresh the quote before retrying."
+            "value" : "Die Gebühr war ungültig. Aktualisieren Sie den Preis und versuchen Sie es erneut."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "La comisión no era válida. Actualiza la cotización antes de reintentar."
+            "value" : "La comisión no era válida. Actualiza el precio e inténtalo de nuevo."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Les frais étaient invalides. Actualisez le devis avant de réessayer."
+            "value" : "Les frais étaient invalides. Actualisez le prix et réessayez."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "शुल्क अमान्य था। फिर से कोशिश करने से पहले कोट रीफ़्रेश करें।"
+            "value" : "शुल्क अमान्य था। मूल्य रीफ़्रेश करें और फिर से कोशिश करें।"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "手数料が無効でした。再試行する前に見積もりを更新してください。"
+            "value" : "手数料が無効でした。価格を更新して再試行してください。"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A taxa era inválida. Atualize a cotação antes de tentar novamente."
+            "value" : "A taxa era inválida. Atualize o preço e tente novamente."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Неверная комиссия. Обновите котировку перед повторной попыткой."
+            "value" : "Неверная комиссия. Обновите цену и повторите попытку."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "费用无效。请先刷新报价再重试。"
+            "value" : "费用无效。请刷新价格后重试。"
           }
         }
       }
     },
     "rejection_invalid_quote" : {
-      "comment" : "Error message: a valid price quote is needed; user should refresh and retry.",
+      "comment" : "Error after a stability change: a current BTC price is needed; the user should refresh and retry.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A current BTC price is required. Refresh and retry."
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "يلزم عرض سعر صالح. حدّث وأعد المحاولة."
+            "value" : "يلزم سعر BTC حالي. حدّث وأعد المحاولة."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "একটি বৈধ মূল্য কোট প্রয়োজন। রিফ্রেশ করে আবার চেষ্টা করুন।"
+            "value" : "বর্তমান BTC মূল্য প্রয়োজন। রিফ্রেশ করে আবার চেষ্টা করুন।"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ein gültiges Preisangebot ist erforderlich. Aktualisieren und erneut versuchen."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A valid price quote is required. Refresh and retry."
+            "value" : "Ein aktueller BTC-Preis ist erforderlich. Aktualisieren und erneut versuchen."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Se necesita una cotización de precio válida. Actualiza e inténtalo de nuevo."
+            "value" : "Se necesita un precio de BTC actual. Actualiza e inténtalo de nuevo."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Un devis de prix valide est requis. Actualisez et réessayez."
+            "value" : "Un prix BTC actuel est requis. Actualisez et réessayez."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "मान्य मूल्य कोट आवश्यक है। रीफ़्रेश करें और फिर से कोशिश करें।"
+            "value" : "वर्तमान BTC मूल्य आवश्यक है। रीफ़्रेश करें और फिर से कोशिश करें।"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "有効な価格見積もりが必要です。更新して再試行してください。"
+            "value" : "最新のBTC価格が必要です。更新して再試行してください。"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "É necessária uma cotação de preço válida. Atualize e tente novamente."
+            "value" : "É necessário um preço de BTC atual. Atualize e tente novamente."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Нужна действительная ценовая котировка. Обновите и повторите попытку."
+            "value" : "Нужна актуальная цена BTC. Обновите и повторите попытку."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "需要有效的价格报价。请刷新后重试。"
+            "value" : "需要当前的 BTC 价格。请刷新后重试。"
           }
         }
       }
     },
     "rejection_quote_deviation" : {
-      "comment" : "Error message: the market price moved too far from the quoted price; refresh and retry.",
+      "comment" : "Error after a stability change: the BTC price moved too far since it was checked; refresh and retry.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The BTC price changed too much. Refresh and retry."
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "تحرك السعر خارج نطاق العرض. حدّث وأعد المحاولة."
+            "value" : "تغيّر سعر BTC كثيرًا. حدّث وأعد المحاولة."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "মূল্য কোটের সীমার বাইরে চলে গেছে। রিফ্রেশ করে আবার চেষ্টা করুন।"
+            "value" : "BTC মূল্য অনেক বেশি বদলে গেছে। রিফ্রেশ করে আবার চেষ্টা করুন।"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Der Preis hat sich außerhalb der Angebotsspanne bewegt. Aktualisieren und erneut versuchen."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The price moved outside the quote range. Refresh and retry."
+            "value" : "Der BTC-Preis hat sich zu stark verändert. Aktualisieren und erneut versuchen."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "El precio salió del rango de la cotización. Actualiza e inténtalo de nuevo."
+            "value" : "El precio de BTC cambió demasiado. Actualiza e inténtalo de nuevo."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le prix est sorti de la plage du devis. Actualisez et réessayez."
+            "value" : "Le prix du BTC a trop changé. Actualisez et réessayez."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "मूल्य कोट सीमा से बाहर चला गया। रीफ़्रेश करें और फिर से कोशिश करें।"
+            "value" : "BTC मूल्य बहुत अधिक बदल गया। रीफ़्रेश करें और फिर से कोशिश करें।"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "価格が見積もりの範囲外に変動しました。更新して再試行してください。"
+            "value" : "BTC価格が大きく変動しました。更新して再試行してください。"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "O preço saiu da faixa da cotação. Atualize e tente novamente."
+            "value" : "O preço do BTC mudou demais. Atualize e tente novamente."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Цена вышла за пределы котировки. Обновите и повторите попытку."
+            "value" : "Цена BTC изменилась слишком сильно. Обновите и повторите попытку."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "价格超出报价范围。请刷新后重试。"
+            "value" : "BTC 价格变化过大。请刷新后重试。"
           }
         }
       }
@@ -30409,73 +30279,73 @@
       }
     },
     "rejection_stale_request" : {
-      "comment" : "Error message: the price quote timed out before the provider accepted it; refresh and retry.",
+      "comment" : "Error after a stability change: the BTC price check expired before the provider accepted it; refresh and retry.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The price check expired before it could be accepted. Refresh and retry."
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "انتهت صلاحية عرض السعر قبل قبوله. حدّث وأعد المحاولة."
+            "value" : "انتهت صلاحية التحقق من السعر قبل قبوله. حدّث وأعد المحاولة."
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "গ্রহণের আগেই কোটের মেয়াদ শেষ হয়েছে। রিফ্রেশ করে আবার চেষ্টা করুন।"
+            "value" : "গ্রহণের আগেই মূল্য যাচাইয়ের মেয়াদ শেষ হয়েছে। রিফ্রেশ করে আবার চেষ্টা করুন।"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Das Angebot ist abgelaufen, bevor es angenommen werden konnte. Aktualisieren und erneut versuchen."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "The quote expired before it could be accepted. Refresh and retry."
+            "value" : "Die Preisprüfung ist abgelaufen, bevor sie angenommen wurde. Aktualisieren und erneut versuchen."
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "La cotización expiró antes de ser aceptada. Actualiza e inténtalo de nuevo."
+            "value" : "La comprobación del precio caducó antes de ser aceptada. Actualiza e inténtalo de nuevo."
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Le devis a expiré avant d'être accepté. Actualisez et réessayez."
+            "value" : "La vérification du prix a expiré avant d'être acceptée. Actualisez et réessayez."
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्वीकार होने से पहले कोट की अवधि समाप्त हो गई। रीफ़्रेश करें और फिर से कोशिश करें।"
+            "value" : "स्वीकार होने से पहले मूल्य जाँच की अवधि समाप्त हो गई। रीफ़्रेश करें और फिर से कोशिश करें।"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "見積もりが受理される前に期限切れになりました。更新して再試行してください。"
+            "value" : "価格確認が受理される前に期限切れになりました。更新して再試行してください。"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "A cotação expirou antes de ser aceita. Atualize e tente novamente."
+            "value" : "A verificação de preço expirou antes de ser aceita. Atualize e tente novamente."
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Котировка истекла до принятия. Обновите и повторите попытку."
+            "value" : "Проверка цены истекла до принятия. Обновите и повторите попытку."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "报价在被接受前已过期。请刷新后重试。"
+            "value" : "价格核对在被接受前已过期。请刷新后重试。"
           }
         }
       }
@@ -31038,71 +30908,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "从 iCloud 恢复将擦除您现有的钱包和所有资金。请在继续操作前提取所有比特币。"
-          }
-        }
-      }
-    },
-    "Save app logs to a file for debugging and support." : {
-      "comment" : "Settings footer text under the Share the logs button; explains logs are saved for troubleshooting.",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "احفظ سجلات التطبيق في ملف لأغراض التصحيح والدعم."
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ডিবাগিং ও সহায়তার জন্য অ্যাপের লগ একটি ফাইলে সংরক্ষণ করুন।"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "App-Protokolle für Fehlersuche und Support in einer Datei speichern."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Guarda los registros de la app en un archivo para depuración y soporte."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Enregistrez les journaux de l'app dans un fichier pour le débogage et l'assistance."
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "डिबगिंग और सहायता के लिए ऐप लॉग को फ़ाइल में सहेजें।"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "デバッグやサポートのために、アプリのログをファイルに保存します。"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Salve os logs do app em um arquivo para depuração e suporte."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Сохраните логи приложения в файл для отладки и поддержки."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "将应用日志保存为文件,用于调试和支持。"
           }
         }
       }
@@ -32551,70 +32356,70 @@
       "comment" : "Section header for the stable position: the part of the balance held at steady US dollar value.",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stability Details"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الوضع المستقر"
+            "value" : "تفاصيل الاستقرار"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্থিতিশীল অবস্থান"
+            "value" : "স্থিতিশীলতার বিবরণ"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Stabile Position"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Stable Position"
+            "value" : "Stabilitätsdetails"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posición Estable"
+            "value" : "Detalles de estabilidad"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Position stable"
+            "value" : "Détails de stabilité"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्थिर स्थिति"
+            "value" : "स्थिरता विवरण"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安定ポジション"
+            "value" : "安定性の詳細"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posição Estável"
+            "value" : "Detalhes de estabilidade"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Стабильная позиция"
+            "value" : "Сведения о стабильности"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "稳定仓位"
+            "value" : "稳定性详情"
           }
         }
       }
@@ -33112,71 +32917,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已选择"
-          }
-        }
-      }
-    },
-    "Share the logs" : {
-      "comment" : "Settings button that opens the share sheet to send the app log file for support.",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "مشاركة السجلات"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "লগ শেয়ার করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Protokolle teilen"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Compartir los registros"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Partager les journaux"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "लॉग साझा करें"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ログを共有"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Compartilhar os logs"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Поделиться логами"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "分享日志"
           }
         }
       }
@@ -36489,71 +36229,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Splice-out 已启动！"
-          }
-        }
-      }
-    },
-    "Support" : {
-      "comment" : "Settings section header for contacting support.",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "الدعم"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "সহায়তা"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Support"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Soporte"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Assistance"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "सहायता"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "サポート"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Suporte"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Поддержка"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "支持"
           }
         }
       }
@@ -40148,70 +39823,70 @@
       "comment" : "Navigation bar title of the stable position screen (balance held at steady US dollar value).",
       "extractionState" : "manual",
       "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stability Details"
+          }
+        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "الوضع المستقر"
+            "value" : "تفاصيل الاستقرار"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "স্থিতিশীল অবস্থান"
+            "value" : "স্থিতিশীলতার বিবরণ"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Stabile Position"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Stable Position"
+            "value" : "Stabilitätsdetails"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posición Estable"
+            "value" : "Detalles de estabilidad"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Position stable"
+            "value" : "Détails de stabilité"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "स्थिर स्थिति"
+            "value" : "स्थिरता विवरण"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安定ポジション"
+            "value" : "安定性の詳細"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Posição Estável"
+            "value" : "Detalhes de estabilidade"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Стабильная позиция"
+            "value" : "Сведения о стабильности"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "稳定仓位"
+            "value" : "稳定性详情"
           }
         }
       }
@@ -41938,6 +41613,654 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "比特币地址二维码"
+          }
+        }
+      }
+    },
+    "header_support" : {
+      "comment" : "Settings section header for contacting support.",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الدعم"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "সহায়তা"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Support"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Support"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Soporte"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Assistance"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "सहायता"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "サポート"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Suporte"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поддержка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "支持"
+          }
+        }
+      },
+      "extractionState" : "manual"
+    },
+    "title_logs_diagnostics" : {
+      "comment" : "Settings menu row title for logs and diagnostic info for troubleshooting.",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "السجلات والتشخيص"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "লগ ও ডায়াগনস্টিক্স"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protokolle & Diagnose"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Logs & Diagnostics"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Registros y diagnóstico"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Journaux et diagnostics"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लॉग और डायग्नोस्टिक्स"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログと診断"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Logs e diagnósticos"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Логи и диагностика"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "日志与诊断"
+          }
+        }
+      },
+      "extractionState" : "manual"
+    },
+    "button_download_logs" : {
+      "comment" : "Settings row to export app diagnostic log files for support.",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تنزيل السجلات"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "লগ ডাউনলোড করুন"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protokolle herunterladen"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Download logs"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Descargar registros"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Télécharger les journaux"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लॉग डाउनलोड करें"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログをダウンロード"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Baixar logs"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Скачать логи"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载日志"
+          }
+        }
+      },
+      "extractionState" : "manual"
+    },
+    "button_share_logs" : {
+      "comment" : "Settings button that opens the share sheet to send the app log file for support.",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مشاركة السجلات"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "লগ শেয়ার করুন"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Protokolle teilen"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Share the logs"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Compartir los registros"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Partager les journaux"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "लॉग साझा करें"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ログを共有"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Compartilhar os logs"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Поделиться логами"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分享日志"
+          }
+        }
+      },
+      "extractionState" : "manual"
+    },
+    "footer_save_logs" : {
+      "comment" : "Settings footer text under the Share the logs button; explains logs are saved for troubleshooting.",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "احفظ سجلات التطبيق في ملف لأغراض التصحيح والدعم."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ডিবাগিং ও সহায়তার জন্য অ্যাপের লগ একটি ফাইলে সংরক্ষণ করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "App-Protokolle für Fehlersuche und Support in einer Datei speichern."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Save app logs to a file for debugging and support."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Guarda los registros de la app en un archivo para depuración y soporte."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Enregistrez les journaux de l'app dans un fichier pour le débogage et l'assistance."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "डिबगिंग और सहायता के लिए ऐप लॉग को फ़ाइल में सहेजें।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "デバッグやサポートのために、アプリのログをファイルに保存します。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Salve os logs do app em um arquivo para depuração e suporte."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Сохраните логи приложения в файл для отладки и поддержки."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "将应用日志保存为文件,用于调试和支持。"
+          }
+        }
+      },
+      "extractionState" : "manual"
+    },
+    "status_action_stable" : {
+      "comment" : "Stability Details status value: the channel is at its target stable value.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable"
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "مستقر"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "স্থিতিশীল"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stabil"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Estable"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "स्थिर"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安定"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Estável"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Стабильно"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "稳定"
+          }
+        }
+      }
+    },
+    "status_action_waiting" : {
+      "comment" : "Stability Details status value: an adjustment is needed but is postponed until it is safe to make.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Waiting for a safe moment"
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "بانتظار وقت آمن"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "নিরাপদ সময়ের অপেক্ষায়"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wartet auf einen sicheren Moment"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Esperando un momento seguro"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "En attente d'un moment sûr"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "सुरक्षित समय की प्रतीक्षा"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安全なタイミングを待機中"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Aguardando um momento seguro"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ожидание безопасного момента"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待安全时机"
+          }
+        }
+      }
+    },
+    "status_action_checking" : {
+      "comment" : "Stability Details status value: the app is checking whether an adjustment is needed.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Checking"
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ التحقق"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "যাচাই করা হচ্ছে"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird geprüft"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Comprobando"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Vérification"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "जाँच हो रही है"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "確認中"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verificando"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Проверка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "检查中"
+          }
+        }
+      }
+    },
+    "status_action_adjusting" : {
+      "comment" : "Stability Details status value: a payment is being made to bring the channel back to its stable value.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Adjusting"
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "جارٍ التعديل"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "সমন্বয় করা হচ্ছে"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Wird angepasst"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ajustando"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ajustement"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "समायोजन हो रहा है"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "調整中"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ajustando"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Корректировка"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "调整中"
           }
         }
       }

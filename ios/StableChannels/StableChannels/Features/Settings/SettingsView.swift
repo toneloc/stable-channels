@@ -155,11 +155,11 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "stethoscope",
                             color: .green,
-                            text: "Logs & Diagnostics"
+                            text: String(localized: .titleLogsDiagnostics)
                         )
                     }
                 } header: {
-                    Text("Support")
+                    Text(String(localized: .headerSupport))
                         .font(.headline)
                         .foregroundStyle(.primary)
                 }

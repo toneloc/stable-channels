@@ -1,16 +1,36 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "CFBundleDisplayName" : {
+      "comment" : "App name shown under the icon. Brand name, keep as is.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels"
+          }
+        }
+      },
+      "shouldTranslate" : false
+    },
+    "CFBundleName" : {
+      "comment" : "App name shown under the icon. Brand name, keep as is.",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "StableChannels"
+          }
+        }
+      },
+      "shouldTranslate" : false
+    },
     "NSCameraUsageDescription" : {
       "comment" : "Permission prompt shown by iOS before the app opens the camera.",
       "extractionState" : "manual",
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
-          }
-        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
@@ -27,6 +47,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Die Kamera wird zum Scannen von QR-Codes für Lightning-Rechnungen und Bitcoin-Adressen verwendet."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
           }
         },
         "es" : {
@@ -77,12 +103,6 @@
       "comment" : "Permission prompt shown by iOS before the app first uses Face ID.",
       "extractionState" : "manual",
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Stable Channels uses Face ID to secure your wallet and confirm transactions."
-          }
-        },
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
@@ -99,6 +119,12 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Stable Channels verwendet Face ID, um Ihre Wallet zu schützen und Transaktionen zu bestätigen."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels uses Face ID to secure your wallet and confirm transactions."
           }
         },
         "es" : {
