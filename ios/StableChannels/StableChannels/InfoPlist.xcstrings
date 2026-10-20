@@ -1,0 +1,150 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "NSCameraUsageDescription" : {
+      "comment" : "Permission prompt shown by iOS before the app opens the camera.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Camera is used to scan QR codes for Lightning invoices and Bitcoin addresses."
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تُستخدم الكاميرا لمسح رموز QR لفواتير Lightning وعناوين البيتكوين."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lightning ইনভয়েস ও বিটকয়েন ঠিকানার QR কোড স্ক্যান করতে ক্যামেরা ব্যবহার করা হয়।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Die Kamera wird zum Scannen von QR-Codes für Lightning-Rechnungen und Bitcoin-Adressen verwendet."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "La cámara se usa para escanear códigos QR de facturas Lightning y direcciones de bitcoin."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "L'appareil photo sert à scanner les codes QR des factures Lightning et des adresses bitcoin."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Lightning इनवॉइस और बिटकॉइन पतों के QR कोड स्कैन करने के लिए कैमरे का उपयोग होता है।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "LightningインボイスやビットコインアドレスのQRコードを読み取るためにカメラを使用します。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "A câmera é usada para escanear códigos QR de faturas Lightning e endereços de bitcoin."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Камера используется для сканирования QR-кодов счетов Lightning и биткоин-адресов."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "相机用于扫描 Lightning 发票和比特币地址的二维码。"
+          }
+        }
+      }
+    },
+    "NSFaceIDUsageDescription" : {
+      "comment" : "Permission prompt shown by iOS before the app first uses Face ID.",
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels uses Face ID to secure your wallet and confirm transactions."
+          }
+        },
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "يستخدم Stable Channels بصمة الوجه Face ID لتأمين محفظتك وتأكيد المعاملات."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "আপনার ওয়ালেট সুরক্ষিত রাখতে ও লেনদেন নিশ্চিত করতে Stable Channels Face ID ব্যবহার করে।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels verwendet Face ID, um Ihre Wallet zu schützen und Transaktionen zu bestätigen."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels usa Face ID para proteger tu billetera y confirmar transacciones."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels utilise Face ID pour sécuriser votre portefeuille et confirmer les transactions."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels आपके वॉलेट को सुरक्षित रखने और लेन-देन की पुष्टि के लिए Face ID का उपयोग करता है।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable ChannelsはFace IDを使用してウォレットを保護し、トランザクションを確認します。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "O Stable Channels usa o Face ID para proteger sua carteira e confirmar transações."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels использует Face ID для защиты кошелька и подтверждения транзакций."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stable Channels 使用 Face ID 保护您的钱包并确认转账。"
+          }
+        }
+      }
+    }
+  },
+  "version" : "1.2"
+}
