@@ -1,5 +1,7 @@
 package com.stablechannels.app.services.websocket
 
+import com.stablechannels.app.domain.send.RecommendedFees
+
 sealed class WebSocketEvent {
     data class Receive(val target: String, val txid: String, val amountSats: Long) :
         WebSocketEvent()
@@ -13,6 +15,10 @@ interface MempoolWebSocketClient {
     val isConnected: Boolean
     var onTransactionDetected: ((WebSocketEvent) -> Unit)?
     var onBlockHeader: ((Int) -> Unit)?
+    var onFeesUpdated: ((RecommendedFees) -> Unit)?
+
+    /** Latest recommended fees received over the socket, or null before the first update. */
+    val latestFees: RecommendedFees?
 
     fun connect()
 
