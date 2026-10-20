@@ -299,6 +299,36 @@ class OnchainMissedReceiveDatabaseServiceTest {
     }
 
     @Test
+    fun mergedPlaceholderIsReplacedWhenALaterDepositIsRecordedToo() {
+        val service = DatabaseService(context)
+        service.recordPlaceholder(29_967)
+        service.recordPlaceholder(10_000)
+
+        service.recordMissedReceive("txC", 10_000, null, null, "addr", since)
+        service.recordMissedReceive("txB", 14_332, null, null, "addr", since)
+        service.recordMissedReceive("txA", 15_635, null, null, "addr", since)
+
+        assertEquals(
+            setOf("txA" to 15_635L, "txB" to 14_332L, "txC" to 10_000L),
+            service.pendingReceives(),
+        )
+        service.close()
+    }
+
+    @Test
+    fun failedRowsDoNotCountTowardMergedPlaceholder() {
+        val service = DatabaseService(context)
+        service.recordPlaceholder(29_967)
+
+        service.recordMissedReceive("txA", 15_635, null, null, "addr", since)
+        service.failPaymentByTxid("txA")
+        service.recordMissedReceive("txB", 14_332, null, null, "addr", since)
+
+        assertEquals(setOf(null to 29_967L, "txB" to 14_332L), service.pendingReceives())
+        service.close()
+    }
+
+    @Test
     fun rowsRecordedBeforePlaceholderDoNotCountTowardIt() {
         val service = DatabaseService(context)
         service.recordMissedReceive("tx1", 10_000, null, null, "addr", since)

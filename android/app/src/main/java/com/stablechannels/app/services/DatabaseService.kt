@@ -2166,28 +2166,47 @@ class DatabaseService(context: Context) :
     }
 
     /**
-     * Deletes txid-less pending placeholders on [address] that the receive rows recorded after them
-     * now add up to exactly. The balance-delta path writes one placeholder for everything that
-     * arrived between two checks, so two deposits landing together share one row until each gets
-     * its own txid row (#317). A single later row never matches: that is a separate deposit.
+     * Deletes txid-less pending placeholders on [address] when two or more receive rows recorded
+     * after them add up to exactly their amount. The balance-delta path writes one placeholder for
+     * everything that arrived between two checks, so two deposits landing together share one row
+     * until each gets its own txid row (#317). A single later row never matches: that is a separate
+     * deposit. Other deposits recorded after the placeholder are left out of the sum.
      */
     private fun dropMergedPlaceholders(db: SQLiteDatabase, address: String) {
-        db.execSQL(
-            """
-            DELETE FROM payments
-            WHERE payment_type = 'onchain' AND direction = 'received' AND address = ?
-              AND status = 'pending' AND (txid IS NULL OR txid = '')
-              AND amount_msat = (
-                SELECT CASE WHEN COUNT(*) >= 2 THEN SUM(r.amount_msat) END
-                FROM payments r
-                WHERE r.payment_type = 'onchain' AND r.direction = 'received'
-                  AND r.address = payments.address AND r.txid IS NOT NULL AND r.txid != ''
-                  AND r.status != 'failed' AND r.created_at >= payments.created_at
-              )
-            """
-                .trimIndent(),
-            arrayOf(address),
-        )
+        val placeholders =
+            db.rawQuery(
+                    "SELECT id, amount_msat, created_at FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND status = 'pending' AND (txid IS NULL OR txid = '')",
+                    arrayOf(address),
+                )
+                .use { c ->
+                    buildList {
+                        while (c.moveToNext()) add(Triple(c.getLong(0), c.getLong(1), c.getLong(2)))
+                    }
+                }
+        for ((id, amountMsat, createdAt) in placeholders) {
+            // The rows that split a placeholder are recorded soon after it, so the earliest few
+            // are enough and keep the subset search small.
+            val later =
+                db.rawQuery(
+                        "SELECT amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND txid IS NOT NULL AND txid != '' AND status != 'failed' AND created_at >= ? ORDER BY created_at ASC, id ASC LIMIT 16",
+                        arrayOf(address, createdAt.toString()),
+                    )
+                    .use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
+            if (twoOrMoreSumTo(later, amountMsat)) {
+                db.delete("payments", "id = ?", arrayOf(id.toString()))
+            }
+        }
+    }
+
+    /** Whether two or more of [amounts] add up to exactly [target]. */
+    private fun twoOrMoreSumTo(amounts: List<Long>, target: Long): Boolean {
+        var single = emptySet<Long>()
+        var multiple = emptySet<Long>()
+        for (amount in amounts) {
+            multiple = multiple + (single + multiple).map { it + amount }.filter { it <= target }
+            if (amount <= target) single = single + amount
+        }
+        return target in multiple
     }
 
     /**
