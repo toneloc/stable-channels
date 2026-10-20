@@ -10,7 +10,7 @@ struct OnChainAmountCard: View {
             HStack {
                 Image(systemName: "dollarsign.circle")
                     .foregroundStyle(.secondary)
-                Text(String(localized: "header_amount", defaultValue: "Amount"))
+                Text(String(localized: .headerAmount))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -30,7 +30,7 @@ struct OnChainAmountCard: View {
                 : (amountUSDStr.isEmpty ? "0.00" : amountUSDStr)
 
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(String(localized: "label_dollar_sign", defaultValue: "$"))
+                Text(String(localized: .labelDollarSign))
                     .font(.system(size: 36, weight: .semibold, design: .rounded))
                     .foregroundStyle(.secondary)
 
@@ -48,7 +48,7 @@ struct OnChainAmountCard: View {
 
                     if !sendAll {
                         TextField(
-                            String(localized: "placeholder_amount_usd", defaultValue: "0.00"),
+                            String(localized: .placeholderAmountUsd),
                             text: $model.amountInputText
                         )
                         .keyboardType(.decimalPad)
@@ -83,12 +83,9 @@ struct OnChainAmountCard: View {
                     Image(systemName: "exclamationmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.red)
-                    Text(String(
-                        localized: "error_amount_exceeds_balance",
-                        defaultValue: "Amount exceeds your balance"
-                    ))
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.red)
+                    Text(String(localized: .errorAmountExceedsBalance))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.red)
                 }
                 .transition(.opacity)
             }
@@ -96,7 +93,7 @@ struct OnChainAmountCard: View {
             Toggle(isOn: $model.sendsAllFromOnchainWallet.animation(.snappy(duration: 0.32, extraBounce: 0.04))) {
                 HStack(spacing: 8) {
                     LemniscateBloomIcon(isActive: sendAll, size: 16, tint: .green)
-                    Text(String(localized: "toggle_send_all", defaultValue: "Send All"))
+                    Text(String(localized: .toggleSendAll))
                         .font(.subheadline)
                 }
             }

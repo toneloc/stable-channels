@@ -9,18 +9,18 @@ struct StablePositionView: View {
         List {
             Section {
                 HStack {
-                    Text(String(localized: "label_expected_usd", defaultValue: "Expected USD"))
+                    Text(String(localized: .labelExpectedUsd))
                     Spacer()
                     Text(appState.stableChannel.expectedUSD.formatted)
                         .fontWeight(.medium)
                 }
                 HStack {
-                    Text(String(localized: "label_backing_sats", defaultValue: "Backing BTC"))
+                    Text(String(localized: .labelBackingSats))
                     Spacer()
                     Text("\(appState.stableChannel.backingSats.btcSpacedFormatted) BTC")
                 }
                 HStack {
-                    Text(String(localized: "label_native_btc", defaultValue: "Native BTC"))
+                    Text(String(localized: .labelNativeBtc))
                     Spacer()
                     Text("\(appState.stableChannel.nativeChannelBTC.sats.btcSpacedFormatted) BTC")
                 }
@@ -30,14 +30,14 @@ struct StablePositionView: View {
                         appState.stableChannel, price: appState.btcPrice
                     )
                     HStack {
-                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Text(String(localized: .labelStatus))
                         Spacer()
                         Text(result.action.rawValue)
                             .foregroundStyle(stabilityColor(result.action))
                             .fontWeight(.medium)
                     }
                     HStack {
-                        Text(String(localized: "label_distance_from_par", defaultValue: "Distance from Par"))
+                        Text(String(localized: .labelDistanceFromPar))
                         Spacer()
                         Text(String(format: "%.2f%%", result.percentFromPar))
                             .foregroundStyle(result.percentFromPar < 0.1 ? .green : .orange)
@@ -53,12 +53,12 @@ struct StablePositionView: View {
                         }
                     } label: {
                         HStack {
-                            Text(String(localized: "label_counterparty", defaultValue: "Counterparty"))
+                            Text(String(localized: .labelCounterparty))
                                 .foregroundStyle(.primary)
                             Spacer()
                             if copiedCounterparty {
                                 Label(
-                                    String(localized: "button_copied", defaultValue: "Copied"),
+                                    String(localized: .buttonCopied),
                                     systemImage: "checkmark"
                                 )
                                 .font(.caption)
@@ -75,7 +75,7 @@ struct StablePositionView: View {
                 }
             }
         }
-        .navigationTitle(String(localized: "title_stable_position", defaultValue: "Stable Position"))
+        .navigationTitle(String(localized: .titleStablePosition))
         .navigationBarTitleDisplayMode(.inline)
     }
 

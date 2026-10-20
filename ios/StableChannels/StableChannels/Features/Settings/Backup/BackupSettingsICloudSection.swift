@@ -20,7 +20,7 @@ struct BackupSettingsICloudSection: View {
                 icloudBackupDisabledSection
             }
         } header: {
-            Text(String(localized: "section_icloud_backup", defaultValue: "iCloud"))
+            Text(String(localized: .sectionIcloudBackup))
         }
     }
 
@@ -28,19 +28,19 @@ struct BackupSettingsICloudSection: View {
     private var icloudBackupEnabledSection: some View {
         HStack {
             Label(
-                String(localized: "icloud_backup", defaultValue: "iCloud Backup"),
+                String(localized: .icloudBackup),
                 systemImage: "icloud.fill"
             )
             .foregroundStyle(.blue)
             Spacer()
-            Text(String(localized: "enabled", defaultValue: "Enabled"))
+            Text(String(localized: .enabled))
                 .font(.caption)
                 .foregroundStyle(.green)
         }
 
         if let lastBackup = backupService.lastBackupDate {
             HStack {
-                Text(String(localized: "last_backup", defaultValue: "Last backup"))
+                Text(String(localized: .lastBackup))
                 Spacer()
                 Text(lastBackup, style: .relative)
                     .font(.caption)
@@ -60,7 +60,7 @@ struct BackupSettingsICloudSection: View {
                 }
                 Text(showBackupSuccess
                     ? "Backup complete"
-                    : String(localized: "backup_now", defaultValue: "Backup Now"))
+                    : String(localized: .backupNow))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -81,7 +81,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "square.and.arrow.up.on.square")
                     .foregroundStyle(.green)
-                Text(String(localized: "export_to_files", defaultValue: "Export to Files"))
+                Text(String(localized: .exportToFiles))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -96,7 +96,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "trash.fill")
                     .foregroundStyle(.red)
-                Text(String(localized: "delete_backup", defaultValue: "Delete Backup"))
+                Text(String(localized: .deleteBackup))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -110,7 +110,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "icloud.and.arrow.down.fill")
                     .foregroundStyle(.blue)
-                Text(String(localized: "restore_backup", defaultValue: "Restore Backup"))
+                Text(String(localized: .restoreBackup))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -128,7 +128,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "icloud.and.arrow.up.fill")
                     .foregroundStyle(.blue)
-                Text(String(localized: "button_enable_icloud_backup", defaultValue: "Backup to iCloud"))
+                Text(String(localized: .buttonEnableIcloudBackup))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -143,7 +143,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "icloud.and.arrow.down.fill")
                     .foregroundStyle(.blue)
-                Text(String(localized: "button_restore_icloud", defaultValue: "Restore from iCloud"))
+                Text(String(localized: .buttonRestoreIcloud))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)
@@ -158,7 +158,7 @@ struct BackupSettingsICloudSection: View {
             HStack {
                 Image(systemName: "square.and.arrow.down.on.square")
                     .foregroundStyle(.green)
-                Text(String(localized: "button_import_backup", defaultValue: "Import from File"))
+                Text(String(localized: .buttonImportBackup))
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption)

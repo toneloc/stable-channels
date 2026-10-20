@@ -23,10 +23,7 @@ struct OnChainSendView: View {
                     if model.isSpliceOut(appState: appState) {
                         infoCard(
                             icon: "arrow.up.arrow.down",
-                            text: String(
-                                localized: "info_splice_out_funds",
-                                defaultValue: "Funds will be sent via splice-out from your Lightning channel."
-                            )
+                            text: String(localized: .infoSpliceOutFunds)
                         )
                     }
                     if let error = errorMessage {
@@ -39,7 +36,7 @@ struct OnChainSendView: View {
             }
             .scrollDismissesKeyboard(.interactively)
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(String(localized: "title_send_on_chain", defaultValue: "Send Onchain"))
+            .navigationTitle(String(localized: .titleSendOnChain))
             .navigationBarTitleDisplayMode(.inline)
             .qrInputToolbar(text: $address, sanitize: QRCodeExtractor.sanitizeAddress)
             .sheet(isPresented: $showReviewSheet, onDismiss: {
@@ -64,13 +61,13 @@ struct OnChainSendView: View {
             HStack {
                 Image(systemName: "wallet.bifold")
                     .foregroundStyle(.secondary)
-                Text(String(localized: "header_destination_address", defaultValue: "Destination Address"))
+                Text(String(localized: .headerDestinationAddress))
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
 
-            TextField(String(localized: "placeholder_address", defaultValue: "bc1..."), text: $address)
+            TextField(String(localized: .placeholderAddress), text: $address)
                 .font(.system(.body, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
@@ -129,7 +126,7 @@ struct OnChainSendView: View {
             errorMessage = nil
             showReviewSheet = true
         } label: {
-            Text(String(localized: "button_review_transfer", defaultValue: "Review Transfer"))
+            Text(String(localized: .buttonReviewTransfer))
                 .fontWeight(.semibold)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 14)

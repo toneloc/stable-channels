@@ -42,7 +42,7 @@ struct FundWalletView: View {
             }
             .padding(32)
         }
-        .navigationTitle(String(localized: "title_on_chain_receive", defaultValue: "Onchain Receive"))
+        .navigationTitle(String(localized: .titleOnChainReceive))
         .navigationBarTitleDisplayMode(.inline)
         .fullScreenCover(isPresented: $showFullscreenQR) {
             if let uri = bitcoinURI,
@@ -64,11 +64,8 @@ struct FundWalletView: View {
                     .resizable()
                     .scaledToFit()
                     .frame(width: 200, height: 200)
-                    .accessibilityLabel(String(
-                        localized: "Bitcoin address QR code",
-                        defaultValue: "Bitcoin address QR code"
-                    ))
-                    .accessibilityHint(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                    .accessibilityLabel(String(localized: .labelBitcoinAddressQr))
+                    .accessibilityHint(String(localized: .labelTapToEnlarge))
                     .onTapGesture {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                             showFullscreenQR = true
@@ -78,7 +75,7 @@ struct FundWalletView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                         .font(.caption2)
-                    Text(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                    Text(String(localized: .labelTapToEnlarge))
                         .font(.caption2)
                 }
                 .foregroundStyle(.secondary)
@@ -88,7 +85,7 @@ struct FundWalletView: View {
 
     private func addressDisplay(address: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "label_your_address", defaultValue: "Your Bitcoin Address"))
+            Text(String(localized: .labelYourAddress))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -113,7 +110,7 @@ struct FundWalletView: View {
                 .overlay(alignment: .center) {
                     if isCopied {
                         Label(
-                            String(localized: "button_copied", defaultValue: "Copied"),
+                            String(localized: .buttonCopied),
                             systemImage: "checkmark.circle.fill"
                         )
                         .font(.subheadline.weight(.semibold))
@@ -143,7 +140,7 @@ struct FundWalletView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "button_copy_address", defaultValue: "Copy Address"))
+            .accessibilityLabel(String(localized: .buttonCopyAddress))
 
             Button {
                 shareQR()
@@ -154,7 +151,7 @@ struct FundWalletView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "button_share_qr", defaultValue: "Share QR"))
+            .accessibilityLabel(String(localized: .buttonShareQr))
 
             Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
@@ -167,7 +164,7 @@ struct FundWalletView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(String(localized: "button_enlarge_qr", defaultValue: "Enlarge QR"))
+            .accessibilityLabel(String(localized: .buttonEnlargeQr))
         }
     }
 
@@ -201,7 +198,7 @@ struct FundWalletView: View {
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button(String(localized: "button_retry", defaultValue: "Retry")) {
+            Button(String(localized: .buttonRetry)) {
                 loadError = nil
                 address = nil
             }

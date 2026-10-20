@@ -11,14 +11,8 @@ struct QRInputToolbar: ViewModifier {
     @State private var showQRAlert = false
     @State private var qrAlertMessage = ""
 
-    private let qrErrorMessage = String(
-        localized: "alert_qr_error",
-        defaultValue: "Selected image doesn't contain a QR code."
-    )
-    private let qrAlertTitle = String(
-        localized: "alert_no_qr",
-        defaultValue: "No QR Code Found"
-    )
+    private let qrErrorMessage = String(localized: .alertQrError)
+    private let qrAlertTitle = String(localized: .alertNoQr)
 
     func body(content: Content) -> some View {
         content
@@ -28,12 +22,12 @@ struct QRInputToolbar: ViewModifier {
                         Button { showPhotoPicker = true } label: {
                             Image(systemName: "photo.on.rectangle")
                         }
-                        .accessibilityLabel(String(localized: "button_pick_image", defaultValue: "Pick Image"))
+                        .accessibilityLabel(String(localized: .buttonPickImage))
 
                         Button { showScanner = true } label: {
                             Image(systemName: "qrcode.viewfinder")
                         }
-                        .accessibilityLabel(String(localized: "button_scan_qr", defaultValue: "Scan QR"))
+                        .accessibilityLabel(String(localized: .buttonScanQr))
                     }
                 }
             }
@@ -67,7 +61,7 @@ struct QRInputToolbar: ViewModifier {
                 )
             }
             .alert(qrAlertTitle, isPresented: $showQRAlert) {
-                Button(String(localized: "button_ok", defaultValue: "OK"), role: .cancel) {}
+                Button(String(localized: .buttonOk), role: .cancel) {}
             } message: {
                 Text(qrAlertMessage)
             }
