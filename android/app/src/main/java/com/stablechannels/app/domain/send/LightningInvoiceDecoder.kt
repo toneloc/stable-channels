@@ -1,7 +1,15 @@
 package com.stablechannels.app.domain.send
 
-/** What the classifier needs from a parsed BOLT11 invoice. */
-data class DecodedBolt11(val network: BitcoinNetwork, val amountMsat: Long?)
+/**
+ * What the send flow needs from a parsed BOLT11 invoice. [descriptionHash] is the hex `h` tag, null
+ * when the invoice carries a plain description.
+ */
+data class DecodedBolt11(
+    val network: BitcoinNetwork,
+    val amountMsat: Long?,
+    val descriptionHash: String? = null,
+    val expiresAtEpochSecs: Long = Long.MAX_VALUE,
+)
 
 /** What the classifier needs from a parsed BOLT12 offer. An empty [chains] means mainnet. */
 data class DecodedBolt12(val chains: Set<BitcoinNetwork>)
