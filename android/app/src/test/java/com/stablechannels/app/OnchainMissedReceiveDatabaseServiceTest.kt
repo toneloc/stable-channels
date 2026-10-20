@@ -329,6 +329,48 @@ class OnchainMissedReceiveDatabaseServiceTest {
     }
 
     @Test
+    fun depositsRecordedLongAfterPlaceholderDoNotCountTowardIt() {
+        val service = DatabaseService(context)
+        service.recordPlaceholder(30_000)
+        service.writableDatabase.execSQL(
+            "UPDATE payments SET created_at = created_at - ?",
+            arrayOf(DatabaseService.MERGED_RECEIVE_WINDOW_SECS + 60),
+        )
+
+        service.recordMissedReceive("tx1", 10_000, null, null, "addr", since)
+        service.recordMissedReceive("tx2", 20_000, null, null, "addr", since)
+
+        assertEquals(
+            setOf(null to 30_000L, "tx1" to 10_000L, "tx2" to 20_000L),
+            service.pendingReceives(),
+        )
+        service.close()
+    }
+
+    @Test
+    fun singleLaterRowWithSameAmountDoesNotDropPlaceholder() {
+        val service = DatabaseService(context)
+        service.recordPlaceholder(10_000)
+        service.recordPayment(
+            paymentId = "onchain_receive_txS",
+            paymentType = "onchain",
+            direction = "received",
+            amountMsat = 10_000_000,
+            status = "pending",
+            txid = "txS",
+            address = "addr",
+        )
+
+        service.recordMissedReceive("tx2", 3_000, null, null, "addr", since)
+
+        assertEquals(
+            setOf(null to 10_000L, "txS" to 10_000L, "tx2" to 3_000L),
+            service.pendingReceives(),
+        )
+        service.close()
+    }
+
+    @Test
     fun rowsRecordedBeforePlaceholderDoNotCountTowardIt() {
         val service = DatabaseService(context)
         service.recordMissedReceive("tx1", 10_000, null, null, "addr", since)

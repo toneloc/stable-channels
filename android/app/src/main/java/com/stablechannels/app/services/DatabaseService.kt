@@ -76,6 +76,12 @@ class DatabaseService(context: Context) :
          * wallet learns of a transaction, then the balance change creates the placeholder.
          */
         internal const val RECEIVE_ADOPTION_SLACK_SECS = 600L
+
+        /**
+         * How long after a merged placeholder its deposits' own rows may be recorded. Recovery runs
+         * every 5 minutes, so this allows a retry; later rows are other deposits.
+         */
+        internal const val MERGED_RECEIVE_WINDOW_SECS = 600L
         internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
@@ -2167,10 +2173,11 @@ class DatabaseService(context: Context) :
 
     /**
      * Deletes txid-less pending placeholders on [address] when two or more receive rows recorded
-     * after them add up to exactly their amount. The balance-delta path writes one placeholder for
-     * everything that arrived between two checks, so two deposits landing together share one row
-     * until each gets its own txid row (#317). A single later row never matches: that is a separate
-     * deposit. Other deposits recorded after the placeholder are left out of the sum.
+     * within [MERGED_RECEIVE_WINDOW_SECS] after them add up to exactly their amount. The
+     * balance-delta path writes one placeholder for everything that arrived between two checks, so
+     * two deposits landing together share one row until each gets its own txid row (#317). A single
+     * later row never matches: that is a separate deposit. Other deposits recorded after the
+     * placeholder are left out of the sum.
      */
     private fun dropMergedPlaceholders(db: SQLiteDatabase, address: String) {
         val placeholders =
@@ -2188,8 +2195,12 @@ class DatabaseService(context: Context) :
             // are enough and keep the subset search small.
             val later =
                 db.rawQuery(
-                        "SELECT amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND txid IS NOT NULL AND txid != '' AND status != 'failed' AND created_at >= ? ORDER BY created_at ASC, id ASC LIMIT 16",
-                        arrayOf(address, createdAt.toString()),
+                        "SELECT amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND txid IS NOT NULL AND txid != '' AND status != 'failed' AND created_at >= ? AND created_at <= ? ORDER BY created_at ASC, id ASC LIMIT 16",
+                        arrayOf(
+                            address,
+                            createdAt.toString(),
+                            (createdAt + MERGED_RECEIVE_WINDOW_SECS).toString(),
+                        ),
                     )
                     .use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
             if (twoOrMoreSumTo(later, amountMsat)) {

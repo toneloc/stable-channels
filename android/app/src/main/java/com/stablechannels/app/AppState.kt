@@ -3997,8 +3997,8 @@ class AppState(private val context: Context) : ViewModel() {
                 // reconciled and deleted the original receive row for this same txid — see
                 // #316), skip: inserting again here would recreate a deposit for funds a splice
                 // already accounted for, as a duplicate, permanent, phantom "Receiving onchain"
-                // entry. A genuinely different deposit always has a different txid, so this
-                // can't suppress a real one.
+                // entry. Another deposit landing in the same delta is skipped too; it gets its
+                // own row from the websocket or recoverMissedReceive.
                 if (
                     !resolvedTxid.isNullOrBlank() && db?.paymentExistsForTxid(resolvedTxid) == true
                 ) {
