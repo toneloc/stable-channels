@@ -74,7 +74,8 @@ object LnurlEndpoint {
     fun isAllowed(url: URI): Boolean {
         val scheme = url.scheme?.lowercase() ?: return false
         val host = hostOf(url) ?: return false
-        if (url.rawUserInfo != null) return false
+        // rawUserInfo is null for hosts java.net.URI cannot parse, so check the authority too.
+        if (url.rawUserInfo != null || url.rawAuthority?.contains('@') == true) return false
         if (url.port != -1 && url.port !in 1..65535) return false
         if (url.port == -1 && url.rawAuthority?.substringAfterLast(']')?.contains(':') == true)
             return false

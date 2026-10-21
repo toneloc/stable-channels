@@ -80,6 +80,24 @@ class LnurlHostBypassTest {
             LnurlHttpClient(LnurlHttpClient.defaultClient(testDns))
                 .get(URI("https://u:p@my_host.example.com/"))
         }
+        assertFails<LnurlError.InsecureEndpoint> {
+            LnurlHttpClient(LnurlHttpClient.defaultClient(testDns))
+                .get(URI("https://u@my_host.example.com/"))
+        }
+        assertTrue(lookups.isEmpty())
+    }
+
+    @Test
+    fun `the url is checked again in the form OkHttp will dial`() {
+        // This policy accepts the URL as written but not OkHttp's canonical form, which lowercases
+        // the host. Only the second check refuses it.
+        val writtenFormOnly =
+            LnurlHttpClient(LnurlHttpClient.defaultClient(testDns), 5_000) {
+                it.host == "PAY.EXAMPLE.COM"
+            }
+        assertFails<LnurlError.InsecureEndpoint> {
+            writtenFormOnly.get(URI("https://PAY.EXAMPLE.COM/lnurlp"))
+        }
         assertTrue(lookups.isEmpty())
     }
 
