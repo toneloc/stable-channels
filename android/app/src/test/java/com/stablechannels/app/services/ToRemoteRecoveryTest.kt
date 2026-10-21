@@ -197,7 +197,7 @@ class ToRemoteRecoveryTest {
         recovery.start(funding, 0, scan = false)
         recovery.runNow()
         assertTrue(recovery.state.active)
-        assertEquals(clock + 10 * 60 * 1000L, recovery.state.nextAt)
+        assertEquals(clock + ToRemoteRecovery.backoffMs(1), recovery.state.nextAt)
 
         // Not due yet: no new request.
         val requests = server.requestCount
@@ -205,7 +205,7 @@ class ToRemoteRecoveryTest {
         assertEquals(requests, server.requestCount)
 
         closePaysUs()
-        clock += 10 * 60 * 1000L
+        clock += ToRemoteRecovery.backoffMs(1)
         recovery.runNow()
         assertEquals(94_467, recovery.pendingSats)
     }
@@ -241,9 +241,10 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
-    fun backoffDoublesUpToADay() {
-        assertEquals(10 * 60 * 1000L, ToRemoteRecovery.backoffMs(1))
-        assertEquals(20 * 60 * 1000L, ToRemoteRecovery.backoffMs(2))
+    fun backoffStartsAtAMinuteThenDoublesUpToADay() {
+        assertEquals(60 * 1000L, ToRemoteRecovery.backoffMs(1))
+        assertEquals(10 * 60 * 1000L, ToRemoteRecovery.backoffMs(2))
+        assertEquals(20 * 60 * 1000L, ToRemoteRecovery.backoffMs(3))
         assertEquals(24 * 60 * 60 * 1000L, ToRemoteRecovery.backoffMs(20))
     }
 
@@ -540,5 +541,18 @@ class ToRemoteRecoveryTest {
         recovery.start(funding, null, scan = false)
         recovery.runNow()
         assertEquals(funding, recovery.state.fundingTxid)
+    }
+
+    @Test
+    fun aZeroFeeEstimateSweepsAtTheFloor() {
+        closePaysUs()
+        val recovery = recovery()
+        recovery.start(funding, 0, scan = false)
+        recovery.runNow()
+        closeConfirmed()
+        feeRate = 0L
+        recovery.runNow()
+        val sweep = Transaction.read(posted.single())
+        assertTrue(94_467 - sweep.txOut.single().amount.sat >= (sweep.weight() + 3) / 4)
     }
 }

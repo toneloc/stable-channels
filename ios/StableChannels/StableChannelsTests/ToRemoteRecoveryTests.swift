@@ -256,7 +256,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
         await runNow(recovery)
         let state = await recovery.state
         XCTAssertTrue(state.active)
-        XCTAssertEqual(state.nextAt, clock + 10 * 60)
+        XCTAssertEqual(state.nextAt, clock + ToRemoteRecovery.backoffSeconds(1))
     }
 
     func testScanFindsAnOutputAtOneOfTheKeys() async throws {
@@ -278,9 +278,10 @@ final class ToRemoteRecoveryTests: XCTestCase {
         XCTAssertFalse(active)
     }
 
-    func testBackoffDoublesUpToADay() {
-        XCTAssertEqual(ToRemoteRecovery.backoffSeconds(1), 10 * 60)
-        XCTAssertEqual(ToRemoteRecovery.backoffSeconds(2), 20 * 60)
+    func testBackoffStartsAtAMinuteThenDoublesUpToADay() {
+        XCTAssertEqual(ToRemoteRecovery.backoffSeconds(1), 60)
+        XCTAssertEqual(ToRemoteRecovery.backoffSeconds(2), 10 * 60)
+        XCTAssertEqual(ToRemoteRecovery.backoffSeconds(3), 20 * 60)
         XCTAssertEqual(ToRemoteRecovery.backoffSeconds(20), 24 * 60 * 60)
     }
 
@@ -570,5 +571,15 @@ final class ToRemoteRecoveryTests: XCTestCase {
         await runNow(recovery)
         let armed = await recovery.state.fundingTxid
         XCTAssertEqual(armed, funding)
+    }
+
+    func testAZeroFeeEstimateSweepsAtTheFloor() async {
+        closePaysUs()
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await runNow(recovery)
+        closeConfirmed()
+        await runNow(recovery, feeRate: 0)
+        XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
     }
 }

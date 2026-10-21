@@ -348,7 +348,8 @@ class ToRemoteRecovery(
                 Bitcoin.addressToPublicKeyScript(Chain.Mainnet.chainHash, address).right?.let {
                     Script.write(it)
                 } ?: continue
-            val feeRate = feeRateSatVb() ?: continue
+            // The explorer's estimate can round to 0; 1 sat/vB is the floor the sweep pays.
+            val feeRate = (feeRateSatVb() ?: continue).coerceAtLeast(1)
             val key = keys.keys[output.keyIndex]
             val tx =
                 ToRemoteSweep.build(
@@ -459,8 +460,12 @@ class ToRemoteRecovery(
                 script.substring(70, 72) == "21" &&
                 script.endsWith("52ae")
 
-        /** 10 minutes, doubling up to a day: the LSP's close usually shows up within hours. */
+        /**
+         * 1 minute, as the LSP closes within seconds of a reconnect, then 10 minutes doubling up to
+         * a day for an LSP that is slow or offline.
+         */
         fun backoffMs(attempts: Int): Long =
-            minOf(24 * 60 * 60 * 1000L, (10 * 60 * 1000L) shl (attempts - 1).coerceIn(0, 10))
+            if (attempts <= 1) 60 * 1000L
+            else minOf(24 * 60 * 60 * 1000L, (10 * 60 * 1000L) shl (attempts - 2).coerceIn(0, 10))
     }
 }

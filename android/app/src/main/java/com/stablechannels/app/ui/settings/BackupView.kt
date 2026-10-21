@@ -25,11 +25,9 @@ import com.stablechannels.app.ui.components.InkButton
 import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.util.ClipboardUtils
-import com.stablechannels.app.util.Constants
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.lightningdevkit.ldknode.Network
 
 @Composable
 fun BackupView(appState: AppState) {
@@ -57,8 +55,7 @@ fun BackupView(appState: AppState) {
         scope.launch(Dispatchers.IO) {
             try {
                 appState.nodeService.stop()
-                appState.nodeService.start(Network.BITCOIN, Constants.PRIMARY_CHAIN_URL, input)
-                appState.startRecoveryAfterRestore(channelMayExist)
+                appState.startRestoredNode(input, channelMayExist)
                 withContext(Dispatchers.Main) {
                     isRestoring = false
                     showRestore = false

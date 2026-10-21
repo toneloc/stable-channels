@@ -706,11 +706,12 @@ class AppState {
                 await backfillHourlyPrices()
                 await backfillDailyPrices()
             }
-            try await startNodeWithFailover(mnemonic: words)
             // LDK starts with no channel data, so the LSP's close of an old channel is looked for on
-            // chain instead (#364). When the LSP said there is no channel, one scan covers a close
-            // that already happened.
+            // chain instead (#364). Set up before the node starts, so a start that fails still finds
+            // it on the next one. When the LSP said there is no channel, one scan covers a close that
+            // already happened.
             await toRemoteRecovery.startAfterRestore(repeats: acknowledgeForceClose)
+            try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
             if !nodeId.isEmpty {

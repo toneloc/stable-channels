@@ -53,9 +53,10 @@ actor ToRemoteRecovery {
     static let clockSlackSeconds: TimeInterval = 2 * 60 * 60
     private static let stateKey = "to_remote_recovery"
 
-    /// 10 minutes, doubling up to a day: the LSP's close usually shows up within hours.
+    /// 1 minute, as the LSP closes within seconds of a reconnect, then 10 minutes doubling up to a
+    /// day for an LSP that is slow or offline.
     static func backoffSeconds(_ attempts: Int) -> TimeInterval {
-        min(24 * 60 * 60, 10 * 60 * pow(2, Double(min(max(attempts - 1, 0), 10))))
+        attempts <= 1 ? 60 : min(24 * 60 * 60, 10 * 60 * pow(2, Double(min(attempts - 2, 10))))
     }
 
     private let session: URLSession
@@ -339,7 +340,9 @@ actor ToRemoteRecovery {
             }
             guard let address,
                   let script = Bech32.segwitScriptPubKey(address, expectedHrp: "bc"),
-                  let feeRate = await feeRateSatVb() else { continue }
+                  let estimate = await feeRateSatVb() else { continue }
+            // 1 sat/vB is the floor the sweep pays.
+            let feeRate = max(estimate, 1)
             let key = keys.keys[output.keyIndex]
             func sweep(at rate: UInt64) throws -> ToRemoteSweep.Signed? {
                 try ToRemoteSweep.build(
