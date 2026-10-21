@@ -82,7 +82,7 @@ struct ClosedChannelFunds: Equatable {
         let timing = if let blocksLeft, blocksLeft > 0 {
             "It unlocks in \(Self.blocksText(blocksLeft)), then moves to your onchain wallet automatically."
         } else {
-            "It moves to your onchain wallet automatically."
+            "It moves to your onchain wallet automatically, usually within a few hours."
         }
         return "\(amount) is safe on the Bitcoin blockchain. \(timing) Keep the app installed until it arrives."
     }

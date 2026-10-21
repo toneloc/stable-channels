@@ -23,7 +23,7 @@ object ClosedChannelFundsMessage {
         val timing =
             if (blocksLeft != null && blocksLeft > 0)
                 "It unlocks in ${ClosedChannelFunds.blocksText(blocksLeft)}, then moves to your onchain wallet automatically."
-            else "It moves to your onchain wallet automatically."
+            else "It moves to your onchain wallet automatically, usually within a few hours."
         return "$amount is safe on the Bitcoin blockchain. $timing Keep the app installed until it arrives."
     }
 }

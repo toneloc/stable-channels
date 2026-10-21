@@ -107,6 +107,11 @@ final class ClosedChannelFundsTests: XCTestCase {
             "$40.00 is safe on the Bitcoin blockchain. It unlocks in 288 blocks (about 2 days), "
                 + "then moves to your onchain wallet automatically. Keep the app installed until it arrives."
         )
+        XCTAssertEqual(
+            ClosedChannelFunds(amountSats: 40000, blocksLeft: nil).message(btcPrice: 100_000),
+            "$40.00 is safe on the Bitcoin blockchain. It moves to your onchain wallet automatically, "
+                + "usually within a few hours. Keep the app installed until it arrives."
+        )
     }
 
     func testBlocksTextUsesTheClosestUnit() {
