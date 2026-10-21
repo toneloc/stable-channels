@@ -38,6 +38,8 @@ class ToRemoteRecovery(
     private val saveState: (String) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
     private val log: (String, Map<String, Any?>) -> Unit = AuditService::log,
+    /** A sweep was broadcast: its txid, the sats it pays the wallet and the address. */
+    private val onSwept: (String, Long, String) -> Unit = { _, _, _ -> },
 ) {
     @Serializable
     data class Output(val txid: String, val vout: Int, val valueSats: Long, val keyIndex: Int)
@@ -284,15 +286,19 @@ class ToRemoteRecovery(
                 }
                 continue
             }
+            val result = broadcast(ByteVector(Transaction.write(tx)).toHex())
             log(
                 "TO_REMOTE_SWEEP_BROADCAST",
                 mapOf(
                     "outpoint" to "${output.txid}:${output.vout}",
-                    "result" to broadcast(ByteVector(Transaction.write(tx)).toHex()),
+                    "result" to result,
                     "sats" to output.valueSats,
                     "fee_rate" to feeRate,
                 ),
             )
+            if (!result.startsWith("error:")) {
+                onSwept(tx.txid.toString(), tx.txOut.single().amount.sat, address)
+            }
         }
         if (done.isEmpty()) return
         update { s ->

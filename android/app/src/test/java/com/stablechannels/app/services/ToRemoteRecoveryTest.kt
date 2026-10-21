@@ -44,6 +44,7 @@ class ToRemoteRecoveryTest {
     private var addressRequests = 0
     private var feeRate: Long? = 2L
     private var onRequest: (String) -> Unit = {}
+    private val swept = mutableListOf<Triple<String, Long, String>>()
     private val server =
         MockWebServer().apply {
             dispatcher =
@@ -81,6 +82,7 @@ class ToRemoteRecoveryTest {
             saveState = { saved = it },
             now = { clock },
             log = { _, _ -> },
+            onSwept = { txid, sats, to -> swept += Triple(txid, sats, to) },
         )
 
     private fun ToRemoteRecovery.runNow() = runBlocking {
@@ -300,6 +302,28 @@ class ToRemoteRecoveryTest {
         assertEquals(2, posted.size)
         assertEquals(posted[0], posted[1])
         assertEquals(1, addressRequests)
+    }
+
+    /** History gets the close from the sweep, as LDK never reports it (#364). */
+    @Test
+    fun onlyABroadcastSweepIsReported() {
+        closePaysUs()
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        recovery.runNow()
+        closeConfirmed()
+        postStatus = 400
+        recovery.runNow()
+        assertTrue(swept.isEmpty())
+
+        postStatus = 200
+        afterSettleInterval()
+        recovery.runNow()
+        val sweep = Transaction.read(posted.last())
+        assertEquals(
+            listOf(Triple(sweep.txid.toString(), sweep.txOut.single().amount.sat, address)),
+            swept,
+        )
     }
 
     @Test

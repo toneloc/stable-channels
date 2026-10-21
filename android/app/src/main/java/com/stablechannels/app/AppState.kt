@@ -1091,6 +1091,24 @@ class AppState(private val context: Context) : ViewModel() {
                     .putString("state", it)
                     .apply()
             },
+            // LDK never saw this channel close, so no ChannelClosed event records it. Pending, so
+            // detectOnchainDeposit() takes the sweep as the close's funds, not a new deposit.
+            onSwept = { txid, sats, address ->
+                val price = priceService.currentPrice.value
+                databaseService?.recordPayment(
+                    paymentId = txid,
+                    paymentType = "channel_close",
+                    direction = "received",
+                    amountMsat = sats * 1000,
+                    amountUSD =
+                        if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                    btcPrice = if (price > 0) price else null,
+                    status = "pending",
+                    txid = txid,
+                    address = address,
+                )
+                notifyPaymentRecorded()
+            },
         )
     private var toRemoteKeys: Pair<String, ToRemoteKeys>? = null
     private val paymentConfirmationPass =
