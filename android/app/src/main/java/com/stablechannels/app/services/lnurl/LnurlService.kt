@@ -3,6 +3,7 @@ package com.stablechannels.app.services.lnurl
 import com.stablechannels.app.domain.lnurl.LnurlError
 import com.stablechannels.app.domain.lnurl.LnurlInvoiceQuote
 import com.stablechannels.app.domain.lnurl.LnurlInvoiceValidator
+import com.stablechannels.app.domain.lnurl.LnurlPayClient
 import com.stablechannels.app.domain.lnurl.LnurlPayParams
 import com.stablechannels.app.domain.send.BitcoinNetwork
 import com.stablechannels.app.services.AuditService
@@ -23,9 +24,9 @@ class LnurlService(
     private val transport: LnurlTransport = LnurlHttpClient(),
     private val nowEpochSecs: () -> Long = { System.currentTimeMillis() / 1000 },
     private val audit: (String, Map<String, Any?>) -> Unit = AuditService::log,
-) {
+) : LnurlPayClient {
     /** The payee's pay parameters; only `payRequest` with a text description and sane bounds. */
-    suspend fun fetchPayParams(url: URI): LnurlPayParams {
+    override suspend fun fetchPayParams(url: URI): LnurlPayParams {
         val response = transport.get(url)
         if (response.code == 404) throw LnurlError.RecipientNotFound
         if (response.code !in 200..299) throw LnurlError.InvalidResponse
@@ -55,10 +56,10 @@ class LnurlService(
      * The payee's invoice for [amountMsat], checked for network, exact amount and expiry. A
      * description hash that does not match the metadata is audit-logged, not rejected.
      */
-    suspend fun fetchInvoice(
+    override suspend fun fetchInvoice(
         params: LnurlPayParams,
         amountMsat: Long,
-        comment: String? = null,
+        comment: String?,
     ): LnurlInvoiceQuote {
         if (!params.isAmountValid(amountMsat))
             throw LnurlError.AmountOutOfBounds(params.minSats, params.maxSats)
