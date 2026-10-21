@@ -129,7 +129,7 @@ class ClosedChannelFundsTest {
             ClosedChannelFundsMessage.text(ClosedChannelFunds(40_000, 288), 100_000.0),
         )
         assertEquals(
-            "\$40.00 is safe on the Bitcoin blockchain. It moves to your onchain wallet automatically. Keep the app installed until it arrives.",
+            "\$40.00 is safe on the Bitcoin blockchain. It moves to your onchain wallet automatically, usually within a few hours. Keep the app installed until it arrives.",
             ClosedChannelFundsMessage.text(ClosedChannelFunds(40_000, null), 100_000.0),
         )
     }
