@@ -695,6 +695,8 @@ class AppState {
         txidResolutionService.cancelAllLaunchers()
         nodeService.stop()
 
+        // Kept for the recovery below: the reset clears it.
+        let lostFundingTxid = fundingTxid
         resetInMemoryWalletState()
         dropDatabaseServices()
         wipeWalletPersistence()
@@ -706,11 +708,11 @@ class AppState {
                 await backfillHourlyPrices()
                 await backfillDailyPrices()
             }
-            // LDK starts with no channel data, so the LSP's close of an old channel is looked for on
-            // chain instead (#364). Set up before the node starts, so a start that fails still finds
-            // it on the next one. When the LSP said there is no channel, one scan covers a close that
-            // already happened.
-            await toRemoteRecovery.startAfterRestore(repeats: acknowledgeForceClose)
+            // LDK starts with no channel data, so the LSP's close of the saved funding txid's channel
+            // is looked for on chain instead (#364). Set up before the node starts, so a start that
+            // fails still finds it on the next one. When the LSP said there is no channel, one check
+            // covers a close that already happened.
+            await toRemoteRecovery.startAfterRestore(fundingTxid: lostFundingTxid, repeats: acknowledgeForceClose)
             try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
@@ -2637,7 +2639,7 @@ class AppState {
             // by what spent the funding tx (#364). Skipped while LDK handles the close itself.
             if let closedFunding = fundingTxid {
                 Task {
-                    await toRemoteRecovery.start(fundingTxid: closedFunding, fundingVout: nil, scan: false)
+                    await toRemoteRecovery.start(fundingTxid: closedFunding, fundingVout: nil)
                 }
             }
             // Stale after close: would otherwise link to the old channel's funding tx.
@@ -4023,7 +4025,6 @@ class AppState {
         let savedFunding = fundingTxid
         let ldkHasChannels = !nodeService.channels.isEmpty
         let ldkHandlesClose = ldkClosedChannelFunds != nil
-        let liveFundingTxids = Set(nodeService.channels.compactMap { $0.fundingTxo?.txid })
         toRemoteRecoveryTask = Task { [weak self] in
             guard let self else { return }
             defer { toRemoteRecoveryTask = nil }
@@ -4038,8 +4039,7 @@ class AppState {
             await recovery.run(
                 seed: seed,
                 destination: { await MainActor.run { try? nodeService.newOnchainAddress() } },
-                feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) },
-                liveFundingTxids: liveFundingTxids
+                feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) }
             )
             toRemotePendingSats = await recovery.pendingSats
             publishClosedChannelFunds()

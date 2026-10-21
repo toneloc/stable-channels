@@ -4,10 +4,9 @@ import XCTest
 private final class ToRemoteMockURLProtocol: URLProtocol {
     static var routes: [String: String] = [:]
     static var posted: [String] = []
-    /// Paths asked for; the scan's lookups arrive in parallel, hence the lock.
+    /// Paths asked for; requests arrive on URLSession threads, hence the lock.
     static var requested: [String] = []
     static var postStatus = 200
-    static var failing: Set<String> = []
     static let lock = NSLock()
 
     override class func canInit(with _: URLRequest) -> Bool { true }
@@ -20,18 +19,13 @@ private final class ToRemoteMockURLProtocol: URLProtocol {
         Self.lock.lock()
         defer { Self.lock.unlock() }
         Self.requested.append(url.path)
-        if Self.failing.contains(url.path) {
-            status = 500
-            body = ""
-        } else if request.httpMethod == "POST" {
+        if request.httpMethod == "POST" {
             let data = request.httpBody ?? request.httpBodyStream.map(Self.read) ?? Data()
             Self.posted.append(String(decoding: data, as: UTF8.self))
             status = Self.postStatus
             body = "sweep"
         } else if let route = Self.routes[url.path] {
             body = route
-        } else if url.path.contains("/scripthash/") {
-            body = "[]"
         } else {
             status = 404
             body = ""
@@ -87,7 +81,6 @@ final class ToRemoteRecoveryTests: XCTestCase {
         ToRemoteMockURLProtocol.routes = [:]
         ToRemoteMockURLProtocol.posted = []
         ToRemoteMockURLProtocol.requested = []
-        ToRemoteMockURLProtocol.failing = []
         ToRemoteMockURLProtocol.postStatus = 200
         addressRequests = AddressCounter()
         defaults = UserDefaults(suiteName: "ToRemoteRecoveryTests-\(UUID().uuidString)")
@@ -112,7 +105,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
 
     private var addressRequests = AddressCounter()
 
-    private func runNow(_ recovery: ToRemoteRecovery, feeRate: UInt64? = 2, live: Set<String> = []) async {
+    private func runNow(_ recovery: ToRemoteRecovery, feeRate: UInt64? = 2) async {
         let address = address
         let counter = addressRequests
         await recovery.run(
@@ -121,8 +114,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
                 counter.count += 1
                 return address
             },
-            feeRateSatVb: { feeRate },
-            liveFundingTxids: live
+            feeRateSatVb: { feeRate }
         )
     }
 
@@ -199,7 +191,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testFindsTheCloseFromTheFundingTxidAndSweepsItOnceConfirmed() async {
         closePaysUs()
         var recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let found = await recovery.state.found
         XCTAssertEqual(found, [ToRemoteRecovery.Output(txid: close, vout: 3, valueSats: 94467, keyIndex: 45)])
@@ -242,7 +234,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
             "[{\"spent\":true,\"txid\":\"\(close)\",\"vin\":0}]"
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] = "{\(fundingInput),\"vout\":[\(lspOutput)]}"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let state = await recovery.state
         XCTAssertFalse(state.active)
@@ -252,30 +244,11 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testUnspentFundingIsRetriedLater() async {
         ToRemoteMockURLProtocol.routes["/api/tx/\(funding)/outspends"] = "[{\"spent\":false}]"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let state = await recovery.state
         XCTAssertTrue(state.active)
         XCTAssertEqual(state.nextAt, clock + ToRemoteRecovery.backoffSeconds(1))
-    }
-
-    func testScanFindsAnOutputAtOneOfTheKeys() async throws {
-        let hash = try XCTUnwrap(Data(hex: ours)?.sha256Hex)
-        ToRemoteMockURLProtocol.routes["/api/scripthash/\(hash)/utxo"] =
-            "[{\"txid\":\"\(close)\",\"vout\":3,\"value\":94467,\"status\":{\"confirmed\":true}}]"
-        let recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true)
-        await runNow(recovery)
-        let found = await recovery.state.found
-        XCTAssertEqual(found, [ToRemoteRecovery.Output(txid: close, vout: 3, valueSats: 94467, keyIndex: 45)])
-    }
-
-    func testAOneTimeScanStopsWhenNothingIsFound() async {
-        let recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true, repeats: false)
-        await runNow(recovery)
-        let active = await recovery.state.active
-        XCTAssertFalse(active)
     }
 
     func testBackoffStartsAtAMinuteThenDoublesUpToADay() {
@@ -286,44 +259,6 @@ final class ToRemoteRecoveryTests: XCTestCase {
     }
 
     // MARK: - Case B scenarios
-
-    /// After a restore from seed nothing is saved, so all keys are scanned.
-    func testRestoreScanWaitsForTheLspCloseThenSweeps() async {
-        var recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true)
-        await runNow(recovery)
-        let scans = ToRemoteMockURLProtocol.requested.filter { $0.contains("/scripthash/") }.count
-        XCTAssertEqual(scans, ToRemoteKeys.count)
-        var active = await recovery.state.active
-        XCTAssertTrue(active)
-
-        // The LSP broadcasts its close after the restored node reconnects.
-        ToRemoteMockURLProtocol.routes["/api/scripthash/\(Data(hex: ours)!.sha256Hex)/utxo"] =
-            "[{\"txid\":\"\(close)\",\"vout\":3,\"value\":94467,\"status\":{\"confirmed\":false}}]"
-        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
-        await runNow(recovery)
-        var pending = await recovery.pendingSats
-        XCTAssertEqual(pending, 94467)
-
-        ToRemoteMockURLProtocol.routes["/api/tx/\(close)/outspend/3"] = "{\"spent\":false}"
-        ToRemoteMockURLProtocol.routes["/api/tx/\(close)/status"] = "{\"confirmed\":false}"
-        await runNow(recovery)
-        XCTAssertTrue(ToRemoteMockURLProtocol.posted.isEmpty)
-
-        closeConfirmed()
-        recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
-        await runNow(recovery)
-        XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
-
-        ToRemoteMockURLProtocol.routes["/api/tx/\(close)/outspend/3"] =
-            "{\"spent\":true,\"txid\":\"sweep\",\"status\":{\"confirmed\":true}}"
-        recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
-        await runNow(recovery)
-        active = await recovery.state.active
-        pending = await recovery.pendingSats
-        XCTAssertFalse(active)
-        XCTAssertEqual(pending, 0)
-    }
 
     /// Without a restore: LDK lost the channel but the funding txid is still saved.
     func testLostChannelDataIsCheckedOnRefresh() async {
@@ -358,7 +293,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
             "[{\"spent\":true,\"txid\":\"other\"},{\"spent\":true,\"txid\":\"\(close)\"}]"
         ToRemoteMockURLProtocol.routes["/api/tx/other"] = "{\"vout\":[\(lspOutput)]}"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let pending = await recovery.pendingSats
         XCTAssertEqual(pending, 94467)
@@ -381,7 +316,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
 
     func testExplorerDownKeepsTheSearchGoing() async {
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let state = await recovery.state
         XCTAssertEqual(state.fundingTxid, funding)
@@ -392,7 +327,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testSearchGivesUpAfterTwoWeeks() async {
         ToRemoteMockURLProtocol.routes["/api/tx/\(funding)/outspends"] = "[{\"spent\":false}]"
         var recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: true)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         var active = await recovery.state.active
         XCTAssertTrue(active)
@@ -407,7 +342,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testFailedBroadcastIsRetriedWithTheSameAddress() async {
         closePaysUs()
         var recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         closeConfirmed()
         ToRemoteMockURLProtocol.postStatus = 400
@@ -427,7 +362,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testNoFeeRateMeansNoBroadcastYet() async {
         closePaysUs()
         var recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         closeConfirmed()
         await runNow(recovery, feeRate: nil)
@@ -442,7 +377,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
             "{\(fundingInput),\"vout\":[\(lspOutput),\(lspOutput),\(lspOutput),{\"scriptpubkey\":\"\(ours)\",\"value\":400}]}"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let pending = await recovery.pendingSats
         XCTAssertEqual(pending, 400)
@@ -460,7 +395,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
             "{\(fundingInput),\"vout\":[\(lspOutput),\(lspOutput),\(lspOutput),{\"scriptpubkey\":\"\(ours)\",\"value\":800}]}"
         var recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         closeConfirmed()
         await runNow(recovery, feeRate: 5)
@@ -473,80 +408,6 @@ final class ToRemoteRecoveryTests: XCTestCase {
         XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
     }
 
-    func testAPartialScanIsNotTakenAsNothingFound() async {
-        ToRemoteMockURLProtocol.failing = ["/api/scripthash/\(Self.keys.keys[7].scriptPubKey.sha256Hex)/utxo"]
-        var recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true, repeats: false)
-        await runNow(recovery)
-        var scanning = await recovery.state.scan
-        XCTAssertTrue(scanning)
-
-        ToRemoteMockURLProtocol.failing = []
-        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
-        await runNow(recovery)
-        scanning = await recovery.state.active
-        XCTAssertFalse(scanning)
-    }
-
-    func testAnOlderCloseDoesNotEndTheWaitForTheNewOne() async {
-        clock = 1_800_000_000
-        let monthAgo = Int(clock) - 30 * 24 * 60 * 60
-        ToRemoteMockURLProtocol.routes["/api/scripthash/\(Data(hex: ours)!.sha256Hex)/utxo"] =
-            "[{\"txid\":\"\(close)\",\"vout\":3,\"value\":94467,\"status\":{\"confirmed\":true,\"block_time\":\(monthAgo)}}]"
-        var recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true)
-        await runNow(recovery)
-        var pending = await recovery.pendingSats
-        var scanning = await recovery.state.scan
-        XCTAssertEqual(pending, 94467)
-        XCTAssertTrue(scanning)
-
-        let newClose = String(repeating: "bb", count: 32)
-        ToRemoteMockURLProtocol.routes["/api/scripthash/\(Self.keys.keys[0].scriptPubKey.sha256Hex)/utxo"] =
-            "[{\"txid\":\"\(newClose)\",\"vout\":1,\"value\":20000,\"status\":{\"confirmed\":false}}]"
-        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
-        await runNow(recovery)
-        pending = await recovery.pendingSats
-        scanning = await recovery.state.scan
-        XCTAssertEqual(pending, 114_467)
-        XCTAssertFalse(scanning)
-    }
-
-    func testClosesOfChannelsLdkStillListsAreLeftToLdk() async {
-        ToRemoteMockURLProtocol.routes["/api/scripthash/\(Data(hex: ours)!.sha256Hex)/utxo"] =
-            "[{\"txid\":\"\(close)\",\"vout\":3,\"value\":94467,\"status\":{\"confirmed\":false}}]"
-        ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] = "{\(fundingInput),\"vout\":[]}"
-        var recovery = recovery()
-        await recovery.start(fundingTxid: nil, fundingVout: nil, scan: true)
-        await runNow(recovery, live: [funding])
-        var pending = await recovery.pendingSats
-        XCTAssertEqual(pending, 0)
-
-        // Once LDK no longer lists the channel, the output is ours to recover.
-        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
-        await runNow(recovery)
-        pending = await recovery.pendingSats
-        XCTAssertEqual(pending, 94467)
-    }
-
-    func testARestoreStartsOver() async {
-        closePaysUs()
-        let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
-        await runNow(recovery)
-        closeConfirmed()
-        await runNow(recovery)
-        var state = await recovery.state
-        XCTAssertEqual(state.destination, address)
-
-        await recovery.startAfterRestore(repeats: true)
-        state = await recovery.state
-        XCTAssertTrue(state.found.isEmpty)
-        XCTAssertNil(state.destination)
-        XCTAssertNil(state.checkedFundingTxid)
-        XCTAssertTrue(state.scan)
-    }
-
     func testWithoutAVoutTheChannelOutputIsFoundByItsWitness() async {
         // Output 0 is the LSP's change, still unspent; output 1 is the channel, closed by coop.
         ToRemoteMockURLProtocol.routes["/api/tx/\(funding)/outspends"] =
@@ -554,7 +415,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
             "{\"vin\":[{\"txid\":\"\(funding)\",\"vout\":1,\"witness\":[\"\",\"30\",\"30\",\"\(multisig)\"]}],\"vout\":[\(lspOutput)]}"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let state = await recovery.state
         XCTAssertFalse(state.active)
@@ -567,7 +428,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
             "{\"vin\":[{\"txid\":\"\(funding)\",\"vout\":1,\"witness\":[\"30\",\"02aa\"]}],\"vout\":[\(lspOutput)]}"
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         let armed = await recovery.state.fundingTxid
         XCTAssertEqual(armed, funding)
@@ -576,10 +437,76 @@ final class ToRemoteRecoveryTests: XCTestCase {
     func testAZeroFeeEstimateSweepsAtTheFloor() async {
         closePaysUs()
         let recovery = recovery()
-        await recovery.start(fundingTxid: funding, fundingVout: nil, scan: false)
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         closeConfirmed()
         await runNow(recovery, feeRate: 0)
         XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
+    }
+
+    /// After a restore the saved funding txid is checked until the LSP's close shows up.
+    func testARestoreWaitsForTheLspCloseThenSweeps() async {
+        ToRemoteMockURLProtocol.routes["/api/tx/\(funding)/outspends"] = "[{\"spent\":false}]"
+        var recovery = recovery()
+        await recovery.startAfterRestore(fundingTxid: funding, repeats: true)
+        await runNow(recovery)
+        var active = await recovery.state.active
+        XCTAssertTrue(active)
+
+        // The LSP closes after the restored node reconnects.
+        closePaysUs()
+        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
+        await runNow(recovery)
+        let pending = await recovery.pendingSats
+        XCTAssertEqual(pending, 94467)
+
+        closeConfirmed()
+        recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
+        await runNow(recovery)
+        XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
+
+        ToRemoteMockURLProtocol.routes["/api/tx/\(close)/outspend/3"] =
+            "{\"spent\":true,\"txid\":\"sweep\",\"status\":{\"confirmed\":true}}"
+        recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
+        await runNow(recovery)
+        active = await recovery.state.active
+        XCTAssertFalse(active)
+    }
+
+    func testAOneTimeRestoreCheckStopsWhenNothingIsFound() async {
+        ToRemoteMockURLProtocol.routes["/api/tx/\(funding)/outspends"] = "[{\"spent\":false}]"
+        let recovery = recovery()
+        await recovery.startAfterRestore(fundingTxid: funding, repeats: false)
+        await runNow(recovery)
+        let active = await recovery.state.active
+        XCTAssertFalse(active)
+    }
+
+    func testARestoreWithoutAFundingTxidLooksForNothing() async {
+        let recovery = recovery()
+        await recovery.startAfterRestore(fundingTxid: nil, repeats: true)
+        await runNow(recovery)
+        let active = await recovery.state.active
+        XCTAssertFalse(active)
+        XCTAssertTrue(ToRemoteMockURLProtocol.requested.isEmpty)
+    }
+
+    func testARestoreStartsOver() async {
+        closePaysUs()
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        closeConfirmed()
+        await runNow(recovery)
+        var state = await recovery.state
+        XCTAssertEqual(state.destination, address)
+
+        let other = String(repeating: "dd", count: 32)
+        await recovery.startAfterRestore(fundingTxid: other, repeats: true)
+        state = await recovery.state
+        XCTAssertTrue(state.found.isEmpty)
+        XCTAssertNil(state.destination)
+        XCTAssertNil(state.checkedFundingTxid)
+        XCTAssertEqual(state.fundingTxid, other)
     }
 }

@@ -3,17 +3,11 @@ package com.stablechannels.app.services
 import fr.acinq.bitcoin.Bitcoin
 import fr.acinq.bitcoin.ByteVector
 import fr.acinq.bitcoin.Chain
-import fr.acinq.bitcoin.Crypto
 import fr.acinq.bitcoin.Script
 import fr.acinq.bitcoin.Transaction
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -28,10 +22,11 @@ import org.json.JSONObject
 /**
  * Finds and moves to the wallet our side of a channel the LSP force-closed after the app lost its
  * channel data (#364, #347), which LDK no longer tracks. It does in the app what the force close
- * recovery script does by hand, and finds the close itself in one of two ways:
- * - by a funding txid saved before the loss: what spent the funding output is the close, and its
- *   outputs are matched against our keys (a few requests),
- * - after a restore from seed, by looking up the scripts of all 1000 keys.
+ * recovery script does by hand. It finds the close from a funding txid saved before the loss: what
+ * spent the funding output is the close, and its outputs are matched against our keys (a few
+ * requests). A restore on a new device has no saved funding txid; getting it from the LSP is a
+ * follow-up. Scanning the scripts of all 1000 keys instead would take 1000 requests, more than the
+ * public explorers allow an hour.
  *
  * The search repeats on a growing delay until the LSP's close shows up. A found output is swept
  * once its close confirms, and stays counted on the Home card until the sweep confirms.
@@ -51,9 +46,6 @@ class ToRemoteRecovery(
     data class State(
         val fundingTxid: String? = null,
         val fundingVout: Int? = null,
-        val scan: Boolean = false,
-        /** When the scan began: an output confirmed well before is an older close. */
-        val scanFrom: Long = 0,
         /** The search stops after this time when nothing new is found. */
         val until: Long = 0,
         val attempts: Int = 0,
@@ -67,10 +59,8 @@ class ToRemoteRecovery(
         val checkedFundingTxid: String? = null,
     ) {
         val active: Boolean
-            get() = fundingTxid != null || scan || found.isNotEmpty()
+            get() = fundingTxid != null || found.isNotEmpty()
     }
-
-    private class Scan(val outputs: List<Output>, val newClose: Boolean, val complete: Boolean)
 
     private val json = Json { ignoreUnknownKeys = true }
     private val running = Mutex()
@@ -106,62 +96,51 @@ class ToRemoteRecovery(
     ): Boolean {
         if (ldkHandlesClose) return false
         if (savedFundingTxid != null && !ldkHasChannels && needsCheck(savedFundingTxid)) {
-            start(savedFundingTxid, savedFundingVout, scan = false)
+            start(savedFundingTxid, savedFundingVout)
         }
         return state.active
     }
 
     /**
-     * Starts looking for a close LDK doesn't track: by [fundingTxid] when known, and by scanning
-     * all keys when [scan]. With [repeat] false it searches once, for a close that already
-     * happened.
+     * Starts looking for the close of the channel funded by [fundingTxid], which LDK doesn't track.
+     * With [repeat] false it looks once, for a close that already happened.
      */
-    fun start(fundingTxid: String?, fundingVout: Int?, scan: Boolean, repeat: Boolean = true) {
-        val time = now()
-        val until = if (repeat) time + SEARCH_MS else time
+    fun start(fundingTxid: String, fundingVout: Int?, repeat: Boolean = true) {
+        val until = if (repeat) now() + SEARCH_MS else now()
         update {
             it.copy(
-                fundingTxid = fundingTxid ?: it.fundingTxid,
-                fundingVout = if (fundingTxid != null) fundingVout else it.fundingVout,
-                scan = scan || it.scan,
-                scanFrom = if (scan) time else it.scanFrom,
+                fundingTxid = fundingTxid,
+                fundingVout = fundingVout,
                 until = maxOf(until, it.until),
                 attempts = 0,
                 nextAt = 0,
                 generation = it.generation + 1,
             )
         }
-        log(
-            "TO_REMOTE_RECOVERY_START",
-            mapOf("funding_txid" to fundingTxid, "scan" to scan, "repeat" to repeat),
-        )
+        log("TO_REMOTE_RECOVERY_START", mapOf("funding_txid" to fundingTxid, "repeat" to repeat))
     }
 
     /**
      * After a restore from seed: starts over, as found outputs and the sweep address may belong to
-     * the wallet that was replaced, then scans all keys.
+     * the wallet that was replaced, then looks for the close of [fundingTxid] when it is known.
      */
     fun startAfterRestore(fundingTxid: String?, fundingVout: Int?, repeat: Boolean) {
         update { State(generation = it.generation + 1) }
-        start(fundingTxid, fundingVout, scan = true, repeat = repeat)
+        if (fundingTxid != null) start(fundingTxid, fundingVout, repeat)
     }
 
-    /**
-     * Does whatever is due. Cheap to call often; returns at once while another run is going. Closes
-     * of channels in [liveFundingTxids] are left to LDK.
-     */
+    /** Does whatever is due. Cheap to call often; returns at once while another run is going. */
     suspend fun run(
         keys: () -> ToRemoteKeys?,
         destination: () -> String?,
         feeRateSatVb: () -> Long?,
-        liveFundingTxids: Set<String> = emptySet(),
     ) {
         if (!state.active || !running.tryLock()) return
         try {
             withContext(Dispatchers.IO) {
                 val k = keys() ?: return@withContext
                 if (state.found.isNotEmpty()) settle(k, destination, feeRateSatVb)
-                if (state.fundingTxid != null || state.scan) search(k, liveFundingTxids)
+                if (state.fundingTxid != null) search(k)
             }
         } catch (e: CancellationException) {
             throw e
@@ -173,35 +152,21 @@ class ToRemoteRecovery(
         }
     }
 
-    private suspend fun search(keys: ToRemoteKeys, liveFundingTxids: Set<String>) {
+    private fun search(keys: ToRemoteKeys) {
         val s = state
+        val fundingTxid = s.fundingTxid ?: return
         if (now() < s.nextAt) return
-        val found = mutableListOf<Output>()
-        var fundingSpent = false
-        if (s.fundingTxid != null) {
-            findByFunding(s.fundingTxid, s.fundingVout, keys)?.let { (outputs, spent) ->
-                found += outputs
-                fundingSpent = spent
-            }
-        }
-        val scan = if (s.scan) scan(keys, liveFundingTxids, s.scanFrom) else null
-        found += scan?.outputs.orEmpty()
+        val result = findByFunding(fundingTxid, s.fundingVout, keys)
+        val found = result?.first.orEmpty()
         val time = now()
-        val pastDeadline = time >= s.until
-        val fundingEnds = s.fundingTxid != null && (fundingSpent || pastDeadline)
-        // An older close found on the keys doesn't end the wait for the new one. Past the deadline
-        // the scan ends once a full scan found nothing new, or two weeks later anyway.
-        val scanEnds =
-            scan != null &&
-                (scan.newClose || pastDeadline && (scan.complete || time >= s.until + SEARCH_MS))
+        val ends = result?.second == true || time >= s.until
         val added = found.filter { o -> s.found.none { it.txid == o.txid && it.vout == o.vout } }
         update {
             if (it.generation != s.generation) return@update it
             it.copy(
-                found = (it.found + added).distinctBy { o -> o.txid to o.vout },
-                fundingTxid = if (fundingEnds) null else it.fundingTxid,
-                checkedFundingTxid = if (fundingEnds) s.fundingTxid else it.checkedFundingTxid,
-                scan = it.scan && !scanEnds,
+                found = it.found + added,
+                fundingTxid = if (ends) null else it.fundingTxid,
+                checkedFundingTxid = if (ends) fundingTxid else it.checkedFundingTxid,
                 attempts = it.attempts + 1,
                 nextAt = time + backoffMs(it.attempts + 1),
             )
@@ -266,63 +231,6 @@ class ToRemoteRecovery(
                 witness.length() > 0 &&
                 isTwoOfTwo(witness.getString(witness.length() - 1))
         }
-    }
-
-    /**
-     * Looks up the script of every key. An output whose close is unconfirmed or confirmed since
-     * [scanFrom] counts as the new close. Closes of channels LDK still lists are left out.
-     */
-    private suspend fun scan(
-        keys: ToRemoteKeys,
-        liveFundingTxids: Set<String>,
-        scanFrom: Long,
-    ): Scan = coroutineScope {
-        val limit = Semaphore(SCAN_PARALLEL)
-        val results =
-            keys.keys
-                .map { key ->
-                    async {
-                        limit.withPermit {
-                            // Esplora's scripthash is the plain SHA-256 of the scriptPubKey.
-                            val hash = ByteVector(Crypto.sha256(key.scriptPubKey)).toHex()
-                            getArray("/scripthash/$hash/utxo")?.let { utxos ->
-                                (0 until utxos.length()).map {
-                                    val utxo = utxos.getJSONObject(it)
-                                    val status = utxo.optJSONObject("status")
-                                    val confirmedAt =
-                                        if (status?.optBoolean("confirmed") == true)
-                                            status.optLong("block_time") * 1000
-                                        else null
-                                    Output(
-                                        utxo.getString("txid"),
-                                        utxo.getInt("vout"),
-                                        utxo.getLong("value"),
-                                        key.index,
-                                    ) to confirmedAt
-                                }
-                            }
-                        }
-                    }
-                }
-                .awaitAll()
-        var complete = results.none { it == null }
-        val outputs =
-            results.filterNotNull().flatten().filter { (output, _) ->
-                if (liveFundingTxids.isEmpty()) return@filter true
-                val inputs = getObject("/tx/${output.txid}")?.optJSONArray("vin")
-                if (inputs == null) {
-                    complete = false
-                    return@filter false
-                }
-                (0 until inputs.length()).none {
-                    inputs.getJSONObject(it).optString("txid") in liveFundingTxids
-                }
-            }
-        Scan(
-            outputs = outputs.map { it.first },
-            newClose = outputs.any { (_, at) -> at == null || at >= scanFrom - CLOCK_SLACK_MS },
-            complete = complete,
-        )
     }
 
     private fun settle(
@@ -448,11 +356,6 @@ class ToRemoteRecovery(
         /** How long to keep looking for the LSP's close. */
         const val SEARCH_MS = 14 * 24 * 60 * 60 * 1000L
         const val SETTLE_INTERVAL_MS = 60 * 1000L
-        const val SCAN_PARALLEL = 4
-        /**
-         * Device and block clocks can differ; a close this close to the scan start counts as new.
-         */
-        const val CLOCK_SLACK_MS = 2 * 60 * 60 * 1000L
 
         private fun isTwoOfTwo(script: String) =
             script.length == 142 &&

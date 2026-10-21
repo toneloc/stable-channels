@@ -4364,10 +4364,10 @@ class AppState(private val context: Context) : ViewModel() {
 
     /**
      * Restores the wallet from [mnemonic], picking the explorer the way a normal start does. LDK
-     * starts with no channel data, so the LSP's close of an old channel is looked for on chain
-     * instead (#364). That is set up first, so a start that fails still finds it on the next one.
-     * [channelMayExist] is false when the LSP said there is no channel: one scan then covers a
-     * close that already happened.
+     * starts with no channel data, so the LSP's close of the saved funding txid's channel is looked
+     * for on chain instead (#364). That is set up first, so a start that fails still finds it on
+     * the next one. [channelMayExist] is false when the LSP said there is no channel: one check
+     * then covers a close that already happened.
      */
     suspend fun startRestoredNode(mnemonic: String, channelMayExist: Boolean) {
         toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
@@ -4750,8 +4750,6 @@ class AppState(private val context: Context) : ViewModel() {
                     keys = ::toRemoteKeys,
                     destination = { runCatching { nodeService.newOnchainAddress() }.getOrNull() },
                     feeRateSatVb = ::fetchFeeRate,
-                    liveFundingTxids =
-                        nodeService.channels.mapNotNull { it.fundingTxo?.txid }.toSet(),
                 )
                 publishClosedChannelFunds()
             }

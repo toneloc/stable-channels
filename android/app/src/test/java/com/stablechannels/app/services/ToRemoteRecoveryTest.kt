@@ -1,7 +1,5 @@
 package com.stablechannels.app.services
 
-import fr.acinq.bitcoin.ByteVector
-import fr.acinq.bitcoin.Crypto
 import fr.acinq.bitcoin.Transaction
 import java.util.Collections
 import java.util.concurrent.TimeUnit
@@ -40,12 +38,11 @@ class ToRemoteRecoveryTest {
 
     private val routes = mutableMapOf<String, String>()
     private val posted = mutableListOf<String>()
-    // The scan's lookups run in parallel on the server's threads.
+    // Requests arrive on the server's threads.
     private val requested = Collections.synchronizedList(mutableListOf<String>())
     private var postStatus = 200
     private var addressRequests = 0
     private var feeRate: Long? = 2L
-    private val failing = mutableSetOf<String>()
     private var onRequest: (String) -> Unit = {}
     private val server =
         MockWebServer().apply {
@@ -55,7 +52,6 @@ class ToRemoteRecoveryTest {
                         val path = request.path.orEmpty()
                         requested += path
                         onRequest(path)
-                        if (path in failing) return MockResponse().setResponseCode(500)
                         if (request.method == "POST") {
                             posted += request.body.readUtf8()
                             return MockResponse().setResponseCode(postStatus).setBody("sweep")
@@ -63,7 +59,6 @@ class ToRemoteRecoveryTest {
                         routes[path]?.let {
                             return MockResponse().setBody(it)
                         }
-                        if (path.startsWith("/scripthash/")) return MockResponse().setBody("[]")
                         return MockResponse().setResponseCode(404)
                     }
                 }
@@ -88,7 +83,7 @@ class ToRemoteRecoveryTest {
             log = { _, _ -> },
         )
 
-    private fun ToRemoteRecovery.runNow(live: Set<String> = emptySet()) = runBlocking {
+    private fun ToRemoteRecovery.runNow() = runBlocking {
         run(
             { keys },
             {
@@ -96,14 +91,7 @@ class ToRemoteRecoveryTest {
                 address
             },
             { feeRate },
-            live,
         )
-    }
-
-    private fun scripthash(script: ByteArray) = ByteVector(Crypto.sha256(script)).toHex()
-
-    private val ourScripthash by lazy {
-        ByteVector(Crypto.sha256(ByteVector(ours).toByteArray())).toHex()
     }
 
     private fun closeConfirmed() {
@@ -127,7 +115,7 @@ class ToRemoteRecoveryTest {
     fun findsTheCloseFromTheFundingTxidAndSweepsItOnceConfirmed() {
         closePaysUs()
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertEquals(listOf(ToRemoteRecovery.Output(close, 3, 94_467, 45)), recovery.state.found)
         assertEquals(94_467, recovery.pendingSats)
@@ -172,7 +160,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$funding/outspends"] = """[{"spent":true,"txid":"$close","vin":0}]"""
         routes["/tx/$close"] = """{"vout":[$lspOutput]}"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertFalse(recovery.state.active)
         assertEquals(funding, recovery.state.checkedFundingTxid)
@@ -184,7 +172,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$close/outspends"] =
             """[{"spent":false},{"spent":false},{"spent":false},{"spent":true,"txid":"x","status":{"confirmed":true}}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertTrue(recovery.state.found.isEmpty())
         assertFalse(recovery.state.active)
@@ -194,7 +182,7 @@ class ToRemoteRecoveryTest {
     fun unspentFundingIsRetriedLater() {
         routes["/tx/$funding/outspends"] = """[{"spent":false}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertTrue(recovery.state.active)
         assertEquals(clock + ToRemoteRecovery.backoffMs(1), recovery.state.nextAt)
@@ -211,29 +199,10 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
-    fun scanFindsAnOutputAtOneOfTheKeys() {
-        val hash = ByteVector(Crypto.sha256(ByteVector(ours).toByteArray())).toHex()
-        routes["/scripthash/$hash/utxo"] =
-            """[{"txid":"$close","vout":3,"value":94467,"status":{"confirmed":true}}]"""
-        val recovery = recovery()
-        recovery.start(null, null, scan = true)
-        recovery.runNow()
-        assertEquals(listOf(ToRemoteRecovery.Output(close, 3, 94_467, 45)), recovery.state.found)
-    }
-
-    @Test
-    fun aOneTimeScanStopsWhenNothingIsFound() {
-        val recovery = recovery()
-        recovery.start(null, null, scan = true, repeat = false)
-        recovery.runNow()
-        assertFalse(recovery.state.active)
-    }
-
-    @Test
     fun stateSurvivesARestart() {
         closePaysUs()
         recovery().apply {
-            start(funding, 0, scan = false)
+            start(funding, 0)
             runNow()
         }
         assertEquals(94_467, recovery().pendingSats)
@@ -246,41 +215,6 @@ class ToRemoteRecoveryTest {
         assertEquals(10 * 60 * 1000L, ToRemoteRecovery.backoffMs(2))
         assertEquals(20 * 60 * 1000L, ToRemoteRecovery.backoffMs(3))
         assertEquals(24 * 60 * 60 * 1000L, ToRemoteRecovery.backoffMs(20))
-    }
-
-    /** Case B after a restore from seed: nothing saved, so all keys are scanned. */
-    @Test
-    fun restoreScanWaitsForTheLspCloseThenSweeps() {
-        val recovery = recovery()
-        recovery.start(null, null, scan = true)
-        recovery.runNow()
-        assertEquals(ToRemoteKeys.COUNT, requested.count { it.startsWith("/scripthash/") })
-        assertTrue(recovery.state.active)
-        assertEquals(0, recovery.pendingSats)
-
-        // The LSP broadcasts its close after the restored node reconnects.
-        routes["/scripthash/$ourScripthash/utxo"] =
-            """[{"txid":"$close","vout":3,"value":94467,"status":{"confirmed":false}}]"""
-        clock += ToRemoteRecovery.backoffMs(1)
-        recovery.runNow()
-        assertEquals(94_467, recovery.pendingSats)
-
-        routes["/tx/$close/outspend/3"] = """{"spent":false}"""
-        routes["/tx/$close/status"] = """{"confirmed":false}"""
-        recovery.runNow()
-        assertTrue(posted.isEmpty())
-
-        closeConfirmed()
-        afterSettleInterval()
-        recovery.runNow()
-        assertEquals(1, posted.size)
-
-        routes["/tx/$close/outspend/3"] =
-            """{"spent":true,"txid":"sweep","status":{"confirmed":true}}"""
-        afterSettleInterval()
-        recovery.runNow()
-        assertFalse(recovery.state.active)
-        assertEquals(0, recovery.pendingSats)
     }
 
     /** Case B without a restore: LDK lost the channel but the funding txid is still saved. */
@@ -318,7 +252,7 @@ class ToRemoteRecoveryTest {
     @Test
     fun explorerDownKeepsTheSearchGoing() {
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertEquals(funding, recovery.state.fundingTxid)
         assertEquals(1, recovery.state.attempts)
@@ -329,7 +263,7 @@ class ToRemoteRecoveryTest {
     fun searchGivesUpAfterTwoWeeks() {
         routes["/tx/$funding/outspends"] = """[{"spent":false}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = true)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertTrue(recovery.state.active)
         clock += ToRemoteRecovery.SEARCH_MS
@@ -342,7 +276,7 @@ class ToRemoteRecoveryTest {
     fun knownVoutChecksOnlyTheFundingOutput() {
         routes["/tx/$funding/outspends"] = """[{"spent":false},{"spent":true,"txid":"other"}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertTrue(requested.none { it == "/tx/other" })
         assertEquals(funding, recovery.state.fundingTxid)
@@ -352,7 +286,7 @@ class ToRemoteRecoveryTest {
     fun failedBroadcastIsRetriedWithTheSameAddress() {
         closePaysUs()
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
         postStatus = 400
@@ -372,7 +306,7 @@ class ToRemoteRecoveryTest {
     fun noFeeRateMeansNoBroadcastYet() {
         closePaysUs()
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
         feeRate = null
@@ -392,7 +326,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$close/outspends"] =
             """[{"spent":false},{"spent":false},{"spent":false},{"spent":false}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertEquals(400, recovery.pendingSats)
         closeConfirmed()
@@ -410,7 +344,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$close/outspends"] =
             """[{"spent":false},{"spent":false},{"spent":false},{"spent":false}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
         feeRate = 5L
@@ -425,81 +359,13 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
-    fun aPartialScanIsNotTakenAsNothingFound() {
-        failing += "/scripthash/${scripthash(keys.keys[7].scriptPubKey)}/utxo"
-        val recovery = recovery()
-        recovery.start(null, null, scan = true, repeat = false)
-        recovery.runNow()
-        assertTrue(recovery.state.scan)
-
-        failing.clear()
-        clock += ToRemoteRecovery.backoffMs(1)
-        recovery.runNow()
-        assertFalse(recovery.state.active)
-    }
-
-    @Test
-    fun anOlderCloseDoesNotEndTheWaitForTheNewOne() {
-        clock = 1_800_000_000_000L
-        val monthAgo = clock / 1000 - 30 * 24 * 60 * 60
-        routes["/scripthash/$ourScripthash/utxo"] =
-            """[{"txid":"$close","vout":3,"value":94467,"status":{"confirmed":true,"block_time":$monthAgo}}]"""
-        val recovery = recovery()
-        recovery.start(null, null, scan = true)
-        recovery.runNow()
-        assertEquals(94_467, recovery.pendingSats)
-        assertTrue(recovery.state.scan)
-
-        val newClose = "bb".repeat(32)
-        routes["/scripthash/${scripthash(keys.keys[0].scriptPubKey)}/utxo"] =
-            """[{"txid":"$newClose","vout":1,"value":20000,"status":{"confirmed":false}}]"""
-        clock += ToRemoteRecovery.backoffMs(1)
-        recovery.runNow()
-        assertEquals(114_467, recovery.pendingSats)
-        assertFalse(recovery.state.scan)
-    }
-
-    @Test
-    fun closesOfChannelsLdkStillListsAreLeftToLdk() {
-        routes["/scripthash/$ourScripthash/utxo"] =
-            """[{"txid":"$close","vout":3,"value":94467,"status":{"confirmed":false}}]"""
-        routes["/tx/$close"] = """{"vin":[{"txid":"$funding","vout":0}],"vout":[]}"""
-        val recovery = recovery()
-        recovery.start(null, null, scan = true)
-        recovery.runNow(live = setOf(funding))
-        assertEquals(0, recovery.pendingSats)
-
-        // Once LDK no longer lists the channel, the output is ours to recover.
-        clock += ToRemoteRecovery.backoffMs(1)
-        recovery.runNow()
-        assertEquals(94_467, recovery.pendingSats)
-    }
-
-    @Test
-    fun aRestoreStartsOver() {
-        closePaysUs()
-        val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
-        recovery.runNow()
-        closeConfirmed()
-        recovery.runNow()
-        assertEquals(address, recovery.state.destination)
-
-        recovery.startAfterRestore(null, null, repeat = true)
-        assertTrue(recovery.state.found.isEmpty())
-        assertNull(recovery.state.destination)
-        assertNull(recovery.state.checkedFundingTxid)
-        assertTrue(recovery.state.scan)
-    }
-
-    @Test
     fun aStartDuringASearchIsKept() {
         val other = "cc".repeat(32)
         routes["/tx/$funding/outspends"] = """[{"spent":false}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         onRequest = {
-            if (it == "/tx/$funding/outspends") recovery.start(other, 1, scan = false)
+            if (it == "/tx/$funding/outspends") recovery.start(other, 1)
         }
         recovery.runNow()
         assertEquals(other, recovery.state.fundingTxid)
@@ -511,7 +377,7 @@ class ToRemoteRecoveryTest {
     fun aMalformedReplyDoesNotCrash() {
         routes["/tx/$funding/outspends"] = """[{"spent":true}]"""
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         assertTrue(recovery.state.active)
     }
@@ -525,7 +391,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$close"] =
             """{"vin":[{"txid":"$funding","vout":1,"witness":["","30","30","$multisig"]}],"vout":[$lspOutput]}"""
         val recovery = recovery()
-        recovery.start(funding, null, scan = false)
+        recovery.start(funding, null)
         recovery.runNow()
         assertFalse(recovery.state.active)
         assertEquals(funding, recovery.state.checkedFundingTxid)
@@ -538,7 +404,7 @@ class ToRemoteRecoveryTest {
         routes["/tx/$close"] =
             """{"vin":[{"txid":"$funding","vout":1,"witness":["30","02aa"]}],"vout":[$lspOutput]}"""
         val recovery = recovery()
-        recovery.start(funding, null, scan = false)
+        recovery.start(funding, null)
         recovery.runNow()
         assertEquals(funding, recovery.state.fundingTxid)
     }
@@ -547,12 +413,76 @@ class ToRemoteRecoveryTest {
     fun aZeroFeeEstimateSweepsAtTheFloor() {
         closePaysUs()
         val recovery = recovery()
-        recovery.start(funding, 0, scan = false)
+        recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
         feeRate = 0L
         recovery.runNow()
         val sweep = Transaction.read(posted.single())
         assertTrue(94_467 - sweep.txOut.single().amount.sat >= (sweep.weight() + 3) / 4)
+    }
+
+    /** After a restore the saved funding txid is checked until the LSP's close shows up. */
+    @Test
+    fun aRestoreWaitsForTheLspCloseThenSweeps() {
+        routes["/tx/$funding/outspends"] = """[{"spent":false}]"""
+        val recovery = recovery()
+        recovery.startAfterRestore(funding, 0, repeat = true)
+        recovery.runNow()
+        assertTrue(recovery.state.active)
+        assertEquals(0, recovery.pendingSats)
+
+        // The LSP closes after the restored node reconnects.
+        closePaysUs()
+        clock += ToRemoteRecovery.backoffMs(1)
+        recovery.runNow()
+        assertEquals(94_467, recovery.pendingSats)
+
+        closeConfirmed()
+        afterSettleInterval()
+        recovery.runNow()
+        assertEquals(1, posted.size)
+
+        routes["/tx/$close/outspend/3"] =
+            """{"spent":true,"txid":"sweep","status":{"confirmed":true}}"""
+        afterSettleInterval()
+        recovery.runNow()
+        assertFalse(recovery.state.active)
+    }
+
+    @Test
+    fun aOneTimeRestoreCheckStopsWhenNothingIsFound() {
+        routes["/tx/$funding/outspends"] = """[{"spent":false}]"""
+        val recovery = recovery()
+        recovery.startAfterRestore(funding, 0, repeat = false)
+        recovery.runNow()
+        assertFalse(recovery.state.active)
+    }
+
+    @Test
+    fun aRestoreWithoutAFundingTxidLooksForNothing() {
+        val recovery = recovery()
+        recovery.startAfterRestore(null, null, repeat = true)
+        recovery.runNow()
+        assertFalse(recovery.state.active)
+        assertTrue(requested.isEmpty())
+    }
+
+    @Test
+    fun aRestoreStartsOver() {
+        closePaysUs()
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        recovery.runNow()
+        closeConfirmed()
+        recovery.runNow()
+        assertEquals(address, recovery.state.destination)
+
+        val other = "dd".repeat(32)
+        recovery.startAfterRestore(other, 1, repeat = true)
+        assertTrue(recovery.state.found.isEmpty())
+        assertNull(recovery.state.destination)
+        assertNull(recovery.state.checkedFundingTxid)
+        assertEquals(other, recovery.state.fundingTxid)
     }
 }

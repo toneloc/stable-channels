@@ -2,10 +2,11 @@ import Foundation
 
 /// Finds and moves to the wallet our side of a channel the LSP force-closed after the app lost its
 /// channel data (#364, #348), which LDK no longer tracks. It does in the app what the force close
-/// recovery script does by hand, and finds the close itself in one of two ways:
-/// - by a funding txid saved before the loss: what spent the funding output is the close, and its
-///   outputs are matched against our keys (a few requests),
-/// - after a restore from seed, by looking up the scripts of all 1000 keys.
+/// recovery script does by hand. It finds the close from a funding txid saved before the loss: what
+/// spent the funding output is the close, and its outputs are matched against our keys (a few
+/// requests). A restore on a new device has no saved funding txid; getting it from the LSP is a
+/// follow-up. Scanning the scripts of all 1000 keys instead would take 1000 requests, more than the
+/// public explorers allow an hour.
 ///
 /// The search repeats on a growing delay until the LSP's close shows up. A found output is swept
 /// once its close confirms, and stays counted on the Home card until the sweep confirms.
@@ -21,9 +22,6 @@ actor ToRemoteRecovery {
         var fundingTxid: String?
         /// Nil when not saved: the funding output is then found by its 2-of-2 witness.
         var fundingVout: UInt32?
-        var scan = false
-        /// When the scan began: an output confirmed well before is an older close.
-        var scanFrom: TimeInterval = 0
         /// The search stops after this time when nothing new is found.
         var until: TimeInterval = 0
         var attempts = 0
@@ -36,21 +34,12 @@ actor ToRemoteRecovery {
         /// The last funding txid fully checked, so it is not looked up again.
         var checkedFundingTxid: String?
 
-        var active: Bool { fundingTxid != nil || scan || !found.isEmpty }
-    }
-
-    private struct Scan {
-        let outputs: [Output]
-        let newClose: Bool
-        let complete: Bool
+        var active: Bool { fundingTxid != nil || !found.isEmpty }
     }
 
     /// How long to keep looking for the LSP's close.
     static let searchSeconds: TimeInterval = 14 * 24 * 60 * 60
     static let settleIntervalSeconds: TimeInterval = 60
-    static let scanParallel = 4
-    /// Device and block clocks can differ; a close this close to the scan start counts as new.
-    static let clockSlackSeconds: TimeInterval = 2 * 60 * 60
     private static let stateKey = "to_remote_recovery"
 
     /// 1 minute, as the LSP closes within seconds of a reconnect, then 10 minutes doubling up to a
@@ -100,46 +89,39 @@ actor ToRemoteRecovery {
     func onRefresh(savedFundingTxid: String?, ldkHasChannels: Bool, ldkHandlesClose: Bool) -> Bool {
         if ldkHandlesClose { return false }
         if let savedFundingTxid, !ldkHasChannels, needsCheck(savedFundingTxid) {
-            start(fundingTxid: savedFundingTxid, fundingVout: nil, scan: false)
+            start(fundingTxid: savedFundingTxid, fundingVout: nil)
         }
         return state.active
     }
 
-    /// Starts looking for a close LDK doesn't track: by `fundingTxid` when known, and by scanning
-    /// all keys when `scan`. With `repeats` false it searches once, for a close that already
-    /// happened.
-    func start(fundingTxid: String?, fundingVout: UInt32?, scan: Bool, repeats: Bool = true) {
-        let time = now()
-        let until = repeats ? time + Self.searchSeconds : time
+    /// Starts looking for the close of the channel funded by `fundingTxid`, which LDK doesn't track.
+    /// With `repeats` false it looks once, for a close that already happened.
+    func start(fundingTxid: String, fundingVout: UInt32?, repeats: Bool = true) {
+        let until = repeats ? now() + Self.searchSeconds : now()
         update {
-            if let fundingTxid {
-                $0.fundingTxid = fundingTxid
-                $0.fundingVout = fundingVout
-            }
-            if scan { $0.scanFrom = time }
-            $0.scan = $0.scan || scan
+            $0.fundingTxid = fundingTxid
+            $0.fundingVout = fundingVout
             $0.until = max($0.until, until)
             $0.attempts = 0
             $0.nextAt = 0
             $0.generation += 1
         }
-        log("TO_REMOTE_RECOVERY_START", ["funding_txid": fundingTxid ?? "", "scan": scan, "repeats": repeats])
+        log("TO_REMOTE_RECOVERY_START", ["funding_txid": fundingTxid, "repeats": repeats])
     }
 
     /// After a restore from seed: starts over, as found outputs and the sweep address may belong to
-    /// the wallet that was replaced, then scans all keys.
-    func startAfterRestore(repeats: Bool) {
+    /// the wallet that was replaced, then looks for the close of `fundingTxid` when it is known.
+    func startAfterRestore(fundingTxid: String?, repeats: Bool) {
         update { $0 = State(generation: $0.generation + 1) }
-        start(fundingTxid: nil, fundingVout: nil, scan: true, repeats: repeats)
+        if let fundingTxid { start(fundingTxid: fundingTxid, fundingVout: nil, repeats: repeats) }
     }
 
     /// Does whatever is due. Cheap to call often; returns at once while another run is going.
-    /// `seed` is the 64-byte wallet seed. Closes of channels in `liveFundingTxids` are left to LDK.
+    /// `seed` is the 64-byte wallet seed.
     func run(
         seed: Data,
         destination: @Sendable () async -> String?,
-        feeRateSatVb: @Sendable () async -> UInt64?,
-        liveFundingTxids: Set<String> = []
+        feeRateSatVb: @Sendable () async -> UInt64?
     ) async {
         guard state.active, !running, let keys = keys(for: seed) else { return }
         running = true
@@ -147,8 +129,8 @@ actor ToRemoteRecovery {
         if !state.found.isEmpty {
             await settle(keys, destination: destination, feeRateSatVb: feeRateSatVb)
         }
-        if state.fundingTxid != nil || state.scan {
-            await search(keys, liveFundingTxids: liveFundingTxids)
+        if state.fundingTxid != nil {
+            await search(keys)
         }
     }
 
@@ -159,40 +141,22 @@ actor ToRemoteRecovery {
         return keys
     }
 
-    private func search(_ keys: ToRemoteKeys, liveFundingTxids: Set<String>) async {
+    private func search(_ keys: ToRemoteKeys) async {
         let s = state
-        guard now() >= s.nextAt else { return }
-        var found: [Output] = []
-        var fundingSpent = false
-        if let txid = s.fundingTxid, let result = await findByFunding(txid, vout: s.fundingVout, keys: keys) {
-            found += result.outputs
-            fundingSpent = result.spent
-        }
-        let scan = s.scan ? await scan(keys, liveFundingTxids: liveFundingTxids, scanFrom: s.scanFrom) : nil
-        found += scan?.outputs ?? []
+        guard let fundingTxid = s.fundingTxid, now() >= s.nextAt else { return }
+        let result = await findByFunding(fundingTxid, vout: s.fundingVout, keys: keys)
         let time = now()
-        let pastDeadline = time >= s.until
-        let fundingEnds = s.fundingTxid != nil && (fundingSpent || pastDeadline)
-        // An older close found on the keys doesn't end the wait for the new one. Past the deadline
-        // the scan ends once a full scan found nothing new, or two weeks later anyway.
-        let scanEnds = scan.map {
-            $0.newClose || pastDeadline && ($0.complete || time >= s.until + Self.searchSeconds)
-        } ?? false
-        let added = found.filter { output in
+        let ends = result?.spent == true || time >= s.until
+        let added = (result?.outputs ?? []).filter { output in
             !s.found.contains { $0.txid == output.txid && $0.vout == output.vout }
         }
         update { current in
             guard current.generation == s.generation else { return }
-            for output in added where !current.found.contains(where: {
-                $0.txid == output.txid && $0.vout == output.vout
-            }) {
-                current.found.append(output)
-            }
-            if fundingEnds {
+            current.found += added
+            if ends {
                 current.fundingTxid = nil
-                current.checkedFundingTxid = s.fundingTxid
+                current.checkedFundingTxid = fundingTxid
             }
-            if scanEnds { current.scan = false }
             current.attempts += 1
             current.nextAt = time + Self.backoffSeconds(current.attempts)
         }
@@ -257,61 +221,6 @@ actor ToRemoteRecovery {
         let bytes = Array(script.utf8)
         return bytes.count == 142 && script.hasPrefix("5221") && script.hasSuffix("52ae")
             && String(decoding: bytes[70 ..< 72], as: UTF8.self) == "21"
-    }
-
-    /// Looks up the script of every key. An output whose close is unconfirmed or confirmed since
-    /// `scanFrom` counts as the new close. Closes of channels LDK still lists are left out.
-    private func scan(_ keys: ToRemoteKeys, liveFundingTxids: Set<String>, scanFrom: TimeInterval) async -> Scan {
-        var results: [(output: Output, confirmedAt: TimeInterval?)] = []
-        var complete = true
-        for start in stride(from: 0, to: keys.keys.count, by: Self.scanParallel) {
-            let batch = keys.keys[start ..< min(start + Self.scanParallel, keys.keys.count)]
-            await withTaskGroup(of: [(output: Output, confirmedAt: TimeInterval?)]?.self) { group in
-                for key in batch {
-                    group.addTask { await self.utxos(of: key) }
-                }
-                for await outputs in group {
-                    if let outputs { results += outputs } else { complete = false }
-                }
-            }
-        }
-        var kept: [(output: Output, confirmedAt: TimeInterval?)] = []
-        for result in results {
-            if !liveFundingTxids.isEmpty {
-                guard let inputs = await (getJSON("/tx/\(result.output.txid)") as? [String: Any])?["vin"]
-                    as? [[String: Any]]
-                else {
-                    complete = false
-                    continue
-                }
-                if inputs.contains(where: { ($0["txid"] as? String).map(liveFundingTxids.contains) == true }) {
-                    continue
-                }
-            }
-            kept.append(result)
-        }
-        return Scan(
-            outputs: kept.map(\.output),
-            newClose: kept.contains { $0.confirmedAt.map { $0 >= scanFrom - Self.clockSlackSeconds } ?? true },
-            complete: complete
-        )
-    }
-
-    /// Nil when the lookup failed.
-    private nonisolated func utxos(of key: ToRemoteKeys.Key) async -> [(output: Output, confirmedAt: TimeInterval?)]? {
-        // Esplora's scripthash is the plain SHA-256 of the scriptPubKey.
-        let hash = key.scriptPubKey.sha256Hex
-        guard let utxos = await getJSON("/scripthash/\(hash)/utxo") as? [[String: Any]] else { return nil }
-        return utxos.compactMap { utxo in
-            guard let txid = utxo["txid"] as? String,
-                  let vout = (utxo["vout"] as? NSNumber)?.uint32Value,
-                  let value = (utxo["value"] as? NSNumber)?.uint64Value else { return nil }
-            let status = utxo["status"] as? [String: Any]
-            let confirmedAt = status?["confirmed"] as? Bool == true
-                ? (status?["block_time"] as? NSNumber)?.doubleValue ?? 0
-                : nil
-            return (Output(txid: txid, vout: vout, valueSats: value, keyIndex: key.index), confirmedAt)
-        }
     }
 
     private func settle(
