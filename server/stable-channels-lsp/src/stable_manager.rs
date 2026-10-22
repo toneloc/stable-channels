@@ -428,6 +428,10 @@ pub struct StableChannelManager {
     sync_retry_exhausted: std::collections::HashSet<u128>,
     /// Usable channels that cannot carry a 1 msat SYNC, by block reason; audited once per (channel, reason).
     sync_retry_blocked_reported: std::collections::HashSet<(u128, &'static str)>,
+    /// Whether the channel list has been loaded from the database and the node since start; until then no event, tick or edit acts on it.
+    hydrated: bool,
+    /// A ready channel could not be registered or its row could not be read, so the next tick loads the list again.
+    reconcile_wanted: bool,
 }
 
 /// Outcome of a `release_stability_payment` call. `needs_acknowledgement` means nothing was done yet: `status` holds the channel's figures and what the answer would do, for the operator to confirm.
@@ -452,14 +456,26 @@ impl StableChannelManager {
         manager: &'a tokio::sync::Mutex<Self>,
         ldk: &dyn LdkServerCalls,
     ) -> tokio::sync::MutexGuard<'a, Self> {
+        let mut load_retry = std::time::Duration::from_secs(1);
         loop {
             let mut mgr = manager.lock().await;
             let price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-            if mgr.retry_pending_reconciliations(ldk, price).await {
+            if !mgr.hydrated {
+                // An event handled against a list that is not loaded could register a tracked channel again at $0.
+                mgr.reconcile_from_grpc(ldk, price).await;
+            }
+            if mgr.hydrated && mgr.retry_pending_reconciliations(ldk, price).await {
                 return mgr;
             }
+            let wait = if mgr.hydrated {
+                std::time::Duration::from_secs(1)
+            } else {
+                let wait = load_retry;
+                load_retry = (load_retry * 2).min(std::time::Duration::from_secs(30));
+                wait
+            };
             drop(mgr);
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -1138,7 +1154,14 @@ impl StableChannelManager {
             startup_sync_initialized: false,
             sync_retry_exhausted: std::collections::HashSet::new(),
             sync_retry_blocked_reported: std::collections::HashSet::new(),
+            hydrated: false,
+            reconcile_wanted: false,
         }
+    }
+
+    /// Whether the channel list has been loaded since start.
+    pub fn is_hydrated(&self) -> bool {
+        self.hydrated
     }
 
     /// Validate, patch expected_usd/note (Some sets, None keeps prior, both-None-no-prior rejected), persist, and update the cache.
@@ -1150,6 +1173,12 @@ impl StableChannelManager {
         ldk_server: &dyn LdkServerCalls,
         btc_price: f64,
     ) -> EditOutcome {
+        if !self.hydrated {
+            return EditOutcome {
+                ok: false,
+                status: "Channels are still loading; retry the edit shortly".to_owned(),
+            };
+        }
         if !self.retry_pending_reconciliations(ldk_server, btc_price).await {
             return EditOutcome {
                 ok: false,
@@ -1184,10 +1213,23 @@ impl StableChannelManager {
             .stable_channels
             .iter()
             .find(|sc| format!("{}", sc.user_channel_id) == user_channel_id_str);
+        // A channel missing from memory keeps its saved target, note and books.
+        let saved = match prior {
+            Some(_) => None,
+            None => match self.db.load_channel_any_notation(&user_channel_id_str) {
+                Ok(saved) => saved,
+                Err(e) => {
+                    return EditOutcome {
+                        ok: false,
+                        status: format!("DB read failed: {}", e),
+                    };
+                }
+            },
+        };
 
-        let prior_target = prior.map(|p| p.expected_usd.0);
-        let prior_note = prior.and_then(|p| p.note.clone());
-        let prior_books = prior.map(|p| (p.backing_sats, p.native_sats));
+        let prior_target = prior.map(|p| p.expected_usd.0).or(saved.as_ref().map(|r| r.expected_usd));
+        let prior_note = prior.and_then(|p| p.note.clone()).or_else(|| saved.as_ref().and_then(|r| r.note.clone()));
+        let prior_books = prior.map(|p| (p.backing_sats, p.native_sats)).or(saved.as_ref().map(|r| (r.backing_sats, r.native_sats)));
 
         if expected_usd_in.is_some() {
             if btc_price <= 0.0 {
@@ -1217,7 +1259,7 @@ impl StableChannelManager {
             (None, None) => None,
         };
 
-        if expected_usd_in.is_none() && note_in.is_none() && prior.is_none() {
+        if expected_usd_in.is_none() && note_in.is_none() && prior.is_none() && saved.is_none() {
             return EditOutcome {
                 ok: false,
                 status: "No changes provided".to_string(),
@@ -1338,6 +1380,9 @@ impl StableChannelManager {
         btc_price: f64,
     ) -> ReleaseOutcome {
         let refused = |status: String| ReleaseOutcome { ok: false, status, needs_acknowledgement: false };
+        if !self.hydrated {
+            return refused("Channels are still loading; retry the release shortly".to_owned());
+        }
         if !self.retry_pending_reconciliations(ldk, btc_price).await {
             return refused("Balance correction is pending; retry the release after it is saved".to_owned());
         }
@@ -1611,7 +1656,8 @@ impl StableChannelManager {
             let stable_receiver_usd = USD::from_bitcoin(stable_receiver_btc, btc_price);
 
             let expected_usd = USD::from_f64(record.expected_usd);
-            let expected_btc = Bitcoin::from_usd(expected_usd, btc_price);
+            // The books need no price; what is derived from one waits for the first tick that has it.
+            let expected_btc = if btc_price > 0.0 { Bitcoin::from_usd(expected_usd, btc_price) } else { Bitcoin::from_sats(0) };
 
             let mut sc = build_stable_channel(
                 c,
@@ -1632,7 +1678,42 @@ impl StableChannelManager {
             rebuilt.push(sc);
         }
 
+        // A ready channel with no row missed its ready event; one with a row, open or closed, keeps it.
+        let mut reconcile_wanted = false;
+        for c in channels.iter().filter(|c| c.is_channel_ready) {
+            let Some(uid) = parse_user_channel_id(&c.user_channel_id) else { continue };
+            if rebuilt.iter().any(|sc| sc.user_channel_id == uid) {
+                continue;
+            }
+            let (_, their_sats) = channel_peer_balances(c);
+            match self.db.insert_channel_if_absent(&c.channel_id, &uid.to_string(), their_sats) {
+                Ok(true) => {
+                    rebuilt.push(new_untracked_channel(c, uid, btc_price, &self.data_dir));
+                    let mut detail = serde_json::json!({
+                        "channel_id": c.channel_id,
+                        "user_channel_id": c.user_channel_id,
+                        "funding_txo": c.funding_txo.as_ref().map(|outpoint| format!("{}:{}", outpoint.txid, outpoint.vout)),
+                        "source": "reconcile",
+                    });
+                    if let Some(fields) = detail.as_object_mut() {
+                        fields.extend(crate::channel_audit::channel_snapshot_fields(c));
+                    }
+                    stable_channels::audit::audit_event("CHANNEL_READY_TRACKED", detail);
+                },
+                Ok(false) => {},
+                Err(e) => {
+                    reconcile_wanted = true;
+                    stable_channels::audit::audit_event(
+                        "DB_WRITE_FAILED",
+                        serde_json::json!({ "op": "insert_channel_if_absent", "context": "reconcile", "channel_id": c.channel_id, "user_channel_id": c.user_channel_id, "error": e.to_string() }),
+                    );
+                },
+            }
+        }
+
         self.stable_channels = rebuilt;
+        self.hydrated = true;
+        self.reconcile_wanted = reconcile_wanted;
         info!(
             "[stable] reconciled {} stable channel(s) from sqlite",
             self.stable_channels.len()
@@ -1835,13 +1916,13 @@ impl StableChannelManager {
         Ok(())
     }
 
-    /// Self-heal: if the in-memory list is empty (startup/reconnect reconcile skipped on a cold price cache), rebuild it from truth; a populated list is left untouched so a transient empty snapshot can't wipe it.
-    pub async fn reconcile_if_empty(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
+    /// Load the channel list until it has loaded once, and again after a ready channel could not be registered; a loaded list is otherwise left as it is.
+    pub async fn reconcile_unless_hydrated(&mut self, ldk: &dyn LdkServerCalls, btc_price: f64) {
         // run_tick owns retries here and skips settlement on a tick that commits a correction.
         if !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty() {
             return;
         }
-        if self.stable_channels.is_empty() {
+        if !self.hydrated || self.reconcile_wanted {
             self.reconcile_from_grpc(ldk, btc_price).await;
         } else {
             self.retry_startup_sync(ldk).await;
@@ -1881,6 +1962,18 @@ impl StableChannelManager {
                 .await;
             return;
         }
+        // A channel missing from memory may still have a row, which only its own books may replace.
+        let saved = match self.db.load_channel_any_notation(&user_channel_id) {
+            Ok(saved) => saved,
+            Err(e) => {
+                self.reconcile_wanted = true;
+                stable_channels::audit::audit_event(
+                    "DB_READ_FAILED",
+                    serde_json::json!({ "op": "load_channel", "context": "handle_channel_ready", "user_channel_id": user_channel_id, "channel_id": channel_id, "error": e.to_string() }),
+                );
+                return;
+            }
+        };
 
         let channels = match ldk.list_channels(ListChannelsRequest {}).await {
             Ok(r) => r.channels,
@@ -1893,6 +1986,7 @@ impl StableChannelManager {
                     "LDK_CALL_FAILED",
                     serde_json::json!({ "op": "list_channels", "context": "handle_channel_ready", "user_channel_id": user_channel_id, "channel_id": channel_id, "error": e.to_string() }),
                 );
+                self.reconcile_wanted = true;
                 return;
             }
         };
@@ -1901,59 +1995,58 @@ impl StableChannelManager {
                 "[stable] handle_channel_ready: channel {} not found in list_channels",
                 channel_id
             );
+            self.reconcile_wanted = true;
             return;
         };
 
-        let (our_sats, their_sats) = channel_peer_balances(&c);
-
-        let new_sc = StableChannel {
-            channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes(
-                parse_channel_id_hex(&c.channel_id),
-            ),
-            user_channel_id: target_uid,
-            counterparty: parse_pubkey_hex(&c.counterparty_node_id),
-            is_stable_receiver: false,
-            expected_usd: USD::from_f64(0.0),
-            expected_btc: Bitcoin::from_sats(0),
-            stable_receiver_btc: Bitcoin::from_sats(their_sats),
-            stable_receiver_usd: USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price),
-            stable_provider_btc: Bitcoin::from_sats(our_sats),
-            stable_provider_usd: USD::from_bitcoin(Bitcoin::from_sats(our_sats), btc_price),
-            latest_price: btc_price,
-            risk_level: 0,
-            payment_made: false,
-            timestamp: 0,
-            formatted_datetime: String::new(),
-            sc_dir: self.data_dir.to_string_lossy().to_string(),
-            prices: String::new(),
-            onchain_btc: Bitcoin::from_sats(0),
-            onchain_usd: USD(0.0),
-            note: None,
-            native_channel_btc: Bitcoin::from_sats(0),
-            backing_sats: 0,
-            native_sats: their_sats,
-            last_stability_payment: 0,
-        };
-
-        if let Err(e) = self.db.save_channel(
-            &c.channel_id,
-            &format!("{}", target_uid),
-            0.0,
-            0,
-            their_sats,
-            None,
-        ) {
-            tracing::error!(
-                "[stable] handle_channel_ready: db.save_channel failed: {}",
-                e
+        if let Some(record) = saved {
+            // Its books as saved, with the balance they were saved at as the one before this event.
+            let (our_sats, _) = channel_peer_balances(&c);
+            let saved_receiver = Bitcoin::from_sats(record.backing_sats.saturating_add(record.native_sats));
+            let expected_usd = USD::from_f64(record.expected_usd);
+            let mut sc = build_stable_channel(
+                &c,
+                target_uid,
+                expected_usd,
+                if btc_price > 0.0 { Bitcoin::from_usd(expected_usd, btc_price) } else { Bitcoin::from_sats(0) },
+                Bitcoin::from_sats(our_sats),
+                saved_receiver,
+                USD::from_bitcoin(Bitcoin::from_sats(our_sats), btc_price),
+                USD::from_bitcoin(saved_receiver, btc_price),
+                record.backing_sats,
+                record.native_sats,
+                record.note.clone(),
+                btc_price,
+                self.data_dir.clone(),
             );
-            stable_channels::audit::audit_event(
-                "DB_WRITE_FAILED",
-                serde_json::json!({ "op": "save_channel", "context": "handle_channel_ready", "channel_id": channel_id, "user_channel_id": user_channel_id, "error": e.to_string() }),
-            );
+            stable_channels::stable::recompute_native(&mut sc);
+            self.stable_channels.push(sc);
+            self.handle_channel_ready_splice(target_uid, funding_txo.as_deref(), ldk, btc_price).await;
             return;
         }
-        self.stable_channels.push(new_sc);
+
+        let (_, their_sats) = channel_peer_balances(&c);
+        match self.db.insert_channel_if_absent(&c.channel_id, &format!("{}", target_uid), their_sats) {
+            Ok(true) => {},
+            Ok(false) => {
+                // A row for this channel already exists under another key; it is never replaced here, and a load picks it up if it is open.
+                self.reconcile_wanted = true;
+                return;
+            },
+            Err(e) => {
+                tracing::error!(
+                    "[stable] handle_channel_ready: db.insert_channel_if_absent failed: {}",
+                    e
+                );
+                stable_channels::audit::audit_event(
+                    "DB_WRITE_FAILED",
+                    serde_json::json!({ "op": "insert_channel_if_absent", "context": "handle_channel_ready", "channel_id": channel_id, "user_channel_id": user_channel_id, "error": e.to_string() }),
+                );
+                self.reconcile_wanted = true;
+                return;
+            },
+        }
+        self.stable_channels.push(new_untracked_channel(&c, target_uid, btc_price, &self.data_dir));
         let mut ready_detail = serde_json::json!({
             "channel_id": channel_id,
             "user_channel_id": user_channel_id,
@@ -2715,6 +2808,9 @@ impl StableChannelManager {
         scope: TickScope<'_>,
     ) -> StabilityTickPlan {
         let mut plan = StabilityTickPlan::default();
+        if !self.hydrated {
+            return plan;
+        }
         let had_pending = !self.pending_book_updates.is_empty() || !self.pending_splices.is_empty();
         if !self.retry_pending_reconciliations(ldk, btc_price).await || had_pending {
             // Give the event loop a chance to process the events held behind this correction
@@ -4349,6 +4445,37 @@ impl StableChannelManager {
     }
 }
 
+/// A ready channel seen for the first time: a $0 target with all its sats native.
+fn new_untracked_channel(c: &Channel, user_channel_id: u128, btc_price: f64, sc_dir: &std::path::Path) -> StableChannel {
+    let (our_sats, their_sats) = channel_peer_balances(c);
+    StableChannel {
+        channel_id: ldk_node::lightning::ln::types::ChannelId::from_bytes(parse_channel_id_hex(&c.channel_id)),
+        user_channel_id,
+        counterparty: parse_pubkey_hex(&c.counterparty_node_id),
+        is_stable_receiver: false,
+        expected_usd: USD::from_f64(0.0),
+        expected_btc: Bitcoin::from_sats(0),
+        stable_receiver_btc: Bitcoin::from_sats(their_sats),
+        stable_receiver_usd: USD::from_bitcoin(Bitcoin::from_sats(their_sats), btc_price),
+        stable_provider_btc: Bitcoin::from_sats(our_sats),
+        stable_provider_usd: USD::from_bitcoin(Bitcoin::from_sats(our_sats), btc_price),
+        latest_price: btc_price,
+        risk_level: 0,
+        payment_made: false,
+        timestamp: 0,
+        formatted_datetime: String::new(),
+        sc_dir: sc_dir.to_string_lossy().to_string(),
+        prices: String::new(),
+        onchain_btc: Bitcoin::from_sats(0),
+        onchain_usd: USD(0.0),
+        note: None,
+        native_channel_btc: Bitcoin::from_sats(0),
+        backing_sats: 0,
+        native_sats: their_sats,
+        last_stability_payment: 0,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_stable_channel(
     channel: &Channel,
@@ -4705,7 +4832,10 @@ mod tests {
         // Keep the temp dir alive for the test process so sqlite isn't backed by a deleted directory.
         std::mem::forget(dir);
         let db = stable_channels::db::Database::open(&db_path).unwrap();
-        StableChannelManager::new(std::sync::Arc::new(db), db_path)
+        let mut mgr = StableChannelManager::new(std::sync::Arc::new(db), db_path);
+        // A running daemon whose channel list has loaded; restart tests build their own.
+        mgr.hydrated = true;
+        mgr
     }
 
     pub const COUNTERPARTY_HEX: &str =
@@ -4715,6 +4845,225 @@ mod tests {
     pub const USER_CHANNEL_ID_DECIMAL: &str = "189476124653200987495269098788434301048";
     pub const CHANNEL_ID_HEX: &str =
         "f9634c603646c60b0df9f07c3011708652125915c80300a9bb8fb37c9c0de05b";
+
+    const OTHER_USER_CHANNEL_ID_DECIMAL: &str = "274877906944000000000000000000000000017";
+
+    /// A daemon restarted on the database of `mgr`, before it has loaded its channel list.
+    fn restarted(mgr: &StableChannelManager) -> StableChannelManager {
+        StableChannelManager::new(mgr.db.clone(), mgr.data_dir.clone())
+    }
+
+    /// A $50 channel backed by 50,000 sats at $100k, saved by a daemon that then restarts.
+    async fn fifty_dollars_then_restart() -> (StableChannelManager, FakeLdkServer) {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
+        )]);
+        assert!(mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await.ok);
+        (restarted(&mgr), ldk)
+    }
+
+    fn saved_target_and_backing(mgr: &StableChannelManager, user_channel_id: &str) -> (f64, u64) {
+        let record = mgr.db.load_channel(user_channel_id).unwrap().unwrap();
+        (record.expected_usd, record.backing_sats)
+    }
+
+    #[tokio::test]
+    async fn channel_ready_before_the_list_is_loaded_keeps_the_target() {
+        let (mgr, ldk) = fifty_dollars_then_restart().await;
+        let manager = tokio::sync::Mutex::new(mgr);
+        // The tracked channel's splice locks while the price cache is still cold.
+        let mut mgr = StableChannelManager::lock_for_event(&manager, &ldk as &dyn LdkServerCalls).await;
+        assert!(mgr.hydrated, "an event is handled only against a loaded list");
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 0.0).await;
+
+        assert_eq!(saved_target_and_backing(&mgr, USER_CHANNEL_ID_DECIMAL), (50.0, 50_000));
+        assert_eq!(mgr.stable_channels.len(), 1);
+        assert_eq!(mgr.stable_channels[0].expected_usd.0, 50.0);
+    }
+
+    /// After a restart the tracked $50 channel's splice-out locks, leaving the user 30,000 sats; it is deducted once, whatever the price at the event.
+    async fn splice_locked_after_a_restart_is_deducted_once(price_at_event: f64) {
+        let (mgr, ldk) = fifty_dollars_then_restart().await;
+        *ldk.channels.lock().unwrap() = vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 80_000, 50_000_000, true,
+        )];
+        let manager = tokio::sync::Mutex::new(mgr);
+        let mut mgr = StableChannelManager::lock_for_event(&manager, &ldk as &dyn LdkServerCalls).await;
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), Some(SPLICE_TXO.into()), &ldk as &dyn LdkServerCalls, price_at_event).await;
+        let push = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
+        ));
+        for _ in 0..5 {
+            mgr.stable_channels[0].last_stability_payment = 0;
+            mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 100_000.0).await;
+        }
+
+        let saved = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert_eq!((saved.expected_usd, saved.backing_sats, saved.native_sats), (30.0, 30_000, 0), "the $20 that left is deducted once");
+        assert_eq!(ldk.sends.lock().unwrap().len(), 1, "one SYNC and no top-up");
+        assert_eq!(sent_sync_payload(&ldk, 0)["expected_usd"], 30.0);
+    }
+
+    #[tokio::test]
+    async fn splice_locked_after_a_restart_on_a_cold_price_is_deducted_once() {
+        splice_locked_after_a_restart_is_deducted_once(0.0).await;
+    }
+
+    #[tokio::test]
+    async fn splice_locked_after_a_restart_on_a_warm_price_is_deducted_once() {
+        splice_locked_after_a_restart_is_deducted_once(100_000.0).await;
+    }
+
+    #[tokio::test]
+    async fn channel_ready_for_a_saved_channel_not_in_memory_keeps_its_books() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        // A loaded list that lacks this channel, as after it was missing from one snapshot.
+        mgr.hydrated = true;
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert_eq!(saved_target_and_backing(&mgr, USER_CHANNEL_ID_DECIMAL), (50.0, 50_000), "a saved channel is never registered again at $0");
+        assert_eq!(mgr.stable_channels.len(), 1);
+        assert_eq!((mgr.stable_channels[0].expected_usd.0, mgr.stable_channels[0].backing_sats), (50.0, 50_000));
+    }
+
+    #[tokio::test]
+    async fn a_new_channel_does_not_keep_saved_channels_from_loading() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        // Another peer's channel becomes ready first and is the only one in memory.
+        ldk.channels.lock().unwrap().push(make_channel(
+            ROUTING_CHANNEL_HEX, OTHER_USER_CHANNEL_ID_DECIMAL, ROUTING_PEER_HEX, 100_000, 100_000_000, true,
+        ));
+        mgr.handle_channel_ready(ROUTING_CHANNEL_HEX.into(), OTHER_USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 0.0).await;
+        assert_eq!(mgr.stable_channels.len(), 1);
+
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.hydrated);
+        assert_eq!(mgr.stable_channels.len(), 2, "a list that is not empty is not proof it was loaded");
+        assert!(mgr.stable_channels.iter().any(|sc| sc.expected_usd.0 == 50.0 && sc.backing_sats == 50_000));
+    }
+
+    #[tokio::test]
+    async fn the_list_loads_without_a_price() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+
+        assert!(mgr.hydrated, "the saved books need no price");
+        assert_eq!(mgr.stable_channels.len(), 1);
+        assert_eq!((mgr.stable_channels[0].expected_usd.0, mgr.stable_channels[0].backing_sats), (50.0, 50_000));
+        assert_eq!(mgr.stable_channels[0].expected_btc.sats, 0, "nothing is derived from a price it does not have");
+    }
+
+    #[tokio::test]
+    async fn edits_and_releases_wait_until_the_list_is_loaded() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, None, Some("vip".into()), &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(!edit.ok);
+        assert_eq!(saved_target_and_backing(&mgr, USER_CHANNEL_ID_DECIMAL), (50.0, 50_000));
+        assert!(!mgr.release_stability_payment("payment", false, true, &ldk as &dyn LdkServerCalls, 100_000.0).await.ok);
+
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.edit_stable_channel(CHANNEL_ID_HEX, None, Some("vip".into()), &ldk as &dyn LdkServerCalls, 100_000.0).await.ok);
+    }
+
+    #[tokio::test]
+    async fn note_edit_for_a_saved_channel_not_in_memory_keeps_its_books() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        mgr.hydrated = true;
+        let edit = mgr.edit_stable_channel(CHANNEL_ID_HEX, None, Some("vip".into()), &ldk as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert!(edit.ok, "{}", edit.status);
+        assert_eq!(saved_target_and_backing(&mgr, USER_CHANNEL_ID_DECIMAL), (50.0, 50_000), "a note says nothing about the target");
+        assert_eq!(mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap().note.as_deref(), Some("vip"));
+    }
+
+    #[tokio::test]
+    async fn a_ready_channel_with_no_row_is_registered_when_the_list_loads() {
+        let mut mgr = restarted(&make_manager());
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true,
+        )]);
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+
+        assert_eq!(mgr.stable_channels.len(), 1, "its ready event was missed, so the load registers it");
+        let record = mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().unwrap();
+        assert_eq!((record.expected_usd, record.backing_sats, record.native_sats), (0.0, 0, 40_000));
+    }
+
+    #[tokio::test]
+    async fn a_channel_registered_by_the_load_records_its_funding_outpoint() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = restarted(&make_manager());
+        let mut channel = make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true);
+        channel.funding_txo = Some(ldk_server_client::ldk_server_grpc::types::OutPoint { txid: "ab".repeat(32), vout: 1 });
+        let ldk = FakeLdkServer::new(vec![channel]);
+        stable_channels::audit::enable_test_capture();
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        let tracked = events.iter().find(|(name, _)| name == "CHANNEL_READY_TRACKED").expect("the registration is recorded");
+        assert_eq!(tracked.1["funding_txo"], format!("{}:1", "ab".repeat(32)), "revenue takes a channel's first funding txid from it");
+    }
+
+    #[tokio::test]
+    async fn a_ready_channel_the_node_does_not_list_yet_is_registered_at_the_next_tick() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![]);
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.stable_channels.is_empty());
+
+        *ldk.channels.lock().unwrap() = vec![make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true)];
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert_eq!(mgr.stable_channels.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_closed_row_is_never_registered_again_at_zero() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        mgr.db.mark_channel_closed(USER_CHANNEL_ID_DECIMAL).unwrap();
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 100_000.0).await;
+
+        assert_eq!(saved_target_and_backing(&mgr, USER_CHANNEL_ID_DECIMAL), (50.0, 50_000));
+        assert!(mgr.stable_channels.iter().all(|sc| sc.expected_usd.0 != 0.0), "no $0 entry stands in for it");
+    }
+
+    #[tokio::test]
+    async fn a_channel_that_could_not_be_registered_is_registered_at_the_next_tick() {
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(
+            CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true,
+        )]);
+        ldk.list_channels_fails.store(true, Ordering::SeqCst);
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert!(mgr.stable_channels.is_empty());
+
+        ldk.list_channels_fails.store(false, Ordering::SeqCst);
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert_eq!(mgr.stable_channels.len(), 1);
+        assert!(mgr.db.load_channel(USER_CHANNEL_ID_DECIMAL).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn an_event_waits_until_the_list_loads() {
+        let (mgr, ldk) = fifty_dollars_then_restart().await;
+        ldk.list_channels_fails.store(true, Ordering::SeqCst);
+        let manager = std::sync::Arc::new(tokio::sync::Mutex::new(mgr));
+        let ldk = std::sync::Arc::new(ldk);
+        let waiting = {
+            let (manager, ldk) = (manager.clone(), ldk.clone());
+            tokio::spawn(async move {
+                let mgr = StableChannelManager::lock_for_event(&manager, ldk.as_ref() as &dyn LdkServerCalls).await;
+                mgr.stable_channels.len()
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(!waiting.is_finished(), "nothing is handled while the list cannot load");
+
+        ldk.list_channels_fails.store(false, Ordering::SeqCst);
+        let loaded = tokio::time::timeout(std::time::Duration::from_secs(10), waiting).await.unwrap().unwrap();
+        assert_eq!(loaded, 1);
+    }
 
     #[tokio::test]
     async fn handle_channel_closed_removes_record() {
@@ -4933,9 +5282,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_if_empty_hydrates_then_leaves_populated_untouched() {
-        // Simulate the cold-start skip: empty in-memory Vec, persisted row, live channel present.
-        let mut mgr = make_manager();
+    async fn reconcile_unless_hydrated_hydrates_then_leaves_populated_untouched() {
+        // Simulate the cold-start skip: a list not loaded yet, persisted row, live channel present.
+        let mut mgr = restarted(&make_manager());
         mgr.db.save_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, 25.0, 40_000, 10_000, Some("persisted")).unwrap();
         assert_eq!(mgr.stable_channels.len(), 0, "fresh manager starts empty");
 
@@ -4944,12 +5293,12 @@ mod tests {
             100_000, 50_000_000, true,
         )]);
         // Empty vec -> self-heal repopulates from truth.
-        mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake as &dyn LdkServerCalls, 100_000.0).await;
         assert_eq!(mgr.stable_channels.len(), 1, "empty list is hydrated");
 
         // Populated vec -> guard skips reconcile, so a transient empty snapshot can't wipe it.
         let empty_server = FakeLdkServer::new(vec![]);
-        mgr.reconcile_if_empty(&empty_server as &dyn LdkServerCalls, 100_000.0).await;
+        mgr.reconcile_unless_hydrated(&empty_server as &dyn LdkServerCalls, 100_000.0).await;
         assert_eq!(mgr.stable_channels.len(), 1, "populated list is left untouched");
     }
 
@@ -5365,7 +5714,7 @@ mod tests {
             CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true,
         )];
         for _ in 0..2 {
-            mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 100_000.0).await;
+            mgr.reconcile_unless_hydrated(&fake as &dyn LdkServerCalls, 100_000.0).await;
             mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 100_000.0).await;
         }
 
@@ -7605,7 +7954,7 @@ mod tests {
                 mgr.startup_sync_pending.insert(uid);
                 // The normal tick runner retries startup SYNCs before run_tick. An unresolved
                 // splice must block that send too, even though the cached balance is still high.
-                mgr.reconcile_if_empty(&fake, 100_000.0).await;
+                mgr.reconcile_unless_hydrated(&fake, 100_000.0).await;
                 assert!(fake.sends.lock().unwrap().is_empty());
                 mgr.startup_sync_pending.remove(&uid);
                 for _ in 0..3 {
@@ -8155,7 +8504,7 @@ mod tests {
     async fn regular_ticks(mgr: &mut StableChannelManager, fake: &FakeLdkServer, count: usize) {
         let push = test_push(mgr);
         for _ in 0..count {
-            mgr.reconcile_if_empty(fake as &dyn LdkServerCalls, 100_000.0).await;
+            mgr.reconcile_unless_hydrated(fake as &dyn LdkServerCalls, 100_000.0).await;
             mgr.run_tick(fake as &dyn LdkServerCalls, &push, 100_000.0).await;
         }
     }
@@ -8507,7 +8856,7 @@ mod tests {
         fake.balances_fail.store(true, Ordering::SeqCst);
         // At $80k the $50 target needs 62,500 sats against 50,000 of backing.
         let push = test_push(&mgr);
-        mgr.reconcile_if_empty(&fake as &dyn LdkServerCalls, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake as &dyn LdkServerCalls, 80_000.0).await;
         mgr.run_tick(&fake as &dyn LdkServerCalls, &push, 80_000.0).await;
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "a balance that covers the backing needs no report on held payments");
@@ -9055,7 +9404,7 @@ mod tests {
         // this state nor the original failed payload may become the retry's balance.
         mgr.stable_channels[0].expected_usd = USD(99.0);
         mgr.stable_channels[0].backing_sats = 90_000;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         let retry = sent_sync_payload(&fake, 1);
         assert_eq!(retry["type"], "SYNC_V1");
         assert_eq!(retry["expected_usd"], 12.0);
@@ -9064,11 +9413,11 @@ mod tests {
         assert_eq!(mgr.db.list_pending_settlements().unwrap(),
             vec![("fake-payment-id-2".into(), "sync".into())]);
 
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "pending attempt must not be duplicated");
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-2", true).await;
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "delivered correction stops retries");
         assert!(mgr.db.list_pending_settlements().unwrap().is_empty());
         assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty());
@@ -9081,7 +9430,7 @@ mod tests {
         let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
         assert!(mgr.send_sync_message(&fake, 7, CHANNEL_ID_HEX, 25.0, 31_250, COUNTERPARTY_HEX).await);
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "newer pending SYNC supersedes old failure");
 
         assert!(mgr.send_sync_message(&fake, 7, CHANNEL_ID_HEX, 25.0, 31_250, COUNTERPARTY_HEX).await);
@@ -9089,11 +9438,11 @@ mod tests {
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-2", true).await;
         assert_eq!(mgr.db.list_failed_sync_channels().unwrap(), vec!["7"],
             "older success must not clear the latest failed correction");
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 4);
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-4", true).await;
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-3", false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 4);
     }
 
@@ -9104,16 +9453,16 @@ mod tests {
             payment_id: "fake-payment-id".into(), status: PaymentStatus::Pending as i32,
             direction: 1, amount_msat: Some(1), ..Default::default()
         });
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
         fake.payments.lock().unwrap()[0].status = PaymentStatus::Failed as i32;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
         fake.payments.lock().unwrap().push(GrpcPayment {
             payment_id: "fake-payment-id-2".into(), status: PaymentStatus::Succeeded as i32,
             direction: 1, amount_msat: Some(1), ..Default::default()
         });
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert!(mgr.db.list_pending_settlements().unwrap().is_empty());
         assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty());
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
@@ -9136,7 +9485,7 @@ mod tests {
         mgr.reconcile_from_grpc(&fake, 80_000.0).await;
         assert_eq!(sent_sync_payload(&fake, 1)["sync_version"], 2);
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-2", true).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
     }
 
@@ -9155,7 +9504,7 @@ mod tests {
             payment_id: "fake-payment-id".into(), status: PaymentStatus::Failed as i32,
             direction: 1, amount_msat: Some(1), ..Default::default()
         });
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
     }
 
@@ -9166,16 +9515,16 @@ mod tests {
         let conn = rusqlite::Connection::open(dir.path().join(stable_channels::db::DB_FILENAME)).unwrap();
         conn.execute_batch("CREATE TRIGGER fail_sync_record BEFORE INSERT ON settlement_payments
             WHEN NEW.kind = 'sync' BEGIN SELECT RAISE(FAIL, 'injected record failure'); END;").unwrap();
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
         assert!(mgr.startup_sync_pending.contains(&7));
         assert_eq!(mgr.db.list_failed_sync_channels().unwrap(), vec!["7"]);
         conn.execute_batch("DROP TRIGGER fail_sync_record;").unwrap();
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(sent_sync_payload(&fake, 2)["sync_version"], 3);
         assert!(!mgr.startup_sync_pending.contains(&7));
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-3", true).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 3);
     }
 
@@ -9192,7 +9541,7 @@ mod tests {
         mgr.handle_channel_closed(CHANNEL_ID_HEX.into(), "7".into(), None, None, 0, None);
         assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty());
         fake.channels.lock().unwrap().clear();
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1);
     }
 
@@ -9221,12 +9570,12 @@ mod tests {
         let (_dir, mut mgr, fake) = sync_delivery_fixture().await;
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
         fake.channels.lock().unwrap()[0].is_usable = false;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt while the peer is offline");
         assert_eq!(mgr.db.get_sync_version("7").unwrap(), Some(1), "no version consumed offline");
         assert!(mgr.startup_sync_pending.contains(&7), "the obligation stays queued");
         fake.channels.lock().unwrap()[0].is_usable = true;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
         assert_eq!(sent_sync_payload(&fake, 1)["sync_version"], 2);
     }
@@ -9238,8 +9587,8 @@ mod tests {
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
         fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 1_000;
         stable_channels::audit::enable_test_capture();
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
         let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
@@ -9249,7 +9598,7 @@ mod tests {
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "no attempt the peer would refuse");
         assert!(mgr.startup_sync_pending.contains(&7), "the obligation stays queued");
         fake.channels.lock().unwrap()[0].next_outbound_htlc_minimum_msat = 0;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "the SYNC goes out once the peer relents");
         assert!(mgr.sync_retry_blocked_reported.is_empty(), "a later block is audited again");
     }
@@ -9261,8 +9610,8 @@ mod tests {
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
         fake.channels.lock().unwrap()[0].next_outbound_htlc_limit_msat = 0;
         stable_channels::audit::enable_test_capture();
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
         let blocked: Vec<_> = events.iter().filter(|(event, _)| event == "SYNC_RETRY_BLOCKED").collect();
@@ -9276,20 +9625,20 @@ mod tests {
     async fn sync_retry_backs_off_after_repeated_delivery_failures() {
         let (dir, mut mgr, fake) = sync_delivery_fixture().await;
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id", false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "the first retry is immediate");
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-2", false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "the second retry waits one backoff step");
         age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 3);
         dispatch_sync_outcome(&mut mgr, &fake, "fake-payment-id-3", false).await;
         age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 3, "the third retry waits twice the base");
         age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_BASE_SECS as i64);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 4);
         assert_eq!(sent_sync_payload(&fake, 3)["sync_version"], 4);
     }
@@ -9303,14 +9652,14 @@ mod tests {
         for attempt in 1..SYNC_RETRY_MAX_ATTEMPTS {
             dispatch_sync_outcome(&mut mgr, &fake, &newest, false).await;
             age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
-            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+            mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
             assert_eq!(fake.sends.lock().unwrap().len() as u64, attempt + 1, "attempt {attempt} retried");
             newest = format!("fake-payment-id-{}", attempt + 1);
         }
         dispatch_sync_outcome(&mut mgr, &fake, &newest, false).await;
         age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len() as u64, SYNC_RETRY_MAX_ATTEMPTS, "no attempt past the cap");
         let events = stable_channels::audit::drain_test_capture();
         stable_channels::audit::disable_test_capture();
@@ -9324,7 +9673,7 @@ mod tests {
         assert!(mgr.send_sync_message(&fake, 7, CHANNEL_ID_HEX, 25.0, 31_250, COUNTERPARTY_HEX).await);
         let failed = format!("fake-payment-id-{}", SYNC_RETRY_MAX_ATTEMPTS + 2);
         dispatch_sync_outcome(&mut mgr, &fake, &failed, false).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len() as u64, SYNC_RETRY_MAX_ATTEMPTS + 3,
             "retries resume once a SYNC is delivered");
     }
@@ -9351,7 +9700,7 @@ mod tests {
             make_channel(ROUTING_CHANNEL_HEX, "8", ROUTING_PEER_HEX, 170_000, 20_000_000, true),
         ]);
         mgr.reconcile_from_grpc(&fake, 80_000.0).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         let sends = fake.sends.lock().unwrap();
         assert_eq!(sends.len(), 1, "only the channel with a stable position gets the startup SYNC");
         assert_eq!(sends[0].node_id, COUNTERPARTY_HEX);
@@ -9363,10 +9712,10 @@ mod tests {
         // Usable, but every sat sits on the user's side: not even a 1-msat keysend can leave.
         let fake = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 0, true)]);
         mgr.reconcile_from_grpc(&fake, 80_000.0).await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert!(fake.sends.lock().unwrap().is_empty(), "no SYNC is attempted without outbound liquidity");
         *fake.channels.lock().unwrap() = vec![make_channel(CHANNEL_ID_HEX, "7", COUNTERPARTY_HEX, 100_000, 50_000_000, true)];
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "the queued SYNC goes out once the LSP can send");
         assert_eq!(sent_sync_payload(&fake, 0)["sync_version"], 1, "waiting consumed no version");
     }
@@ -9383,13 +9732,13 @@ mod tests {
         };
         mgr.reconcile_from_grpc(&fake, 80_000.0).await;
         for _ in 0..3 {
-            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+            mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         }
         let mut events = stable_channels::audit::drain_test_capture();
         assert_eq!(refused(&events), 2, "an instantly refused SYNC backs off like a failed one");
         for _ in 0..(2 * SYNC_RETRY_MAX_ATTEMPTS) {
             age_sync_attempts(&dir, SYNC_RETRY_BACKOFF_MAX_SECS as i64);
-            mgr.reconcile_if_empty(&fake, 80_000.0).await;
+            mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         }
         events.extend(stable_channels::audit::drain_test_capture());
         stable_channels::audit::disable_test_capture();
@@ -9407,10 +9756,10 @@ mod tests {
             direction: 1, amount_msat: Some(1), ..Default::default()
         });
         age_sync_attempts(&dir, SYNC_PENDING_TIMEOUT_SECS as i64 - 10);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "a young pending attempt is still awaited");
         age_sync_attempts(&dir, 20);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2, "an abandoned attempt is replaced");
         assert_eq!(mgr.db.list_pending_settlements().unwrap(),
             vec![("fake-payment-id-2".into(), "sync".into())]);
@@ -9423,10 +9772,10 @@ mod tests {
     #[tokio::test]
     async fn sync_pending_attempt_unknown_to_ldk_is_abandoned_after_the_timeout() {
         let (dir, mut mgr, fake) = sync_delivery_fixture().await;
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 1, "an unknown young attempt is still awaited");
         age_sync_attempts(&dir, SYNC_PENDING_TIMEOUT_SECS as i64 + 10);
-        mgr.reconcile_if_empty(&fake, 80_000.0).await;
+        mgr.reconcile_unless_hydrated(&fake, 80_000.0).await;
         assert_eq!(fake.sends.lock().unwrap().len(), 2);
         assert!(mgr.db.list_failed_sync_channels().unwrap().is_empty(), "the replacement supersedes it");
     }
