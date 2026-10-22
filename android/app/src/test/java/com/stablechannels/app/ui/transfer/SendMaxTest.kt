@@ -34,6 +34,14 @@ class SendMaxTest {
     }
 
     @Test
+    fun spliceOutMaxLeavesTheSpliceFee() {
+        // 2 sat/vB on 180 vB.
+        assertEquals(29_640L, SendMax.spliceOutSats(44_516, 30_000, 2))
+        assertEquals(44_156L, SendMax.spliceOutSats(44_516, 50_000, 2))
+        assertEquals(0L, SendMax.spliceOutSats(300, 300, 2))
+    }
+
+    @Test
     fun usdIsRoundedDown() {
         // 44,025 sats at $100,000 is $44.025.
         assertEquals(44.02, SendMax.usd(44_025, 100_000.0), 0.0)

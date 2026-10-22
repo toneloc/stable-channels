@@ -21,6 +21,17 @@ internal object SendMax {
         return sats
     }
 
+    /**
+     * The on-chain "Send Max" amount when it splices out, as iOS works it out: one channel's
+     * outbound capacity, capped by the channel balance, less the splice fee estimate.
+     */
+    fun spliceOutSats(lightningBalanceSats: Long, outboundCapacitySats: Long, feeRateSatVb: Long) =
+        maxOf(
+            minOf(lightningBalanceSats, outboundCapacitySats) -
+                feeRateSatVb * Constants.ESTIMATED_SPLICE_OUT_VBYTES,
+            0,
+        )
+
     /** USD for [sats], rounded down to the cent so the amount sent stays within it. */
     fun usd(sats: Long, btcPrice: Double): Double =
         floor(sats.toDouble() / Constants.SATS_IN_BTC * btcPrice * 100) / 100
