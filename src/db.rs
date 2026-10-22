@@ -59,7 +59,7 @@ pub struct StabilityTopUp {
     pub top_up_sats: u64,
     /// Sats of it the wallet has already paid back, which are left out when it is booked.
     pub offset_sats: u64,
-    /// Unix seconds at which the top-up was recorded as sent.
+    /// Unix seconds at which the top-up was recorded, which is before its send.
     pub recorded_at: i64,
 }
 
@@ -4429,7 +4429,7 @@ impl Database {
         committed
     }
 
-    /// Stability top-ups sent and not yet known to be claimed or failed, oldest first.
+    /// Stability top-ups recorded and not yet known to be claimed or failed, oldest first.
     pub fn stability_top_ups_in_flight(&self) -> SqliteResult<Vec<StabilityTopUp>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -4449,6 +4449,17 @@ impl Database {
             })
         })?;
         rows.collect()
+    }
+
+    /// Key a top-up still on the way by the id the node gave its payment, so the node's outcome events find it. False if no such top-up is on the way.
+    pub fn rekey_stability_top_up(&self, recorded_id: &str, node_payment_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        let changed = conn.execute(
+            "UPDATE settlement_payments SET payment_id = ?2
+             WHERE payment_id = ?1 AND kind = 'stability' AND outcome = 'pending' AND top_up_sats IS NOT NULL",
+            params![recorded_id, node_payment_id],
+        )?;
+        Ok(changed == 1)
     }
 
     /// Top-ups an older daemon booked when it sent them and whose outcome is still not recorded, as (payment id, channel, unix seconds recorded).
@@ -7861,6 +7872,20 @@ mod tests {
         assert_eq!(settlement_outcome(&db), "pending");
         assert_eq!(db.load_channel("26").unwrap().unwrap().backing_sats, 10_000);
         assert_eq!(db.load_channel("0x1a").unwrap().unwrap().backing_sats, 7_000);
+    }
+
+    #[test]
+    fn top_up_takes_the_id_the_node_gave_it() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "stable", 10.0, 10_000, 5_000, None).unwrap();
+        db.record_stability_top_up_in_flight("hash", "stable", "physical", 2_500, 10.0, 10_000, 5_000, 2_500_000, "lsp_to_user", "counterparty")
+            .unwrap();
+
+        assert!(db.rekey_stability_top_up("hash", "node-id").unwrap());
+        assert_eq!(db.stability_top_ups_in_flight().unwrap()[0].payment_id, "node-id");
+        assert!(db.claim_stability_top_up("node-id", Some(2_500_000), None).unwrap().is_some(), "the node's outcome events carry its id");
+        assert_eq!(db.load_channel("stable").unwrap().unwrap().backing_sats, 12_500);
+        assert!(!db.rekey_stability_top_up("node-id", "other").unwrap(), "only a top-up still on the way is rekeyed");
     }
 
     #[test]
