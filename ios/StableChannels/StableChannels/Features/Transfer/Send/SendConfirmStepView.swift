@@ -58,10 +58,7 @@ struct SendConfirmStepView: View {
                     )
 
                     if isInsufficientBalance {
-                        SendErrorBanner(message: String(
-                            localized: "error_insufficient_balance_total",
-                            defaultValue: "Insufficient balance. Total debit exceeds available funds."
-                        ))
+                        SendErrorBanner(message: String(localized: .errorInsufficientBalanceTotal))
                     } else if let error = model.errorMessage {
                         SendErrorBanner(message: error)
                     }
@@ -74,7 +71,7 @@ struct SendConfirmStepView: View {
 
             VStack(spacing: 4) {
                 SlideToSendButton(
-                    title: String(localized: "button_slide_to_send", defaultValue: "Slide to Send"),
+                    title: String(localized: .buttonSlideToSend),
                     isSending: model.isSending,
                     resetToken: model.resetToken
                 ) {
@@ -84,7 +81,7 @@ struct SendConfirmStepView: View {
                 .opacity(isSlideDisabled ? 0.5 : 1.0)
 
                 if !model.isFeeRateReady {
-                    Text(String(localized: "label_loading_network_fee", defaultValue: "Loading network fee..."))
+                    Text(String(localized: .labelLoadingNetworkFee))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -137,15 +134,15 @@ struct SendConfirmStepView: View {
 
     private var feeCardLabel: String {
         if isSpliceOut {
-            return String(localized: "label_estimated_splice_fee", defaultValue: "Estimated Splice Fee")
+            return String(localized: .labelEstimatedSpliceFee)
         }
         if isLightning {
-            return String(localized: "label_max_routing_fee", defaultValue: "Max Routing Fee")
+            return String(localized: .labelMaxRoutingFee)
         }
         // Sending everything: the node sets the exact fee when it builds the transaction.
         return model.sendsEntireOnchainBalance(appState: appState)
-            ? String(localized: "label_estimated_network_fee", defaultValue: "Estimated Network Fee")
-            : String(localized: "label_total_fees", defaultValue: "Network Fee")
+            ? String(localized: .labelEstimatedNetworkFee)
+            : String(localized: .labelTotalFees)
     }
 
     private var isInsufficientBalance: Bool {
@@ -169,10 +166,10 @@ struct SendConfirmStepView: View {
 
     private var addressHeaderTitle: String {
         switch model.destination {
-        case .bolt11: return String(localized: "header_invoice", defaultValue: "Lightning (BOLT11) Invoice")
-        case .bolt12: return String(localized: "header_offer", defaultValue: "Lightning (BOLT12) Offer")
-        case .lightningAddress, .lnurlPay: return String(localized: "header_recipient", defaultValue: "Recipient")
-        case .onchain, .none: return String(localized: "header_address", defaultValue: "Recipient Address")
+        case .bolt11: return String(localized: .headerInvoice)
+        case .bolt12: return String(localized: .headerOffer)
+        case .lightningAddress, .lnurlPay: return String(localized: .headerRecipient)
+        case .onchain, .none: return String(localized: .headerAddress)
         }
     }
 }

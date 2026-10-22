@@ -57,7 +57,7 @@ struct AppAccessSettingsView: View {
 
     var body: some View {
         List {
-            Section(String(localized: "section_wallet_security", defaultValue: "Wallet Security")) {
+            Section(String(localized: .sectionWalletSecurity)) {
                 Toggle(isOn: Binding(
                     get: { appUnlockEnabled },
                     set: { newValue in
@@ -74,7 +74,7 @@ struct AppAccessSettingsView: View {
                         }
                     }
                 )) {
-                    Label { Text(String(localized: "label_app_unlock", defaultValue: "App Unlock")) }
+                    Label { Text(String(localized: .labelAppUnlock)) }
                         icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(capability.biometricType == .none || coordinator.isEnabling)
@@ -96,14 +96,14 @@ struct AppAccessSettingsView: View {
                     }
                 )) {
                     Label {
-                        Text(String(localized: "label_payment_confirmation", defaultValue: "Payment Confirmation"))
+                        Text(String(localized: .labelPaymentConfirmation))
                     }
                     icon: { Image(systemName: "faceid").foregroundStyle(.green) }
                 }
                 .disabled(capability.biometricType == .none || coordinator.isEnabling)
             }
         }
-        .navigationTitle(String(localized: "title_app_access", defaultValue: "App Access"))
+        .navigationTitle(String(localized: .titleAppAccess))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             appUnlockEnabled = isEnabled(.appUnlock)
@@ -155,7 +155,7 @@ struct ToggleAuthSheet: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
-                Button(String(localized: "button_continue", defaultValue: "Continue")) {
+                Button(String(localized: .buttonContinue)) {
                     Task {
                         await coordinator.disableToggle(target.rawValue, reason: target.disableTitle)
                         dismiss()
@@ -164,17 +164,17 @@ struct ToggleAuthSheet: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
 
-                Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                Button(String(localized: .buttonCancel)) {
                     dismiss()
                 }
                 .foregroundStyle(.secondary)
             }
             .padding()
-            .navigationTitle(String(localized: "title_security", defaultValue: "Security"))
+            .navigationTitle(String(localized: .titleSecurity))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
+                    Button(String(localized: .buttonCancel)) { dismiss() }
                 }
             }
         }

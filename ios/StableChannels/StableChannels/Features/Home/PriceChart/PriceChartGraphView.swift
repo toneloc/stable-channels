@@ -143,12 +143,9 @@ struct PriceChartGraphView: View {
             .overlay {
                 VStack(spacing: 12) {
                     CurveProgressIndicator(curve: .spiralSearch, size: 68, tint: .blue)
-                    Text(String(
-                        localized: "status_collecting_data",
-                        defaultValue: "Collecting price data..."
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text(String(localized: .statusCollectingData))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.horizontal, 14)

@@ -96,7 +96,7 @@ struct BackupSettingsView: View {
             supportBannerSection
         }
         .listStyle(.insetGrouped)
-        .navigationTitle(String(localized: "title_backup", defaultValue: "Backup"))
+        .navigationTitle(String(localized: .titleBackup))
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showRestore) {
             RestoreSeedSheet(
@@ -159,8 +159,8 @@ struct BackupSettingsView: View {
                     Image(systemName: showSeedWords ? "eye.slash.fill" : "eye.fill")
                         .foregroundStyle(Color.stablePrimary)
                     Text(showSeedWords
-                        ? String(localized: "button_hide_seed", defaultValue: "Hide Seed Words")
-                        : String(localized: "button_view_seed", defaultValue: "View Seed Words"))
+                        ? String(localized: .buttonHideSeed)
+                        : String(localized: .buttonViewSeed))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption)
@@ -173,12 +173,9 @@ struct BackupSettingsView: View {
                 SeedDisplayView(words: words)
             }
         } header: {
-            Text(String(localized: "section_backup_seed", defaultValue: "Backup"))
+            Text(String(localized: .sectionBackupSeed))
         } footer: {
-            Text(String(
-                localized: "info_backup_seed",
-                defaultValue: "Write these words down and store them safely. Anyone with these words can access your funds."
-            ))
+            Text(String(localized: .infoBackupSeed))
         }
     }
 
@@ -190,7 +187,7 @@ struct BackupSettingsView: View {
                 HStack {
                     Image(systemName: "arrow.uturn.backward.circle.fill")
                         .foregroundStyle(.orange)
-                    Text(String(localized: "button_restore_seed", defaultValue: "Restore from Seed"))
+                    Text(String(localized: .buttonRestoreSeed))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption)
@@ -199,12 +196,9 @@ struct BackupSettingsView: View {
             }
             .foregroundStyle(.primary)
         } header: {
-            Text(String(localized: "section_restore", defaultValue: "Restore"))
+            Text(String(localized: .sectionRestore))
         } footer: {
-            Text(String(
-                localized: "info_restore",
-                defaultValue: "Restore will stop your current node and start fresh."
-            ))
+            Text(String(localized: .infoRestore))
         }
     }
 

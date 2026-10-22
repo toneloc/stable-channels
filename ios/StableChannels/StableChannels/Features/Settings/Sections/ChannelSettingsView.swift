@@ -14,29 +14,29 @@ struct ChannelSettingsView: View {
             if let channel = appState.nodeService.channels.first {
                 Section {
                     HStack {
-                        Text(String(localized: "label_capacity", defaultValue: "Capacity"))
+                        Text(String(localized: .labelCapacity))
                         Spacer()
                         Text("\(channel.channelValueSats.btcSpacedFormatted) BTC")
                     }
                     HStack {
-                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Text(String(localized: .labelStatus))
                         Spacer()
                         channelStatusBadge(isReady: channel.isChannelReady)
                     }
                     HStack {
-                        Text(String(localized: "label_outbound", defaultValue: "Outbound"))
+                        Text(String(localized: .labelOutbound))
                         Spacer()
                         Text("\((channel.outboundCapacityMsat / 1000).btcSpacedFormatted) BTC")
                     }
                     HStack {
-                        Text(String(localized: "label_inbound", defaultValue: "Inbound"))
+                        Text(String(localized: .labelInbound))
                         Spacer()
                         Text("\((channel.inboundCapacityMsat / 1000).btcSpacedFormatted) BTC")
                     }
 
                     if let closeTxid = appState.transactionLinkService.lastCloseTxid, !closeTxid.isEmpty {
                         HStack {
-                            Text(String(localized: "label_close_tx", defaultValue: "Close Tx"))
+                            Text(String(localized: .labelCloseTx))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(String(closeTxid.prefix(8)) + "..." + String(closeTxid.suffix(8)))
@@ -46,7 +46,7 @@ struct ChannelSettingsView: View {
                         if let url = Constants.txExplorerLink(for: closeTxid) {
                             Link(destination: url) {
                                 HStack(spacing: 4) {
-                                    Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                    Text(String(localized: .viewOnExplorer))
                                     Image(systemName: "arrow.up.right.square")
                                 }
                                 .font(.caption)
@@ -54,15 +54,12 @@ struct ChannelSettingsView: View {
                             }
                         }
                     } else if appState.isChannelClosing {
-                        Text(String(
-                            localized: "info_close_pending_confirmation",
-                            defaultValue: "Channel closing — will appear on explorer after confirmation"
-                        ))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        Text(String(localized: .infoClosePendingConfirmation))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     } else if let txid = appState.fundingTxid, !txid.isEmpty {
                         HStack {
-                            Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
+                            Text(String(localized: .labelFundingTx))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
@@ -72,7 +69,7 @@ struct ChannelSettingsView: View {
                         if let url = Constants.txExplorerLink(for: txid) {
                             Link(destination: url) {
                                 HStack(spacing: 4) {
-                                    Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                    Text(String(localized: .viewOnExplorer))
                                     Image(systemName: "arrow.up.right.square")
                                 }
                                 .font(.caption)
@@ -85,7 +82,7 @@ struct ChannelSettingsView: View {
                 if !appState.isChannelClosing {
                     Section {
                         Button(
-                            String(localized: "button_close_channel", defaultValue: "Close channel"),
+                            String(localized: .buttonCloseChannel),
                             role: .destructive
                         ) {
                             showCloseChannelAlert = true
@@ -94,10 +91,7 @@ struct ChannelSettingsView: View {
                         .foregroundStyle(appState.isOnline ? .red : .secondary)
                     } footer: {
                         if !appState.isOnline {
-                            Text(String(
-                                localized: "info_close_channel_offline",
-                                defaultValue: "Internet connection required to close channel."
-                            ))
+                            Text(String(localized: .infoCloseChannelOffline))
                         }
                     }
                 } else {
@@ -105,7 +99,7 @@ struct ChannelSettingsView: View {
                         HStack {
                             ProgressView()
                                 .padding(.trailing, 8)
-                            Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
+                            Text(String(localized: .statusClosingChannel))
                                 .foregroundStyle(.secondary)
                         }
                     }
@@ -115,25 +109,25 @@ struct ChannelSettingsView: View {
                     HStack {
                         ProgressView()
                             .padding(.trailing, 8)
-                        Text(String(localized: "status_closing_channel", defaultValue: "Closing channel..."))
+                        Text(String(localized: .statusClosingChannel))
                             .foregroundStyle(.secondary)
                     }
                 }
             } else if appState.hasActiveChannel {
                 Section {
                     HStack {
-                        Text(String(localized: "label_capacity", defaultValue: "Capacity"))
+                        Text(String(localized: .labelCapacity))
                         Spacer()
                         Text(appState.lightningBalanceSats.satsFormatted)
                     }
                     HStack {
-                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Text(String(localized: .labelStatus))
                         Spacer()
                         channelStatusBadge(isReady: appState.hasReadyChannel)
                     }
                     if let txid = appState.fundingTxid, !txid.isEmpty {
                         HStack {
-                            Text(String(localized: "label_funding_tx", defaultValue: "Funding Tx"))
+                            Text(String(localized: .labelFundingTx))
                                 .foregroundStyle(.secondary)
                             Spacer()
                             Text(String(txid.prefix(8)) + "..." + String(txid.suffix(8)))
@@ -142,15 +136,12 @@ struct ChannelSettingsView: View {
                         }
                     }
                 } footer: {
-                    Text(String(
-                        localized: "info_channel_offline_note",
-                        defaultValue: "Channel metrics cached. Reconnect to the internet for live balance synchronization."
-                    ))
+                    Text(String(localized: .infoChannelOfflineNote))
                 }
 
                 Section {
                     Button(
-                        String(localized: "button_close_channel", defaultValue: "Close channel"),
+                        String(localized: .buttonCloseChannel),
                         role: .destructive
                     ) {
                         showCloseChannelAlert = true
@@ -158,37 +149,28 @@ struct ChannelSettingsView: View {
                     .disabled(true)
                     .foregroundStyle(.secondary)
                 } footer: {
-                    Text(String(
-                        localized: "info_close_channel_offline",
-                        defaultValue: "Internet connection required to close channel."
-                    ))
+                    Text(String(localized: .infoCloseChannelOffline))
                 }
             } else {
                 Section {
-                    Text(String(
-                        localized: "info_no_channel",
-                        defaultValue: "No channel open yet."
-                    ))
-                    .foregroundStyle(.secondary)
+                    Text(String(localized: .infoNoChannel))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
-        .navigationTitle(String(localized: "title_channel", defaultValue: "Channel"))
+        .navigationTitle(String(localized: .titleChannel))
         .navigationBarTitleDisplayMode(.inline)
         .alert(
-            String(localized: "alert_close_channel_title", defaultValue: "Close channel"),
+            String(localized: .alertCloseChannelTitle),
             isPresented: $showCloseChannelAlert
         ) {
-            Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel"), role: .cancel) { }
-            Button(String(localized: "alert_close_channel_confirm", defaultValue: "Close channel"),
+            Button(String(localized: .alertCloseChannelCancel), role: .cancel) { }
+            Button(String(localized: .alertCloseChannelConfirm),
                    role: .destructive) {
                 closeChannel()
             }
         } message: {
-            Text(String(
-                localized: "alert_close_channel_message",
-                defaultValue: "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
-            ))
+            Text(String(localized: .alertCloseChannelMessage))
         }
     }
 
@@ -225,15 +207,15 @@ struct ChannelSettingsView: View {
                 Circle()
                     .fill(.orange)
                     .frame(width: 8, height: 8)
-                Text(String(localized: "channel_status_offline", defaultValue: "Offline"))
+                Text(String(localized: .channelStatusOffline))
                     .foregroundStyle(.orange)
             } else {
                 Circle()
                     .fill(isReady ? .green : .orange)
                     .frame(width: 8, height: 8)
                 Text(isReady
-                    ? String(localized: "channel_status_ready", defaultValue: "Ready")
-                    : String(localized: "channel_status_pending", defaultValue: "Pending"))
+                    ? String(localized: .channelStatusReady)
+                    : String(localized: .channelStatusPending))
             }
         }
     }

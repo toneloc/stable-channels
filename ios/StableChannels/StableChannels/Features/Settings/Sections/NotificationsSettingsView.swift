@@ -9,18 +9,18 @@ struct NotificationsSettingsView: View {
         List {
             Section {
                 HStack {
-                    Text(String(localized: "label_notifications", defaultValue: "Notifications"))
+                    Text(String(localized: .labelNotifications))
                     Spacer()
                     if notificationsEnabled {
-                        Text(String(localized: "notifications_enabled", defaultValue: "Enabled"))
+                        Text(String(localized: .notificationsEnabled))
                             .foregroundStyle(.green)
                     } else {
-                        Text(String(localized: "notifications_disabled", defaultValue: "Disabled"))
+                        Text(String(localized: .notificationsDisabled))
                             .foregroundStyle(.red)
                     }
                 }
             } header: {
-                Text(String(localized: "label_status", defaultValue: "Status"))
+                Text(String(localized: .labelStatus))
             }
 
             if !notificationsEnabled {
@@ -32,21 +32,18 @@ struct NotificationsSettingsView: View {
                     } label: {
                         HStack {
                             Image(systemName: "gear")
-                            Text(String(localized: "button_enable_in_settings", defaultValue: "Enable in Settings"))
+                            Text(String(localized: .buttonEnableInSettings))
                             Spacer()
                             Image(systemName: "arrow.up.right")
                                 .font(.caption)
                         }
                     }
                 } footer: {
-                    Text(String(
-                        localized: "info_notifications_needed",
-                        defaultValue: "Notifications are required to receive stability payments while the app is closed."
-                    ))
+                    Text(String(localized: .infoNotificationsNeeded))
                 }
             }
         }
-        .navigationTitle(String(localized: "title_notifications", defaultValue: "Notifications"))
+        .navigationTitle(String(localized: .titleNotifications))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             checkNotificationStatus()

@@ -57,7 +57,7 @@ struct BalanceBarHeaderView: View {
                     .foregroundStyle(.red)
                     .symbolEffect(.pulse.byLayer, options: .repeating)
 
-                Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                Text(String(localized: .offlineTitle))
                     .font(.caption2.bold())
                     .foregroundStyle(.red)
 
@@ -68,14 +68,11 @@ struct BalanceBarHeaderView: View {
                     .opacity(offlinePulse ? 1.0 : 0.5)
             }
 
-            Text(String(
-                localized: "offline_check_network",
-                defaultValue: "Please check your network connection"
-            ))
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
+            Text(String(localized: .offlineCheckNetwork))
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
         .multilineTextAlignment(.center)
         .padding(.horizontal, 10)
@@ -101,7 +98,7 @@ struct BalanceBarHeaderView: View {
                 Image(systemName: "arrow.down.circle.fill")
                     .font(.caption2)
                     .foregroundStyle(.green)
-                Text(String(localized: "deposit_to_balance_prompt", defaultValue: "Deposit to balance channel"))
+                Text(String(localized: .depositToBalancePrompt))
                     .font(.caption2.bold())
                     .foregroundStyle(.primary)
             }
@@ -123,14 +120,11 @@ struct BalanceBarHeaderView: View {
                 .foregroundStyle(.red)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            Text(String(
-                localized: "stabilization_reserve_explanation",
-                defaultValue: "Keeps a small BTC reserve in the channel."
-            ))
-            .font(.system(size: 9))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
+            Text(String(localized: .stabilizationReserveExplanation))
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
         .multilineTextAlignment(.center)
         .padding(.horizontal, 10)

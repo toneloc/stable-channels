@@ -8,37 +8,34 @@ struct AppearanceSettingsView: View {
     var body: some View {
         List {
             Section {
-                Picker(String(localized: "label_theme", defaultValue: "Theme"), selection: $themeSelection) {
+                Picker(String(localized: .labelTheme), selection: $themeSelection) {
                     HStack {
                         Image(systemName: "circle.lefthalf.filled")
-                        Text(String(localized: "theme_system", defaultValue: "System"))
+                        Text(String(localized: .themeSystem))
                     }
                     .tag("system")
 
                     HStack {
                         Image(systemName: "sun.max.fill")
-                        Text(String(localized: "theme_light", defaultValue: "Light"))
+                        Text(String(localized: .themeLight))
                     }
                     .tag("light")
 
                     HStack {
                         Image(systemName: "moon.fill")
-                        Text(String(localized: "theme_dark", defaultValue: "Dark"))
+                        Text(String(localized: .themeDark))
                     }
                     .tag("dark")
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
             } header: {
-                Text(String(localized: "section_appearance", defaultValue: "Appearance"))
+                Text(String(localized: .sectionAppearance))
             } footer: {
-                Text(String(
-                    localized: "info_theme_setting",
-                    defaultValue: "System uses your device's appearance setting."
-                ))
+                Text(String(localized: .infoThemeSetting))
             }
         }
-        .navigationTitle(String(localized: "title_appearance", defaultValue: "Appearance"))
+        .navigationTitle(String(localized: .titleAppearance))
         .navigationBarTitleDisplayMode(.inline)
     }
 }

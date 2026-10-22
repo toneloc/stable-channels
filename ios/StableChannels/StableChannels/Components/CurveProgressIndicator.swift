@@ -183,9 +183,9 @@ typealias MathCurveLoader = CurveProgressIndicator
 
             Divider()
 
-            // 2. Buy / Sell - Order Pending Dialog
+            // 2. Stability change pending dialog
             VStack(alignment: .leading, spacing: 8) {
-                Text("2. Trade Execution (BuyView / SellView)")
+                Text("2. Stability Change (BuyView / SellView)")
                     .font(.caption.bold())
                     .foregroundStyle(.secondary)
 
@@ -193,10 +193,10 @@ typealias MathCurveLoader = CurveProgressIndicator
                     CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
                         .padding(.bottom, 2)
 
-                    Text("Order Pending")
+                    Text("Stability Change Pending")
                         .font(.headline.bold())
 
-                    Text("Converting 0.00500000 BTC for $485.20")
+                    Text("Stabilizing 0.00500000 BTC as $485.20")
                         .font(.caption)
                         .foregroundStyle(.secondary)
 

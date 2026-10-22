@@ -10,7 +10,7 @@ struct NodeSettingsView: View {
             Section {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(String(localized: "label_status", defaultValue: "Status"))
+                        Text(String(localized: .labelStatus))
                             .font(.subheadline)
                         HStack(spacing: 6) {
                             Circle()
@@ -26,7 +26,7 @@ struct NodeSettingsView: View {
                         .foregroundStyle(statusColor)
                 }
             } header: {
-                Text(String(localized: "label_node_status", defaultValue: "Node Status"))
+                Text(String(localized: .labelNodeStatus))
             }
 
             Section {
@@ -37,7 +37,7 @@ struct NodeSettingsView: View {
                         showNodeId = true
                     } label: {
                         HStack {
-                            Text(String(localized: "button_show_node_id", defaultValue: "Show Node ID"))
+                            Text(String(localized: .buttonShowNodeId))
                             Spacer()
                             Image(systemName: "chevron.right")
                                 .font(.caption)
@@ -46,33 +46,30 @@ struct NodeSettingsView: View {
                     }
                 }
             } header: {
-                Text(String(localized: "label_node_identity", defaultValue: "Node Identity"))
+                Text(String(localized: .labelNodeIdentity))
             } footer: {
-                Text(String(
-                    localized: "info_node_id",
-                    defaultValue: "Your node's public key. Share this to receive Lightning payments."
-                ))
+                Text(String(localized: .infoNodeId))
             }
 
             Section {
                 HStack {
-                    Text(String(localized: "label_network", defaultValue: "Network"))
+                    Text(String(localized: .labelNetwork))
                     Spacer()
                     Text(Constants.defaultNetwork)
                         .foregroundStyle(.secondary)
                 }
                 HStack {
-                    Text(String(localized: "label_explorer", defaultValue: "Explorer"))
+                    Text(String(localized: .labelExplorer))
                     Spacer()
                     Text(String(appState.chainURL.replacingOccurrences(of: "https://", with: "").prefix(20)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             } header: {
-                Text(String(localized: "label_connection", defaultValue: "Connection"))
+                Text(String(localized: .labelConnection))
             }
         }
-        .navigationTitle(String(localized: "title_node", defaultValue: "Node"))
+        .navigationTitle(String(localized: .titleNode))
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -88,11 +85,11 @@ struct NodeSettingsView: View {
 
     private var statusText: String {
         if !isOnline {
-            return String(localized: "status_offline_paused", defaultValue: "Offline (Paused)")
+            return String(localized: .statusOfflinePaused)
         }
         return isNodeRunning
-            ? String(localized: "status_running", defaultValue: "Running")
-            : String(localized: "status_stopped", defaultValue: "Stopped")
+            ? String(localized: .statusRunning)
+            : String(localized: .statusStopped)
     }
 
     private var statusIcon: String {
@@ -119,11 +116,11 @@ struct NodeSettingsView: View {
         } label: {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(String(localized: "label_node_id", defaultValue: "Node ID"))
+                    Text(String(localized: .labelNodeId))
                         .font(.subheadline)
                     Spacer()
                     if copiedNodeId {
-                        Label(String(localized: "button_copied", defaultValue: "Copied"), systemImage: "checkmark")
+                        Label(String(localized: .buttonCopied), systemImage: "checkmark")
                             .font(.caption)
                             .foregroundStyle(.green)
                             .transition(.scale.combined(with: .opacity))
@@ -134,7 +131,7 @@ struct NodeSettingsView: View {
                     }
                 }
                 Text(effectiveNodeId.isEmpty
-                    ? String(localized: "status_offline_unknown", defaultValue: "Offline — waiting for node start")
+                    ? String(localized: .statusOfflineUnknown)
                     : effectiveNodeId)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)

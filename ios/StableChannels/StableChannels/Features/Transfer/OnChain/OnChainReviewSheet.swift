@@ -43,7 +43,7 @@ struct OnChainReviewSheet: View {
                         )
 
                         SendConfirmAddressCard(
-                            headerTitle: String(localized: "header_address", defaultValue: "Recipient Address"),
+                            headerTitle: String(localized: .headerAddress),
                             representation: .onchain(AddressVisualChunker.chunkAddress(address)),
                             rawAddress: address
                         )
@@ -67,14 +67,8 @@ struct OnChainReviewSheet: View {
                         }
 
                         SendConfirmFeeTotalCard(
-                            feeLabel: isSpliceOut ? String(
-                                localized: "label_estimated_splice_fee",
-                                defaultValue: "Estimated Splice Fee"
-                            ) :
-                                String(
-                                    localized: "label_total_fees",
-                                    defaultValue: "Network Fee"
-                                ),
+                            feeLabel: isSpliceOut ? String(localized: .labelEstimatedSpliceFee) :
+                                String(localized: .labelTotalFees),
                             estimatedFeeSats: model.estimatedFeeSats(appState: appState),
                             rateSatVb: model.effectiveFeeRateSatVb,
                             totalDebitSats: model.totalDebitSats(appState: appState),
@@ -93,7 +87,7 @@ struct OnChainReviewSheet: View {
 
                 VStack(spacing: 4) {
                     SlideToSendButton(
-                        title: String(localized: "button_slide_to_send", defaultValue: "Slide to Send"),
+                        title: String(localized: .buttonSlideToSend),
                         isSending: model.isSending,
                         resetToken: model.resetToken
                     ) {
@@ -107,11 +101,11 @@ struct OnChainReviewSheet: View {
                 .padding(.bottom, 16)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(String(localized: "title_confirm_transaction", defaultValue: "Confirm transaction"))
+            .navigationTitle(String(localized: .titleConfirmTransaction))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                    Button(String(localized: .buttonCancel)) {
                         dismiss()
                     }
                     .disabled(model.isSending)

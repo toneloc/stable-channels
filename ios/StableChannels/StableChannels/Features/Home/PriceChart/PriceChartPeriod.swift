@@ -68,17 +68,17 @@ enum ChartPeriod: String, CaseIterable, Sendable {
 
     var label: String {
         switch self {
-        case .day: return String(localized: "period_label_day", defaultValue: "Past 24 Hours")
-        case .week: return String(localized: "period_label_week", defaultValue: "Past Week")
-        case .month: return String(localized: "period_label_month", defaultValue: "Past Month")
-        case .threeMonth: return String(localized: "period_label_three_month", defaultValue: "Past 3 Months")
-        case .sixMonth: return String(localized: "period_label_six_month", defaultValue: "Past 6 Months")
-        case .ytd: return String(localized: "period_label_ytd", defaultValue: "Year to Date")
-        case .year: return String(localized: "period_label_year", defaultValue: "Past Year")
-        case .twoYear: return String(localized: "period_label_two_year", defaultValue: "Past 2 Years")
-        case .fiveYear: return String(localized: "period_label_five_year", defaultValue: "Past 5 Years")
-        case .tenYear: return String(localized: "period_label_ten_year", defaultValue: "Past 10 Years")
-        case .all: return String(localized: "period_label_all", defaultValue: "All Time")
+        case .day: return String(localized: .periodLabelDay)
+        case .week: return String(localized: .periodLabelWeek)
+        case .month: return String(localized: .periodLabelMonth)
+        case .threeMonth: return String(localized: .periodLabelThreeMonth)
+        case .sixMonth: return String(localized: .periodLabelSixMonth)
+        case .ytd: return String(localized: .periodLabelYtd)
+        case .year: return String(localized: .periodLabelYear)
+        case .twoYear: return String(localized: .periodLabelTwoYear)
+        case .fiveYear: return String(localized: .periodLabelFiveYear)
+        case .tenYear: return String(localized: .periodLabelTenYear)
+        case .all: return String(localized: .periodLabelAll)
         }
     }
 }

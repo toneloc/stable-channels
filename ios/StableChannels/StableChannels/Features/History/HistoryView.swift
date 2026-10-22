@@ -12,9 +12,9 @@ struct HistoryView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 // Segment picker
-                Picker(String(localized: "picker_history", defaultValue: "History"), selection: $selectedSegment) {
-                    Text(String(localized: "segment_trades", defaultValue: "Orders")).tag(0)
-                    Text(String(localized: "segment_payments", defaultValue: "Payments")).tag(1)
+                Picker(String(localized: .pickerHistory), selection: $selectedSegment) {
+                    Text(String(localized: .segmentTrades)).tag(0)
+                    Text(String(localized: .segmentPayments)).tag(1)
                 }
                 .pickerStyle(.segmented)
                 .padding()
@@ -48,21 +48,15 @@ struct HistoryView: View {
                     Group {
                         if selectedSegment == 0 && trades.isEmpty {
                             ContentUnavailableView(
-                                String(localized: "empty_trades_title", defaultValue: "No Trades"),
+                                String(localized: .emptyTradesTitle),
                                 systemImage: "arrow.left.arrow.right",
-                                description: Text(String(
-                                    localized: "empty_trades_desc",
-                                    defaultValue: "Convert BTC to see orders here."
-                                ))
+                                description: Text(String(localized: .emptyTradesDesc))
                             )
                         } else if selectedSegment == 1 && payments.isEmpty {
                             ContentUnavailableView(
-                                String(localized: "empty_payments_title", defaultValue: "No Payments"),
+                                String(localized: .emptyPaymentsTitle),
                                 systemImage: "bolt.fill",
-                                description: Text(String(
-                                    localized: "empty_payments_desc",
-                                    defaultValue: "Send or receive payments to see history here."
-                                ))
+                                description: Text(String(localized: .emptyPaymentsDesc))
                             )
                         }
                     }
@@ -70,7 +64,7 @@ struct HistoryView: View {
                     .allowsHitTesting(false)
                 }
             }
-            .navigationTitle(String(localized: "title_history", defaultValue: "History"))
+            .navigationTitle(String(localized: .titleHistory))
             .navigationBarTitleDisplayMode(.inline)
             .onAppear {
                 loadHistory()
@@ -222,8 +216,8 @@ struct TradeRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(isBuy
-                    ? String(localized: "trade_buy_btc", defaultValue: "USD → BTC")
-                    : String(localized: "trade_sell_btc", defaultValue: "BTC → USD"))
+                    ? String(localized: .tradeBuyBtc)
+                    : String(localized: .tradeSellBtc))
                     .fontWeight(.medium)
                 Text(trade.date, style: .relative)
                     .font(.caption)
@@ -265,8 +259,8 @@ struct PaymentRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(payment.isIncoming
-                    ? String(localized: "payment_received", defaultValue: "Received")
-                    : String(localized: "payment_sent", defaultValue: "Sent"))
+                    ? String(localized: .paymentReceived)
+                    : String(localized: .paymentSent))
                     .fontWeight(.medium)
                 Text(paymentTypeLabel)
                     .font(.caption)
@@ -293,13 +287,13 @@ struct PaymentRowView: View {
 
     private var paymentTypeLabel: String {
         switch payment.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
-        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
-        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
-        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
+        case "stability": return String(localized: .paymentTypeStability)
+        case "lightning": return String(localized: .paymentTypeLightning)
+        case "splice_in": return String(localized: .paymentTypeSpliceIn)
+        case "splice_out": return String(localized: .paymentTypeSpliceOut)
+        case "onchain": return String(localized: .paymentTypeOnChain)
+        case "channel_close": return String(localized: .paymentTypeChannelClose)
+        case "bolt12": return String(localized: .paymentTypeBolt12)
         default: return payment.paymentType
         }
     }

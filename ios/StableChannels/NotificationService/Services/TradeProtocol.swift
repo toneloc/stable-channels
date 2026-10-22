@@ -20,15 +20,11 @@ enum StabilizationPolicy {
     }
 
     static func maximumMessage(_ cents: UInt64) -> String {
-        String(
-            format: String(localized: "maximum_additional_trade", defaultValue: "Maximum additional trade: $%.2f"),
-            Double(cents) / 100
-        )
+        String(localized: .maximumAdditionalTrade(String(format: "%.2f", Double(cents) / 100)))
     }
 
     static func limitExceededMessage(_ cents: UInt64) -> String {
-        let explanation = String(localized: "stabilization_reserve_explanation",
-                                 defaultValue: "Keeps a small BTC reserve in the channel.")
+        let explanation = String(localized: .stabilizationReserveExplanation)
         return maximumMessage(cents) + "\n" + explanation
     }
 }
@@ -53,13 +49,20 @@ enum TradeValidationError: LocalizedError, Equatable {
     /// Fixed local copy. Says what happened and, where the user can act, what to do about it.
     var errorDescription: String? {
         switch self {
-        case .invalidAmount: return "Enter a valid amount and try again."
-        case .invalidPrice: return "A fresh BTC/USD consensus is required before trading."
-        case .exceedsStableBalance: return "That is more than your stabilized balance. Reduce the amount."
-        case .channelNotReady: return "This channel is not ready to trade yet."
-        case .feeUnavailable: return "The trade fee could not be calculated. Refresh the price and try again."
-        case .feeExceedsBalance: return "Your balance cannot cover this trade and its fee. Reduce the amount."
-        case .allocationUnavailable: return "That is more than this channel can convert right now. Reduce the amount."
+        case .invalidAmount:
+            return String(localized: .errorInvalidAmount)
+        case .invalidPrice:
+            return String(localized: .errorFreshPriceRequired)
+        case .exceedsStableBalance:
+            return String(localized: .errorExceedsStableBalance)
+        case .channelNotReady:
+            return String(localized: .errorChannelNotReady)
+        case .feeUnavailable:
+            return String(localized: .errorFeeUnavailable)
+        case .feeExceedsBalance:
+            return String(localized: .errorFeeExceedsBalance)
+        case .allocationUnavailable:
+            return String(localized: .errorAllocationUnavailable)
         case .stabilizationLimit(let cents): return StabilizationPolicy.limitExceededMessage(cents)
         }
     }
@@ -469,15 +472,24 @@ enum TradeProtocol {
 
     static func rejectionMessage(_ reason: String) -> String {
         switch reason {
-        case "invalid_amount": return "The trade amount is invalid. Review the amount and retry."
-        case "stale_request": return "The quote expired before it could be accepted. Refresh and retry."
-        case "invalid_fee": return "The trade fee was invalid. Refresh the quote before retrying."
-        case "invalid_quote": return "A valid market quote is required. Refresh and retry."
-        case "quote_deviation": return "The market moved outside the quote range. Refresh and retry."
-        case "insufficient_capacity": return "The channel does not have enough capacity for this trade. Reduce the amount."
-        case "settlement_required": return "Settle the current stability adjustment before retrying this trade."
-        case "unsafe_allocation": return "This trade cannot preserve the current channel allocation safely."
-        default: return "The provider could not process the trade. Try again later."
+        case "invalid_amount":
+            return String(localized: .rejectionInvalidAmount)
+        case "stale_request":
+            return String(localized: .rejectionStaleRequest)
+        case "invalid_fee":
+            return String(localized: .rejectionInvalidFee)
+        case "invalid_quote":
+            return String(localized: .rejectionInvalidQuote)
+        case "quote_deviation":
+            return String(localized: .rejectionQuoteDeviation)
+        case "insufficient_capacity":
+            return String(localized: .rejectionInsufficientCapacity)
+        case "settlement_required":
+            return String(localized: .rejectionSettlementRequired)
+        case "unsafe_allocation":
+            return String(localized: .rejectionUnsafeAllocation)
+        default:
+            return String(localized: .rejectionDefault)
         }
     }
 
