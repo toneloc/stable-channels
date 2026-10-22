@@ -3990,18 +3990,9 @@ class AppState(private val context: Context) : ViewModel() {
                 AuditService.log("CHANNEL_CLOSE_CONFIRMED", mapOf("sats" to depositSats))
             } else {
                 val receiveAddress = _onchainReceiveAddress.value
-                // Only an address match is authoritative enough to persist a txid — it's proof
-                // this specific tx pays our own tracked receive address. Matching by amount and
-                // timestamp proximity against LDK's payment list is not proof of identity (an
-                // unrelated same-amount payment can be the only visible candidate), so — mirroring
-                // iOS's DepositRecorder, which either resolves via a direct address lookup or
-                // leaves the row permanently txid-less — we never guess here. This branch only
-                // runs when there's no pending channel close (that case, the reported #264 bug,
-                // has its own authoritative fix via fundingVout-based CloseTxidResolver above);
-                // an ordinary receive with no tracked address is a rare edge case (e.g. an
-                // LSP-initiated on-chain funding outside the app's own receive flow). If it
-                // happens, the row is left without a txid/confirmation link — there is currently
-                // no way to retroactively recover it, including by generating a new address.
+                // The latest txid seen paying our tracked receive address. Used only to skip a
+                // deposit that already has a row, never to label this one: the balance delta can
+                // hold several deposits that landed between two checks (#317).
                 val resolvedTxid =
                     _lastReceiveTxid.value?.takeIf {
                         !it.isNullOrBlank() &&
@@ -4013,8 +4004,8 @@ class AppState(private val context: Context) : ViewModel() {
                 // reconciled and deleted the original receive row for this same txid — see
                 // #316), skip: inserting again here would recreate a deposit for funds a splice
                 // already accounted for, as a duplicate, permanent, phantom "Receiving onchain"
-                // entry. A genuinely different deposit always has a different txid, so this
-                // can't suppress a real one.
+                // entry. Another deposit landing in the same delta is skipped too; it gets its
+                // own row from the websocket or recoverMissedReceive.
                 if (
                     !resolvedTxid.isNullOrBlank() && db?.paymentExistsForTxid(resolvedTxid) == true
                 ) {
@@ -4022,28 +4013,20 @@ class AppState(private val context: Context) : ViewModel() {
                     return
                 }
 
-                // Always record the deposit, mirroring iOS. When the websocket and this
-                // balance-delta path both see the same deposit, the pair is reconciled at
-                // txid time instead of skipped up front: recordWebSocketReceive adopts a
-                // txid-less placeholder, and reconcileResolvedReceiveTxid deletes it when
-                // the websocket row already exists. A skip heuristic here silently omits a
-                // second deposit arriving while any earlier receive is still confirming.
-                val dedupId =
-                    if (!resolvedTxid.isNullOrBlank()) {
-                        "onchain_receive_$resolvedTxid"
-                    } else {
-                        "onchain_deposit_${java.util.UUID.randomUUID()}"
-                    }
+                // Always record the deposit, mirroring iOS, as a txid-less placeholder. Txids
+                // are attached later only by paths that match the exact amount: a single
+                // deposit's txid adopts the placeholder (recordWebSocketReceive,
+                // resolveTxidlessReceives, reconcileResolvedReceiveTxid), and a placeholder for
+                // several deposits is dropped once their own rows add up to it.
                 val rowId =
                     db?.recordPayment(
-                        paymentId = dedupId,
+                        paymentId = "onchain_deposit_${java.util.UUID.randomUUID()}",
                         paymentType = "onchain",
                         direction = "received",
                         amountMsat = depositSats * 1000,
                         amountUSD = (depositSats.toDouble() / Constants.SATS_IN_BTC) * price,
                         btcPrice = price,
                         status = "pending",
-                        txid = resolvedTxid,
                         address = receiveAddress,
                     )
 
@@ -4051,11 +4034,7 @@ class AppState(private val context: Context) : ViewModel() {
                     triggerPaymentFlash()
                     AuditService.log(
                         "ONCHAIN_DEPOSIT_DETECTED",
-                        mapOf(
-                            "sats" to depositSats,
-                            "status" to "pending",
-                            "txid_known" to (!resolvedTxid.isNullOrBlank()),
-                        ),
+                        mapOf("sats" to depositSats, "status" to "pending"),
                     )
                 }
             }
@@ -4197,14 +4176,18 @@ class AppState(private val context: Context) : ViewModel() {
                     // Run txid resolution in the background so it doesn't block the polling loop
                     launch {
                         val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
-                        val txid =
+                        val resolved =
                             com.stablechannels.app.services.OnchainTxidResolver.resolve(
                                 address,
                                 esploraUrl,
                             )
-                        if (txid != null) {
-                            setLastReceiveTxid(txid, address)
-                            databaseService?.reconcileResolvedReceiveTxid(txid, address)
+                        if (resolved != null) {
+                            setLastReceiveTxid(resolved.txid, address)
+                            databaseService?.reconcileResolvedReceiveTxid(
+                                resolved.txid,
+                                address,
+                                resolved.sats * 1000,
+                            )
                         }
                     }
                 }
@@ -4424,11 +4407,15 @@ class AppState(private val context: Context) : ViewModel() {
         // Start polling for this address to be hit
         viewModelScope.launch {
             val esploraUrl = com.stablechannels.app.util.Constants.PRIMARY_CHAIN_URL
-            val txid =
+            val resolved =
                 com.stablechannels.app.services.OnchainTxidResolver.resolve(normalized, esploraUrl)
-            if (txid != null) {
-                setLastReceiveTxid(txid, normalized)
-                databaseService?.reconcileResolvedReceiveTxid(txid, normalized)
+            if (resolved != null) {
+                setLastReceiveTxid(resolved.txid, normalized)
+                databaseService?.reconcileResolvedReceiveTxid(
+                    resolved.txid,
+                    normalized,
+                    resolved.sats * 1000,
+                )
             }
         }
     }
