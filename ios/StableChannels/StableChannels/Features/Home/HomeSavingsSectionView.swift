@@ -36,21 +36,34 @@ struct HomeSavingsSectionView: View {
                     pendingRow(kind: .closeNoLink)
                 }
             } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
-                HStack {
-                    Text(String(localized: "move_to_trading", defaultValue: "Move to Lightning Account"))
+                // Funds move automatically; Move is only offered while fees are above the auto cap.
+                if appState.autoSpliceInStep == .feeTooHigh {
+                    HStack {
+                        Text(String(localized: "info_waiting_lower_fees", defaultValue: "Waiting for lower fees"))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            appState.sweepToChannel()
+                        } label: {
+                            Text(String(localized: "button_swap", defaultValue: "Move"))
+                                .font(.caption.bold())
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 6)
+                                .background(.blue.opacity(0.1))
+                                .foregroundStyle(.blue)
+                                .clipShape(Capsule())
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text(String(
+                            localized: "info_auto_move_after_confirmations",
+                            defaultValue: "Moves to Lightning Account after 3 confirmations"
+                        ))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Spacer()
-                    Button {
-                        appState.sweepToChannel()
-                    } label: {
-                        Text(String(localized: "button_swap", defaultValue: "Move"))
-                            .font(.caption.bold())
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .background(.blue.opacity(0.1))
-                            .foregroundStyle(.blue)
-                            .clipShape(Capsule())
+                        Spacer()
                     }
                 }
             } else if appState.spendableOnchainSats == 0 {
