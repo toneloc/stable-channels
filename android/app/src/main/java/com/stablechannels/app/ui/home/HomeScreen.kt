@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.AutoSpliceIn
 import com.stablechannels.app.ui.components.StatusCapsule
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
@@ -84,6 +85,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var pendingOnchainReceives by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     var pendingOnchainSends by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
+    val autoSpliceInStep by appState.autoSpliceInStep.collectAsState()
 
     LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
         withContext(Dispatchers.IO) {
@@ -279,6 +281,11 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 val isBusyOnchainState =
                     (hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
                         (isSweeping && hasPendingOnchainReceive)
+                // Funds move on their own (#445); Move is only for paying a fee above the cap.
+                val showMove = autoSpliceInStep == AutoSpliceIn.Step.FEE_TOO_HIGH
+                val moveLabel =
+                    if (showMove) "Waiting for lower fees"
+                    else "Moves to Lightning Account after 3 confirmations"
                 var onchainExpanded by remember { mutableStateOf(false) }
                 val chevronRotation by
                     animateFloatAsState(if (onchainExpanded) 90f else 0f, label = "onchainChevron")
@@ -408,7 +415,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 if (!onchainExpanded) {
                                     Spacer(Modifier.height(4.dp))
                                     Text(
-                                        "Ready to move \u00b7 Receiving onchain$pendingReceiveSummary",
+                                        "$moveLabel \u00b7 Receiving onchain$pendingReceiveSummary",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
@@ -435,37 +442,40 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                             Text(
                                                 // Shows exactly what "Move" sweeps, so it's
                                                 // unambiguous when a separate deposit is pending.
-                                                PendingAmountFormatter.moveToLightningLabel(
-                                                    spendableOnchainSats,
-                                                    btcPrice,
-                                                ),
+                                                if (showMove) {
+                                                    PendingAmountFormatter.moveToLightningLabel(
+                                                        spendableOnchainSats,
+                                                        btcPrice,
+                                                    )
+                                                } else moveLabel,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             )
-                                            FilledTonalButton(
-                                                onClick = {
-                                                    scope.launch(Dispatchers.IO) {
-                                                        appState.sweepToChannel()
-                                                    }
-                                                },
-                                                shape = RoundedCornerShape(12.dp),
-                                                colors =
-                                                    ButtonDefaults.filledTonalButtonColors(
-                                                        containerColor =
-                                                            MaterialTheme.colorScheme.secondary
-                                                                .copy(alpha = 0.15f),
-                                                        contentColor =
-                                                            MaterialTheme.colorScheme.secondary,
-                                                    ),
-                                                contentPadding =
-                                                    PaddingValues(
-                                                        horizontal = 12.dp,
-                                                        vertical = 0.dp,
-                                                    ),
-                                                modifier = Modifier.height(32.dp),
-                                            ) {
-                                                Text("Move", fontSize = 13.sp)
-                                            }
+                                            if (showMove)
+                                                FilledTonalButton(
+                                                    onClick = {
+                                                        scope.launch(Dispatchers.IO) {
+                                                            appState.sweepToChannel()
+                                                        }
+                                                    },
+                                                    shape = RoundedCornerShape(12.dp),
+                                                    colors =
+                                                        ButtonDefaults.filledTonalButtonColors(
+                                                            containerColor =
+                                                                MaterialTheme.colorScheme.secondary
+                                                                    .copy(alpha = 0.15f),
+                                                            contentColor =
+                                                                MaterialTheme.colorScheme.secondary,
+                                                        ),
+                                                    contentPadding =
+                                                        PaddingValues(
+                                                            horizontal = 12.dp,
+                                                            vertical = 0.dp,
+                                                        ),
+                                                    modifier = Modifier.height(32.dp),
+                                                ) {
+                                                    Text("Move", fontSize = 13.sp)
+                                                }
                                         }
                                         pendingReceives.forEach { receive ->
                                             Spacer(Modifier.height(8.dp))
@@ -494,37 +504,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        "Move to Lightning Account",
+                                        moveLabel,
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    FilledTonalButton(
-                                        onClick = {
-                                            scope.launch(Dispatchers.IO) {
-                                                appState.sweepToChannel()
-                                            }
-                                        },
-                                        shape = RoundedCornerShape(12.dp),
-                                        colors =
-                                            ButtonDefaults.filledTonalButtonColors(
-                                                // Same tonal treatment as the Send/Receive buttons
-                                                // below
-                                                // (ActionButton), just tinted with the app's amber
-                                                // "native
-                                                // BTC" accent so this on-chain action still reads
-                                                // as distinct.
-                                                containerColor =
-                                                    MaterialTheme.colorScheme.secondary.copy(
-                                                        alpha = 0.15f
-                                                    ),
-                                                contentColor = MaterialTheme.colorScheme.secondary,
-                                            ),
-                                        contentPadding =
-                                            PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                                        modifier = Modifier.height(32.dp),
-                                    ) {
-                                        Text("Move", fontSize = 13.sp)
-                                    }
+                                    if (showMove)
+                                        FilledTonalButton(
+                                            onClick = {
+                                                scope.launch(Dispatchers.IO) {
+                                                    appState.sweepToChannel()
+                                                }
+                                            },
+                                            shape = RoundedCornerShape(12.dp),
+                                            colors =
+                                                ButtonDefaults.filledTonalButtonColors(
+                                                    // Same tonal treatment as the Send/Receive
+                                                    // buttons below (ActionButton), just tinted
+                                                    // with the app's amber "native BTC" accent so
+                                                    // this on-chain action still reads as distinct.
+                                                    containerColor =
+                                                        MaterialTheme.colorScheme.secondary.copy(
+                                                            alpha = 0.15f
+                                                        ),
+                                                    contentColor =
+                                                        MaterialTheme.colorScheme.secondary,
+                                                ),
+                                            contentPadding =
+                                                PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                                            modifier = Modifier.height(32.dp),
+                                        ) {
+                                            Text("Move", fontSize = 13.sp)
+                                        }
                                 }
                             }
                         } else if (onchainSats == 0L) {
