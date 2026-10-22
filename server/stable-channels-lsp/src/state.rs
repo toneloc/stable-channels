@@ -39,4 +39,6 @@ pub struct AppState {
     /// activity. The event loop reloads the authoritative checkpoint (fixtures may leave None).
     #[allow(dead_code)]
     pub last_event_before_start_ms: Option<i64>,
+    /// Stablecoin onboarding swaps; None when `[swap]` is not configured.
+    pub onboarding_swaps: Option<Arc<crate::swap::OnboardingSwaps>>,
 }
