@@ -32,6 +32,11 @@ struct HomeView: View {
                     balanceBarSection
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
 
+                    // Funds of a closed channel are left out of the total until swept to the wallet
+                    if let funds = appState.closedChannelFunds {
+                        HomeClosedChannelView(funds: funds, btcPrice: appState.btcPrice)
+                    }
+
                     if appState.onchainBalanceSats > 0 {
                         HomeSavingsSectionView(showBTC: showBTC)
                     }

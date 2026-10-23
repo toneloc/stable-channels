@@ -72,6 +72,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
     val isOnline by appState.isOnline.collectAsState()
     val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
+    val closedChannelFunds by appState.closedChannelFunds.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -241,6 +242,12 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+            }
+
+            // Funds of a closed channel are left out of the total until swept to the wallet
+            closedChannelFunds?.let { funds ->
+                ClosedChannelFundsCard(funds, btcPrice)
+                Spacer(Modifier.height(12.dp))
             }
 
             // On-chain section
