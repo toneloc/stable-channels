@@ -71,7 +71,10 @@ object Constants {
     const val ESTIMATED_ONCHAIN_SEND_VBYTES: Long = 140L
     const val ESTIMATED_ONCHAIN_SEND_ALL_VBYTES: Long = 250L
     const val ESTIMATED_CHANNEL_CLOSE_VBYTES: Long = 180L
+    /** LDK splice-out spend of the 2-of-2 funding output with channel and destination outputs. */
     const val ESTIMATED_SPLICE_OUT_VBYTES: Long = 180L
+    const val MIN_FEE_RATE_SAT_VB: Double = 1.0
+    const val MAX_FEE_RATE_SAT_VB: Double = 10_000.0
     const val DEFAULT_CHANNEL_LIFETIME: Int = 2016
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000

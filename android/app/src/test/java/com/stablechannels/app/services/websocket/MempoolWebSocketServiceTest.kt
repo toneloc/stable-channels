@@ -1,5 +1,6 @@
 package com.stablechannels.app.services.websocket
 
+import com.stablechannels.app.domain.send.RecommendedFees
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestDispatcher
@@ -440,6 +441,104 @@ class MempoolWebSocketServiceTest {
         assertFalse(service.isConnected)
         assertEquals(0, reconnectAttempts(service))
     }
+
+    @Test
+    fun `fees message sets latest fees and notifies once`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        val received = mutableListOf<RecommendedFees>()
+        service.onFeesUpdated = { received.add(it) }
+
+        invokeHandleMessage(service, feesMessage(25, 15, 8, 4, 1))
+        advanceUntilIdle()
+
+        val expected = RecommendedFees(25.0, 15.0, 8.0, 4.0, 1.0)
+        assertEquals(expected, service.latestFees)
+        assertEquals(listOf(expected), received)
+    }
+
+    @Test
+    fun `same fees again do not notify`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        var calls = 0
+        service.onFeesUpdated = { calls++ }
+
+        invokeHandleMessage(service, feesMessage(25, 15, 8, 4, 1))
+        invokeHandleMessage(service, feesMessage(25, 15, 8, 4, 1))
+        advanceUntilIdle()
+        assertEquals(1, calls)
+
+        invokeHandleMessage(service, feesMessage(30, 15, 8, 4, 1))
+        advanceUntilIdle()
+        assertEquals(2, calls)
+        assertEquals(30.0, service.latestFees!!.fastestFee, 0.0)
+    }
+
+    @Test
+    fun `fees message values are sanitized`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        var received: RecommendedFees? = null
+        service.onFeesUpdated = { received = it }
+
+        invokeHandleMessage(service, feesMessage(25, 15, 8, 0, 0))
+        advanceUntilIdle()
+
+        val fees = service.latestFees!!
+        assertEquals(1.0, fees.minimumFee, 0.0)
+        assertEquals(1.0, fees.economyFee!!, 0.0)
+        assertEquals(25.0, fees.fastestFee, 0.0)
+        assertEquals(fees, received)
+    }
+
+    @Test
+    fun `fractional sub minimum fees are clamped to min rate`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        var received: RecommendedFees? = null
+        service.onFeesUpdated = { received = it }
+
+        invokeHandleMessage(service, feesMessage(1.5, 0.913, 0.466, 0.2, 0.1))
+        advanceUntilIdle()
+
+        val fees = received!!
+        assertEquals(1.5, fees.fastestFee, 0.0)
+        assertEquals(1.0, fees.halfHourFee, 0.0)
+        assertEquals(1.0, fees.hourFee, 0.0)
+        assertEquals(1.0, fees.economyFee!!, 0.0)
+        assertEquals(1.0, fees.minimumFee, 0.0)
+    }
+
+    @Test
+    fun `fees message without economy fee decodes`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        invokeHandleMessage(
+            service,
+            """{"fees": {"fastestFee": 25, "halfHourFee": 15, "hourFee": 8, "minimumFee": 1}}""",
+        )
+        advanceUntilIdle()
+        assertNull(service.latestFees!!.economyFee)
+    }
+
+    @Test
+    fun `fees missing a required field are ignored without dropping the block`() = runTest {
+        val service = MempoolWebSocketService(serviceScope = this)
+        var height: Int? = null
+        service.onBlockHeader = { height = it }
+
+        invokeHandleMessage(service, """{"block": {"height": 900}, "fees": {"fastestFee": 5}}""")
+        advanceUntilIdle()
+
+        assertNull(service.latestFees)
+        assertEquals(900, height)
+    }
+
+    private fun feesMessage(
+        fastest: Number,
+        halfHour: Number,
+        hour: Number,
+        economy: Number,
+        minimum: Number,
+    ): String =
+        """{"fees": {"fastestFee": $fastest, "halfHourFee": $halfHour, "hourFee": $hour, """ +
+            """"economyFee": $economy, "minimumFee": $minimum}}"""
 
     private fun invokeHandleMessage(service: MempoolWebSocketService, payload: String) {
         val method = service.javaClass.getDeclaredMethod("handleMessage", String::class.java)

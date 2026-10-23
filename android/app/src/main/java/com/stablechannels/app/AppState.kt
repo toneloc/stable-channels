@@ -11,6 +11,7 @@ import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.*
 import com.stablechannels.app.services.CloseTxidResolver
+import com.stablechannels.app.services.fees.FeeRateService
 import com.stablechannels.app.services.websocket.MempoolWebSocketClient
 import com.stablechannels.app.services.websocket.MempoolWebSocketService
 import com.stablechannels.app.services.websocket.WebSocketEvent
@@ -575,6 +576,9 @@ class AppState(private val context: Context) : ViewModel() {
         )
     private val mempoolWebSocketService: MempoolWebSocketClient = MempoolWebSocketService()
 
+    /** Recommended on-chain fee rates; the mempool websocket keeps it current between fetches. */
+    val feeRateService = FeeRateService()
+
     private val _phase = MutableStateFlow(Phase.LOADING)
     val phase: StateFlow<Phase> = _phase
 
@@ -873,6 +877,9 @@ class AppState(private val context: Context) : ViewModel() {
                 refreshBalances()
                 pollPaymentConfirmations(force = true)
             }
+        }
+        mempoolWebSocketService.onFeesUpdated = { fees ->
+            viewModelScope.launch { feeRateService.update(fees) }
         }
         mempoolWebSocketService.onTransactionDetected = { event ->
             viewModelScope.launch(Dispatchers.IO) {

@@ -1,9 +1,29 @@
 package com.stablechannels.app.services.websocket
 
+import com.stablechannels.app.domain.send.RecommendedFees
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
 @Serializable data class MempoolWSBlock(val height: Int)
+
+/** Recommended fees pushed with the `stats` subscription. */
+@Serializable
+data class MempoolWSFees(
+    val fastestFee: Double? = null,
+    val halfHourFee: Double? = null,
+    val hourFee: Double? = null,
+    val economyFee: Double? = null,
+    val minimumFee: Double? = null,
+) {
+    /**
+     * Null when a required rate is missing, so one bad field never drops the rest of the message.
+     */
+    fun toRecommendedFees(): RecommendedFees? {
+        if (fastestFee == null || halfHourFee == null || hourFee == null || minimumFee == null)
+            return null
+        return RecommendedFees(fastestFee, halfHourFee, hourFee, economyFee, minimumFee)
+    }
+}
 
 @Serializable
 data class MempoolWSVout(
@@ -50,4 +70,5 @@ data class MempoolWSMessage(
     @SerialName("multi-address-transactions")
     val multiAddressTransactions: Map<String, MempoolWSAddressTransactions>? = null,
     @SerialName("tracked-txs") val trackedTxs: Map<String, MempoolWSTxTrackingInfo>? = null,
+    val fees: MempoolWSFees? = null,
 )
