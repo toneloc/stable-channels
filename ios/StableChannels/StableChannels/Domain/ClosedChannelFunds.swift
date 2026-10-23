@@ -87,3 +87,12 @@ struct ClosedChannelFunds: Equatable {
         return "\(amount) is safe on the Bitcoin blockchain. \(timing) Keep the app installed until it arrives."
     }
 }
+
+/// Text rules for the emergency force close sheet (#363).
+enum ForceCloseConfirmation {
+    static let phrase = "FORCE CLOSE"
+
+    static func isConfirmed(_ input: String) -> Bool {
+        input.trimmingCharacters(in: .whitespaces) == phrase
+    }
+}

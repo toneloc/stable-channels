@@ -2533,7 +2533,8 @@ class AppState {
         userChannelId: UserChannelId,
         counterpartyNodeId: PublicKey,
         fundingOutpointTxid: String,
-        fundingOutpointVout: UInt32
+        fundingOutpointVout: UInt32,
+        force: Bool = false
     ) async throws {
         // Snapshot here: AppState globals could be wrong for rapid re-tap or multi-channel
         let balanceSats = stableChannel.stableReceiverBTC.sats
@@ -2553,7 +2554,8 @@ class AppState {
             balanceSats: balanceSats,
             balanceUsd: balanceUSD,
             btcPrice: price > 0 ? price : nil,
-            counterparty: counterparty
+            counterparty: counterparty,
+            force: force
         )
     }
 

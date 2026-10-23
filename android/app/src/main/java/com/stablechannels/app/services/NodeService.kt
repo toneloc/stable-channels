@@ -237,6 +237,15 @@ class NodeService(private val context: Context) {
         n.closeChannel(userChannelId, counterpartyNodeId)
     }
 
+    /**
+     * Unilateral close for when the LSP is unreachable. Our funds stay timelocked for the channel's
+     * spend delay.
+     */
+    fun forceCloseChannel(userChannelId: String, counterpartyNodeId: String) {
+        val n = node ?: throw NodeServiceError()
+        n.forceCloseChannel(userChannelId, counterpartyNodeId, "user_emergency_force_close")
+    }
+
     fun spliceIn(userChannelId: String, counterpartyNodeId: String, amountSats: Long) {
         val n = node ?: throw NodeServiceError()
         n.spliceIn(userChannelId, counterpartyNodeId, amountSats.toULong())

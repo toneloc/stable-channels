@@ -4,6 +4,7 @@ import UIKit
 struct ChannelSettingsView: View {
     @Environment(AppState.self) private var appState
     @State private var showCloseChannelAlert = false
+    @State private var showForceCloseSheet = false
 
     var body: some View {
         // Read observable property on AppState to ensure view invalidation when channel state changes,
@@ -100,6 +101,18 @@ struct ChannelSettingsView: View {
                             ))
                         }
                     }
+
+                    // Shown even when the channel is not usable (#363).
+                    Section {
+                        Button(
+                            String(localized: "button_force_close", defaultValue: "Emergency force close"),
+                            role: .destructive
+                        ) {
+                            showForceCloseSheet = true
+                        }
+                        .disabled(!appState.isOnline)
+                        .foregroundStyle(appState.isOnline ? .red : .secondary)
+                    }
                 } else {
                     Section {
                         HStack {
@@ -190,10 +203,15 @@ struct ChannelSettingsView: View {
                 defaultValue: "This will cooperatively close the channel and return your funds to your onchain wallet after confirmation."
             ))
         }
+        .sheet(isPresented: $showForceCloseSheet) {
+            ForceCloseSheet {
+                closeChannel(force: true)
+            }
+        }
     }
 
     @MainActor
-    private func closeChannel() {
+    private func closeChannel(force: Bool = false) {
         guard let channel = appState.nodeService.channels.first,
               let outpoint = channel.fundingTxo else {
             // Edge case: channel exists but no funding outpoint. Log and abort.
@@ -210,7 +228,8 @@ struct ChannelSettingsView: View {
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId,
                     fundingOutpointTxid: "\(outpoint.txid)",
-                    fundingOutpointVout: outpoint.vout
+                    fundingOutpointVout: outpoint.vout,
+                    force: force
                 )
             } catch {
                 appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
@@ -234,6 +253,61 @@ struct ChannelSettingsView: View {
                 Text(isReady
                     ? String(localized: "channel_status_ready", defaultValue: "Ready")
                     : String(localized: "channel_status_pending", defaultValue: "Pending"))
+            }
+        }
+    }
+}
+
+private struct ForceCloseSheet: View {
+    let onConfirm: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Text(String(
+                        localized: "info_force_close_last_resort",
+                        defaultValue: "Use this only if a normal close does not work. A normal close is faster and cheaper."
+                    ))
+                    Text(String(
+                        localized: "info_force_close_timing",
+                        defaultValue: "The provider puts the close on chain, then your funds move to your onchain wallet. This usually takes a few hours. If the provider is offline, it waits until the provider is back."
+                    ))
+                    Text(String(
+                        localized: "info_force_close_keep_app",
+                        defaultValue: "Do not uninstall the app or clear its data until the funds arrive. The app needs its channel data to claim them."
+                    ))
+                }
+                Section {
+                    TextField(
+                        String(
+                            format: String(localized: "placeholder_force_close", defaultValue: "Type %@ to confirm"),
+                            ForceCloseConfirmation.phrase
+                        ),
+                        text: $input
+                    )
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                }
+                Section {
+                    Button(
+                        String(localized: "button_force_close_confirm", defaultValue: "Force close"),
+                        role: .destructive
+                    ) {
+                        dismiss()
+                        onConfirm()
+                    }
+                    .disabled(!ForceCloseConfirmation.isConfirmed(input))
+                }
+            }
+            .navigationTitle(String(localized: "button_force_close", defaultValue: "Emergency force close"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(String(localized: "alert_close_channel_cancel", defaultValue: "Cancel")) { dismiss() }
+                }
             }
         }
     }

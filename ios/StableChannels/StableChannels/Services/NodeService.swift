@@ -400,7 +400,8 @@ class NodeService: NodeServiceProtocol {
         balanceSats: UInt64,
         balanceUsd: Double?,
         btcPrice: Double?,
-        counterparty: String?
+        counterparty: String?,
+        force: Bool = false
     ) async throws {
         guard let node else { throw NodeServiceError.notRunning }
 
@@ -419,14 +420,25 @@ class NodeService: NodeServiceProtocol {
 
         AuditService.log("CHANNEL_CLOSE_REQUESTED", data: [
             "user_channel_id": "\(userChannelId)",
-            "funding_outpoint": "\(fundingOutpointTxid):\(fundingOutpointVout)"
+            "funding_outpoint": "\(fundingOutpointTxid):\(fundingOutpointVout)",
+            "force": force
         ])
 
         do {
-            try node.closeChannel(
-                userChannelId: userChannelId,
-                counterpartyNodeId: counterpartyNodeId
-            )
+            if force {
+                // Unilateral close for when the LSP is unreachable (#363). Our funds stay
+                // timelocked for the channel's spend delay.
+                try node.forceCloseChannel(
+                    userChannelId: userChannelId,
+                    counterpartyNodeId: counterpartyNodeId,
+                    reason: "user_emergency_force_close"
+                )
+            } else {
+                try node.closeChannel(
+                    userChannelId: userChannelId,
+                    counterpartyNodeId: counterpartyNodeId
+                )
+            }
         } catch {
             databaseService?.pendingOpRepo.updatePendingOperation(
                 opId: opId,
