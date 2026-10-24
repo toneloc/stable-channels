@@ -7,15 +7,19 @@ final class ProcessedTxStore {
     var entries: [String: Date] = [:]
     let ttl: TimeInterval
     let maxEntries: Int
+    /// Longest key kept. Real keys are a 64-character txid plus an address and a short prefix,
+    /// so anything longer came from a hostile feed and must not be retained.
+    let maxKeyBytes: Int
 
     private var insertionOrder: [String] = []
     private var lastPurgeTime: Date = .distantPast
     private let purgeInterval: TimeInterval = 300 // 5 minutes
     private let logger = Logger(subsystem: "com.stablechannels", category: "dedup")
 
-    init(ttl: TimeInterval = 900, maxEntries: Int = 500) {
+    init(ttl: TimeInterval = 900, maxEntries: Int = 500, maxKeyBytes: Int = 256) {
         self.ttl = ttl
         self.maxEntries = maxEntries
+        self.maxKeyBytes = maxKeyBytes
     }
 
     // MARK: - Public API
@@ -28,6 +32,10 @@ final class ProcessedTxStore {
 
     /// Record a processed key and enforce the memory cap.
     func recordProcessedTx(_ key: String) {
+        guard key.utf8.count <= maxKeyBytes else {
+            logger.warning("Ignoring oversized dedup key (\(key.utf8.count) bytes)")
+            return
+        }
         if entries[key] == nil {
             insertionOrder.append(key)
         }

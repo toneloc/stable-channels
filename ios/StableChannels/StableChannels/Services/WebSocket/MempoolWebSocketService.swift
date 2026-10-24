@@ -416,6 +416,8 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
 
         // 1. Process all transaction payloads (mempool, confirmed)
         let allTxs = aggregateTransactions(from: msg)
+        // Built once so matching every transaction in a large bulk payload stays linear.
+        let membership = MultiAddressMembership(message: msg, trackedAddresses: trackedAddresses)
 
         for tx in allTxs {
             let txid = tx.txid
@@ -425,26 +427,31 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 trackedAddresses: trackedAddresses,
                 trackedTxids: trackedTxids,
                 msg: msg,
-                tx: tx
+                tx: tx,
+                membership: membership
             )
 
-            for match in matches {
-                guard !match.isTxid else { continue }
-                let targetKey = match.target
-                let dedupKey = "\(txid)_\(targetKey)"
+            // One receive per transaction, totalled over every tracked address it pays, so a
+            // transaction paying two of our addresses isn't recorded for only one of them.
+            let addresses = matches.filter { !$0.isTxid }.map(\.target)
+            guard let targetKey = addresses.first else { continue }
+            let dedupKey = "\(txid)_receive"
 
-                if isRecentlyProcessed(dedupKey) { continue }
-                recordProcessedTx(dedupKey)
-
-                let amountSats = sumAmount(for: tx, target: targetKey)
-
-                logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
-                AuditService.log(
-                    "WEBSOCKET_MATCH_DETECTED",
-                    data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "false"]
-                )
-                onTransactionDetected?(.receive(target: targetKey, txid: txid, amountSats: amountSats))
+            if isRecentlyProcessed(dedupKey) { continue }
+            // The feed is untrusted: an impossible total is dropped rather than summed.
+            guard let amountSats = receivedSats(in: tx, to: Set(addresses)) else {
+                logger.warning("[WebSocket] Rejected impossible output total for \(targetKey): \(txid)")
+                AuditService.log("WEBSOCKET_AMOUNT_REJECTED", data: ["target": targetKey, "txid": txid])
+                continue
             }
+            recordProcessedTx(dedupKey)
+
+            logger.info("Real-time transaction detected via WebSocket for \(targetKey): \(txid)")
+            AuditService.log(
+                "WEBSOCKET_MATCH_DETECTED",
+                data: ["target": targetKey, "txid": txid, "amount_sats": "\(amountSats)", "is_txid": "false"]
+            )
+            onTransactionDetected?(.receive(target: targetKey, txid: txid, amountSats: amountSats))
         }
 
         // 2. Handle removed transactions (RBF replacements)
@@ -464,6 +471,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 if let outspends = trackingInfo.utxoSpent {
                     for (_, outspend) in outspends {
                         let spendingTxid = outspend.txid
+                        guard ResilientEsploraClient.isValidTxid(spendingTxid) else { continue }
                         let dedupKey = "\(spendingTxid)_outspend_\(trackedTxid)"
                         if isRecentlyProcessed(dedupKey) { continue }
                         recordProcessedTx(dedupKey)
@@ -524,6 +532,7 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
                 guard trackedAddresses.contains(addr) else { continue }
                 for tx in txGroup.removed ?? [] {
                     let txid = tx.txid
+                    guard ResilientEsploraClient.isValidTxid(txid) else { continue }
                     // Use a unique dedup key for removed so it doesn't collide with the receive
                     let dedupKey = "removed_\(txid)_\(addr)"
                     if isRecentlyProcessed(dedupKey) { continue }
@@ -536,16 +545,13 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         }
     }
 
-    private func sumAmount(for tx: MempoolWSTransaction, target: String) -> Int64 {
-        var amountSats: Int64 = 0
-        if let vouts = tx.vout {
-            for vout in vouts {
-                if vout.scriptpubkeyAddress == target, let val = vout.value {
-                    amountSats += val
-                }
-            }
-        }
-        return amountSats
+    /// Sats `tx` pays to `addresses`, or nil when an output value is negative or the total is
+    /// more than can exist.
+    private func receivedSats(in tx: MempoolWSTransaction, to addresses: Set<String>) -> Int64? {
+        let values = (tx.vout ?? []).lazy
+            .filter { $0.scriptpubkeyAddress.map(addresses.contains) ?? false }
+            .compactMap(\.value)
+        return OnchainAmount.total(of: values)
     }
 
     // MARK: - Tracking Sync

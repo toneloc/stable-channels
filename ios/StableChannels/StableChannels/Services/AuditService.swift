@@ -5,6 +5,19 @@ enum AuditService {
     private static var logPath: String?
     static var onLog: ((String, [String: Any]) -> Void)?
 
+    /// Size at which the log rotates. The previous file is kept as `<name>.1.<ext>`, so the
+    /// log never uses much more than twice this on disk, however many events arrive.
+    static var maxFileBytes: UInt64 = 5 * 1024 * 1024
+
+    /// Where the previous log goes when `path` rotates: `audit_log.txt` -> `audit_log.1.txt`.
+    static func rotatedPath(for path: String) -> String {
+        let url = URL(fileURLWithPath: path)
+        let ext = url.pathExtension
+        let base = url.deletingPathExtension().lastPathComponent
+        let name = ext.isEmpty ? "\(base).1" : "\(base).1.\(ext)"
+        return url.deletingLastPathComponent().appendingPathComponent(name).path
+    }
+
     static func setLogPath(_ path: String) {
         logPath = path
     }
@@ -33,6 +46,7 @@ enum AuditService {
         }
 
         let line = jsonStr + "\n"
+        rotateIfFull(path)
         if let fileHandle = FileHandle(forWritingAtPath: path) {
             fileHandle.seekToEndOfFile()
             fileHandle.write(line.data(using: .utf8) ?? Data())
@@ -40,5 +54,15 @@ enum AuditService {
         } else {
             try? line.write(toFile: path, atomically: true, encoding: .utf8)
         }
+    }
+
+    /// Moves a full log aside, replacing the previous rotation, so writes start a fresh file.
+    private static func rotateIfFull(_ path: String) {
+        let fileManager = FileManager.default
+        guard let size = (try? fileManager.attributesOfItem(atPath: path))?[.size] as? UInt64,
+              size >= maxFileBytes else { return }
+        let rotated = rotatedPath(for: path)
+        try? fileManager.removeItem(atPath: rotated)
+        try? fileManager.moveItem(atPath: path, toPath: rotated)
     }
 }
