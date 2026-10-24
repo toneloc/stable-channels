@@ -20,6 +20,7 @@ object LdkLightningInvoiceDecoder : LightningInvoiceDecoder {
                 (invoice.invoiceDescription() as? Bolt11InvoiceDescription.Hash)?.hash,
             expiresAtEpochSecs =
                 saturatedSum(invoice.secondsSinceEpoch(), invoice.expiryTimeSeconds()),
+            paymentHash = invoice.paymentHash(),
         )
     }
         .getOrNull()

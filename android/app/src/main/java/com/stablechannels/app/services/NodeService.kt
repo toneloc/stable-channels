@@ -2,6 +2,8 @@ package com.stablechannels.app.services
 
 import android.content.Context
 import android.util.Log
+import com.stablechannels.app.domain.send.OutboundPaymentStatus
+import com.stablechannels.app.domain.send.PaymentFeeEstimator
 import com.stablechannels.app.util.Constants
 import com.stablechannels.app.util.LspPreferencesManager
 import com.stablechannels.app.util.QRCodeUtils
@@ -31,6 +33,10 @@ class NodeService(private val context: Context) {
         get() = _isRunning.value
 
     var nodeId: String = ""
+        private set
+
+    /** Network of the running node, set on start. */
+    var activeNetwork: Network? = null
         private set
 
     var channels: List<ChannelDetails> = emptyList()
@@ -159,6 +165,7 @@ class NodeService(private val context: Context) {
             node = startedNode
             _isRunning.value = true
             nodeId = startedNode.nodeId()
+            activeNetwork = network
 
             // Connect to LSP. Only the LSP-switch restart path (strictLspConnect) treats a
             // failed connect as fatal so it can roll back; ordinary starts log-and-continue so a
@@ -361,16 +368,44 @@ class NodeService(private val context: Context) {
         return QRCodeUtils.normalizeAddress(n.onchainPayment().newAddress())
     }
 
-    fun sendOnchain(address: String, amountSats: Long): String {
+    /** A null [feeRateSatVb] lets the node pick the rate. */
+    fun sendOnchain(address: String, amountSats: Long, feeRateSatVb: Double? = null): String {
         val n = node ?: throw NodeServiceError()
         return n.onchainPayment()
-            .sendToAddress(QRCodeUtils.normalizeAddress(address), amountSats.toULong(), null)
+            .sendToAddress(
+                QRCodeUtils.normalizeAddress(address),
+                amountSats.toULong(),
+                ldkFeeRate(feeRateSatVb),
+            )
     }
 
-    fun sendAllOnchain(address: String): String {
+    /** Sends the whole on-chain balance; the fee at [feeRateSatVb] comes out of it. */
+    fun sendAllOnchain(address: String, feeRateSatVb: Double? = null): String {
         val n = node ?: throw NodeServiceError()
         return n.onchainPayment()
-            .sendAllToAddress(QRCodeUtils.normalizeAddress(address), false, null)
+            .sendAllToAddress(
+                QRCodeUtils.normalizeAddress(address),
+                false,
+                ldkFeeRate(feeRateSatVb),
+            )
+    }
+
+    /** Rounded up to sat/kwu, so the rate broadcast is never below the rate shown. */
+    private fun ldkFeeRate(feeRateSatVb: Double?): FeeRate? =
+        feeRateSatVb
+            ?.let(PaymentFeeEstimator::satPerKwu)
+            ?.takeIf { it > 0 }
+            ?.let { FeeRate.fromSatPerKwu(it.toULong()) }
+
+    /** Status of an earlier outbound payment for [paymentHash], or null when there is none. */
+    fun outboundPaymentStatus(paymentHash: String): OutboundPaymentStatus? {
+        val payment = node?.payment(paymentHash) ?: return null
+        if (payment.direction != PaymentDirection.OUTBOUND) return null
+        return when (payment.status) {
+            PaymentStatus.PENDING -> OutboundPaymentStatus.PENDING
+            PaymentStatus.SUCCEEDED -> OutboundPaymentStatus.SUCCEEDED
+            PaymentStatus.FAILED -> OutboundPaymentStatus.FAILED
+        }
     }
 
     fun syncWallets() {
