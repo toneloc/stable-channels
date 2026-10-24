@@ -1,5 +1,7 @@
 package com.stablechannels.app.domain.send
 
+import com.stablechannels.app.domain.lnurl.LnurlInvoiceQuote
+
 /** What the send flow reads from the wallet. */
 interface SendWallet {
     /** The chain the node runs on, or null before it starts. */
@@ -16,7 +18,7 @@ interface SendWallet {
     fun outboundPaymentStatus(paymentHash: String): OutboundPaymentStatus?
 }
 
-/** Node calls and wallet bookkeeping a send makes. Implementations may block. */
+/** Node calls a send makes. Implementations may block. */
 interface SendNode {
     /** Pays [invoice]; a null [amountMsat] pays the amount the invoice carries. */
     fun payBolt11(invoice: String, amountMsat: Long?): String
@@ -30,12 +32,23 @@ interface SendNode {
     fun sendAllOnchain(address: String, feeRateSatVb: Double?): String
 
     fun spliceOut(channel: SpliceChannelCandidate, address: String, amountSats: Long)
+}
 
+/** Wallet state a send checks and updates around the node call. */
+interface SendLedger {
     /** Throws when the send would spend sats still owed to the LSP. */
     fun ensureNoUnsettledSurplus(amountMsat: Long)
 
-    /** Records the pending splice-out before the node call, so it survives a restart. */
-    fun beginSpliceOut(amountSats: Long, address: String, price: Double)
+    /**
+     * Records the pending splice-out from [channel] before the node call, so it survives a restart.
+     * Must name the channel [spliceOut] uses, or the splice events never resolve the row.
+     */
+    fun beginSpliceOut(
+        channel: SpliceChannelCandidate,
+        amountSats: Long,
+        address: String,
+        price: Double,
+    )
 
     fun cancelSpliceStart()
 
@@ -44,7 +57,12 @@ interface SendNode {
 
 /** Payment history writes, injected so tests can use a fake. */
 interface SendPaymentRecorder {
-    fun recordLightning(paymentId: String, paymentType: String, amountMsat: Long, price: Double)
+    fun recordLightning(
+        paymentId: String,
+        kind: LightningPaymentKind,
+        amountMsat: Long,
+        price: Double,
+    )
 
     fun recordOnchain(txid: String, amountMsat: Long, price: Double, address: String)
 }
@@ -52,4 +70,28 @@ interface SendPaymentRecorder {
 /** Confirms the user may send, for example with biometrics. False blocks the send. */
 fun interface SendAuthenticator {
     suspend fun authorize(destination: SendDestination): Boolean
+}
+
+/** Dispatches a confirmed send and records it. Blocks on the node; throws [SendFailure]. */
+interface SendPaymentDispatcher {
+    fun execute(
+        destination: SendDestination,
+        amountSats: Long,
+        feeRateSatVb: Double?,
+        lnurlQuote: LnurlInvoiceQuote?,
+    ): SendPaymentResult
+
+    /** Empties the on-chain wallet in one transaction. */
+    fun sendAllOnchain(address: String, feeRateSatVb: Double?): SendPaymentResult
+}
+
+/**
+ * Waits up to [timeoutMs] for a Lightning payment started at [attemptStartedAtNanos] to resolve.
+ */
+fun interface PaymentSettlementWatcher {
+    suspend fun await(
+        paymentId: String,
+        attemptStartedAtNanos: Long,
+        timeoutMs: Long,
+    ): PaymentSettlement
 }

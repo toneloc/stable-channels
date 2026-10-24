@@ -27,3 +27,24 @@ sealed class PaymentSettlement {
     /** Not settled in time. Never shown as sent: the receipt stays pending. */
     data object TimedOut : PaymentSettlement()
 }
+
+/** The Lightning payment types a send records in history. */
+enum class LightningPaymentKind {
+    BOLT11,
+    BOLT12,
+    LNURL,
+}
+
+/** How long a send waits for a Lightning settlement before showing the receipt as pending. */
+object SettlementWait {
+    const val BOLT11_MS = 7_000L
+
+    /** Longer: the node first fetches an invoice from the offer. */
+    const val BOLT12_MS = 10_000L
+
+    /** A pending receipt is checked again for this long per round. */
+    const val PENDING_ROUND_MS = 60_000L
+
+    fun forDestination(destination: SendDestination): Long =
+        if (destination is SendDestination.Bolt12) BOLT12_MS else BOLT11_MS
+}

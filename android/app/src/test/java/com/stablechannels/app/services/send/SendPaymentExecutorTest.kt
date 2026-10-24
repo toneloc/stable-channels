@@ -4,11 +4,18 @@ import com.stablechannels.app.domain.lnurl.LnurlDescriptionBinding
 import com.stablechannels.app.domain.lnurl.LnurlInvoiceQuote
 import com.stablechannels.app.domain.send.BitcoinNetwork
 import com.stablechannels.app.domain.send.DecodedBolt11
+import com.stablechannels.app.domain.send.FakeInvoiceDecoder
+import com.stablechannels.app.domain.send.FakeSendNode
+import com.stablechannels.app.domain.send.FakeSendRecorder
+import com.stablechannels.app.domain.send.FakeSendWallet
 import com.stablechannels.app.domain.send.InvoicePayability
 import com.stablechannels.app.domain.send.SendDestination
 import com.stablechannels.app.domain.send.SendError
+import com.stablechannels.app.domain.send.SendFailure
 import com.stablechannels.app.domain.send.SendPaymentOutcome
 import com.stablechannels.app.domain.send.SendPaymentResult
+import com.stablechannels.app.domain.send.balances
+import com.stablechannels.app.domain.send.readyChannel
 import java.net.URI
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -23,6 +30,7 @@ class SendPaymentExecutorTest {
     private val audits = mutableListOf<String>()
     private val executor =
         SendPaymentExecutor(
+            node,
             node,
             wallet,
             recorder,
@@ -55,7 +63,7 @@ class SendPaymentExecutorTest {
         val result = executor.execute(SendDestination.Bolt11("lnbc-fixed", 50_000), 0, null, null)
 
         assertEquals(listOf("surplusCheck 50000", "payBolt11 lnbc-fixed null"), node.calls)
-        assertEquals(listOf("lightning pid-1 50000"), recorder.rows)
+        assertEquals(listOf("bolt11 pid-1 50000"), recorder.rows)
         assertEquals(SendPaymentResult(50, SendPaymentOutcome.Lightning("pid-1")), result)
     }
 
@@ -134,7 +142,7 @@ class SendPaymentExecutorTest {
     }
 
     @Test
-    fun `onchain with a ready channel splices out of the best channel`() {
+    fun `onchain with a ready channel splices out of the best channel and tracks that channel`() {
         wallet.snapshot =
             balances(
                 lightningSats = 900_000,
@@ -143,7 +151,10 @@ class SendPaymentExecutorTest {
 
         val result = executor.execute(SendDestination.Onchain(ADDRESS, null), 50_000, 2.0, null)
 
-        assertEquals(listOf("beginSpliceOut 50000", "spliceOut small $ADDRESS 50000"), node.calls)
+        assertEquals(
+            listOf("beginSpliceOut small 50000", "spliceOut small $ADDRESS 50000"),
+            node.calls,
+        )
         assertEquals(SendPaymentResult(50_000, SendPaymentOutcome.SpliceOut), result)
         assertTrue(recorder.rows.isEmpty())
     }

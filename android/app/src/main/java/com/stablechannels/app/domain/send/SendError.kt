@@ -2,6 +2,9 @@ package com.stablechannels.app.domain.send
 
 import com.stablechannels.app.domain.lnurl.LnurlError
 
+/** A send rejected for a reason the flow shows as is. */
+class SendFailure(val error: SendError) : Exception()
+
 /** Why a send cannot go ahead. The UI maps each case to localized text. */
 sealed class SendError {
     data object Offline : SendError()

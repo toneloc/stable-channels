@@ -7,6 +7,7 @@ import com.stablechannels.app.domain.lnurl.LnurlPayClient
 import com.stablechannels.app.domain.lnurl.LnurlPayParams
 import com.stablechannels.app.domain.send.BitcoinNetwork
 import com.stablechannels.app.services.AuditService
+import com.stablechannels.app.util.epochSecondsNow
 import java.net.URI
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -22,7 +23,7 @@ class LnurlService(
     private val network: BitcoinNetwork,
     private val invoiceValidator: LnurlInvoiceValidator,
     private val transport: LnurlTransport = LnurlHttpClient(),
-    private val nowEpochSecs: () -> Long = { System.currentTimeMillis() / 1000 },
+    private val nowEpochSecs: () -> Long = ::epochSecondsNow,
     private val audit: (String, Map<String, Any?>) -> Unit = AuditService::log,
 ) : LnurlPayClient {
     /** The payee's pay parameters; only `payRequest` with a text description and sane bounds. */

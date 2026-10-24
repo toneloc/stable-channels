@@ -1,15 +1,4 @@
-package com.stablechannels.app.services.send
-
-import com.stablechannels.app.domain.send.BitcoinNetwork
-import com.stablechannels.app.domain.send.DecodedBolt11
-import com.stablechannels.app.domain.send.DecodedBolt12
-import com.stablechannels.app.domain.send.LightningInvoiceDecoder
-import com.stablechannels.app.domain.send.OutboundPaymentStatus
-import com.stablechannels.app.domain.send.SendBalanceSnapshot
-import com.stablechannels.app.domain.send.SendNode
-import com.stablechannels.app.domain.send.SendPaymentRecorder
-import com.stablechannels.app.domain.send.SendWallet
-import com.stablechannels.app.domain.send.SpliceChannelCandidate
+package com.stablechannels.app.domain.send
 
 internal class FakeSendWallet(
     override var network: BitcoinNetwork? = BitcoinNetwork.TESTNET,
@@ -44,7 +33,7 @@ internal fun readyChannel(outboundSats: Long, id: String = "chan") =
     SpliceChannelCandidate(id, "user-$id", "peer-$id", outboundSats * 1000, isReady = true)
 
 /** Records every node call as text, in order. */
-internal class FakeSendNode : SendNode {
+internal class FakeSendNode : SendNode, SendLedger {
     val calls = mutableListOf<String>()
     var paymentId = "pid-1"
     var txid = "txid-1"
@@ -89,8 +78,13 @@ internal class FakeSendNode : SendNode {
         calls += "surplusCheck $amountMsat"
     }
 
-    override fun beginSpliceOut(amountSats: Long, address: String, price: Double) {
-        calls += "beginSpliceOut $amountSats"
+    override fun beginSpliceOut(
+        channel: SpliceChannelCandidate,
+        amountSats: Long,
+        address: String,
+        price: Double,
+    ) {
+        calls += "beginSpliceOut ${channel.channelId} $amountSats"
     }
 
     override fun cancelSpliceStart() {
@@ -107,11 +101,11 @@ internal class FakeSendRecorder : SendPaymentRecorder {
 
     override fun recordLightning(
         paymentId: String,
-        paymentType: String,
+        kind: LightningPaymentKind,
         amountMsat: Long,
         price: Double,
     ) {
-        rows += "$paymentType $paymentId $amountMsat"
+        rows += "${kind.name.lowercase()} $paymentId $amountMsat"
     }
 
     override fun recordOnchain(txid: String, amountMsat: Long, price: Double, address: String) {

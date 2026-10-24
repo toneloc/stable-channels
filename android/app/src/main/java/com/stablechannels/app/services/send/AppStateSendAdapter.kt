@@ -2,21 +2,22 @@ package com.stablechannels.app.services.send
 
 import com.stablechannels.app.AppState
 import com.stablechannels.app.domain.send.BitcoinNetwork
+import com.stablechannels.app.domain.send.LightningPaymentKind
 import com.stablechannels.app.domain.send.OutboundPaymentStatus
 import com.stablechannels.app.domain.send.SendBalanceSnapshot
+import com.stablechannels.app.domain.send.SendLedger
 import com.stablechannels.app.domain.send.SendNode
 import com.stablechannels.app.domain.send.SendPaymentRecorder
 import com.stablechannels.app.domain.send.SendWallet
 import com.stablechannels.app.domain.send.SpliceChannelCandidate
 import com.stablechannels.app.services.toDomain
-import com.stablechannels.app.util.Constants
 import org.lightningdevkit.ldknode.Bolt11Invoice
 import org.lightningdevkit.ldknode.ChannelDetails
 import org.lightningdevkit.ldknode.Offer
 
 /** The send flow's ports, backed by the running wallet. */
 class AppStateSendAdapter(private val appState: AppState) :
-    SendWallet, SendNode, SendPaymentRecorder {
+    SendWallet, SendNode, SendLedger, SendPaymentRecorder {
     private val nodeService
         get() = appState.nodeService
 
@@ -66,8 +67,19 @@ class AppStateSendAdapter(private val appState: AppState) :
     override fun ensureNoUnsettledSurplus(amountMsat: Long) =
         appState.ensureNoUnsettledSurplus(amountMsat)
 
-    override fun beginSpliceOut(amountSats: Long, address: String, price: Double) =
-        appState.beginSpliceOut(amountSats, address, price)
+    override fun beginSpliceOut(
+        channel: SpliceChannelCandidate,
+        amountSats: Long,
+        address: String,
+        price: Double,
+    ) =
+        appState.beginSpliceOut(
+            amountSats,
+            address,
+            price,
+            userChannelId = channel.userChannelId,
+            channelId = channel.channelId,
+        )
 
     override fun cancelSpliceStart() = appState.cancelPendingSpliceStart()
 
@@ -76,26 +88,13 @@ class AppStateSendAdapter(private val appState: AppState) :
 
     override fun recordLightning(
         paymentId: String,
-        paymentType: String,
+        kind: LightningPaymentKind,
         amountMsat: Long,
         price: Double,
-    ) = appState.recordOutgoingLightningPayment(paymentId, paymentType, amountMsat, price)
+    ) = appState.recordOutgoingLightningPayment(paymentId, kind.historyType, amountMsat, price)
 
-    override fun recordOnchain(txid: String, amountMsat: Long, price: Double, address: String) {
-        appState.databaseService?.recordPayment(
-            paymentId = null,
-            paymentType = "onchain",
-            direction = "sent",
-            amountMsat = amountMsat,
-            amountUSD =
-                (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * price).takeIf { price > 0 },
-            btcPrice = price.takeIf { it > 0 },
-            status = "pending",
-            txid = txid,
-            address = address,
-        )
-        appState.notifyPaymentRecorded()
-    }
+    override fun recordOnchain(txid: String, amountMsat: Long, price: Double, address: String) =
+        appState.recordPendingOnchainSend(txid, amountMsat, price, address)
 }
 
 private fun ChannelDetails.toCandidate() =
@@ -106,3 +105,12 @@ private fun ChannelDetails.toCandidate() =
         outboundCapacityMsat = outboundCapacityMsat.toLong(),
         isReady = isChannelReady,
     )
+
+/** The payment_type column value for each Lightning send. */
+private val LightningPaymentKind.historyType: String
+    get() =
+        when (this) {
+            LightningPaymentKind.BOLT11 -> "lightning"
+            LightningPaymentKind.BOLT12 -> "bolt12"
+            LightningPaymentKind.LNURL -> "lnurl"
+        }

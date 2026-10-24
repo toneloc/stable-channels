@@ -1,6 +1,7 @@
 package com.stablechannels.app.services.send
 
 import com.stablechannels.app.domain.send.PaymentSettlement
+import com.stablechannels.app.domain.send.PaymentSettlementWatcher
 import com.stablechannels.app.services.PaymentOutcome
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -20,8 +21,8 @@ class PaymentSettlementObserver(
     /** Asks the node for the status, in case its event was handled elsewhere. */
     private val refresh: (paymentId: String, attemptStartedAtNanos: Long) -> Unit,
     private val pollIntervalMs: Long = 2_000,
-) {
-    suspend fun await(
+) : PaymentSettlementWatcher {
+    override suspend fun await(
         paymentId: String,
         attemptStartedAtNanos: Long,
         timeoutMs: Long,

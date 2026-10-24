@@ -9,15 +9,13 @@ import com.stablechannels.app.domain.send.SendFlowStep
 import com.stablechannels.app.domain.send.SendPaymentOutcome
 import com.stablechannels.app.domain.send.SendPaymentResult
 import com.stablechannels.app.domain.send.SendPreflight
+import com.stablechannels.app.domain.send.SettlementWait
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** A pending Lightning receipt is checked again for this long per round. */
-internal const val PENDING_SETTLEMENT_ROUND_MS = 60_000L
 
 /** The slide: sends the confirmed payment once, however often it is triggered. */
 fun SendFlowModel.send() {
@@ -31,7 +29,13 @@ internal suspend fun SendFlowModel.executeSend() {
     val lnurlQuote =
         if (s.isLnurl) {
             if (lnurlClient() == null) return failAndReset(SendError.WalletNotReady)
-            payableLnurlQuote() ?: return update { it.copy(resetToken = it.resetToken + 1) }
+            val quote =
+                state.value.lnurlQuote ?: return update { it.copy(resetToken = it.resetToken + 1) }
+            if (quote.isExpired(nowEpochSecs())) {
+                replaceExpiredLnurlQuote()
+                return update { it.copy(resetToken = it.resetToken + 1) }
+            }
+            quote
         } else null
 
     // Marked in flight before the first suspension, so a second slide cannot dispatch twice.
@@ -95,7 +99,7 @@ private suspend fun SendFlowModel.showOutcome(
         SendPaymentOutcome.SpliceOut ->
             showReceipt(SendReceipt(sentSats, isPendingSettlement = true))
         is SendPaymentOutcome.Lightning -> {
-            val timeoutMs = if (destination is SendDestination.Bolt12) 10_000L else 7_000L
+            val timeoutMs = SettlementWait.forDestination(destination)
             val settled = settlement.await(outcome.paymentId, attemptStartedAt, timeoutMs)
             applySettlement(settled, sentSats, outcome.paymentId, attemptStartedAt)
         }
@@ -131,7 +135,8 @@ private fun SendFlowModel.watchPendingSettlement(paymentId: String, attemptStart
     pendingSettlementJob?.cancel()
     pendingSettlementJob = viewModelScope.launch {
         while (isActive && state.value.isWatching(paymentId)) {
-            val settled = settlement.await(paymentId, attemptStartedAt, PENDING_SETTLEMENT_ROUND_MS)
+            val settled =
+                settlement.await(paymentId, attemptStartedAt, SettlementWait.PENDING_ROUND_MS)
             if (!state.value.isWatching(paymentId)) return@launch
             when (settled) {
                 PaymentSettlement.Settled ->
@@ -216,13 +221,8 @@ internal fun SendFlowModel.invalidateLnurlQuote() {
     update { it.copy(lnurlQuote = null, lnurlQuoteError = null, isFetchingLnurlQuote = false) }
 }
 
-/**
- * The quote the slide may pay. An expired one is replaced and must be reviewed: never auto-paid.
- */
-private fun SendFlowModel.payableLnurlQuote(): LnurlInvoiceQuote? {
-    val quote = state.value.lnurlQuote ?: return null
-    if (!quote.isExpired(nowEpochSecs())) return quote
+/** An expired quote is replaced and must be reviewed again: never auto-paid. */
+private fun SendFlowModel.replaceExpiredLnurlQuote() {
     startLnurlQuoteFetch()
     fail(SendError.LnurlInvoiceRefreshed)
-    return null
 }

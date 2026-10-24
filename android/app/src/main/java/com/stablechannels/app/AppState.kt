@@ -659,6 +659,23 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
+    /** Records a broadcast on-chain send as pending and refreshes history. */
+    fun recordPendingOnchainSend(txid: String, amountMsat: Long, price: Double, address: String) {
+        databaseService?.recordPayment(
+            paymentId = null,
+            paymentType = "onchain",
+            direction = "sent",
+            amountMsat = amountMsat,
+            amountUSD =
+                (amountMsat.toDouble() / 1000 / Constants.SATS_IN_BTC * price).takeIf { price > 0 },
+            btcPrice = price.takeIf { it > 0 },
+            status = "pending",
+            txid = txid,
+            address = address,
+        )
+        notifyPaymentRecorded()
+    }
+
     fun recordOutgoingLightningPayment(
         paymentId: String,
         paymentType: String,
@@ -2962,7 +2979,16 @@ class AppState(private val context: Context) : ViewModel() {
         }
     }
 
-    fun beginSpliceOut(amountSats: Long, address: String, accountingPrice: Double) {
+    /**
+     * Starts a splice-out from the channel [userChannelId]/[channelId], the stable one by default.
+     */
+    fun beginSpliceOut(
+        amountSats: Long,
+        address: String,
+        accountingPrice: Double,
+        userChannelId: String = _stableChannel.value.userChannelId,
+        channelId: String = _stableChannel.value.channelId,
+    ) {
         releaseStaleSpliceLock()
         if (isSweeping) {
             throw IllegalStateException("A splice is already in progress — try again shortly")
@@ -2977,15 +3003,18 @@ class AppState(private val context: Context) : ViewModel() {
         val paymentRowId =
             db.recordPendingSplice(
                 paymentType = "splice_out",
-                userChannelId = _stableChannel.value.userChannelId,
-                channelId = _stableChannel.value.channelId,
+                userChannelId = userChannelId,
+                channelId = channelId,
+                // The persisted fundingTxid belongs to the stable channel, so only it may fall
+                // back.
                 previousFundingTxid =
                     nodeService.channels
-                        .singleOrNull {
-                            it.userChannelId == _stableChannel.value.userChannelId
-                        }
+                        .singleOrNull { it.userChannelId == userChannelId }
                         ?.fundingTxo
-                        ?.txid ?: fundingTxid,
+                        ?.txid
+                        ?: fundingTxid.takeIf {
+                            userChannelId == _stableChannel.value.userChannelId
+                        },
                 amountMsat = amountSats * 1000,
                 amountUSD =
                     if (accountingPrice > 0) {

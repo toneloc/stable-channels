@@ -881,20 +881,12 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                                 isSendAll = isSendMax,
                                                 txid = txid,
                                             )
-                                            appState.databaseService?.recordPayment(
-                                                paymentId = null,
-                                                paymentType = "onchain",
-                                                direction = "sent",
-                                                amountMsat = sats * 1000,
-                                                amountUSD =
-                                                    (sats.toDouble() / Constants.SATS_IN_BTC) *
-                                                        accountingPrice,
-                                                btcPrice = accountingPrice,
-                                                status = "pending",
-                                                txid = txid,
-                                                address = trimmed,
+                                            appState.recordPendingOnchainSend(
+                                                txid,
+                                                sats * 1000,
+                                                accountingPrice,
+                                                trimmed,
                                             )
-                                            appState.notifyPaymentRecorded()
                                             result = "Onchain tx sent: $txid"
                                         }
                                     }

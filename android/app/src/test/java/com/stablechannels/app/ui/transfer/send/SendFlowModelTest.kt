@@ -7,6 +7,10 @@ import com.stablechannels.app.domain.lnurl.LnurlPayParams
 import com.stablechannels.app.domain.send.BitcoinNetwork
 import com.stablechannels.app.domain.send.DecodedBolt11
 import com.stablechannels.app.domain.send.DecodedBolt12
+import com.stablechannels.app.domain.send.FakeInvoiceDecoder
+import com.stablechannels.app.domain.send.FakeSendNode
+import com.stablechannels.app.domain.send.FakeSendRecorder
+import com.stablechannels.app.domain.send.FakeSendWallet
 import com.stablechannels.app.domain.send.InvoicePayability
 import com.stablechannels.app.domain.send.NetworkFeeSpeedTier
 import com.stablechannels.app.domain.send.OutboundPaymentStatus
@@ -16,15 +20,11 @@ import com.stablechannels.app.domain.send.SendAmountUnit
 import com.stablechannels.app.domain.send.SendError
 import com.stablechannels.app.domain.send.SendFlowStep
 import com.stablechannels.app.domain.send.SendSuccessStatus
+import com.stablechannels.app.domain.send.balances
+import com.stablechannels.app.domain.send.readyChannel
 import com.stablechannels.app.services.PaymentOutcome
-import com.stablechannels.app.services.send.FakeInvoiceDecoder
-import com.stablechannels.app.services.send.FakeSendNode
-import com.stablechannels.app.services.send.FakeSendRecorder
-import com.stablechannels.app.services.send.FakeSendWallet
 import com.stablechannels.app.services.send.PaymentSettlementObserver
 import com.stablechannels.app.services.send.SendPaymentExecutor
-import com.stablechannels.app.services.send.balances
-import com.stablechannels.app.services.send.readyChannel
 import java.net.URI
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +109,7 @@ class SendFlowModelTest {
             wallet = wallet,
             executor =
                 SendPaymentExecutor(
+                    node,
                     node,
                     wallet,
                     FakeSendRecorder(),

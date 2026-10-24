@@ -10,7 +10,7 @@ import com.stablechannels.app.domain.send.InvoicePayability
 import com.stablechannels.app.domain.send.LightningInvoiceDecoder
 import com.stablechannels.app.domain.send.PayeeAmountLimits
 import com.stablechannels.app.domain.send.PaymentDestinationClassifier
-import com.stablechannels.app.domain.send.PaymentFeeEstimator
+import com.stablechannels.app.domain.send.PaymentSettlementWatcher
 import com.stablechannels.app.domain.send.SendAmountCalculator
 import com.stablechannels.app.domain.send.SendAmountRequest
 import com.stablechannels.app.domain.send.SendAmountUnit
@@ -18,12 +18,13 @@ import com.stablechannels.app.domain.send.SendAmountValidator
 import com.stablechannels.app.domain.send.SendAuthenticator
 import com.stablechannels.app.domain.send.SendDestination
 import com.stablechannels.app.domain.send.SendError
+import com.stablechannels.app.domain.send.SendFailure
 import com.stablechannels.app.domain.send.SendFlowStep
+import com.stablechannels.app.domain.send.SendPaymentDispatcher
 import com.stablechannels.app.domain.send.SendQuote
 import com.stablechannels.app.domain.send.SendWallet
-import com.stablechannels.app.services.send.PaymentSettlementObserver
-import com.stablechannels.app.services.send.SendFailure
-import com.stablechannels.app.services.send.SendPaymentExecutor
+import com.stablechannels.app.domain.send.presetSats
+import com.stablechannels.app.util.epochSecondsNow
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
@@ -43,15 +44,15 @@ import kotlinx.coroutines.withContext
  */
 class SendFlowModel(
     internal val wallet: SendWallet,
-    internal val executor: SendPaymentExecutor,
-    internal val settlement: PaymentSettlementObserver,
+    internal val executor: SendPaymentDispatcher,
+    internal val settlement: PaymentSettlementWatcher,
     private val classifier: PaymentDestinationClassifier,
     private val decoder: LightningInvoiceDecoder,
     private val lnurlClientFor: (BitcoinNetwork) -> LnurlPayClient,
     internal val authenticator: SendAuthenticator,
     internal val ensureLspConnected: () -> Unit,
     internal val io: CoroutineDispatcher = Dispatchers.IO,
-    internal val nowEpochSecs: () -> Long = { System.currentTimeMillis() / 1000 },
+    internal val nowEpochSecs: () -> Long = ::epochSecondsNow,
     internal val nanoTime: () -> Long = System::nanoTime,
 ) : ViewModel() {
     internal val mutableState = MutableStateFlow(SendFlowState())
@@ -93,12 +94,7 @@ class SendFlowModel(
                     )
                 target == s.destination -> base
                 else -> {
-                    val presetSats =
-                        when (target) {
-                            is SendDestination.Onchain -> target.amountSats
-                            is SendDestination.Bolt11 -> target.amountMsat?.let { it / 1000 }
-                            else -> null
-                        }?.takeIf { it > 0 }
+                    val presetSats = target.presetSats
                     base.copy(
                         destination = target,
                         isMaxAmount = false,
@@ -146,7 +142,7 @@ class SendFlowModel(
             is SendDestination.Bolt12 -> goTo(SendFlowStep.AMOUNT)
             is SendDestination.Onchain -> {
                 // A BIP-21 amount refills the field if the user cleared it.
-                val preset = destination.amountSats?.takeIf { it > 0 }
+                val preset = destination.presetSats
                 if (preset != null && state.value.amountInputText.isEmpty()) {
                     update {
                         it.copy(amountUnit = SendAmountUnit.SATS, amountInputText = "$preset")
@@ -182,18 +178,15 @@ class SendFlowModel(
         val decoded = decoder.decodeBolt11(destination.raw)
         val payability =
             InvoicePayability.evaluate(
-                isExpired = decoded != null && nowEpochSecs() >= decoded.expiresAtEpochSecs,
+                isExpired = decoded?.isExpired(nowEpochSecs()) == true,
                 existingPayment = decoded?.paymentHash?.let(wallet::outboundPaymentStatus),
             )
         if (payability != InvoicePayability.PAYABLE) {
             return fail(SendError.InvoiceNotPayable(payability))
         }
-        val msat = destination.amountMsat?.takeIf { it > 0 }
-        if (msat == null) return goTo(SendFlowStep.AMOUNT)
-        val available = quote()?.availableSats ?: 0
-        if (available == 0L || PaymentFeeEstimator.maxLightningDebitSats(msat) > available) {
-            return fail(SendError.InsufficientBalance(available))
-        }
+        if (destination.amountMsat?.takeIf { it > 0 } == null) return goTo(SendFlowStep.AMOUNT)
+        val error = SendAmountValidator.validate(amountRequest() ?: return, quote() ?: return)
+        if (error != null) return fail(error)
         goTo(SendFlowStep.CONFIRM)
     }
 
