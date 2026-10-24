@@ -2262,6 +2262,157 @@ final class DatabaseServiceTests: XCTestCase {
             "owed debit must still apply after a marker-only migration rerun"
         )
     }
+
+    // MARK: - On-chain receive reconciliation
+
+    private let receiveTxid = String(repeating: "c", count: 64)
+
+    private func onchainReceiveCount() throws -> Int {
+        try service.rawSQL.query(
+            "SELECT COUNT(*) FROM payments WHERE payment_type = 'onchain' AND direction = 'received'"
+        ).first.map { $0.int64(0) }.map(Int.init) ?? 0
+    }
+
+    private func recordWebSocketReceive(sats: UInt64, address: String = "bc1qws") throws
+        -> OnchainReceiveRepository.WebSocketReceiveOutcome {
+        try service.onchainRepo.recordWebSocketReceive(
+            txid: receiveTxid,
+            address: address,
+            amountMsat: sats * 1000,
+            amountUSD: nil,
+            btcPrice: nil
+        )
+    }
+
+    func testWebSocketReceiveIsRecordedOncePerTxid() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .alreadyRecorded)
+
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives().map(\.sats), [50_000])
+    }
+
+    func testWebSocketReceiveAdoptsBalancePlaceholderOfSameAmount() throws {
+        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qws"))
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "onchain_deposit_1",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            resolutionId: resolutionId
+        ))
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .adoptedPlaceholder)
+
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "onchain_deposit_1")
+        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
+        // The resolver for the placeholder is done: the deposit is identified.
+        XCTAssertTrue(service.onchainRepo.fetchPendingOnchainReceives().isEmpty)
+    }
+
+    func testWebSocketReceiveDoesNotAdoptPlaceholderOfAnotherAmountOrAddress() throws {
+        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qother"))
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "onchain_deposit_1",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            resolutionId: resolutionId
+        ))
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, address: "bc1qws"), .inserted)
+
+        XCTAssertEqual(try onchainReceiveCount(), 2)
+    }
+
+    func testMarkBalanceSeenClearsAwaitingReceive() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+        let awaiting = try service.onchainRepo.awaitingBalanceReceives()
+
+        try service.onchainRepo.markBalanceSeen(rowIds: awaiting.map(\.rowId))
+
+        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
+    }
+
+    func testFailedReceiveNoLongerAwaitsBalance() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+
+        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "failed")
+        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
+    }
+
+    func testRemovedTxDoesNotFailConfirmedReceive() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+        let row = try XCTUnwrap(service.paymentRepo.payment(txid: receiveTxid))
+        try service.paymentRepo.updateConfirmations(
+            paymentId: row.id,
+            paymentType: "onchain",
+            txBlockHeight: 800_000,
+            currentBlockHeight: 800_001
+        )
+
+        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "pending")
+    }
+
+    func testRemovedTxDoesNotFailOtherPaymentTypes() throws {
+        XCTAssertTrue(try service.paymentRepo.recordPayment(
+            paymentId: "splice-1",
+            paymentType: "splice_in",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: receiveTxid
+        ))
+
+        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "splice-1")?.status, "pending")
+    }
+
+    func testSecondOnchainReceiveRowWithSameTxidIsRefused() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+
+        let inserted = try service.paymentRepo.recordPayment(
+            paymentId: "onchain_deposit_dup",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: receiveTxid
+        )
+
+        XCTAssertFalse(inserted)
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+    }
+
+    func testMigrationDedupesExistingOnchainReceiveRowsByTxid() throws {
+        try service.rawSQL.execute("DROP INDEX idx_payments_onchain_receive_txid_unique")
+        for paymentId in ["first", "second"] {
+            try service.rawSQL.execute(
+                """
+                INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, txid)
+                VALUES (?, 'onchain', 'received', 1000000, 'pending', ?)
+                """,
+                params: [.text(paymentId), .text(receiveTxid)]
+            )
+        }
+
+        service = try DatabaseService(dataDir: dataDir)
+
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "first")
+    }
 }
 
 @MainActor
