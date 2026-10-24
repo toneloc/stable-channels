@@ -7005,6 +7005,77 @@
         }
       }
     },
+    "error_network_unstable_sync" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "تعذّرت مزامنة محفظتك. الشبكة غير مستقرة الآن. يُرجى المحاولة مرة أخرى."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "আপনার ওয়ালেট সিঙ্ক করা যায়নি। নেটওয়ার্ক এখন অস্থির। অনুগ্রহ করে আবার চেষ্টা করুন।"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Ihre Wallet konnte nicht synchronisiert werden. Das Netzwerk ist gerade instabil. Bitte versuchen Sie es erneut."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Could not sync your wallet. The network is unstable right now. Please try again."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "No se pudo sincronizar tu billetera. La red está inestable en este momento. Inténtalo de nuevo."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Impossible de synchroniser votre portefeuille. Le réseau est instable pour le moment. Veuillez réessayer."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "आपका वॉलेट सिंक नहीं हो सका। नेटवर्क अभी अस्थिर है। कृपया फिर से कोशिश करें।"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ウォレットを同期できませんでした。現在ネットワークが不安定です。もう一度お試しください。"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Não foi possível sincronizar sua carteira. A rede está instável no momento. Tente novamente."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Не удалось синхронизировать кошелёк. Сеть сейчас нестабильна. Повторите попытку."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法同步您的钱包。网络当前不稳定，请重试。"
+          }
+        }
+      }
+    },
     "error_no_file" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -24029,6 +24100,77 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Connected"
+          }
+        }
+      }
+    },
+    "status_network_retrying" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "الشبكة غير مستقرة. جارٍ إعادة محاولة مزامنة المحفظة..."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "নেটওয়ার্ক অস্থির। ওয়ালেট সিঙ্ক আবার চেষ্টা করা হচ্ছে..."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Netzwerk instabil. Wallet-Synchronisierung wird erneut versucht..."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Network unstable. Retrying wallet sync..."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Red inestable. Reintentando la sincronización de la billetera..."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Réseau instable. Nouvelle tentative de synchronisation du portefeuille..."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "नेटवर्क अस्थिर है। वॉलेट सिंक फिर से किया जा रहा है..."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ネットワークが不安定です。ウォレットの同期を再試行しています..."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Rede instável. Tentando sincronizar a carteira novamente..."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Нестабильная сеть. Повторная синхронизация кошелька..."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "网络不稳定。正在重试钱包同步..."
           }
         }
       }

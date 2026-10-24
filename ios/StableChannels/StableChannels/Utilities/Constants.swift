@@ -20,6 +20,18 @@ enum Constants {
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
     static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
+    // Caps every Esplora fee-rate refresh (node start and runtime): a stalled provider fails fast, start
+    // moves on to the next provider or the retry loop, and a failed runtime refresh keeps cached rates.
+    static let nodeStartFeeRateTimeoutSecs: UInt64 = 8
+    static let nodeStartRetryDelay: Duration = .seconds(2)
+    // Ceiling for the launch-time backoff that keeps retrying node start after every provider failed.
+    static let nodeStartRetryMaxDelay: Duration = .seconds(60)
+    // Automatic node-start retries before the error screen (backoff 1+2+4+8+16+32s, about 1-3 minutes).
+    static let nodeStartMaxRetries = 6
+    static let onchainWalletSyncTimeoutSecs: UInt64 = 60
+    static let lightningWalletSyncTimeoutSecs: UInt64 = 60
+    static let txBroadcastTimeoutSecs: UInt64 = 30
+    static let esploraRequestTimeoutSecs: UInt8 = 15
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL
