@@ -3635,11 +3635,33 @@ class AppState {
                 return
             }
 
+            // Receives the WebSocket already recorded are part of this increase; only the rest
+            // is a deposit it missed. If the lookup fails, retry on the next poll rather than
+            // risk recording a deposit twice.
+            guard let awaiting = try? databaseService?.onchainRepo.awaitingBalanceReceives() else { return }
+            let attribution = DepositAttribution.attribute(depositSats: Int64(depositSats), awaiting: awaiting)
+            if !attribution.absorbedRowIds.isEmpty {
+                do {
+                    try databaseService?.onchainRepo.markBalanceSeen(rowIds: attribution.absorbedRowIds)
+                } catch {
+                    return
+                }
+                AuditService.log("ONCHAIN_DEPOSIT_MATCHED_WEBSOCKET", data: [
+                    "amount_sats": "\(depositSats)",
+                    "remainder_sats": "\(attribution.remainderSats)"
+                ])
+            }
+            guard attribution.remainderSats >= 1000 else {
+                prevOnchainSats = currentOnchain
+                return
+            }
+            let unattributedSats = UInt64(attribution.remainderSats)
+
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
-            let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
+            let amountUSD: Double? = price > 0 ? Double(unattributedSats) / 100_000_000.0 * price : nil
 
             // UUID -> unique depositId -> recordPayment dedup on retry.
             let depositId = "onchain_deposit_\(UUID().uuidString)"
@@ -3659,7 +3681,7 @@ class AppState {
 
             let deposit = DepositRecordInput(
                 depositId: depositId,
-                depositSats: Int64(depositSats),
+                depositSats: Int64(unattributedSats),
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil
             )
@@ -3715,33 +3737,23 @@ class AppState {
             // Fires only for our own tracked receive address, so unlike the balance-delta
             // fallback it cannot be confused with a splice/close's own movement — safe to
             // record regardless of splice/close state.
-            if (try? db.paymentRepo.paymentExists(forTxid: txid)) == true {
-                return
-            }
-
-            // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
-            if amountSats >= 1000 {
+            // The amount comes from the WebSocket feed, so convert it with a range check.
+            if amountSats >= 1000, let amountMsat = OnchainAmount.msats(fromSats: amountSats) {
                 let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
                 let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
-                let paymentId = "onchain_receive_\(txid)"
 
                 do {
-                    let recorded = try db.paymentRepo.recordPayment(
-                        paymentId: paymentId,
-                        paymentType: "onchain",
-                        direction: "received",
-                        amountMsat: UInt64(amountSats * 1000),
-                        amountUSD: amountUSD,
-                        btcPrice: price > 0 ? price : nil,
-                        counterparty: nil,
-                        status: "pending",
+                    let outcome = try db.onchainRepo.recordWebSocketReceive(
                         txid: txid,
-                        address: target
+                        address: target,
+                        amountMsat: amountMsat,
+                        amountUSD: amountUSD,
+                        btcPrice: price > 0 ? price : nil
                     )
-                    if recorded {
+                    if outcome != .alreadyRecorded {
                         AuditService.log(
                             "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
-                            data: ["txid": txid, "sats": "\(amountSats)"]
+                            data: ["txid": txid, "sats": "\(amountSats)", "outcome": "\(outcome)"]
                         )
                         paymentFlash = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in

@@ -213,9 +213,16 @@ final class PaymentRepository {
         }
     }
 
+    /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
+    /// "removed" report that arrives after a block (or for another row type) must not fail
+    /// a deposit that is already in the chain.
     func failPaymentByTxid(txid: String) throws {
         try rawSQL.execute(
-            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0
+              AND payment_type = 'onchain' AND direction = 'received'
+            """,
             params: [.text(txid)]
         )
     }
@@ -294,13 +301,6 @@ final class PaymentRepository {
         return rows.map { row in
             paymentRecord(from: row)
         }
-    }
-
-    /// Check if any payment row exists carrying this transaction ID.
-    func paymentExists(forTxid txid: String) throws -> Bool {
-        let sql = "SELECT 1 FROM payments WHERE txid = ? LIMIT 1"
-        let rows = try rawSQL.query(sql, params: [.text(txid)])
-        return !rows.isEmpty
     }
 
     /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).
