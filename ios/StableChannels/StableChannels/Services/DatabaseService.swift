@@ -262,7 +262,7 @@ final class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
         ]
 
-        for sql in statements {
+        for sql in statements + SpliceEventRecorder.createTableStatements {
             try rawSQL.execute(sql)
         }
 
