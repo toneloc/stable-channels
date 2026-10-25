@@ -1202,6 +1202,7 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertNil(OnchainAmount.usd(sats: 50_000_000, price: 0))
         XCTAssertNil(OnchainAmount.total(of: [-1]))
         XCTAssertNil(OnchainAmount.total(of: [Int64.max, 1]))
+        XCTAssertNil(OnchainAmount.total(of: [1, Int64.max]))
         XCTAssertNil(OnchainAmount.total(of: [OnchainAmount.maxSats, 1]))
 
         XCTAssertEqual(OnchainAmount.msats(fromSats: 1000), 1_000_000)
@@ -1318,31 +1319,38 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 0, unrecorded: [txB], walletSats: [txB: 0]))
     }
 
-    func testRemovedReceiveLeavesTheBaselineOnlyWhenItWasCounted() {
+    func testRemovedReceiveLeavesTheBaselineOnceTheNodeSyncs() {
         let txA = String(repeating: "a", count: 64)
         let txB = String(repeating: "b", count: 64)
-        var baseline = OnchainDepositBaseline(sats: 55_000, txids: [txA])
+        var baseline = OnchainDepositBaseline(sats: 55000, txids: [txA])
 
         // Not counted: nothing changes.
-        baseline.removeCounted(txid: txB, sats: 50_000)
-        XCTAssertEqual(baseline.sats, 55_000)
+        baseline.markRemoved(txid: txB, sats: 50000)
+        baseline.settleRemovals(wallet: [txB], balance: 55000)
+        XCTAssertEqual(baseline.sats, 55000)
 
-        baseline.removeCounted(txid: txA, sats: 50_000)
-        XCTAssertEqual(baseline.sats, 5_000)
-        XCTAssertFalse(baseline.counts(txA))
+        // Counted: it stays while the node still shows the old wallet, then comes off once.
+        baseline.markRemoved(txid: txA, sats: 50000)
+        baseline.settleRemovals(wallet: [txA], balance: 55000)
+        XCTAssertEqual(baseline.sats, 55000)
+        baseline.settleRemovals(wallet: [txB], balance: 55000)
+        XCTAssertEqual(baseline.sats, 5000)
+        baseline.settleRemovals(wallet: [txA, txB], balance: 55000)
+        XCTAssertEqual(baseline.sats, 5000)
 
-        // Never below zero, and a second removal of the same txid is a no-op.
-        var small = OnchainDepositBaseline(sats: 40_000, txids: [txA])
-        small.removeCounted(txid: txA, sats: 50_000)
-        small.removeCounted(txid: txA, sats: 50_000)
-        XCTAssertEqual(small.sats, 0)
+        // A balance that already fell below the baseline left it out; the poll advances to it.
+        var dropped = OnchainDepositBaseline(sats: 55000, txids: [txA])
+        dropped.markRemoved(txid: txA, sats: 50000)
+        dropped.settleRemovals(wallet: [txA], balance: 5000)
+        XCTAssertEqual(dropped.sats, 55000)
+        XCTAssertEqual(dropped.removed, [:])
 
         // An unknown txid list counts nothing; advancing records what the wallet lists.
-        var unknown = OnchainDepositBaseline(sats: 40_000, txids: nil)
-        unknown.removeCounted(txid: txA, sats: 40_000)
-        XCTAssertEqual(unknown.sats, 40_000)
-        unknown.advance(to: 90_000, wallet: [txA, txB])
-        XCTAssertEqual(unknown.sats, 90_000)
+        var unknown = OnchainDepositBaseline(sats: 40000, txids: nil)
+        unknown.markRemoved(txid: txA, sats: 40000)
+        XCTAssertEqual(unknown.removed, [:])
+        unknown.advance(to: 90000, wallet: [txA, txB])
+        XCTAssertEqual(unknown.sats, 90000)
         XCTAssertTrue(unknown.counts(txB))
     }
 

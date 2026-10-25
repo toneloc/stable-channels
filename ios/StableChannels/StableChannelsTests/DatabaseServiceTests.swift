@@ -2450,7 +2450,7 @@ final class DatabaseServiceTests: XCTestCase {
             txid: receiveTxid
         ))
 
-        XCTAssertTrue(try service.paymentRepo.hasPendingOnchainSend(txid: receiveTxid))
+        XCTAssertTrue(try service.paymentRepo.hasPendingOnchainTx(txid: receiveTxid))
 
         // The feed's report alone leaves it pending; the explorer's word fails it.
         try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
@@ -2459,7 +2459,16 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try service.paymentRepo.failDroppedSend(txid: receiveTxid), 1)
         XCTAssertEqual(service.paymentRepo.payment(paymentId: "send-1")?.status, "failed")
         XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
-        XCTAssertFalse(try service.paymentRepo.hasPendingOnchainSend(txid: receiveTxid))
+        XCTAssertFalse(try service.paymentRepo.hasPendingOnchainTx(txid: receiveTxid))
+    }
+
+    func testRemovalCheckIsQueuedOnceUntilCleared() throws {
+        try service.paymentRepo.deferRemovalCheck(txid: receiveTxid)
+        try service.paymentRepo.deferRemovalCheck(txid: receiveTxid)
+        XCTAssertEqual(try service.paymentRepo.pendingRemovalChecks(), [receiveTxid])
+
+        try service.paymentRepo.clearRemovalCheck(txid: receiveTxid)
+        XCTAssertEqual(try service.paymentRepo.pendingRemovalChecks(), [])
     }
 
     func testRemovedTxDoesNotFailOtherPaymentTypes() throws {

@@ -100,6 +100,9 @@ struct OnchainDepositBaseline: Equatable {
     /// When tracking began. While [txids] is unknown, only receives recorded since then can be
     /// inside an increase.
     var since = Date()
+    /// Counted receives the explorer confirmed gone, with their sats. They stay counted until the node
+    /// syncs past them: a poll before that still sees the original in the balance.
+    private(set) var removed: [String: Int64] = [:]
 
     /// Moves the baseline to [sats], with the txids the wallet lists now inside it.
     mutating func advance(to sats: UInt64, wallet: Set<String>) {
@@ -112,10 +115,19 @@ struct OnchainDepositBaseline: Equatable {
         txids?.contains(txid) ?? false
     }
 
-    /// A receive the baseline counted, of [removedSats], left the mempool: its sats and txid come off,
-    /// so the transaction replacing it is a new increase on the next poll.
-    mutating func removeCounted(txid: String, sats removedSats: Int64) {
-        guard txids?.remove(txid) != nil else { return }
-        sats -= min(sats, UInt64(max(0, removedSats)))
+    /// A receive of [removedSats] left the mempool. Only one the baseline counted affects it.
+    mutating func markRemoved(txid: String, sats removedSats: Int64) {
+        guard counts(txid) else { return }
+        removed[txid] = max(0, removedSats)
+    }
+
+    /// Takes marked removals out once the node has synced past them, so the transaction replacing
+    /// one is a new increase. A balance below the baseline already left them out.
+    mutating func settleRemovals(wallet: Set<String>, balance: UInt64) {
+        guard !removed.isEmpty, balance < sats || wallet != txids else { return }
+        if balance >= sats {
+            sats -= min(sats, UInt64(removed.values.reduce(0, +)))
+        }
+        removed = [:]
     }
 }

@@ -232,17 +232,32 @@ final class PaymentRepository {
         }
     }
 
-    /// True while an unconfirmed on-chain send with this txid is pending.
-    func hasPendingOnchainSend(txid: String) throws -> Bool {
+    /// True while an unconfirmed on-chain send or receive with this txid is pending.
+    func hasPendingOnchainTx(txid: String) throws -> Bool {
         try !rawSQL.query(
             """
             SELECT 1 FROM payments
-            WHERE txid = ? AND status = 'pending' AND confirmations = 0
-              AND payment_type = 'onchain' AND direction = 'sent'
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0 AND payment_type = 'onchain'
             LIMIT 1
             """,
             params: [.text(txid)]
         ).isEmpty
+    }
+
+    /// Queues a txid the WebSocket feed reported removed until the block explorer answers for it.
+    func deferRemovalCheck(txid: String) throws {
+        try rawSQL.execute(
+            "INSERT INTO pending_removal_checks (txid) VALUES (?) ON CONFLICT(txid) DO NOTHING",
+            params: [.text(txid)]
+        )
+    }
+
+    func pendingRemovalChecks() throws -> [String] {
+        try rawSQL.query("SELECT txid FROM pending_removal_checks ORDER BY created_at, rowid").map { $0.string(0) }
+    }
+
+    func clearRemovalCheck(txid: String) throws {
+        try rawSQL.execute("DELETE FROM pending_removal_checks WHERE txid = ?", params: [.text(txid)])
     }
 
     /// Fails an unconfirmed on-chain send whose transaction is gone from the mempool. A pending

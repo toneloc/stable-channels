@@ -68,6 +68,8 @@ final class ConfirmationPollingService {
     /// payment list to reflect updated confirmation state.
     var onUpdate: (@MainActor () -> Void)?
     var onRefreshResult: (@MainActor (ConfirmationRefreshResult) -> Void)?
+    /// A receive the explorer confirmed gone, with the sats it failed.
+    var onReceiveDropped: (@MainActor (_ txid: String, _ sats: Int64) -> Void)?
 
     init(
         databaseService: DatabaseService,
@@ -87,26 +89,59 @@ final class ConfirmationPollingService {
         self.presenceProvider = presenceProvider
     }
 
-    /// Fails a pending on-chain send the WebSocket feed reported removed, but only once the block
-    /// explorer also no longer knows its transaction. A feed report alone could fail a send that
-    /// still confirms; a send left pending after it really dropped blocks books repair.
-    func failSendIfDropped(txid: String) async {
-        guard let presenceProvider,
-              (try? databaseService.paymentRepo.hasPendingOnchainSend(txid: txid)) == true else { return }
-        let known = await presenceProvider.isKnown(txid: txid)
-        guard known == false else {
-            AuditService.log("WEBSOCKET_SEND_REMOVAL_NOT_CONFIRMED", data: [
-                "txid": txid,
-                "explorer": known == true ? "known" : "unreachable"
-            ])
-            return
-        }
+    /// Fails a pending on-chain payment the WebSocket feed reported removed, but only once the block
+    /// explorer also no longer knows its transaction. A feed report alone could fail a payment that
+    /// still confirms; a send left pending after it really dropped blocks books repair. The check is
+    /// queued, so `pollOnce` retries it until the explorer answers or the payment settles.
+    func failIfDropped(txid: String) async {
+        guard presenceProvider != nil,
+              (try? databaseService.paymentRepo.hasPendingOnchainTx(txid: txid)) == true else { return }
         do {
-            let failed = try databaseService.paymentRepo.failDroppedSend(txid: txid)
-            AuditService.log("WEBSOCKET_DROPPED_SEND_FAILED", data: ["txid": txid, "rows": "\(failed)"])
+            try databaseService.paymentRepo.deferRemovalCheck(txid: txid)
+        } catch {
+            AuditService.log("WEBSOCKET_REMOVAL_QUEUE_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
+        await checkRemoval(txid: txid)
+    }
+
+    /// Retries the removal checks the explorer has not answered yet.
+    func retryRemovalChecks() async {
+        guard let txids = try? databaseService.paymentRepo.pendingRemovalChecks() else { return }
+        for txid in txids {
+            guard !Task.isCancelled else { return }
+            await checkRemoval(txid: txid)
+        }
+    }
+
+    private func checkRemoval(txid: String) async {
+        guard let presenceProvider else { return }
+        let repo = databaseService.paymentRepo
+        do {
+            // Confirmed or failed since it was queued: nothing left to check.
+            guard try repo.hasPendingOnchainTx(txid: txid) else {
+                try repo.clearRemovalCheck(txid: txid)
+                return
+            }
+            let known = await presenceProvider.isKnown(txid: txid)
+            guard known == false else {
+                AuditService.log("WEBSOCKET_REMOVAL_NOT_CONFIRMED", data: [
+                    "txid": txid,
+                    "explorer": known == true ? "known" : "unreachable"
+                ])
+                return
+            }
+            let failedSends = try repo.failDroppedSend(txid: txid)
+            let failedReceiveSats = try repo.failPaymentByTxid(txid: txid)
+            try repo.clearRemovalCheck(txid: txid)
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAILED", data: [
+                "txid": txid,
+                "sends": "\(failedSends)",
+                "receive_sats": failedReceiveSats.map { "\($0)" } ?? "none"
+            ])
+            if let failedReceiveSats { onReceiveDropped?(txid, failedReceiveSats) }
             onUpdate?()
         } catch {
-            AuditService.log("WEBSOCKET_DROPPED_SEND_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
         }
     }
 
@@ -142,6 +177,7 @@ final class ConfirmationPollingService {
                 break
             }
         }
+        await retryRemovalChecks()
 
         if anyUpdated {
             onUpdate?()

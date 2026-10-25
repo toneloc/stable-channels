@@ -54,15 +54,16 @@ struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
         return height
     }
 
-    /// One request per explorer, no retries. Esplora answers 404 for a txid it does not know.
+    /// One request per explorer, no retries. Esplora answers 404 for a txid it does not know; the
+    /// transaction is gone only when every explorer answered that, since one may lag the others.
     func isKnown(txid: String) async -> Bool? {
-        var notFound = false
+        var allNotFound = !client.config.chainURLs.isEmpty
         for base in client.config.chainURLs {
             let path = "\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"
-            guard let response = await client.fetchResponse(path: path) else { continue }
-            if response.statusCode == 200 { return true }
-            if response.statusCode == 404 { notFound = true }
+            let status = await client.fetchResponse(path: path)?.statusCode
+            if status == 200 { return true }
+            if status != 404 { allNotFound = false }
         }
-        return notFound ? false : nil
+        return allNotFound ? false : nil
     }
 }

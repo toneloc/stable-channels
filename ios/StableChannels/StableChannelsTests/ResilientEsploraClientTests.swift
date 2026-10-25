@@ -731,7 +731,7 @@ extension ResilientEsploraClientTests {
         let cases: [(primary: Int, fallback: Int, expected: Bool?)] = [
             (404, 200, true),
             (404, 404, false),
-            (500, 404, false),
+            (500, 404, nil),
             (500, 503, nil)
         ]
         for (primary, fallback, expected) in cases {

@@ -561,6 +561,9 @@ class AppState {
             self.confirmationRefreshResult = result
             self.confirmationRefreshResultVersion += 1
         }
+        pollingService?.onReceiveDropped = { [weak self] txid, sats in
+            self?.depositBaseline.markRemoved(txid: txid, sats: sats)
+        }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
             self.confirmationUpdateEpoch += 1
@@ -3606,6 +3609,7 @@ class AppState {
         if isSweeping || pendingSplice != nil {
             return
         }
+        depositBaseline.settleRemovals(wallet: walletInbound.txids, balance: currentOnchain)
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {
@@ -3700,6 +3704,9 @@ class AppState {
                 depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
                 return
             }
+            if let txid = missed.txid {
+                transactionLinkService.setReceiveTxid(txid)
+            }
             // NOTE: do NOT clear lastReceiveTxid here. The view should
             // show the most recent resolved txid, not be blanked during
             // the re-detection window. The resolver will update
@@ -3732,18 +3739,8 @@ class AppState {
 
         case .removed(let target, let txid):
             guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
-            do {
-                if let failedSats = try db.paymentRepo.failPaymentByTxid(txid: txid) {
-                    depositBaseline.removeCounted(txid: txid, sats: failedSats)
-                }
-                if onchainBalanceSats < depositBaseline.sats {
-                    depositBaseline.advance(to: onchainBalanceSats, wallet: walletInbound.txids)
-                }
-                AuditService.log("WEBSOCKET_RBF_FAILED_PAYMENT", data: ["txid": txid, "target": target])
-            } catch {
-                AuditService.log("WEBSOCKET_RBF_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
-            }
-            Task { [weak self] in await self?.confirmationPollingService?.failSendIfDropped(txid: txid) }
+            AuditService.log("WEBSOCKET_TX_REMOVED", data: ["txid": txid, "target": target])
+            Task { [weak self] in await self?.confirmationPollingService?.failIfDropped(txid: txid) }
 
         case .receive(let target, let txid, let feedSats):
             // Fires only for our own tracked receive address, so unlike the balance-delta

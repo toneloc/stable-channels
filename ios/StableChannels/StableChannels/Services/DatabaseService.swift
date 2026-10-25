@@ -206,6 +206,12 @@ final class DatabaseService {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS pending_removal_checks (
+                txid TEXT PRIMARY KEY NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS onchain_receive_txids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,
