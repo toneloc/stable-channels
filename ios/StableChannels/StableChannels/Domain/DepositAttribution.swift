@@ -18,23 +18,41 @@ enum DepositAttribution {
         let amountCorrections: [String: Int64]
         /// Whether any recorded receive was part of the increase.
         let matchedRecordedReceive: Bool
+        /// The transaction the remainder is, when exactly one arrived txid has no recorded receive
+        /// and the node's amount for it is the remainder.
+        let missedTxid: String?
     }
 
-    /// Attributes an increase of [depositSats] to the receives [recorded] (by txid) for arrived
+    /// Attributes an increase of [depositSats] to the receives [recorded] (by txid) for the [arrived]
     /// txids, trusting the node's [walletSats] over each row's feed amount.
     static func attribute(
         depositSats: Int64,
+        arrived: Set<String>,
         recorded: [String: Int64],
         walletSats: [String: Int64]
     ) -> Outcome {
-        Outcome(
-            remainderSats: remainderSats(
-                depositSats: depositSats,
-                recordedSats: accountedSats(recorded: recorded, walletSats: walletSats)
-            ),
-            amountCorrections: amountCorrections(recorded: recorded, walletSats: walletSats),
-            matchedRecordedReceive: !recorded.isEmpty
+        let remainder = remainderSats(
+            depositSats: depositSats,
+            recordedSats: accountedSats(recorded: recorded, walletSats: walletSats)
         )
+        return Outcome(
+            remainderSats: remainder,
+            amountCorrections: amountCorrections(recorded: recorded, walletSats: walletSats),
+            matchedRecordedReceive: !recorded.isEmpty,
+            missedTxid: missedTxid(
+                remainderSats: remainder,
+                unrecorded: arrived.subtracting(recorded.keys),
+                walletSats: walletSats
+            )
+        )
+    }
+
+    /// The txid of the deposit the WebSocket missed, when it is the only [unrecorded] arrival and the
+    /// node's amount for it is the whole remainder. Several unrecorded arrivals cannot be told apart.
+    static func missedTxid(remainderSats: Int64, unrecorded: Set<String>, walletSats: [String: Int64]) -> String? {
+        guard remainderSats > 0, unrecorded.count == 1, let txid = unrecorded.first,
+              walletSats[txid] == remainderSats else { return nil }
+        return txid
     }
 
     /// Txids whose deposits are inside the increase: the wallet lists them now but did not when
@@ -69,5 +87,35 @@ enum DepositAttribution {
             return overflow ? .max : total
         }
         return max(0, depositSats - recorded)
+    }
+}
+
+/// The on-chain balance deposit detection has accounted for, with the inbound txids inside it: a
+/// later increase never counts them again.
+struct OnchainDepositBaseline: Equatable {
+    var sats: UInt64
+    /// nil when no list was cached with the balance (first launch, or an install from before the
+    /// list existed).
+    var txids: Set<String>?
+    /// When tracking began. While [txids] is unknown, only receives recorded since then can be
+    /// inside an increase.
+    var since = Date()
+
+    /// Moves the baseline to [sats], with the txids the wallet lists now inside it.
+    mutating func advance(to sats: UInt64, wallet: Set<String>) {
+        self.sats = sats
+        txids = wallet
+    }
+
+    /// Whether the baseline already counts [txid].
+    func counts(_ txid: String) -> Bool {
+        txids?.contains(txid) ?? false
+    }
+
+    /// A receive the baseline counted, of [removedSats], left the mempool: its sats and txid come off,
+    /// so the transaction replacing it is a new increase on the next poll.
+    mutating func removeCounted(txid: String, sats removedSats: Int64) {
+        guard txids?.remove(txid) != nil else { return }
+        sats -= min(sats, UInt64(max(0, removedSats)))
     }
 }

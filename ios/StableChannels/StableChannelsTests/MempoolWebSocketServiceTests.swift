@@ -1280,13 +1280,15 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(
             DepositAttribution.attribute(
                 depositSats: 110_000,
+                arrived: [txA, txB],
                 recorded: [txA: 500_000],
                 walletSats: [txA: 50_000, txB: 60_000]
             ),
             DepositAttribution.Outcome(
                 remainderSats: 60_000,
                 amountCorrections: [txA: 50_000],
-                matchedRecordedReceive: true
+                matchedRecordedReceive: true,
+                missedTxid: txB
             )
         )
         XCTAssertEqual(
@@ -1296,6 +1298,52 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             ),
             [txA: 50_000]
         )
+    }
+
+    func testMissedTxidIsNamedOnlyWhenOneUnrecordedArrivalIsTheWholeRemainder() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        XCTAssertEqual(
+            DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [txB: 60_000]),
+            txB
+        )
+        // Two unrecorded arrivals, a different amount, an unknown amount, or nothing left: no txid.
+        XCTAssertNil(DepositAttribution.missedTxid(
+            remainderSats: 60_000,
+            unrecorded: [txA, txB],
+            walletSats: [txA: 60_000, txB: 60_000]
+        ))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [txB: 50_000]))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [:]))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 0, unrecorded: [txB], walletSats: [txB: 0]))
+    }
+
+    func testRemovedReceiveLeavesTheBaselineOnlyWhenItWasCounted() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        var baseline = OnchainDepositBaseline(sats: 55_000, txids: [txA])
+
+        // Not counted: nothing changes.
+        baseline.removeCounted(txid: txB, sats: 50_000)
+        XCTAssertEqual(baseline.sats, 55_000)
+
+        baseline.removeCounted(txid: txA, sats: 50_000)
+        XCTAssertEqual(baseline.sats, 5_000)
+        XCTAssertFalse(baseline.counts(txA))
+
+        // Never below zero, and a second removal of the same txid is a no-op.
+        var small = OnchainDepositBaseline(sats: 40_000, txids: [txA])
+        small.removeCounted(txid: txA, sats: 50_000)
+        small.removeCounted(txid: txA, sats: 50_000)
+        XCTAssertEqual(small.sats, 0)
+
+        // An unknown txid list counts nothing; advancing records what the wallet lists.
+        var unknown = OnchainDepositBaseline(sats: 40_000, txids: nil)
+        unknown.removeCounted(txid: txA, sats: 40_000)
+        XCTAssertEqual(unknown.sats, 40_000)
+        unknown.advance(to: 90_000, wallet: [txA, txB])
+        XCTAssertEqual(unknown.sats, 90_000)
+        XCTAssertTrue(unknown.counts(txB))
     }
 
     func testUntrackAllDropsOldWalletAddresses() {

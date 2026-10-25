@@ -707,11 +707,11 @@ final class StabilityServiceTests: XCTestCase {
     func testDetectOnchainDepositAbsorbsWhenChannelClosing() {
         let appState = AppState()
         appState.isChannelClosing = true
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 105_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 105_000)
     }
 
     @MainActor
@@ -729,11 +729,11 @@ final class StabilityServiceTests: XCTestCase {
             fundingOutpointVout: 0
         )
         appState.isChannelClosing = false
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 105_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 105_000)
     }
 
     @MainActor
@@ -755,12 +755,12 @@ final class StabilityServiceTests: XCTestCase {
             status: "completed"
         )
         appState.isChannelClosing = false
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         // Sweep of 99,000 sats confirms (1,000 sat mining fee difference)
         appState.onchainBalanceSats = 104_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 104_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 104_000)
 
         // Verify no duplicate onchain payment row was created
         let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
@@ -783,9 +783,9 @@ final class StabilityServiceTests: XCTestCase {
         let appState = AppState()
         appState.databaseService = db
         appState.transactionLinkService.onchainReceiveAddress = nil
-        appState.prevOnchainSats = 5000
+        appState.depositBaseline.sats = 5000
         appState.walletInbound = WalletInboundOnchain()
-        appState.onchainBaselineTxids = []
+        appState.depositBaseline.txids = []
         return (appState, db)
     }
 
@@ -823,7 +823,7 @@ final class StabilityServiceTests: XCTestCase {
         poll(appState, balance: 55000, wallet: [txA])
 
         XCTAssertEqual(try receivedSats(db), [50000])
-        XCTAssertEqual(appState.prevOnchainSats, 55000)
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
     }
 
     @MainActor
@@ -857,7 +857,7 @@ final class StabilityServiceTests: XCTestCase {
 
         appState.isSweeping = true
         poll(appState, balance: 55000, wallet: [txA])
-        XCTAssertEqual(appState.prevOnchainSats, 5000)
+        XCTAssertEqual(appState.depositBaseline.sats, 5000)
         appState.isSweeping = false
         poll(appState, balance: 115_000, wallet: [txA, txB])
 
@@ -869,8 +869,8 @@ final class StabilityServiceTests: XCTestCase {
         let (appState, db) = try makeDepositAppState()
         webSocketReceive(appState, txid: txA, sats: 50000)
         // Relaunch after the balance (55k) and its wallet txids were cached, before detection ran.
-        appState.prevOnchainSats = 55000
-        appState.onchainBaselineTxids = [txA]
+        appState.depositBaseline.sats = 55000
+        appState.depositBaseline.txids = [txA]
 
         poll(appState, balance: 115_000, wallet: [txA, txB])
 
@@ -884,7 +884,7 @@ final class StabilityServiceTests: XCTestCase {
         defer { shared?.set(saved, forKey: AppState.BalanceCacheKey.onchainTxids) }
         shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
 
-        XCTAssertEqual(AppState().onchainBaselineTxids, [txA, txB])
+        XCTAssertEqual(AppState().depositBaseline.txids, [txA, txB])
     }
 
     @MainActor
@@ -922,6 +922,46 @@ final class StabilityServiceTests: XCTestCase {
         appState.handleWebSocketTransactionDetected(event: .removed(target: "bc1qws", txid: txA))
 
         XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testReplacementAfterTheBalanceCountedTheOriginalKeepsALiveRow() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The sender fee-bumps txA into txC for the same amount: the balance does not change.
+        appState.handleWebSocketTransactionDetected(event: .removed(target: "bc1qws", txid: txA))
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+    }
+
+    @MainActor
+    func testFirstLaunchAfterUpgradeRecordsAWebSocketDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.depositBaseline.txids = nil
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testLateWebSocketReceiveFindsItsOwnRowNotAnEarlierDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        let txX = String(repeating: "e", count: 64)
+        // Two 50k deposits the WebSocket missed, in separate polls; then txA's event arrives late.
+        poll(appState, balance: 55000, wallet: [txX], walletSats: [txX: 50000])
+        poll(appState, balance: 105_000, wallet: [txX, txA], walletSats: [txX: 50000, txA: 50000])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txX)?.paymentId, "onchain_receive_\(txX)")
+        XCTAssertEqual(db.paymentRepo.payment(txid: txA)?.paymentId, "onchain_receive_\(txA)")
     }
 
     @MainActor
@@ -1186,15 +1226,15 @@ final class StabilityServiceTests: XCTestCase {
     @MainActor
     func testDetectOnchainDepositDefersWhenSweepingOrSplicePending() {
         let appState = AppState()
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 100_000
 
-        // When isSweeping is true, deposit detection defers and prevOnchainSats is NOT advanced
+        // When isSweeping is true, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = true
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_000)
 
-        // When pendingSplice exists, deposit detection defers and prevOnchainSats is NOT advanced
+        // When pendingSplice exists, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = false
         appState.pendingSplice = PendingSplice(
             direction: "out",
@@ -1202,7 +1242,7 @@ final class StabilityServiceTests: XCTestCase {
             address: "tb1qtestaddress"
         )
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_000)
     }
 
     @MainActor
@@ -1213,13 +1253,13 @@ final class StabilityServiceTests: XCTestCase {
         let dbService = try DatabaseService(dataDir: tempDir)
         let appState = AppState()
         appState.databaseService = dbService
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         // Increase of only 500 sats (< 1000 sats threshold)
         appState.onchainBalanceSats = 5_500
 
         appState.detectOnchainDeposit()
         // Baseline advances to avoid re-triggering
-        XCTAssertEqual(appState.prevOnchainSats, 5_500)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_500)
 
         // No onchain payment row recorded
         let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
@@ -1541,12 +1581,12 @@ final class StabilityServiceTests: XCTestCase {
             counterparty: "node-1"
         )
 
-        appState.prevOnchainSats = 0
+        appState.depositBaseline.sats = 0
         appState.onchainBalanceSats = 99_000
 
         // Sweep arrives while channel is closing
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 99_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 99_000)
 
         // Marker must be consumed in database
         let consumed = try dbService.rawSQL.query(

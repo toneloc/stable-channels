@@ -384,8 +384,8 @@ final class DatabaseService {
         }
 
         // One on-chain receive row per txid. Older installs may hold duplicates from the
-        // WebSocket and balance paths, so keep the most advanced row (completed, then most
-        // confirmations, then first recorded) before indexing. No other table references payments.id.
+        // WebSocket and balance paths, so keep the most advanced row (completed, then not failed,
+        // then most confirmations, then first recorded) before indexing. No other table references payments.id.
         let hasUniqueReceiveTxidIndex = try !rawSQL.query(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_onchain_receive_txid_unique'"
         ).isEmpty
@@ -396,7 +396,7 @@ final class DatabaseService {
               AND id NOT IN (SELECT id FROM (
                                  SELECT id, ROW_NUMBER() OVER (
                                      PARTITION BY txid
-                                     ORDER BY status = 'completed' DESC, confirmations DESC, id
+                                     ORDER BY status = 'completed' DESC, status = 'failed', confirmations DESC, id
                                  ) AS rank
                                  FROM payments
                                  WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL

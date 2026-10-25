@@ -215,16 +215,21 @@ final class PaymentRepository {
 
     /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
     /// "removed" report that arrives after a block (or for another row type) must not fail
-    /// a deposit that is already in the chain.
-    func failPaymentByTxid(txid: String) throws {
-        try rawSQL.execute(
-            """
-            UPDATE payments SET status = 'failed'
-            WHERE txid = ? AND status = 'pending' AND confirmations = 0
-              AND payment_type = 'onchain' AND direction = 'received'
-            """,
-            params: [.text(txid)]
-        )
+    /// a deposit that is already in the chain. Returns the sats of the receive it failed, if any.
+    @discardableResult
+    func failPaymentByTxid(txid: String) throws -> Int64? {
+        let condition = """
+        txid = ? AND status = 'pending' AND confirmations = 0
+          AND payment_type = 'onchain' AND direction = 'received'
+        """
+        return try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            guard let row = try rawSQL.query(
+                "SELECT amount_msat FROM payments WHERE \(condition) LIMIT 1",
+                params: [.text(txid)]
+            ).first else { return nil }
+            try rawSQL.execute("UPDATE payments SET status = 'failed' WHERE \(condition)", params: [.text(txid)])
+            return row.int64(0) / 1000
+        }
     }
 
     /// True while an unconfirmed on-chain send with this txid is pending.

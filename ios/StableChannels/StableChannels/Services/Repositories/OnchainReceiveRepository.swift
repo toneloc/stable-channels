@@ -148,18 +148,20 @@ final class OnchainReceiveRepository {
         )
     }
 
-    /// Sats of the on-chain receives already recorded for [txids], by txid, failed ones excluded.
+    /// Sats of the on-chain receives already recorded for [txids], by txid, failed ones excluded,
+    /// and only those recorded at or after [recordedSince] when given.
     /// The partial unique index allows one receive row per txid.
-    func recordedReceiveSats(txids: Set<String>) throws -> [String: Int64] {
+    func recordedReceiveSats(txids: Set<String>, recordedSince: Date? = nil) throws -> [String: Int64] {
         guard !txids.isEmpty else { return [:] }
         let marks = Array(repeating: "?", count: txids.count).joined(separator: ", ")
+        let since = Int64(recordedSince?.timeIntervalSince1970.rounded(.down) ?? 0)
         return try rawSQL.query(
             """
             SELECT txid, amount_msat FROM payments
             WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
-              AND txid IN (\(marks))
+              AND created_at >= ? AND txid IN (\(marks))
             """,
-            params: txids.sorted().map { .text($0) }
+            params: [.integer(since)] + txids.sorted().map { .text($0) }
         ).reduce(into: [:]) { sats, row in
             if let txid = row.optString(0) { sats[txid] = row.int64(1) / 1000 }
         }

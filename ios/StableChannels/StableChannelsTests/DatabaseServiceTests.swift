@@ -2314,12 +2314,45 @@ final class DatabaseServiceTests: XCTestCase {
         let wallet = WalletInboundOnchain(txids: [receiveTxid], sats: [receiveTxid: 40000])
 
         // Inside the baseline already: none of the increase is this receive.
-        XCTAssertEqual(reconciler.remainderSats(depositSats: 110_000, wallet: wallet, baseline: [receiveTxid]), 110_000)
+        XCTAssertEqual(
+            reconciler.missedDeposit(
+                depositSats: 110_000,
+                wallet: wallet,
+                baseline: OnchainDepositBaseline(sats: 0, txids: [receiveTxid])
+            )?.sats,
+            110_000
+        )
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 500_000_000)
 
         // Arrived since the baseline: the node amount is subtracted and the row corrected to it.
-        XCTAssertEqual(reconciler.remainderSats(depositSats: 110_000, wallet: wallet, baseline: []), 70000)
+        XCTAssertEqual(reconciler.missedDeposit(
+            depositSats: 110_000,
+            wallet: wallet,
+            baseline: OnchainDepositBaseline(sats: 0, txids: [])
+        )?.sats, 70000)
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 40_000_000)
+    }
+
+    func testUnknownBaselineSubtractsOnlyReceivesRecordedSinceLaunch() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+        let wallet = WalletInboundOnchain(txids: [receiveTxid], sats: [receiveTxid: 50_000])
+
+        let reconciler = OnchainDepositReconciler(repository: service.onchainRepo)
+        let sinceLaunch = OnchainDepositBaseline(sats: 0, txids: nil, since: .distantPast)
+        XCTAssertEqual(reconciler.missedDeposit(depositSats: 50_000, wallet: wallet, baseline: sinceLaunch)?.sats, 0)
+
+        let beforeLaunch = OnchainDepositBaseline(sats: 0, txids: nil, since: .distantFuture)
+        XCTAssertEqual(
+            reconciler.missedDeposit(depositSats: 50_000, wallet: wallet, baseline: beforeLaunch)?.sats,
+            50_000
+        )
+    }
+
+    func testFailingARemovedReceiveReturnsItsSatsOnce() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+
+        XCTAssertEqual(try service.paymentRepo.failPaymentByTxid(txid: receiveTxid), 50_000)
+        XCTAssertNil(try service.paymentRepo.failPaymentByTxid(txid: receiveTxid))
     }
 
     func testCorrectReceiveAmountUsesTheNodeAmountAndScalesUSD() throws {
@@ -2493,6 +2526,24 @@ final class DatabaseServiceTests: XCTestCase {
                 VALUES (?, 'onchain', 'received', 1000000, ?, ?, ?)
                 """,
                 params: [.text(paymentId), .text(status), .integer(Int64(confirmations)), .text(receiveTxid)]
+            )
+        }
+
+        service = try DatabaseService(dataDir: dataDir)
+
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "second")
+    }
+
+    func testMigrationKeepsTheLivePendingDuplicateOverAnEarlierFailedOne() throws {
+        try service.rawSQL.execute("DROP INDEX idx_payments_onchain_receive_txid_unique")
+        for (paymentId, status) in [("first", "failed"), ("second", "pending")] {
+            try service.rawSQL.execute(
+                """
+                INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, txid)
+                VALUES (?, 'onchain', 'received', 1000000, ?, ?)
+                """,
+                params: [.text(paymentId), .text(status), .text(receiveTxid)]
             )
         }
 
