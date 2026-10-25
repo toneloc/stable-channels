@@ -5,7 +5,6 @@ import SQLite3
 /// SQLite implementation of PaymentDatabase
 final class SQLitePaymentDatabase: PaymentDatabase {
     private let dbPath: String
-    private static let satsInBTC: Double = 100_000_000.0
     private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
     private static let pendingSendTableSQL = """
     CREATE TABLE IF NOT EXISTS pending_stability_send (
@@ -299,7 +298,10 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                             return .missingChannelRow
                         }
-                        if !updateBacking(db: db, ucid: ucid, delta: delta) {
+                        if !updateBacking(
+                            db: db, ucid: ucid, delta: delta,
+                            paymentType: paymentType, direction: direction, btcPrice: btcPrice
+                        ) {
                             sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                             return .missingChannelRow
                         }
@@ -408,7 +410,10 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .missingChannelRow
             }
-            if !updateBacking(db: db, ucid: ucid, delta: delta) {
+            if !updateBacking(
+                db: db, ucid: ucid, delta: delta,
+                paymentType: paymentType, direction: direction, btcPrice: btcPrice
+            ) {
                 sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
                 return .missingChannelRow // originally returned missingChannelRow if it fails to update or missing
                 // channel
@@ -419,11 +424,18 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         return .inserted
     }
 
-    private func updateBacking(db: OpaquePointer, ucid: String, delta: Int64) -> Bool {
+    private func updateBacking(
+        db: OpaquePointer,
+        ucid: String,
+        delta: Int64,
+        paymentType: String,
+        direction: String,
+        btcPrice: Double
+    ) -> Bool {
         var selectStmt: OpaquePointer?
         guard sqlite3_prepare_v2(
             db,
-            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
+            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
             -1,
             &selectStmt,
             nil
@@ -442,9 +454,18 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             return false
         }
         let currentBacking = sqlite3_column_int64(selectStmt, 0)
+        let expectedUSD = sqlite3_column_double(selectStmt, 1)
         sqlite3_finalize(selectStmt)
 
-        let newBacking = max(0, currentBacking + delta)
+        // Incoming stability credits only the local shortfall (#320); nil rolls the row back.
+        guard let newBacking = StabilityAllocation.backingAfterPayment(
+            currentBackingSats: currentBacking,
+            expectedUSD: expectedUSD,
+            price: btcPrice,
+            deltaSats: delta,
+            paymentType: paymentType,
+            direction: direction
+        ) else { return false }
 
         var updateStmt: OpaquePointer?
         let sql = "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?"
@@ -801,20 +822,13 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
         let oldBacking = UInt64(oldBackingSigned)
         let receiver = UInt64(receiverSigned)
-        let localBacking: UInt64
-        if sync.expectedUSD == 0 {
-            localBacking = 0
-        } else if oldBacking > 0, sync.expectedUSD == oldExpected {
-            localBacking = min(oldBacking, receiver)
-        } else if let calculated = TradeProtocol.tradeBackingAfterDelta(
+        guard let localBacking = TradeProtocol.uncorrelatedSyncBacking(
             receiverSats: receiver,
             currentBackingSats: oldBacking,
             currentExpectedUSD: oldExpected,
-            newExpectedUSD: sync.expectedUSD,
+            sync: sync,
             price: trustedPrice
-        ) {
-            localBacking = calculated
-        } else {
+        ) else {
             rollback(db)
             return .retry
         }
@@ -858,6 +872,65 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
     private func rollback(_ db: OpaquePointer?) {
         sqlite3_exec(db, "ROLLBACK", nil, nil, nil)
+    }
+
+    // MARK: - Splice Events
+
+    func recordSpliceEvent(_ receipt: SpliceEventReceipt) -> Bool {
+        guard let db = openDB() else { return false }
+        defer { sqlite3_close(db) }
+        for sql in SpliceEventRecorder.createTableStatements
+            where sqlite3_exec(db, sql, nil, nil, nil) != SQLITE_OK {
+            return false
+        }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
+        let committed = runSpliceStatement(db, SpliceEventRecorder.insertEventSQL, receipt)
+            && runSpliceStatement(db, SpliceEventRecorder.attachFundingSQL, receipt)
+            && SpliceEventRecorder.assignmentStatements.allSatisfy { runSpliceStatement(db, $0, nil) }
+            && sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK
+        if !committed {
+            rollback(db)
+        }
+        return committed
+    }
+
+    func hasPendingSplice() -> Bool? {
+        guard let db = openDB(write: false) else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, SpliceEventRecorder.hasPendingSpliceSQL, -1, &stmt, nil) == SQLITE_OK else {
+            return nil
+        }
+        defer { sqlite3_finalize(stmt) }
+        switch sqlite3_step(stmt) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: return nil
+        }
+    }
+
+    /// Binds the receipt in SpliceEventRecorder parameter order (?1...?6).
+    private func runSpliceStatement(_ db: OpaquePointer?, _ sql: String, _ receipt: SpliceEventReceipt?) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        if let receipt {
+            let texts = [receipt.eventKey, receipt.kind.rawValue, receipt.userChannelId, receipt.channelId,
+                         receipt.fundingTxid]
+            for (index, value) in texts.enumerated() {
+                if let value {
+                    bindText(stmt, Int32(index + 1), value)
+                } else {
+                    sqlite3_bind_null(stmt, Int32(index + 1))
+                }
+            }
+            if let vout = receipt.fundingVout {
+                sqlite3_bind_int64(stmt, 6, Int64(vout))
+            } else {
+                sqlite3_bind_null(stmt, 6)
+            }
+        }
+        return sqlite3_step(stmt) == SQLITE_DONE
     }
 
     // MARK: - Pending Send Operations
@@ -961,8 +1034,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             }
         }
 
-        let amountUSD = pending.btcPrice > 0 ? (Double(pending.amountMsat) / 1000.0 / Self.satsInBTC) * pending
-            .btcPrice : 0.0
+        let amountUSD = pending.btcPrice > 0 ? BitcoinUnits
+            .usd(msats: pending.amountMsat, price: pending.btcPrice) : 0.0
         let result = recordPayment(
             paymentId: pending.paymentId,
             paymentType: "stability",
@@ -1003,6 +1076,145 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             SQLITE_TRANSIENT
         )
         return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    // MARK: - Outbound Lightning Outcomes (persisted before the LDK event is acked)
+
+    func recordOutgoingPaymentSuccess(paymentId: String, feeMsat: UInt64?) -> Bool {
+        guard !paymentId.isEmpty else { return true }
+        guard let db = openDB() else { return false }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
+        // Fee settlement is not trade acceptance: the trade waits for its signed result.
+        let committed = execute(db, SharedPaymentSQL.markTradeFeePaid) { self.bindText($0, 1, paymentId) }
+            && execute(db, SharedPaymentSQL.resolvePendingPaymentWithFee) {
+                self.bindText($0, 1, "completed")
+                sqlite3_bind_int64($0, 2, Int64(clamping: feeMsat ?? 0))
+                self.bindText($0, 3, paymentId)
+            }
+            && sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK
+        if !committed { rollback(db) }
+        return committed
+    }
+
+    func recordOutgoingPaymentFailure(
+        paymentId: String,
+        reasonCode: String?,
+        lookupAmountMsat: () -> UInt64?
+    ) -> Bool {
+        guard !paymentId.isEmpty else { return true }
+        guard let db = openDB() else { return false }
+        defer { sqlite3_close(db) }
+        guard let tradeExists = exists(db, "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1", paymentId),
+              let hasUnattached = exists(
+                  db,
+                  "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
+                  nil
+              ) else { return false }
+        let target = LightningPaymentRecovery.failureTarget(
+            paymentId: paymentId,
+            pendingStabilityPaymentId: loadPendingSend()?.paymentId,
+            tradeExists: tradeExists,
+            hasUnattachedPreparedTrade: hasUnattached,
+            lookupAmountMsat: lookupAmountMsat
+        )
+        switch target {
+        case .stabilitySend:
+            // No sats moved, so there is no debit to record; unblock the next send.
+            return execute(db, "DELETE FROM pending_stability_send WHERE id = 1")
+        case .trade:
+            // Signed results and already-paid fees are protected by the status filter.
+            return execute(db, SharedPaymentSQL.markTradeSendFailedByPaymentId) {
+                self.bindOptionalText($0, 1, reasonCode)
+                self.bindText($0, 2, paymentId)
+            }
+        case .unattachedTrade(let amountMsat):
+            if failUnattachedPreparedTrade(db, paymentId: paymentId, amountMsat: amountMsat, reasonCode: reasonCode) {
+                return true
+            }
+            return markPaymentFailed(db, paymentId: paymentId)
+        case .payment:
+            return markPaymentFailed(db, paymentId: paymentId)
+        }
+    }
+
+    private func markPaymentFailed(_ db: OpaquePointer?, paymentId: String) -> Bool {
+        execute(db, SharedPaymentSQL.resolvePendingPayment) {
+            self.bindText($0, 1, "failed")
+            self.bindText($0, 2, paymentId)
+        }
+    }
+
+    /// Same rule and SQL as ChannelRepository.failUnattachedPreparedTrade: exactly one recent prepared
+    /// trade with this fee amount adopts the failed payment id.
+    private func failUnattachedPreparedTrade(
+        _ db: OpaquePointer?,
+        paymentId: String,
+        amountMsat: UInt64,
+        reasonCode: String?
+    ) -> Bool {
+        let now = UInt64(Date().timeIntervalSince1970)
+        guard TradeProtocol.isCanonicalIdentifier(paymentId), amountMsat <= UInt64(Int64.max),
+              sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
+        let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs) - TradeProtocol.responseRetryWindowSecs)
+        var select: OpaquePointer?
+        let selectSQL = "SELECT id \(SharedPaymentSQL.unattachedPreparedTradeMatch)"
+        guard sqlite3_prepare_v2(db, selectSQL, -1, &select, nil) == SQLITE_OK else {
+            rollback(db)
+            return false
+        }
+        sqlite3_bind_int64(select, 1, Int64(amountMsat))
+        sqlite3_bind_int64(select, 2, cutoff)
+        var ids: [Int64] = []
+        while sqlite3_step(select) == SQLITE_ROW {
+            ids.append(sqlite3_column_int64(select, 0))
+        }
+        sqlite3_finalize(select)
+        guard ids.count == 1, let tradeDbId = ids.first else {
+            rollback(db)
+            return false
+        }
+        let updated = execute(db, SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade) {
+            self.bindText($0, 1, paymentId)
+            self.bindText($0, 2, paymentId)
+            self.bindOptionalText($0, 3, reasonCode)
+            sqlite3_bind_int64($0, 4, tradeDbId)
+        } && sqlite3_changes(db) == 1
+        guard updated, sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            rollback(db)
+            return false
+        }
+        return true
+    }
+
+    /// Runs one statement to completion; false when it could not be prepared or stepped.
+    private func execute(
+        _ db: OpaquePointer?,
+        _ sql: String,
+        bind: (OpaquePointer?) -> Void = { _ in }
+    ) -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(statement) }
+        bind(statement)
+        return sqlite3_step(statement) == SQLITE_DONE
+    }
+
+    /// Whether the query returns a row; nil when it could not run.
+    private func exists(_ db: OpaquePointer?, _ sql: String, _ value: String?) -> Bool? {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(statement) }
+        if let value { bindText(statement, 1, value) }
+        switch sqlite3_step(statement) {
+        case SQLITE_ROW: return true
+        case SQLITE_DONE: return false
+        default: return nil
+        }
+    }
+
+    private func bindOptionalText(_ statement: OpaquePointer?, _ index: Int32, _ value: String?) {
+        if let value { bindText(statement, index, value) } else { sqlite3_bind_null(statement, index) }
     }
 
     // MARK: - Seen Settlement IDs (STABILITY_PAYMENT_V1 replay protection)

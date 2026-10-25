@@ -28,6 +28,18 @@ protocol PaymentDatabase {
     func clearPendingSend()
     func reconcilePendingOutgoingPayment(node: LDKNode.Node) -> Bool
     func isSettlementSeen(settlementId: String) -> Bool
+    /// Commits a splice event (and any txid it lets an operation claim) before it is acknowledged.
+    func recordSpliceEvent(_ receipt: SpliceEventReceipt) -> Bool
+    /// nil when the database cannot be read.
+    func hasPendingSplice() -> Bool?
+    /// Commit an outbound payment's success; false means do not ack the LDK event.
+    func recordOutgoingPaymentSuccess(paymentId: String, feeMsat: UInt64?) -> Bool
+    /// Commit an outbound payment's failure; false means do not ack the LDK event.
+    func recordOutgoingPaymentFailure(
+        paymentId: String,
+        reasonCode: String?,
+        lookupAmountMsat: () -> UInt64?
+    ) -> Bool
 }
 
 enum StableControlDatabaseResult {
