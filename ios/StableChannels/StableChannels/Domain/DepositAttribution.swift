@@ -1,32 +1,24 @@
 import Foundation
 
-/// An on-chain receive the WebSocket recorded before the wallet balance showed it.
-struct AwaitingReceive: Equatable {
-    let rowId: Int64
-    let sats: Int64
-}
-
 /// Decides how much of an on-chain balance increase is a new deposit.
 ///
 /// A deposit is seen twice: the WebSocket records it by txid, and the wallet balance rises once
-/// the node syncs. Receives the WebSocket already recorded are taken out of the increase, so the
-/// balance fallback only records what the WebSocket missed and no deposit is counted twice.
+/// the node syncs. Only receives whose transaction reached the wallet since the baseline are part
+/// of the increase, so they are tied to it by txid, never by amount: an equal amount does not
+/// prove two receives are the same deposit.
 enum DepositAttribution {
-    struct Result: Equatable {
-        /// WebSocket receives this increase accounts for.
-        let absorbedRowIds: [Int64]
-        /// The part of the increase no recorded receive explains.
-        let remainderSats: Int64
+    /// Txids whose deposits are inside the increase: the wallet lists them now but did not when
+    /// the baseline was taken.
+    static func arrivedTxids(wallet: Set<String>, baseline: Set<String>) -> Set<String> {
+        wallet.subtracting(baseline)
     }
 
-    /// Takes `awaiting` receives, oldest first, while they fit in `depositSats`.
-    static func attribute(depositSats: Int64, awaiting: [AwaitingReceive]) -> Result {
-        var remainder = depositSats
-        var absorbed: [Int64] = []
-        for receive in awaiting.sorted(by: { $0.rowId < $1.rowId }) where receive.sats <= remainder {
-            remainder -= receive.sats
-            absorbed.append(receive.rowId)
+    /// The part of the increase that the receives already recorded for arrived txids don't explain.
+    static func remainderSats(depositSats: Int64, recordedSats: [Int64]) -> Int64 {
+        let recorded = recordedSats.reduce(Int64(0)) { sum, sats in
+            let (total, overflow) = sum.addingReportingOverflow(max(0, sats))
+            return overflow ? .max : total
         }
-        return Result(absorbedRowIds: absorbed, remainderSats: remainder)
+        return max(0, depositSats - recorded)
     }
 }

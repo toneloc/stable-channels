@@ -1247,26 +1247,36 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(socket.untracked.count, 2)
     }
 
-    func testDepositAttributionTakesRecordedReceivesOutOfBalanceIncrease() {
-        let awaiting = [AwaitingReceive(rowId: 2, sats: 30_000), AwaitingReceive(rowId: 1, sats: 50_000)]
+    func testDepositAttributionCountsOnlyReceivesThatArrivedSinceTheBaseline() {
+        XCTAssertEqual(
+            DepositAttribution.arrivedTxids(wallet: ["a", "b", "c"], baseline: ["a"]),
+            ["b", "c"]
+        )
+        XCTAssertEqual(DepositAttribution.arrivedTxids(wallet: ["a"], baseline: ["a", "z"]), [])
 
-        XCTAssertEqual(
-            DepositAttribution.attribute(depositSats: 80_000, awaiting: awaiting),
-            .init(absorbedRowIds: [1, 2], remainderSats: 0)
-        )
-        XCTAssertEqual(
-            DepositAttribution.attribute(depositSats: 100_000, awaiting: awaiting),
-            .init(absorbedRowIds: [1, 2], remainderSats: 20_000)
-        )
-        // A receive the balance hasn't reached yet stays awaiting.
-        XCTAssertEqual(
-            DepositAttribution.attribute(depositSats: 40_000, awaiting: awaiting),
-            .init(absorbedRowIds: [2], remainderSats: 10_000)
-        )
-        XCTAssertEqual(
-            DepositAttribution.attribute(depositSats: 5000, awaiting: []),
-            .init(absorbedRowIds: [], remainderSats: 5000)
-        )
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 80_000, recordedSats: [50_000, 30_000]), 0)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 100_000, recordedSats: [50_000]), 50_000)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 5000, recordedSats: []), 5000)
+        // Recorded receives larger than the increase leave nothing, never a negative remainder.
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 40_000, recordedSats: [50_000]), 0)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 40_000, recordedSats: [.max, .max]), 0)
+    }
+
+    func testUntrackAllDropsOldWalletAddresses() {
+        var received = false
+        service.onTransactionDetected = { event in
+            if case .receive = event { received = true }
+        }
+        service.trackAddress("bc1qoldwallet")
+
+        service.untrackAll()
+        service.handleMessage(makeAddressTransactionJSON(
+            txid: makeValidTxid(),
+            voutAddress: "bc1qoldwallet",
+            voutValue: 50_000
+        ))
+
+        XCTAssertFalse(received)
     }
 
     func testTransactionPayingTwoTrackedAddressesIsOneReceiveWithTotal() {
@@ -1306,4 +1316,5 @@ private final class RecordingWebSocket: MempoolWebSocketProtocol {
     func untrackAddress(_ address: String) { untracked.append(address) }
     func trackTx(_: String) {}
     func untrackTx(_: String) {}
+    func untrackAll() {}
 }

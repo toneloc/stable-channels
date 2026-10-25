@@ -293,6 +293,16 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
         }
     }
 
+    /// Drops every address and txid subscription, for a wallet reset.
+    func untrackAll() {
+        trackedAddresses.removeAll()
+        trackedTxids.removeAll()
+        logger.info("[WebSocket] Untracked all")
+        if isConnected {
+            syncTracking()
+        }
+    }
+
     // MARK: - Subscription
 
     /// Subscribe to block tip announcements, mempool-block projections, and live stats (including fees).

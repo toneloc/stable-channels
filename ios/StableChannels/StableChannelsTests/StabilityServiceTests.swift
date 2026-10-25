@@ -768,6 +768,156 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertTrue(onchainRows.isEmpty)
     }
 
+    // MARK: - Deposit attribution by txid
+
+    private let txA = String(repeating: "a", count: 64)
+    private let txB = String(repeating: "b", count: 64)
+    private let txC = String(repeating: "c", count: 64)
+
+    @MainActor
+    private func makeDepositAppState() throws -> (AppState, DatabaseService) {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try DatabaseService(dataDir: tempDir)
+        let appState = AppState()
+        appState.databaseService = db
+        appState.transactionLinkService.onchainReceiveAddress = nil
+        appState.prevOnchainSats = 5000
+        appState.walletInboundTxids = []
+        appState.onchainBaselineTxids = []
+        return (appState, db)
+    }
+
+    /// A balance refresh: the node reports [balance] and lists [wallet] as its inbound on-chain txids.
+    @MainActor
+    private func poll(_ appState: AppState, balance: UInt64, wallet: Set<String>) {
+        appState.walletInboundTxids = wallet
+        appState.onchainBalanceSats = balance
+        appState.detectOnchainDeposit()
+    }
+
+    @MainActor
+    private func webSocketReceive(_ appState: AppState, txid: String, sats: Int64) {
+        appState.handleWebSocketTransactionDetected(event: .receive(target: "bc1qws", txid: txid, amountSats: sats))
+    }
+
+    private func receivedSats(_ db: DatabaseService) throws -> [UInt64] {
+        try db.paymentRepo.getRecentPayments(limit: 50)
+            .filter { $0.paymentType == "onchain" && $0.direction == "received" && $0.status != "failed" }
+            .map { $0.amountMsat / 1000 }
+            .sorted()
+    }
+
+    @MainActor
+    func testWebSocketThenBalanceRecordsTheDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(appState.prevOnchainSats, 55000)
+    }
+
+    @MainActor
+    func testBalanceThenWebSocketRecordsTheDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        poll(appState, balance: 55000, wallet: [txA])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+    }
+
+    @MainActor
+    func testReceiveCountedDuringACloseIsNotSubtractedFromALaterDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        appState.isChannelClosing = true
+        poll(appState, balance: 55000, wallet: [txA])
+        appState.isChannelClosing = false
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testDepositDeferredBySweepIsRecordedWithoutTheWebSocketReceive() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        appState.isSweeping = true
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(appState.prevOnchainSats, 5000)
+        appState.isSweeping = false
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testRelaunchBaselineKeepsACountedReceiveOutOfALaterDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        // Relaunch after the balance (55k) and its wallet txids were cached, before detection ran.
+        appState.prevOnchainSats = 55000
+        appState.onchainBaselineTxids = [txA]
+
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testLaunchLoadsTheBaselineTxidsCachedWithTheBalance() {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let saved = shared?.stringArray(forKey: AppState.BalanceCacheKey.onchainTxids)
+        defer { shared?.set(saved, forKey: AppState.BalanceCacheKey.onchainTxids) }
+        shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
+
+        XCTAssertEqual(AppState().onchainBaselineTxids, [txA, txB])
+    }
+
+    @MainActor
+    func testOutOfOrderArrivalSubtractsOnlyTheReceiveThatArrived() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        webSocketReceive(appState, txid: txB, sats: 45000)
+
+        poll(appState, balance: 50000, wallet: [txB])
+        poll(appState, balance: 100_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [45000, 50000])
+    }
+
+    @MainActor
+    func testTwoDepositsInOnePollThenWebSocketAreRecordedOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        poll(appState, balance: 85000, wallet: [txA, txB])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        webSocketReceive(appState, txid: txB, sats: 30000)
+
+        XCTAssertEqual(try receivedSats(db), [30000, 50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txB))
+    }
+
+    @MainActor
+    func testReplacedReceiveLeavesItsReplacementToTheBalanceFallback() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        // txA is replaced by txC, which pays the same amount; the wallet only ever sees txC.
+        poll(appState, balance: 55000, wallet: [txC])
+        appState.handleWebSocketTransactionDetected(event: .removed(target: "bc1qws", txid: txA))
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
     @MainActor
     func testCalculateSettlementAmountMsatCapsToOutboundCapacity() {
         let appState = AppState()

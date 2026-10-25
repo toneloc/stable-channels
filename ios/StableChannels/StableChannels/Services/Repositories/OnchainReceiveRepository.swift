@@ -4,8 +4,10 @@ import SQLite3
 final class OnchainReceiveRepository {
     enum WebSocketReceiveOutcome: Equatable {
         case alreadyRecorded
-        /// The balance fallback had already recorded this deposit; its row now carries the txid.
+        /// The balance fallback had recorded exactly this deposit; its row now carries the txid.
         case adoptedPlaceholder
+        /// The balance fallback had recorded this deposit inside a larger one; it is split out.
+        case splitFromPlaceholder
         case inserted
     }
 
@@ -15,16 +17,20 @@ final class OnchainReceiveRepository {
         self.rawSQL = rawSQL
     }
 
-    /// Records a receive seen on the WebSocket, at most once per txid. A pending placeholder of
-    /// exactly this amount means the balance fallback already counted the deposit, so it gets
-    /// the txid instead of a second row being written. Otherwise a new row is inserted and marked
-    /// as awaiting the balance, so the fallback doesn't count it again when the node syncs.
+    /// Records a receive seen on the WebSocket, at most once per txid.
+    ///
+    /// Once the wallet balance has counted the transaction ([balanceCounted]), the balance fallback
+    /// recorded it as a txid-less placeholder: one of exactly this amount takes the txid, and a
+    /// larger one (several deposits in one balance jump) gives this amount up to a new row. Before
+    /// the balance counts it, no placeholder can be this deposit, so a new row is written and the
+    /// fallback later subtracts it by txid.
     func recordWebSocketReceive(
         txid: String,
         address: String,
         amountMsat: UInt64,
         amountUSD: Double?,
-        btcPrice: Double?
+        btcPrice: Double?,
+        balanceCounted: Bool
     ) throws -> WebSocketReceiveOutcome {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
             let existing = try rawSQL.query(
@@ -33,78 +39,112 @@ final class OnchainReceiveRepository {
             )
             if !existing.isEmpty { return .alreadyRecorded }
 
-            let placeholders = try rawSQL.query(
-                """
-                SELECT p.id, p.resolution_id FROM payments p
-                LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
-                WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
-                  AND p.txid IS NULL AND p.amount_msat = ? AND (r.address IS NULL OR r.address = ?)
-                ORDER BY p.id ASC LIMIT 1
-                """,
-                params: [.integer(Int64(amountMsat)), .text(address)]
-            )
-            if let placeholder = placeholders.first {
-                if let resolutionId = placeholder.optInt64(1) {
-                    // Stops the txid resolver: the deposit is identified.
+            if balanceCounted, let placeholder = try fallbackRow(covering: amountMsat, address: address) {
+                let rowId = placeholder.int64(0)
+                if placeholder.int64(2) == Int64(amountMsat) {
+                    if let resolutionId = placeholder.optInt64(1) {
+                        // Stops the txid resolver: the deposit is identified.
+                        try rawSQL.execute(
+                            """
+                            UPDATE onchain_receive_txids
+                            SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
+                            WHERE id = ? AND status = 'pending'
+                            """,
+                            params: [.text(txid), .integer(resolutionId)]
+                        )
+                    }
                     try rawSQL.execute(
-                        """
-                        UPDATE onchain_receive_txids
-                        SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
-                        WHERE id = ? AND status = 'pending'
-                        """,
-                        params: [.text(txid), .integer(resolutionId)]
+                        "UPDATE payments SET txid = ?, address = ? WHERE id = ?",
+                        params: [.text(txid), .text(address), .integer(rowId)]
                     )
+                    return .adoptedPlaceholder
                 }
+                // ponytail: assumes the larger placeholder holds this deposit. A receive the close
+                // branch absorbed instead could shrink an unrelated placeholder; tying placeholders to
+                // the txids of their balance jump would remove that.
                 try rawSQL.execute(
-                    "UPDATE payments SET txid = ?, address = ? WHERE id = ?",
-                    params: [.text(txid), .text(address), .integer(placeholder.int64(0))]
+                    """
+                    UPDATE payments
+                    SET amount_usd = amount_usd * (amount_msat - ?) / amount_msat,
+                        amount_msat = amount_msat - ?
+                    WHERE id = ?
+                    """,
+                    params: [.integer(Int64(amountMsat)), .integer(Int64(amountMsat)), .integer(rowId)]
                 )
-                return .adoptedPlaceholder
+                try insertReceive(
+                    txid: txid,
+                    address: address,
+                    amountMsat: amountMsat,
+                    amountUSD: amountUSD,
+                    btcPrice: btcPrice
+                )
+                return .splitFromPlaceholder
             }
 
-            let inserted = try rawSQL.executeReturningChanges(
-                """
-                INSERT OR IGNORE INTO payments (
-                    payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
-                    status, txid, address, awaiting_balance
-                )
-                VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', ?, ?, 1)
-                """,
-                params: [
-                    .text("onchain_receive_\(txid)"),
-                    .integer(Int64(amountMsat)),
-                    amountUSD.map { .real($0) } ?? .null,
-                    btcPrice.map { .real($0) } ?? .null,
-                    .text(txid),
-                    .text(address)
-                ]
+            let inserted = try insertReceive(
+                txid: txid,
+                address: address,
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: btcPrice
             )
-            return inserted > 0 ? .inserted : .alreadyRecorded
+            return inserted ? .inserted : .alreadyRecorded
         }
     }
 
-    /// WebSocket receives the wallet balance hasn't shown yet, oldest first. A receive whose
-    /// transaction was replaced or dropped is failed and never reaches the balance, so it is left out.
-    func awaitingBalanceReceives() throws -> [AwaitingReceive] {
+    /// The oldest pending, txid-less fallback row for [address] that is at least [amountMsat],
+    /// preferring one of exactly that amount: (id, resolution_id, amount_msat).
+    private func fallbackRow(covering amountMsat: UInt64, address: String) throws -> [Any?]? {
         try rawSQL.query(
             """
-            SELECT id, amount_msat FROM payments
-            WHERE awaiting_balance = 1 AND status != 'failed'
-            ORDER BY id ASC
+            SELECT p.id, p.resolution_id, p.amount_msat FROM payments p
+            LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
+            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+              AND p.txid IS NULL AND p.amount_msat >= ? AND (r.address IS NULL OR r.address = ?)
+            ORDER BY p.amount_msat = ? DESC, p.id ASC LIMIT 1
             """,
-            params: []
-        ).map { AwaitingReceive(rowId: $0.int64(0), sats: $0.int64(1) / 1000) }
+            params: [.integer(Int64(amountMsat)), .text(address), .integer(Int64(amountMsat))]
+        ).first
     }
 
-    func markBalanceSeen(rowIds: [Int64]) throws {
-        try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            for rowId in rowIds {
-                try rawSQL.execute(
-                    "UPDATE payments SET awaiting_balance = 0 WHERE id = ?",
-                    params: [.integer(rowId)]
-                )
-            }
-        }
+    @discardableResult
+    private func insertReceive(
+        txid: String,
+        address: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?
+    ) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            """
+            INSERT OR IGNORE INTO payments (
+                payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, txid, address
+            )
+            VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', ?, ?)
+            """,
+            params: [
+                .text("onchain_receive_\(txid)"),
+                .integer(Int64(amountMsat)),
+                amountUSD.map { .real($0) } ?? .null,
+                btcPrice.map { .real($0) } ?? .null,
+                .text(txid),
+                .text(address)
+            ]
+        ) > 0
+    }
+
+    /// Sats of the on-chain receives already recorded for [txids], failed ones excluded.
+    func recordedReceiveSats(txids: Set<String>) throws -> [Int64] {
+        guard !txids.isEmpty else { return [] }
+        let marks = Array(repeating: "?", count: txids.count).joined(separator: ", ")
+        return try rawSQL.query(
+            """
+            SELECT amount_msat FROM payments
+            WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
+              AND txid IN (\(marks))
+            """,
+            params: txids.sorted().map { .text($0) }
+        ).map { $0.int64(0) / 1000 }
     }
 
     @discardableResult

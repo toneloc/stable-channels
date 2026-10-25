@@ -383,15 +383,10 @@ final class DatabaseService {
             """)
         }
 
-        // Migrate: awaiting_balance marks WebSocket receives the wallet balance hasn't shown yet,
-        // so the balance fallback doesn't record them again. Existing rows default to 0: whatever
-        // they were, the balance has long since caught up with them.
-        if !paymentsColNames.contains("awaiting_balance") {
-            try rawSQL.execute("ALTER TABLE payments ADD COLUMN awaiting_balance INTEGER NOT NULL DEFAULT 0")
-        }
-
         // One on-chain receive row per txid. Older installs may hold duplicates from the
-        // WebSocket and balance paths, so keep the first-recorded row before indexing.
+        // WebSocket and balance paths, so keep the first-recorded row before indexing. If a later
+        // duplicate was the completed one, the kept row is still pending; the confirmation poller
+        // moves it forward again from the txid.
         let hasUniqueReceiveTxidIndex = try !rawSQL.query(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_onchain_receive_txid_unique'"
         ).isEmpty

@@ -2273,15 +2273,31 @@ final class DatabaseServiceTests: XCTestCase {
         ).first.map { $0.int64(0) }.map(Int.init) ?? 0
     }
 
-    private func recordWebSocketReceive(sats: UInt64, address: String = "bc1qws") throws
-        -> OnchainReceiveRepository.WebSocketReceiveOutcome {
+    private func recordWebSocketReceive(
+        sats: UInt64,
+        address: String = "bc1qws",
+        txid: String? = nil,
+        balanceCounted: Bool = false
+    ) throws -> OnchainReceiveRepository.WebSocketReceiveOutcome {
         try service.onchainRepo.recordWebSocketReceive(
-            txid: receiveTxid,
+            txid: txid ?? receiveTxid,
             address: address,
             amountMsat: sats * 1000,
             amountUSD: nil,
-            btcPrice: nil
+            btcPrice: nil,
+            balanceCounted: balanceCounted
         )
+    }
+
+    private func recordPlaceholder(sats: Int64, address: String = "bc1qws") throws {
+        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: address))
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "onchain_deposit_1",
+            amountMsat: sats * 1000,
+            amountUSD: Double(sats) / 1000,
+            btcPrice: nil,
+            resolutionId: resolutionId
+        ))
     }
 
     func testWebSocketReceiveIsRecordedOncePerTxid() throws {
@@ -2289,59 +2305,61 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .alreadyRecorded)
 
         XCTAssertEqual(try onchainReceiveCount(), 1)
-        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives().map(\.sats), [50_000])
+        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [50_000])
     }
 
     func testWebSocketReceiveAdoptsBalancePlaceholderOfSameAmount() throws {
-        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qws"))
-        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
-            paymentId: "onchain_deposit_1",
-            amountMsat: 50_000_000,
-            amountUSD: nil,
-            btcPrice: nil,
-            resolutionId: resolutionId
-        ))
+        try recordPlaceholder(sats: 50_000)
 
-        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .adoptedPlaceholder)
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, balanceCounted: true), .adoptedPlaceholder)
 
         XCTAssertEqual(try onchainReceiveCount(), 1)
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "onchain_deposit_1")
-        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
         // The resolver for the placeholder is done: the deposit is identified.
         XCTAssertTrue(service.onchainRepo.fetchPendingOnchainReceives().isEmpty)
     }
 
-    func testWebSocketReceiveDoesNotAdoptPlaceholderOfAnotherAmountOrAddress() throws {
-        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qother"))
-        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
-            paymentId: "onchain_deposit_1",
-            amountMsat: 50_000_000,
-            amountUSD: nil,
-            btcPrice: nil,
-            resolutionId: resolutionId
-        ))
+    func testWebSocketReceiveDoesNotAdoptPlaceholderBeforeTheBalanceCountsIt() throws {
+        try recordPlaceholder(sats: 50_000)
 
-        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, address: "bc1qws"), .inserted)
+        // An equal amount is not evidence: this transaction is not in the balance yet, so the
+        // placeholder must be some other deposit.
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+
+        XCTAssertEqual(try onchainReceiveCount(), 2)
+        XCTAssertEqual(service.onchainRepo.fetchPendingOnchainReceives().count, 1)
+    }
+
+    func testWebSocketReceiveDoesNotAdoptPlaceholderOfAnotherAddress() throws {
+        try recordPlaceholder(sats: 50_000, address: "bc1qother")
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, address: "bc1qws", balanceCounted: true), .inserted)
 
         XCTAssertEqual(try onchainReceiveCount(), 2)
     }
 
-    func testMarkBalanceSeenClearsAwaitingReceive() throws {
-        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
-        let awaiting = try service.onchainRepo.awaitingBalanceReceives()
+    func testTwoDepositsInOneBalanceJumpSplitThePlaceholder() throws {
+        let other = String(repeating: "d", count: 64)
+        try recordPlaceholder(sats: 80_000)
 
-        try service.onchainRepo.markBalanceSeen(rowIds: awaiting.map(\.rowId))
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, balanceCounted: true), .splitFromPlaceholder)
+        XCTAssertEqual(try recordWebSocketReceive(sats: 30_000, txid: other, balanceCounted: true), .adoptedPlaceholder)
 
-        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
+        XCTAssertEqual(try onchainReceiveCount(), 2)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 50_000_000)
+        let rest = try XCTUnwrap(service.paymentRepo.payment(txid: other))
+        XCTAssertEqual(rest.paymentId, "onchain_deposit_1")
+        XCTAssertEqual(rest.amountMsat, 30_000_000)
+        XCTAssertEqual(try XCTUnwrap(rest.amountUSD), 30, accuracy: 0.001)
     }
 
-    func testFailedReceiveNoLongerAwaitsBalance() throws {
+    func testFailedReceiveIsNotSubtractedFromTheBalance() throws {
         XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
 
         try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
 
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "failed")
-        XCTAssertEqual(try service.onchainRepo.awaitingBalanceReceives(), [])
+        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [])
     }
 
     func testRemovedTxDoesNotFailConfirmedReceive() throws {
