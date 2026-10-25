@@ -1262,6 +1262,36 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 40_000, recordedSats: [.max, .max]), 0)
     }
 
+    func testDepositAttributionPrefersTheNodeAmountOverTheFeed() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        // The feed recorded txA at 500k; the node says 50k. txB has no node amount yet.
+        let accounted = DepositAttribution.accountedSats(
+            recorded: [txA: 500_000, txB: 30_000],
+            walletSats: [txA: 50_000]
+        )
+        XCTAssertEqual(accounted.sorted(), [30_000, 50_000])
+        XCTAssertEqual(
+            DepositAttribution.attribute(
+                depositSats: 110_000,
+                recorded: [txA: 500_000],
+                walletSats: [txA: 50_000, txB: 60_000]
+            ),
+            DepositAttribution.Outcome(
+                remainderSats: 60_000,
+                amountCorrections: [txA: 50_000],
+                matchedRecordedReceive: true
+            )
+        )
+        XCTAssertEqual(
+            DepositAttribution.amountCorrections(
+                recorded: [txA: 500_000, txB: 30_000],
+                walletSats: [txA: 50_000, txB: 30_000]
+            ),
+            [txA: 50_000]
+        )
+    }
+
     func testUntrackAllDropsOldWalletAddresses() {
         var received = false
         service.onTransactionDetected = { event in

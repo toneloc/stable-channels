@@ -133,18 +133,36 @@ final class OnchainReceiveRepository {
         ) > 0
     }
 
-    /// Sats of the on-chain receives already recorded for [txids], failed ones excluded.
-    func recordedReceiveSats(txids: Set<String>) throws -> [Int64] {
-        guard !txids.isEmpty else { return [] }
+    /// Sets the receive row for [txid] to the node's amount, scaling its USD value with it. The row's
+    /// amount came from the WebSocket feed.
+    func correctReceiveAmount(txid: String, sats: Int64) throws {
+        let msat = sats.multipliedReportingOverflow(by: 1000)
+        guard sats > 0, !msat.overflow else { return }
+        try rawSQL.execute(
+            """
+            UPDATE payments
+            SET amount_usd = amount_usd * ? / amount_msat, amount_msat = ?
+            WHERE payment_type = 'onchain' AND direction = 'received' AND txid = ? AND amount_msat > 0
+            """,
+            params: [.integer(msat.partialValue), .integer(msat.partialValue), .text(txid)]
+        )
+    }
+
+    /// Sats of the on-chain receives already recorded for [txids], by txid, failed ones excluded.
+    /// The partial unique index allows one receive row per txid.
+    func recordedReceiveSats(txids: Set<String>) throws -> [String: Int64] {
+        guard !txids.isEmpty else { return [:] }
         let marks = Array(repeating: "?", count: txids.count).joined(separator: ", ")
         return try rawSQL.query(
             """
-            SELECT amount_msat FROM payments
+            SELECT txid, amount_msat FROM payments
             WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
               AND txid IN (\(marks))
             """,
             params: txids.sorted().map { .text($0) }
-        ).map { $0.int64(0) / 1000 }
+        ).reduce(into: [:]) { sats, row in
+            if let txid = row.optString(0) { sats[txid] = row.int64(1) / 1000 }
+        }
     }
 
     @discardableResult

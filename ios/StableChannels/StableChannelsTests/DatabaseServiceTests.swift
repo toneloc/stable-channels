@@ -2305,7 +2305,20 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .alreadyRecorded)
 
         XCTAssertEqual(try onchainReceiveCount(), 1)
-        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [50_000])
+        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [receiveTxid: 50_000])
+    }
+
+    func testCorrectReceiveAmountUsesTheNodeAmountAndScalesUSD() throws {
+        try service.onchainRepo.recordWebSocketReceive(
+            txid: receiveTxid, address: "bc1qws", amountMsat: 500_000_000,
+            amountUSD: 500, btcPrice: 100_000, balanceCounted: false
+        )
+
+        try service.onchainRepo.correctReceiveAmount(txid: receiveTxid, sats: 50_000)
+
+        let row = try XCTUnwrap(service.paymentRepo.payment(txid: receiveTxid))
+        XCTAssertEqual(row.amountMsat, 50_000_000)
+        XCTAssertEqual(try XCTUnwrap(row.amountUSD), 50, accuracy: 0.001)
     }
 
     func testWebSocketReceiveAdoptsBalancePlaceholderOfSameAmount() throws {
@@ -2359,7 +2372,7 @@ final class DatabaseServiceTests: XCTestCase {
         try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
 
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "failed")
-        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [])
+        XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [:])
     }
 
     func testRemovedTxDoesNotFailConfirmedReceive() throws {

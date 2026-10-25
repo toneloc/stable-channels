@@ -789,10 +789,17 @@ final class StabilityServiceTests: XCTestCase {
         return (appState, db)
     }
 
-    /// A balance refresh: the node reports [balance] and lists [wallet] as its inbound on-chain txids.
+    /// A balance refresh: the node reports [balance] and lists [wallet] as its inbound on-chain txids,
+    /// with [walletSats] as the amounts it knows for them.
     @MainActor
-    private func poll(_ appState: AppState, balance: UInt64, wallet: Set<String>) {
+    private func poll(
+        _ appState: AppState,
+        balance: UInt64,
+        wallet: Set<String>,
+        walletSats: [String: Int64] = [:]
+    ) {
         appState.walletInboundTxids = wallet
+        appState.walletInboundSats = walletSats
         appState.onchainBalanceSats = balance
         appState.detectOnchainDeposit()
     }
@@ -916,6 +923,78 @@ final class StabilityServiceTests: XCTestCase {
         appState.handleWebSocketTransactionDetected(event: .removed(target: "bc1qws", txid: txA))
 
         XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testInflatedFeedAmountDoesNotHideARealDepositInTheSameIncrease() throws {
+        let (appState, db) = try makeDepositAppState()
+        // A hostile feed reports txA as 500k; the node says it paid 50k. txB (60k) has no WebSocket event.
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+
+        poll(appState, balance: 115_000, wallet: [txA, txB], walletSats: [txA: 50000, txB: 60000])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testReceiveTheNodeAlreadyListsUsesTheNodeAmount() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.walletInboundSats = [txA: 50000]
+
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testBalanceCountedReceiveTakesOverThePlaceholderAndOthersDoNot() throws {
+        let (appState, db) = try makeDepositAppState()
+        poll(appState, balance: 55000, wallet: [txA])
+
+        // txB is not in the baseline, so it gets its own row and leaves the placeholder alone.
+        webSocketReceive(appState, txid: txB, sats: 50000)
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertNil(db.paymentRepo.payment(txid: txA))
+
+        // txA is in the baseline, so it takes over the 50k placeholder.
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+    }
+
+    @MainActor
+    func testWebSocketReceivePointsThePendingDepositLinkAtItsTxid() throws {
+        let (appState, _) = try makeDepositAppState()
+        appState.transactionLinkService.setReceiveTxid(txC)
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(appState.transactionLinkService.lastReceiveTxid, txA)
+    }
+
+    func testInboundOnchainPaymentsSkipFailedAndOutboundOnes() {
+        func payment(_ txid: String, _ direction: PaymentDirection, _ status: PaymentStatus,
+                     msat: UInt64?) -> PaymentDetails {
+            PaymentDetails(
+                id: txid,
+                kind: .onchain(txid: txid, status: .unconfirmed),
+                amountMsat: msat,
+                feePaidMsat: nil,
+                direction: direction,
+                status: status,
+                latestUpdateTimestamp: 0
+            )
+        }
+        let payments = [
+            payment(txA, .inbound, .pending, msat: 50_000_000),
+            payment(txB, .inbound, .failed, msat: 60_000_000),
+            payment(txC, .outbound, .succeeded, msat: 70_000_000),
+            payment(String(repeating: "d", count: 64), .inbound, .succeeded, msat: nil)
+        ]
+
+        let inbound = WalletInboundOnchain(payments)
+        XCTAssertEqual(inbound.txids, [txA, String(repeating: "d", count: 64)])
+        XCTAssertEqual(inbound.sats, [txA: 50000])
     }
 
     @MainActor

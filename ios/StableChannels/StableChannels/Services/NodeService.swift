@@ -780,6 +780,27 @@ enum StabilityFreshness {
     }
 }
 
+/// The wallet's inbound on-chain payments that have not failed, read from the node's payment
+/// list in the form deposit attribution needs.
+struct WalletInboundOnchain: Equatable {
+    let txids: Set<String>
+    /// The node's amount for each txid that has one.
+    let sats: [String: Int64]
+
+    init(_ payments: [PaymentDetails]) {
+        var txids: Set<String> = []
+        var sats: [String: Int64] = [:]
+        for payment in payments where payment.direction == .inbound {
+            guard case let .onchain(txid, _) = payment.kind else { continue }
+            if case .failed = payment.status { continue }
+            txids.insert(txid)
+            if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000) { sats[txid] = amount }
+        }
+        self.txids = txids
+        self.sats = sats
+    }
+}
+
 extension Notification.Name {
     static let ldkEventReceived = Notification.Name("ldkEventReceived")
 }
