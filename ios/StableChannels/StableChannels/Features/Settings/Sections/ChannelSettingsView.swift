@@ -269,15 +269,33 @@ private struct ForceCloseSheet: View {
                 Section {
                     Text(String(
                         localized: "info_force_close_last_resort",
-                        defaultValue: "Use this only if a normal close does not work. A normal close is faster and cheaper."
+                        defaultValue: "Use this only if a normal close does not work."
+                    ))
+                    .foregroundStyle(.red)
+                    + Text(" ")
+                    + Text(String(
+                        localized: "info_force_close_cheaper",
+                        defaultValue: "A normal close is faster and cheaper."
                     ))
                     Text(String(
                         localized: "info_force_close_timing",
-                        defaultValue: "The provider puts the close on chain, then your funds move to your onchain wallet. This usually takes a few hours. If the provider is offline, it waits until the provider is back."
+                        defaultValue: "The provider puts the close on chain, then your funds move to your onchain wallet. This usually takes a few hours."
                     ))
+                        + Text(" ")
+                        + Text(String(
+                            localized: "info_force_close_provider_offline",
+                            defaultValue: "If the provider is offline, it waits until the provider is back."
+                        ))
+                        .foregroundStyle(.red)
                     Text(String(
                         localized: "info_force_close_keep_app",
-                        defaultValue: "Do not uninstall the app or clear its data until the funds arrive. The app needs its channel data to claim them."
+                        defaultValue: "Do not uninstall the app or clear its data until the funds arrive."
+                    ))
+                    .foregroundStyle(.red)
+                    + Text(" ")
+                    + Text(String(
+                        localized: "info_force_close_channel_data",
+                        defaultValue: "The app needs its channel data to claim them."
                     ))
                 }
                 Section {
