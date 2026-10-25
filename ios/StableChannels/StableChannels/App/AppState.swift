@@ -436,12 +436,9 @@ class AppState {
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
     }()
 
-    /// Inbound on-chain txids the wallet listed at the last balance refresh.
-    @ObservationIgnored var walletInboundTxids: Set<String> = []
-
-    /// The node's own amount for those txids, where it lists one. Once the node has a
-    /// transaction, its amount is used instead of the WebSocket feed's.
-    @ObservationIgnored var walletInboundSats: [String: Int64] = [:]
+    /// Inbound on-chain payments the wallet listed at the last balance refresh. Once the node has
+    /// a transaction, its amount is used instead of the WebSocket feed's.
+    @ObservationIgnored var walletInbound = WalletInboundOnchain()
 
     /// Inbound on-chain txids inside prevOnchainSats: a later increase never counts them. Loaded
     /// with the cached balance prevOnchainSats starts from; nil when no list was cached with it
@@ -558,7 +555,8 @@ class AppState {
                 manualTipProvider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1),
                 manualConfirmationService: ConfirmationService(
                     provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1)
-                )
+                ),
+                presenceProvider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
             )
         }
         confirmationPollingService = pollingService
@@ -766,8 +764,7 @@ class AppState {
         monitoredSpliceTxid = nil
         sweepOnchainStart = 0
         prevOnchainSats = 0
-        walletInboundTxids = []
-        walletInboundSats = [:]
+        walletInbound = WalletInboundOnchain()
         onchainBaselineTxids = nil
         fundingTxid = nil
         lightningBalanceSats = 0
@@ -3641,7 +3638,7 @@ class AppState {
         if currentOnchain > prevOnchainSats {
             let depositSats = currentOnchain - prevOnchainSats
             // Ignore tiny fluctuations from fee estimation changes
-            guard depositSats >= 1000 else {
+            guard depositSats >= DepositAttribution.minDepositSats else {
                 advanceOnchainBaseline(to: currentOnchain)
                 return
             }
@@ -3657,49 +3654,25 @@ class AppState {
                 return
             }
 
-            // Receives the WebSocket already recorded are part of this increase only if their
-            // transaction reached the wallet since the baseline; only the rest is a deposit it
-            // missed. If the lookup fails, retry on the next poll rather than risk recording a
-            // deposit twice.
-            // Known limitation: an unknown baseline (first launch after upgrade) counts nothing as arrived, so a
-            // WebSocket receive in that one increase can still be recorded twice, as before this check.
-            let arrivedTxids = DepositAttribution.arrivedTxids(
-                wallet: walletInboundTxids,
-                baseline: onchainBaselineTxids ?? walletInboundTxids
-            )
-            guard let recordedByTxid = try? databaseService?.onchainRepo.recordedReceiveSats(txids: arrivedTxids)
-            else { return }
-            let attribution = DepositAttribution.attribute(
-                depositSats: Int64(depositSats),
-                recorded: recordedByTxid,
-                walletSats: walletInboundSats
-            )
-            for (txid, sats) in attribution.amountCorrections {
-                do {
-                    try databaseService?.onchainRepo.correctReceiveAmount(txid: txid, sats: sats)
-                    AuditService.log("ONCHAIN_RECEIVE_AMOUNT_CORRECTED", data: ["txid": txid, "sats": "\(sats)"])
-                } catch {
-                    AuditService.log("ONCHAIN_RECEIVE_AMOUNT_CORRECT_FAILED", data: ["error": "\(error)"])
-                }
-            }
-            let remainderSats = attribution.remainderSats
-            if attribution.matchedRecordedReceive {
-                AuditService.log("ONCHAIN_DEPOSIT_MATCHED_WEBSOCKET", data: [
-                    "amount_sats": "\(depositSats)",
-                    "remainder_sats": "\(remainderSats)"
-                ])
-            }
-            guard remainderSats >= 1000 else {
+            // Only what the WebSocket's recorded receives don't explain is a deposit it missed. If the
+            // lookup fails, retry on the next poll rather than risk recording a deposit twice.
+            guard let remainderSats = databaseService.flatMap({
+                OnchainDepositReconciler(repository: $0.onchainRepo).remainderSats(
+                    depositSats: Int64(depositSats),
+                    wallet: walletInbound,
+                    baseline: onchainBaselineTxids
+                )
+            }) else { return }
+            guard remainderSats >= DepositAttribution.minDepositSats else {
                 advanceOnchainBaseline(to: currentOnchain)
                 return
             }
-            let unattributedSats = UInt64(remainderSats)
 
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
-            let amountUSD: Double? = price > 0 ? Double(unattributedSats) / 100_000_000.0 * price : nil
+            let amountUSD = OnchainAmount.usd(sats: remainderSats, price: price)
 
             // UUID -> unique depositId -> recordPayment dedup on retry.
             let depositId = "onchain_deposit_\(UUID().uuidString)"
@@ -3719,7 +3692,7 @@ class AppState {
 
             let deposit = DepositRecordInput(
                 depositId: depositId,
-                depositSats: Int64(unattributedSats),
+                depositSats: remainderSats,
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil
             )
@@ -3747,7 +3720,7 @@ class AppState {
     /// so a later increase never counts them again, whichever branch moved it.
     private func advanceOnchainBaseline(to sats: UInt64) {
         prevOnchainSats = sats
-        onchainBaselineTxids = walletInboundTxids
+        onchainBaselineTxids = walletInbound.txids
     }
 
     func handleWebSocketTransactionDetected(event: WebSocketEvent) {
@@ -3777,6 +3750,7 @@ class AppState {
             } catch {
                 AuditService.log("WEBSOCKET_RBF_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
             }
+            Task { [weak self] in await self?.confirmationPollingService?.failSendIfDropped(txid: txid) }
 
         case .receive(let target, let txid, let feedSats):
             // Fires only for our own tracked receive address, so unlike the balance-delta
@@ -3784,10 +3758,15 @@ class AppState {
             // record regardless of splice/close state.
             // Once the node lists the transaction its own amount is used; until then the amount
             // comes from the WebSocket feed, so convert it with a range check.
-            let amountSats = walletInboundSats[txid] ?? feedSats
-            if amountSats >= 1000, let amountMsat = OnchainAmount.msats(fromSats: amountSats) {
+            let amountSats = DepositAttribution.trustedSats(
+                txid: txid,
+                feedSats: feedSats,
+                walletSats: walletInbound.sats
+            )
+            if amountSats >= DepositAttribution.minDepositSats,
+               let amountMsat = OnchainAmount.msats(fromSats: amountSats) {
                 let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
-                let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
+                let amountUSD = OnchainAmount.usd(sats: amountSats, price: price)
 
                 do {
                     let outcome = try db.onchainRepo.recordWebSocketReceive(
@@ -4064,9 +4043,7 @@ class AppState {
         // sats, and that one deposit may then be recorded twice. Balances are unaffected.
         let payments = nodeService.node?.listPayments()
         if let payments {
-            let inbound = WalletInboundOnchain(payments)
-            walletInboundTxids = inbound.txids
-            walletInboundSats = inbound.sats
+            walletInbound = WalletInboundOnchain(payments)
         }
         let rawOnchain = balances.totalOnchainBalanceSats
         let rawSpendable = balances.spendableOnchainBalanceSats
@@ -4167,7 +4144,7 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
         ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
-        ud?.set(walletInboundTxids.sorted(), forKey: BalanceCacheKey.onchainTxids)
+        ud?.set(walletInbound.txids.sorted(), forKey: BalanceCacheKey.onchainTxids)
         ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
         ud?.set(hasReadyChannel, forKey: BalanceCacheKey.hasReadyChannel)
         if btcPrice > 0 {

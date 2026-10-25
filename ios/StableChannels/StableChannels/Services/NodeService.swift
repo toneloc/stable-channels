@@ -787,6 +787,11 @@ struct WalletInboundOnchain: Equatable {
     /// The node's amount for each txid that has one.
     let sats: [String: Int64]
 
+    init(txids: Set<String> = [], sats: [String: Int64] = [:]) {
+        self.txids = txids
+        self.sats = sats
+    }
+
     init(_ payments: [PaymentDetails]) {
         var txids: Set<String> = []
         var sats: [String: Int64] = [:]
@@ -796,8 +801,7 @@ struct WalletInboundOnchain: Equatable {
             txids.insert(txid)
             if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000) { sats[txid] = amount }
         }
-        self.txids = txids
-        self.sats = sats
+        self.init(txids: txids, sats: sats)
     }
 }
 

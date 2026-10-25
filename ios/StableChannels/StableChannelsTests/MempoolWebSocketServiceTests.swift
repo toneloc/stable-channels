@@ -1198,6 +1198,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
     func testOnchainAmountBounds() {
         XCTAssertEqual(OnchainAmount.total(of: [1, 2, 3]), 6)
         XCTAssertEqual(OnchainAmount.total(of: []), 0)
+        XCTAssertEqual(OnchainAmount.usd(sats: 50_000_000, price: 60_000), 30_000)
+        XCTAssertNil(OnchainAmount.usd(sats: 50_000_000, price: 0))
         XCTAssertNil(OnchainAmount.total(of: [-1]))
         XCTAssertNil(OnchainAmount.total(of: [Int64.max, 1]))
         XCTAssertNil(OnchainAmount.total(of: [OnchainAmount.maxSats, 1]))
@@ -1271,6 +1273,10 @@ final class MempoolWebSocketServiceTests: XCTestCase {
             walletSats: [txA: 50_000]
         )
         XCTAssertEqual(accounted.sorted(), [30_000, 50_000])
+        XCTAssertEqual(DepositAttribution.trustedSats(txid: txA, feedSats: 500_000, walletSats: [txA: 50_000]), 50_000)
+        XCTAssertEqual(DepositAttribution.trustedSats(txid: txB, feedSats: 30_000, walletSats: [txA: 50_000]), 30_000)
+        // Recorded amounts that overflow when summed cap the total instead of wrapping.
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 50_000, recordedSats: [.max, .max]), 0)
         XCTAssertEqual(
             DepositAttribution.attribute(
                 depositSats: 110_000,

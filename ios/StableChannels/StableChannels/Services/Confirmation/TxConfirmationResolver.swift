@@ -10,7 +10,7 @@ private struct TxStatusResponse: Decodable {
     }
 }
 
-struct TxConfirmationResolver: TxConfirmationProvider {
+struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
     private let client: ResilientEsploraClient
 
     init(
@@ -52,5 +52,17 @@ struct TxConfirmationResolver: TxConfirmationProvider {
         // Convert the 0 sentinel back to nil for the caller (meaning "pending").
         guard let height = result, height > 0 else { return nil }
         return height
+    }
+
+    /// One request per explorer, no retries. Esplora answers 404 for a txid it does not know.
+    func isKnown(txid: String) async -> Bool? {
+        var notFound = false
+        for base in client.config.chainURLs {
+            let path = "\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"
+            guard let response = await client.fetchResponse(path: path) else { continue }
+            if response.statusCode == 200 { return true }
+            if response.statusCode == 404 { notFound = true }
+        }
+        return notFound ? false : nil
     }
 }

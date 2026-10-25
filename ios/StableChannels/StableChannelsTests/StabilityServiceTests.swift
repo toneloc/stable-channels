@@ -784,7 +784,7 @@ final class StabilityServiceTests: XCTestCase {
         appState.databaseService = db
         appState.transactionLinkService.onchainReceiveAddress = nil
         appState.prevOnchainSats = 5000
-        appState.walletInboundTxids = []
+        appState.walletInbound = WalletInboundOnchain()
         appState.onchainBaselineTxids = []
         return (appState, db)
     }
@@ -798,8 +798,7 @@ final class StabilityServiceTests: XCTestCase {
         wallet: Set<String>,
         walletSats: [String: Int64] = [:]
     ) {
-        appState.walletInboundTxids = wallet
-        appState.walletInboundSats = walletSats
+        appState.walletInbound = WalletInboundOnchain(txids: wallet, sats: walletSats)
         appState.onchainBalanceSats = balance
         appState.detectOnchainDeposit()
     }
@@ -939,7 +938,7 @@ final class StabilityServiceTests: XCTestCase {
     @MainActor
     func testReceiveTheNodeAlreadyListsUsesTheNodeAmount() throws {
         let (appState, db) = try makeDepositAppState()
-        appState.walletInboundSats = [txA: 50000]
+        appState.walletInbound = WalletInboundOnchain(sats: [txA: 50000])
 
         webSocketReceive(appState, txid: txA, sats: 500_000)
 

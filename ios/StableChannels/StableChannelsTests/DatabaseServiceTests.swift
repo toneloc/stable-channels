@@ -2308,6 +2308,20 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try service.onchainRepo.recordedReceiveSats(txids: [receiveTxid]), [receiveTxid: 50_000])
     }
 
+    func testReconcilerSubtractsArrivedReceivesAtTheNodeAmount() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 500_000), .inserted)
+        let reconciler = OnchainDepositReconciler(repository: service.onchainRepo)
+        let wallet = WalletInboundOnchain(txids: [receiveTxid], sats: [receiveTxid: 40000])
+
+        // Inside the baseline already: none of the increase is this receive.
+        XCTAssertEqual(reconciler.remainderSats(depositSats: 110_000, wallet: wallet, baseline: [receiveTxid]), 110_000)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 500_000_000)
+
+        // Arrived since the baseline: the node amount is subtracted and the row corrected to it.
+        XCTAssertEqual(reconciler.remainderSats(depositSats: 110_000, wallet: wallet, baseline: []), 70000)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 40_000_000)
+    }
+
     func testCorrectReceiveAmountUsesTheNodeAmountAndScalesUSD() throws {
         try service.onchainRepo.recordWebSocketReceive(
             txid: receiveTxid, address: "bc1qws", amountMsat: 500_000_000,
@@ -2390,7 +2404,7 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "pending")
     }
 
-    func testRemovedTxFailsAPendingOnchainSend() throws {
+    func testDroppedSendFailsOnlyThroughTheExplorerCheck() throws {
         XCTAssertTrue(try service.paymentRepo.recordPayment(
             paymentId: "send-1",
             paymentType: "onchain",
@@ -2403,10 +2417,16 @@ final class DatabaseServiceTests: XCTestCase {
             txid: receiveTxid
         ))
 
-        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+        XCTAssertTrue(try service.paymentRepo.hasPendingOnchainSend(txid: receiveTxid))
 
+        // The feed's report alone leaves it pending; the explorer's word fails it.
+        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "send-1")?.status, "pending")
+
+        XCTAssertEqual(try service.paymentRepo.failDroppedSend(txid: receiveTxid), 1)
         XCTAssertEqual(service.paymentRepo.payment(paymentId: "send-1")?.status, "failed")
         XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+        XCTAssertFalse(try service.paymentRepo.hasPendingOnchainSend(txid: receiveTxid))
     }
 
     func testRemovedTxDoesNotFailOtherPaymentTypes() throws {

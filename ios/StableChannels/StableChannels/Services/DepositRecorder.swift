@@ -20,6 +20,41 @@ protocol DepositRecorder {
     func record(deposit: DepositRecordInput, address: String?) -> Bool
 }
 
+/// Ties a balance increase to the receives the WebSocket already recorded, by txid, and corrects
+/// rows whose feed amount differs from the node's. The rules are in ``DepositAttribution``.
+struct OnchainDepositReconciler {
+    let repository: OnchainReceiveRepository
+
+    /// The part of [depositSats] no recorded receive explains, or nil when the recorded receives
+    /// could not be read.
+    /// Known limitation: an unknown [baseline] (first launch after upgrade) counts nothing as
+    /// arrived, so a WebSocket receive in that one increase can still be recorded twice.
+    func remainderSats(depositSats: Int64, wallet: WalletInboundOnchain, baseline: Set<String>?) -> Int64? {
+        let arrived = DepositAttribution.arrivedTxids(wallet: wallet.txids, baseline: baseline ?? wallet.txids)
+        guard let recorded = try? repository.recordedReceiveSats(txids: arrived) else { return nil }
+        let attribution = DepositAttribution.attribute(
+            depositSats: depositSats,
+            recorded: recorded,
+            walletSats: wallet.sats
+        )
+        for (txid, sats) in attribution.amountCorrections {
+            do {
+                try repository.correctReceiveAmount(txid: txid, sats: sats)
+                AuditService.log("ONCHAIN_RECEIVE_AMOUNT_CORRECTED", data: ["txid": txid, "sats": "\(sats)"])
+            } catch {
+                AuditService.log("ONCHAIN_RECEIVE_AMOUNT_CORRECT_FAILED", data: ["error": "\(error)"])
+            }
+        }
+        if attribution.matchedRecordedReceive {
+            AuditService.log("ONCHAIN_DEPOSIT_MATCHED_WEBSOCKET", data: [
+                "amount_sats": "\(depositSats)",
+                "remainder_sats": "\(attribution.remainderSats)"
+            ])
+        }
+        return attribution.remainderSats
+    }
+}
+
 struct DepositRecordInput {
     let depositId: String
     let depositSats: Int64

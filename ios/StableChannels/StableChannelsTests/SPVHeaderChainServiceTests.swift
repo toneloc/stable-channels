@@ -209,6 +209,38 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    func testRemovedSendFailsOnlyWhenTheExplorerNoLongerKnowsIt() async throws {
+        let txid = String(repeating: "d", count: 64)
+        for (known, expected) in [(Bool?.some(false), "failed"), (true, "pending"), (nil, "pending")] {
+            _ = try db.paymentRepo.recordPayment(
+                paymentId: "send-\(String(describing: known))",
+                paymentType: "onchain",
+                direction: "sent",
+                amountMsat: 50_000_000,
+                amountUSD: nil,
+                btcPrice: nil,
+                counterparty: nil,
+                status: "pending",
+                txid: txid
+            )
+            let service = ConfirmationPollingService(
+                databaseService: db,
+                blockHeightService: blockHeightService,
+                confirmationService: ConfirmationService(provider: mockProvider),
+                presenceProvider: StubTxPresence(known: known)
+            )
+
+            await service.failSendIfDropped(txid: txid)
+
+            XCTAssertEqual(
+                db.paymentRepo.payment(paymentId: "send-\(String(describing: known))")?.status,
+                expected,
+                "explorer: \(String(describing: known))"
+            )
+            try db.rawSQL.execute("DELETE FROM payments")
+        }
+    }
+
     private func recordPendingPayment(txid: String) throws -> Int64 {
         _ = try db.paymentRepo.recordPayment(
             paymentId: txid,
@@ -659,4 +691,9 @@ private final class HangingConfirmationURLProtocol: URLProtocol {
             requestStopped?.fulfill()
         }
     }
+}
+
+private struct StubTxPresence: TxPresenceProviding {
+    let known: Bool?
+    func isKnown(txid _: String) async -> Bool? { known }
 }

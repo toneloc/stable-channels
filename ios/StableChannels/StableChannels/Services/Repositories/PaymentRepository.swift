@@ -213,16 +213,42 @@ final class PaymentRepository {
         }
     }
 
-    /// Fails an on-chain receive or send whose transaction left the mempool. Only unconfirmed
-    /// rows: a "removed" report that arrives after a block (or for another row type) must not
-    /// fail a payment that is already in the chain. A dropped send must fail too, or its pending
-    /// row blocks books repair for good.
+    /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
+    /// "removed" report that arrives after a block (or for another row type) must not fail
+    /// a deposit that is already in the chain.
     func failPaymentByTxid(txid: String) throws {
         try rawSQL.execute(
             """
             UPDATE payments SET status = 'failed'
             WHERE txid = ? AND status = 'pending' AND confirmations = 0
-              AND payment_type = 'onchain'
+              AND payment_type = 'onchain' AND direction = 'received'
+            """,
+            params: [.text(txid)]
+        )
+    }
+
+    /// True while an unconfirmed on-chain send with this txid is pending.
+    func hasPendingOnchainSend(txid: String) throws -> Bool {
+        try !rawSQL.query(
+            """
+            SELECT 1 FROM payments
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0
+              AND payment_type = 'onchain' AND direction = 'sent'
+            LIMIT 1
+            """,
+            params: [.text(txid)]
+        ).isEmpty
+    }
+
+    /// Fails an unconfirmed on-chain send whose transaction is gone from the mempool. A pending
+    /// send left in place blocks books repair for good. Returns the number of rows failed.
+    @discardableResult
+    func failDroppedSend(txid: String) throws -> Int {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0
+              AND payment_type = 'onchain' AND direction = 'sent'
             """,
             params: [.text(txid)]
         )

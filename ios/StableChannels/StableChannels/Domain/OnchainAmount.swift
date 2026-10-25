@@ -24,4 +24,9 @@ enum OnchainAmount {
         guard (0...maxSats).contains(sats) else { return nil }
         return UInt64(sats) * 1000
     }
+
+    /// USD value of `sats` at `price`, or nil when no price is known.
+    static func usd(sats: Int64, price: Double) -> Double? {
+        price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil
+    }
 }

@@ -55,6 +55,8 @@ final class ConfirmationPollingService {
     private let manualTipProvider: BlockHeightProvider?
     private let manualConfirmationService: ConfirmationService?
     private let manualRefreshTimeout: Duration
+    /// Second opinion before a send is failed: the WebSocket feed alone never fails one.
+    private let presenceProvider: (any TxPresenceProviding)?
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
@@ -73,7 +75,8 @@ final class ConfirmationPollingService {
         confirmationService: ConfirmationService,
         manualTipProvider: BlockHeightProvider? = nil,
         manualConfirmationService: ConfirmationService? = nil,
-        manualRefreshTimeout: Duration = .seconds(20)
+        manualRefreshTimeout: Duration = .seconds(20),
+        presenceProvider: (any TxPresenceProviding)? = nil
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
@@ -81,6 +84,30 @@ final class ConfirmationPollingService {
         self.manualTipProvider = manualTipProvider
         self.manualConfirmationService = manualConfirmationService
         self.manualRefreshTimeout = manualRefreshTimeout
+        self.presenceProvider = presenceProvider
+    }
+
+    /// Fails a pending on-chain send the WebSocket feed reported removed, but only once the block
+    /// explorer also no longer knows its transaction. A feed report alone could fail a send that
+    /// still confirms; a send left pending after it really dropped blocks books repair.
+    func failSendIfDropped(txid: String) async {
+        guard let presenceProvider,
+              (try? databaseService.paymentRepo.hasPendingOnchainSend(txid: txid)) == true else { return }
+        let known = await presenceProvider.isKnown(txid: txid)
+        guard known == false else {
+            AuditService.log("WEBSOCKET_SEND_REMOVAL_NOT_CONFIRMED", data: [
+                "txid": txid,
+                "explorer": known == true ? "known" : "unreachable"
+            ])
+            return
+        }
+        do {
+            let failed = try databaseService.paymentRepo.failDroppedSend(txid: txid)
+            AuditService.log("WEBSOCKET_DROPPED_SEND_FAILED", data: ["txid": txid, "rows": "\(failed)"])
+            onUpdate?()
+        } catch {
+            AuditService.log("WEBSOCKET_DROPPED_SEND_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.

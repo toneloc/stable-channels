@@ -7,6 +7,9 @@ import Foundation
 /// of the increase, so they are tied to it by txid, never by amount: an equal amount does not
 /// prove two receives are the same deposit.
 enum DepositAttribution {
+    /// Smaller balance increases and receives are fee-estimate noise, not deposits.
+    static let minDepositSats: Int64 = 1000
+
     /// How a balance increase splits against the receives already recorded for arrived txids.
     struct Outcome: Equatable {
         /// Sats no recorded receive explains: a deposit the WebSocket missed.
@@ -44,7 +47,12 @@ enum DepositAttribution {
     /// from the WebSocket feed, so the node's own amount for the txid replaces it; a txid the node
     /// lists without an amount keeps the row's, so its receive is still not recorded twice.
     static func accountedSats(recorded: [String: Int64], walletSats: [String: Int64]) -> [Int64] {
-        recorded.map { txid, sats in walletSats[txid] ?? sats }
+        recorded.map { txid, sats in trustedSats(txid: txid, feedSats: sats, walletSats: walletSats) }
+    }
+
+    /// The amount to trust for [txid]: the node's once it lists one, otherwise the feed's.
+    static func trustedSats(txid: String, feedSats: Int64, walletSats: [String: Int64]) -> Int64 {
+        walletSats[txid] ?? feedSats
     }
 
     /// Recorded receives whose amount differs from the node's, with the node's amount to keep.
