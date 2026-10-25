@@ -115,7 +115,7 @@ extension UInt64 {
     }
 
     var btcFormatted: String {
-        let btc = Double(self) / Double(Constants.satsInBTC)
+        let btc = Double(self) / BitcoinUnits.satsPerBTC
         return String(format: "%.8f BTC", btc)
     }
 
@@ -123,7 +123,7 @@ extension UInt64 {
     /// Two decimal digits, then groups of three separated by thin spaces.
     /// Preallocates buffer capacity to minimize intermediate heap reallocations.
     var btcSpacedFormatted: String {
-        let btc = Double(self) / Double(Constants.satsInBTC)
+        let btc = Double(self) / BitcoinUnits.satsPerBTC
         let raw = String(format: "%.8f", btc)
         guard let dotIndex = raw.firstIndex(of: ".") else { return raw }
         let whole = raw[raw.startIndex..<dotIndex]

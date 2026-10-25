@@ -14,6 +14,32 @@ enum ConfirmationPolicy {
             return defaultRequiredConfirmations
         }
     }
+
+    /// Nodes drop unconfirmed transactions after about two weeks.
+    static let stalePendingOnchainSeconds: Int64 = 14 * 86400
+
+    /// Rows created before this are old enough to age out.
+    static func staleCutoff(now: Int64) -> Int64 {
+        now - stalePendingOnchainSeconds
+    }
+
+    /// Whether a row whose transaction every explorer reported missing (404 from all, not an
+    /// outage) may be failed: an unconfirmed onchain row older than `stalePendingOnchainSeconds`.
+    /// A confirmed or younger row stays pollable so a later lookup can still confirm it.
+    static func shouldFailUnfound(_ payment: PaymentRecord, now: Int64) -> Bool {
+        payment.paymentType == "onchain"
+            && payment.status == "pending"
+            && payment.confirmations == 0
+            && payment.createdAt < staleCutoff(now: now)
+    }
+
+    /// The address a received onchain row's transaction must pay, or nil when there is nothing to
+    /// check (other row kinds, or no stored address).
+    static func expectedReceiveAddress(for payment: PaymentRecord) -> String? {
+        guard payment.paymentType == "onchain", payment.direction == "received" else { return nil }
+        let address = payment.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return address.isEmpty ? nil : address
+    }
 }
 
 struct ConfirmationProgress: Equatable {

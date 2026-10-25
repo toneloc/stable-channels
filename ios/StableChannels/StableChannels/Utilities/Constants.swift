@@ -3,7 +3,7 @@ import Foundation
 enum Constants {
     // MARK: - Network
 
-    static let satsInBTC: UInt64 = 100_000_000
+    static let satsInBTC = UInt64(BitcoinUnits.satsPerBTC)
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let tradeMessageType = "TRADE_V1"
@@ -20,6 +20,14 @@ enum Constants {
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
     static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
+
+    /// Explorer lookup order: the user's configured chain first, then the defaults, deduplicated.
+    static func chainLookupURLs(preferred: String) -> [String] {
+        ([preferred] + esploraChainURLs).reduce(into: []) { urls, url in
+            if !urls.contains(url) { urls.append(url) }
+        }
+    }
+
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL

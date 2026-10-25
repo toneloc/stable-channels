@@ -3,7 +3,35 @@ import CoreFoundation
 import Foundation
 import Security
 
-// This file belongs to BOTH the app and notification extension targets. Trade-entry only:
+// This file belongs to BOTH the app and notification extension targets.
+
+/// The one sats/USD conversion. Both targets use it; their `Constants.satsInBTC` derive from it.
+enum BitcoinUnits {
+    static let satsPerBTC: Double = 100_000_000
+
+    static func usd(sats: some BinaryInteger, price: Double) -> Double {
+        Double(sats) / satsPerBTC * price
+    }
+
+    static func usd(msats: some BinaryInteger, price: Double) -> Double {
+        Double(msats) / 1000 / satsPerBTC * price
+    }
+
+    /// Unrounded: callers pick the rounding their rule needs.
+    static func sats(usd: Double, price: Double) -> Double {
+        usd / price * satsPerBTC
+    }
+
+    /// The cumulative floor every stable target uses, or nil when it is not a representable
+    /// non-negative sats amount (invalid price, overflow).
+    static func floorTargetSats(usd: Double, price: Double) -> UInt64? {
+        let target = sats(usd: usd, price: price)
+        guard target.isFinite, target >= 0, target < Double(UInt64.max) else { return nil }
+        return UInt64(target.rounded(.down))
+    }
+}
+
+// Trade-entry only:
 // never enforce this policy in accepted-result reconciliation or stability settlements.
 enum StabilizationPolicy {
     static let maxStableAllocationPercent: UInt64 = 99
@@ -33,6 +61,53 @@ enum StabilizationPolicy {
     }
 }
 
+/// Settlement-side allocation rules, shared by the app and notification extension so every
+/// incoming-stability write path credits backing the same way (#320). Mirrors Android's
+/// `StabilityService.backingAfterIncomingStability`.
+enum StabilityAllocation {
+    /// Use Rust's local shortfall rule: excess receipts stay native and existing surplus stays
+    /// backing. Apply the credit to the committed books, bounded by the actual received sats. Do not
+    /// cap against a live balance snapshot: it can already include a later withdrawal whose event
+    /// has not been accounted for. Nil on invalid books, so the caller rolls back and retries.
+    static func backingAfterIncomingStability(
+        currentBackingSats: Int64,
+        expectedUSD: Double,
+        price: Double,
+        amountSats: Int64
+    ) -> Int64? {
+        guard currentBackingSats >= 0, expectedUSD.isFinite, expectedUSD >= 0,
+              price.isFinite, price > 0, amountSats > 0 else { return nil }
+        guard let equilibrium = BitcoinUnits.floorTargetSats(usd: expectedUSD, price: price),
+              equilibrium <= UInt64(Int64.max) else { return nil }
+        let targetSats = Int64(equilibrium)
+        if currentBackingSats >= targetSats { return currentBackingSats }
+        // Cap the credit before adding so even an excessive amount cannot overflow.
+        return currentBackingSats + min(amountSats, targetSats - currentBackingSats)
+    }
+
+    /// The backing a payment row writes: incoming stability credits only the local shortfall;
+    /// every other delta already moved sats, so it keeps the existing floor-at-zero debit clamp.
+    /// Nil when an incoming-stability credit cannot be computed (row must be retried).
+    static func backingAfterPayment(
+        currentBackingSats: Int64,
+        expectedUSD: Double,
+        price: Double?,
+        deltaSats: Int64,
+        paymentType: String,
+        direction: String
+    ) -> Int64? {
+        guard paymentType == "stability", direction == "received" else {
+            return max(0, currentBackingSats + deltaSats)
+        }
+        return backingAfterIncomingStability(
+            currentBackingSats: currentBackingSats,
+            expectedUSD: expectedUSD,
+            price: price ?? 0,
+            amountSats: deltaSats
+        )
+    }
+}
+
 /// Why a trade could not be prepared or executed on this device. Distinct from a signed
 /// TRADE_REJECTED_V1 reason code: these are decided locally, before anything is signed or
 /// sent, so no fee has been spent and there is nothing to reconcile with the LSP.
@@ -49,6 +124,9 @@ enum TradeValidationError: LocalizedError, Equatable {
     case feeExceedsBalance
     case allocationUnavailable
     case stabilizationLimit(UInt64)
+    /// LDK may fail to persist its payment row after the fee keysend started. The prepared
+    /// row stays recoverable and blocks the next order until the outcome is known.
+    case sendOutcomeUnknown
 
     /// Fixed local copy. Says what happened and, where the user can act, what to do about it.
     var errorDescription: String? {
@@ -61,6 +139,9 @@ enum TradeValidationError: LocalizedError, Equatable {
         case .feeExceedsBalance: return "Your balance cannot cover this trade and its fee. Reduce the amount."
         case .allocationUnavailable: return "That is more than this channel can convert right now. Reduce the amount."
         case .stabilizationLimit(let cents): return StabilizationPolicy.limitExceededMessage(cents)
+        case .sendOutcomeUnknown:
+            return "The trade may have been sent, but its status could not be saved. "
+                + "Keep the wallet connected and check History. Do not place the order again."
         }
     }
 }
@@ -72,6 +153,11 @@ struct StabilizationSnapshot {
     let expectedUSD: Double
     let price: Double
 
+    /// Receiver sats not backing the stable position.
+    private var nativeSats: UInt64 {
+        receiverSats >= backingSats ? receiverSats - backingSats : 0
+    }
+
     func accepts(_ orderCents: UInt64) -> Bool {
         fits(orderCents, searching: false)
     }
@@ -79,8 +165,8 @@ struct StabilizationSnapshot {
     private func fits(_ orderCents: UInt64, searching: Bool) -> Bool {
         guard orderCents > 0, price.isFinite, price > 0, expectedUSD.isFinite, expectedUSD >= 0 else { return false }
         let amount = Double(orderCents) / 100
-        let required = (amount / price * 100_000_000).rounded(.up)
-        let native = receiverSats >= backingSats ? receiverSats - backingSats : 0
+        let required = (BitcoinUnits.sats(usd: amount, price: price)).rounded(.up)
+        let native = nativeSats
         guard required.isFinite, required <= Double(native) else { return false }
         let target = TradeProtocol.normalizeExpectedUSD(expectedUSD + (amount - amount * TradeProtocol.feeRate))
         guard target >= expectedUSD, searching || target > expectedUSD,
@@ -92,10 +178,13 @@ struct StabilizationSnapshot {
         let fee = feeMsat / 1000
         guard fee <= receiverSats, fee <= spendableSats,
               let limit = StabilizationPolicy.clientLimit(spendableSats - fee),
-              target <= Double(receiverSats - fee) / 100_000_000 * price else { return false }
+              target <= BitcoinUnits.usd(sats: receiverSats - fee, price: price) else { return false }
         // Ignore the lower no-op bound only during the upper-bound search.
         if searching, backingSats == 0,
-           (target / price * 100_000_000).rounded(.down) == (expectedUSD / price * 100_000_000)
+           (BitcoinUnits.sats(usd: target, price: price)).rounded(.down) == (BitcoinUnits.sats(
+               usd: expectedUSD,
+               price: price
+           ))
            .rounded(.down) { return true }
         guard let backing = TradeProtocol.tradeBackingAfterDelta(
             receiverSats: receiverSats - fee,
@@ -109,8 +198,8 @@ struct StabilizationSnapshot {
 
     func maxOrderCents() -> UInt64 {
         guard price.isFinite, price > 0, expectedUSD.isFinite, expectedUSD >= 0 else { return 0 }
-        let native = receiverSats >= backingSats ? receiverSats - backingSats : 0
-        let cents = (Double(native) / 100_000_000 * price * 100).rounded(.down)
+        let native = nativeSats
+        let cents = (BitcoinUnits.usd(sats: native, price: price) * 100).rounded(.down)
         guard cents.isFinite, cents >= 1, cents < Double(Int64.max) else { return 0 }
         var low: UInt64 = 0
         var high = UInt64(cents)
@@ -170,10 +259,11 @@ struct PreparedMobileTrade {
 }
 
 enum TradeProtocol {
+    /// Signed control TLVs larger than this are refused before any parsing.
+    static let maxControlTLVBytes = 8 * 1024
     static let resultControlAmountMsat: UInt64 = 1
     static let resultTimeoutSecs: UInt64 = 15 * 60
     static let responseRetryWindowSecs: UInt64 = 14 * 24 * 60 * 60
-    private static let satsInBTC = 100_000_000.0
     static let feeRate = 0.01
     private static let stabilityThresholdUSD = 0.25
     private static let stabilityThresholdPercent = 0.1
@@ -202,7 +292,7 @@ enum TradeProtocol {
               feeRate.isFinite, feeRate >= 0, feeRate < 1 else { return nil }
         let targetDelta = abs(newExpectedUSD - oldExpectedUSD)
         let grossUSD = newExpectedUSD > oldExpectedUSD ? targetDelta / (1 - feeRate) : targetDelta
-        let feeSats = grossUSD * feeRate / quotePrice * satsInBTC
+        let feeSats = BitcoinUnits.sats(usd: grossUSD * feeRate, price: quotePrice)
         // Swift traps on invalid floating-point to UInt64 conversions. Match Rust's valid-input
         // truncation only after proving the value can be represented and multiplied by 1,000.
         guard feeSats.isFinite, feeSats >= 0, feeSats <= Double(UInt64.max / 1000) else { return nil }
@@ -347,7 +437,7 @@ enum TradeProtocol {
         guard currentExpectedUSD.isFinite, currentExpectedUSD >= 0,
               normalizedExpected.isFinite, normalizedExpected >= 0,
               price.isFinite, price > 0 else { return nil }
-        let receiverUSD = Double(receiverSats) / satsInBTC * price
+        let receiverUSD = BitcoinUnits.usd(sats: receiverSats, price: price)
         guard normalizedExpected <= receiverUSD else { return nil }
         if normalizedExpected == 0 {
             return allocationDriftIsActionable(
@@ -357,13 +447,9 @@ enum TradeProtocol {
             ) ? nil : 0
         }
 
-        let currentTarget = currentExpectedUSD / price * satsInBTC
-        let newTarget = normalizedExpected / price * satsInBTC
-        guard currentTarget.isFinite, newTarget.isFinite,
-              currentTarget >= 0, newTarget >= 0,
-              currentTarget < Double(UInt64.max), newTarget < Double(UInt64.max) else { return nil }
-        let currentTargetSats = UInt64(currentTarget.rounded(.down))
-        let newTargetSats = UInt64(newTarget.rounded(.down))
+        guard let currentTargetSats = BitcoinUnits.floorTargetSats(usd: currentExpectedUSD, price: price),
+              let newTargetSats = BitcoinUnits.floorTargetSats(usd: normalizedExpected, price: price)
+        else { return nil }
         let backing: UInt64
         if normalizedExpected >= currentExpectedUSD {
             let delta = newTargetSats - currentTargetSats
@@ -377,29 +463,105 @@ enum TradeProtocol {
         }
         var normalizedBacking = backing
         if currentExpectedUSD < 0.01, currentBackingSats == 0, backing <= receiverSats {
-            let nativeUSD = Double(receiverSats - backing) / satsInBTC * price
+            let nativeUSD = BitcoinUnits.usd(sats: receiverSats - backing, price: price)
             if nativeUSD < 0.01 { normalizedBacking = receiverSats }
         }
         return normalizedBacking > 0 && normalizedBacking <= receiverSats ? normalizedBacking : nil
     }
 
+    /// Reconcile an authenticated target using our allocation and price, bounded by our balance.
+    /// Unlike a new trade, a correction must not fail just because its target exceeds capacity
+    /// (#318). Zero-target settlement is handled separately by the caller.
+    static func syncBackingAfterDelta(
+        receiverSats: UInt64,
+        currentBackingSats: UInt64,
+        currentExpectedUSD: Double,
+        newExpectedUSD: Double,
+        price: Double
+    ) -> UInt64? {
+        guard currentExpectedUSD.isFinite, currentExpectedUSD >= 0,
+              newExpectedUSD.isFinite, newExpectedUSD > 0,
+              price.isFinite, price > 0 else { return nil }
+        if let backing = tradeBackingAfterDelta(
+            receiverSats: receiverSats,
+            currentBackingSats: currentBackingSats,
+            currentExpectedUSD: currentExpectedUSD,
+            newExpectedUSD: newExpectedUSD,
+            price: price
+        ) {
+            return backing
+        }
+
+        // Use cumulative floors, as trades do, without repricing the existing position or
+        // adopting the peer's backing. This preserves unsettled drift through corrections.
+        let int64Max = UInt64(Int64.max)
+        guard let currentTarget = BitcoinUnits.floorTargetSats(usd: currentExpectedUSD, price: price),
+              let newTarget = BitcoinUnits.floorTargetSats(usd: newExpectedUSD, price: price),
+              currentTarget <= int64Max, newTarget <= int64Max,
+              currentBackingSats <= int64Max, receiverSats <= int64Max else { return nil }
+        let delta = Int64(newTarget) - Int64(currentTarget)
+        let current = Int64(currentBackingSats)
+        let receiver = Int64(receiverSats)
+        let backing: Int64
+        if delta >= 0 {
+            // Clamp before adding to avoid overflowing on a large correction.
+            let available = max(receiver - current, 0)
+            backing = min(current, receiver) + min(delta, available)
+        } else {
+            backing = min(max(current + delta, 0), receiver)
+        }
+        return backing > 0 ? UInt64(backing) : nil
+    }
+
+    /// The backing an uncorrelated SYNC writes. A zero target keeps leftover backing only up to
+    /// what the LSP still books: its signed residue settles via the stability machinery (#322),
+    /// while a signed backing of 0 means the LSP already booked the close, so the wallet's stale
+    /// pre-exit allocation is released rather than paid away as phantom surplus.
+    /// Nil means the SYNC cannot be applied yet and must be retried.
+    static func uncorrelatedSyncBacking(
+        receiverSats: UInt64,
+        currentBackingSats: UInt64,
+        currentExpectedUSD: Double,
+        sync: TradeControlMessage.Sync,
+        price: Double
+    ) -> UInt64? {
+        if normalizeExpectedUSD(sync.expectedUSD) == 0 {
+            return min(currentBackingSats, sync.backingSats, receiverSats)
+        }
+        if currentBackingSats > 0, sync.expectedUSD == currentExpectedUSD {
+            return min(currentBackingSats, receiverSats)
+        }
+        return syncBackingAfterDelta(
+            receiverSats: receiverSats,
+            currentBackingSats: currentBackingSats,
+            currentExpectedUSD: currentExpectedUSD,
+            newExpectedUSD: sync.expectedUSD,
+            price: price
+        )
+    }
+
+    /// Size, strict UTF-8 and field validation all run before signature work, so oversize or
+    /// malformed peer input never reaches the node's verifier (matches Android).
     static func parseSignedControl(
         data: Data,
         expectedCounterparty: String,
         verifySignature: ([UInt8], String, String) -> Bool
     ) -> TradeControlMessage? {
-        guard let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard data.count <= maxControlTLVBytes,
+              let raw = String(data: data, encoding: .utf8),
+              let envelope = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String: Any],
               let payload = envelope["payload"] as? String,
               let signature = envelope["signature"] as? String,
-              verifySignature(Array(payload.utf8), signature, expectedCounterparty),
-              let payloadData = payload.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+              let object = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
               let type = object["type"] as? String else { return nil }
+        let message: TradeControlMessage?
         switch type {
-        case "SYNC_V1": return parseSync(object).map(TradeControlMessage.sync)
-        case "TRADE_REJECTED_V1": return parseRejection(object).map(TradeControlMessage.rejected)
-        default: return nil
+        case "SYNC_V1": message = parseSync(object).map(TradeControlMessage.sync)
+        case "TRADE_REJECTED_V1": message = parseRejection(object).map(TradeControlMessage.rejected)
+        default: message = nil
         }
+        guard let message, verifySignature(Array(payload.utf8), signature, expectedCounterparty) else { return nil }
+        return message
     }
 
     private static func parseSync(_ object: [String: Any]) -> TradeControlMessage.Sync? {
@@ -506,7 +668,7 @@ enum TradeProtocol {
         expectedUSD: Double,
         price: Double
     ) -> Bool {
-        let currentValue = Double(backingSats) / satsInBTC * price
+        let currentValue = BitcoinUnits.usd(sats: backingSats, price: price)
         let driftUSD = abs(currentValue - expectedUSD)
         if expectedUSD < 0.01 { return driftUSD >= stabilityThresholdUSD }
         let driftPercent = driftUSD / expectedUSD * 100
