@@ -131,6 +131,16 @@ final class LSPToUserHandler: PaymentHandler {
                         break eventLoop
                     }
                 }
+            case .spliceNegotiated, .channelReady, .spliceNegotiationFailed:
+                // Commit splice details before acking; a failure while a splice is pending is
+                // left for the foreground.
+                guard SpliceEventAcknowledgement.backgroundMayAcknowledge(event, db: db, node: node)
+                else { break eventLoop }
+                try? node.eventHandled()
+            case .paymentSuccessful, .paymentFailed:
+                // Not acked on a failed write: the foreground replays and records it.
+                guard recordOutgoingOutcome(event, node: node, db: db) else { break eventLoop }
+                try? node.eventHandled()
             default:
                 try? node.eventHandled()
             }
@@ -193,6 +203,6 @@ final class LSPToUserHandler: PaymentHandler {
     }
 
     private func calculateUSD(_ sats: UInt64, price: Double) -> Double {
-        return Double(sats) / 100_000_000.0 * price
+        return BitcoinUnits.usd(sats: sats, price: price)
     }
 }
