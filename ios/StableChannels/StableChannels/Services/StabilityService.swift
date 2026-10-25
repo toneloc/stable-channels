@@ -1,9 +1,19 @@
 import Foundation
-import LDKNode
 
 /// Pure stability logic — direct port of src/stable.rs
 enum StabilityService {
     // MARK: - Reconciliation
+
+    /// The first usable (positive, finite) price in preference order, or 0 when none is.
+    static func firstPositivePrice(_ prices: Double...) -> Double {
+        prices.first { $0.isFinite && $0 > 0 } ?? 0
+    }
+
+    /// Stability receipts are booked at the trusted accounting price, like every settlement;
+    /// any other receipt is valued at the channel's last booked price.
+    static func receiptPrice(isStabilityPayment: Bool, accountingPrice: Double, bookedPrice: Double) -> Double {
+        isStabilityPayment ? accountingPrice : bookedPrice
+    }
 
     /// Below this the position counts as zero-target; a zero target with no backing is closed.
     static let minimumStableUSD: Double = 0.01
@@ -11,28 +21,11 @@ enum StabilityService {
     /// Reconcile an outgoing payment against the stable position.
     /// Returns the USD amount the stable target dropped by, or nil if fully covered by native BTC.
     static func reconcileOutgoing(_ sc: inout StableChannel, price: Double) -> Double? {
-        guard sc.backingSats > 0, price > 0.0 else { return nil }
-
-        let userSats = sc.stableReceiverBTC.sats
-        guard sc.backingSats > userSats else { return nil }
-
-        let overflowSats = sc.backingSats - userSats
-        let usdOverflow = Double(overflowSats) / Double(Constants.satsInBTC) * price
-        let oldExpected = sc.expectedUSD.amount
-        let newExpected = max(oldExpected - usdOverflow, 0.0)
-
-        sc.expectedUSD = USD(amount: newExpected)
-        // Preserve sats, don't re-peg. The overflow is exactly what left the channel, so the
-        // sats that remain are the backing. Re-pegging to newExpected/price left backing ABOVE
-        // the live balance whenever the position was below par.
-        // At the zero boundary the residue stays backing: a $0 target with sats still backing it
-        // is an unsettled LSP surplus, which checkStabilityAction now settles as a normal
-        // above-par PAY. Zeroing it here would release the LSP's sats to the user as native BTC.
-        sc.backingSats = userSats
-        recomputeNative(&sc)
-
-        // Report only the target drop; past the zero boundary the rest of the overflow is surplus.
-        return oldExpected - newExpected
+        // Preserve sats, don't re-peg: the overflow is exactly what left the channel, so the sats
+        // that remain are the backing. At the zero boundary the residue stays backing: a $0
+        // target with sats still backing it is an unsettled LSP surplus, which
+        // checkStabilityAction settles as a normal above-par PAY. Reports only the target drop.
+        repairBooksAboveLiveBalance(&sc, price: price)?.usdDeducted
     }
 
     struct RepairResult: Equatable {
@@ -48,25 +41,40 @@ enum StabilityService {
     @discardableResult
     static func repairBooksAboveLiveBalance(_ sc: inout StableChannel, price: Double) -> RepairResult? {
         let receiverSats = sc.stableReceiverBTC.sats
-        guard sc.backingSats > receiverSats, price > 0.0 else { return nil }
+        guard let repair = overflowRepair(
+            expectedUSD: sc.expectedUSD.amount,
+            backingSats: sc.backingSats,
+            receiverSats: receiverSats,
+            price: price
+        ) else { return nil }
 
-        let overflowSats = sc.backingSats - receiverSats
-        let usdOverflow = Double(overflowSats) / Double(Constants.satsInBTC) * price
-        let oldExpected = sc.expectedUSD.amount
-        let newExpected = max(oldExpected - usdOverflow, 0.0)
-
-        sc.expectedUSD = USD(amount: newExpected)
+        sc.expectedUSD = USD(amount: repair.newExpectedUSD)
         // At the zero boundary the residue stays backing: a $0 target with sats still backing
         // it is an unsettled LSP surplus, which the stability machinery settles as a
         // normal above-par payment -- see reconcileOutgoing().
         sc.backingSats = receiverSats
         recomputeNative(&sc)
+        return repair
+    }
 
-        // Report only the target drop; past the zero boundary the overflow is surplus.
+    /// The books after sats left the channel without their stable deduction: the overflow above
+    /// `receiverSats` is deducted from the target at `price`, and the backing becomes
+    /// `receiverSats` (idempotent: a re-run sees backing <= receiver and returns nil).
+    /// Reports only the target drop; past the zero boundary the overflow is surplus.
+    static func overflowRepair(
+        expectedUSD: Double,
+        backingSats: UInt64,
+        receiverSats: UInt64,
+        price: Double
+    ) -> RepairResult? {
+        guard backingSats > receiverSats, price > 0.0 else { return nil }
+        let overflowSats = backingSats - receiverSats
+        let usdOverflow = BitcoinUnits.usd(sats: overflowSats, price: price)
+        let newExpected = max(expectedUSD - usdOverflow, 0.0)
         return RepairResult(
             overflowSats: overflowSats,
-            usdDeducted: oldExpected - newExpected,
-            oldExpectedUSD: oldExpected,
+            usdDeducted: expectedUSD - newExpected,
+            oldExpectedUSD: expectedUSD,
             newExpectedUSD: newExpected
         )
     }
@@ -88,18 +96,10 @@ enum StabilityService {
 
         guard overflowSats > 0 else { return nil }
 
-        let usdToDeduct = Double(overflowSats) / Double(Constants.satsInBTC) * price
+        let usdToDeduct = BitcoinUnits.usd(sats: overflowSats, price: price)
         let newExpected = max(sc.expectedUSD.amount - usdToDeduct, 0.0)
 
-        sc.expectedUSD = USD(amount: newExpected)
-        if price > 0.0 {
-            let btcAmount = newExpected / price
-            sc.backingSats = UInt64(btcAmount * 100_000_000.0)
-        }
-        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
-            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
-        recomputeNative(&sc)
-
+        setTarget(&sc, usd: newExpected, price: price)
         return usdToDeduct
     }
 
@@ -109,19 +109,22 @@ enum StabilityService {
     /// owed to the LSP unchanged. A spend that exhausts the target eats the surplus directly.
     static func spendConsumesLspSurplus(_ sc: StableChannel, price: Double, amountSats: UInt64) -> Bool {
         guard checkStabilityAction(sc, price: price).action == .pay else { return false }
-        let nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
-            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
-        let overflowSats = Int64(amountSats) - Int64(nativeSats)
+        let overflowSats = Int64(amountSats) - Int64(sc.unbackedReceiverSats)
         guard overflowSats > 0 else { return false }
-        let overflowUsd = Double(overflowSats) / Double(Constants.satsInBTC) * price
+        let overflowUsd = BitcoinUnits.usd(sats: overflowSats, price: price)
         return overflowUsd > sc.expectedUSD.amount
+    }
+
+    /// Adopt committed books (target and backing) from storage; native follows the live balance.
+    static func adoptStoredBooks(_ sc: inout StableChannel, expectedUSD: Double, backingSats: UInt64) {
+        sc.expectedUSD = USD(amount: expectedUSD)
+        sc.backingSats = backingSats
+        recomputeNative(&sc)
     }
 
     /// Recompute native BTC from receiver sats and backing sats.
     static func recomputeNative(_ sc: inout StableChannel) {
-        let nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
-            ? sc.stableReceiverBTC.sats - sc.backingSats
-            : 0
+        let nativeSats = sc.unbackedReceiverSats
         sc.nativeChannelBTC = Bitcoin(sats: nativeSats)
         sc.nativeSats = nativeSats
     }
@@ -133,14 +136,16 @@ enum StabilityService {
 
     /// Apply a trade — set new expected USD and recalculate backing sats + native sats.
     static func applyTrade(_ sc: inout StableChannel, newExpectedUSD: Double, price: Double) {
-        sc.expectedUSD = USD(amount: newExpectedUSD)
+        setTarget(&sc, usd: newExpectedUSD, price: price)
+    }
+
+    /// Set the stable target and re-peg backing to it at `price` (unchanged at price 0); native
+    /// is everything not backing the stable position.
+    private static func setTarget(_ sc: inout StableChannel, usd: Double, price: Double) {
+        sc.expectedUSD = USD(amount: usd)
         if price > 0.0 {
-            let btcAmount = newExpectedUSD / price
-            sc.backingSats = UInt64(btcAmount * 100_000_000.0)
+            sc.backingSats = UInt64(BitcoinUnits.sats(usd: usd, price: price))
         }
-        // native_sats is everything NOT backing the stable position
-        sc.nativeSats = sc.stableReceiverBTC.sats >= sc.backingSats
-            ? sc.stableReceiverBTC.sats - sc.backingSats : 0
         recomputeNative(&sc)
     }
 
@@ -179,7 +184,7 @@ enum StabilityService {
             )
         }
 
-        let stableUSDValue = Double(sc.backingSats) / 100_000_000.0 * price
+        let stableUSDValue = BitcoinUnits.usd(sats: sc.backingSats, price: price)
 
         let dollarsFromPar = stableUSDValue - targetUSD
         // Clamp the denominator: at a zero/tiny target an unclamped ratio is 0 (or explodes),
@@ -211,12 +216,12 @@ enum StabilityService {
 
     // MARK: - Balance Update
 
-    /// Update balances on a StableChannel from LDK channel data.
+    /// Update balances on a StableChannel from live channel data.
     /// Returns true if a matching channel was found.
     @discardableResult
     static func updateBalances(
         _ sc: inout StableChannel,
-        channels: [ChannelDetails],
+        channels: [ChannelSnapshot],
         onchainBalanceSats: UInt64,
         price: Double
     ) -> Bool {
@@ -229,7 +234,7 @@ enum StabilityService {
         sc.onchainUSD = USD.fromBitcoin(sc.onchainBTC, price: sc.latestPrice)
 
         // Find matching channel
-        let matchingChannel: ChannelDetails?
+        let matchingChannel: ChannelSnapshot?
         if sc.userChannelId.isEmpty {
             matchingChannel = channels.first(where: { $0.isChannelReady }) ?? channels.first
         } else {

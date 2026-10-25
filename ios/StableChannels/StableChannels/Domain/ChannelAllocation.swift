@@ -26,7 +26,7 @@ struct ChannelAllocation: Equatable, Sendable {
             return min(backingSatsOverride, lightningBalanceSats)
         }
         guard stableUSD > 0, btcPrice > 0 else { return 0 }
-        let calculated = (stableUSD / btcPrice) * Double(Constants.satsInBTC)
+        let calculated = BitcoinUnits.sats(usd: stableUSD, price: btcPrice)
         if calculated.isNaN || calculated.isInfinite || calculated <= 0 { return 0 }
         return UInt64(exactly: calculated) ?? (calculated > Double(UInt64.max) ? UInt64.max : UInt64(calculated))
     }
@@ -40,7 +40,7 @@ struct ChannelAllocation: Equatable, Sendable {
     /// Current fiat USD value of the native satoshi position.
     var nativeUSD: Double {
         guard btcPrice > 0, nativeSats > 0 else { return 0.0 }
-        return (Double(nativeSats) / Double(Constants.satsInBTC)) * btcPrice
+        return BitcoinUnits.usd(sats: nativeSats, price: btcPrice)
     }
 
     /// Total USD value combining both stable and native channel balances.
