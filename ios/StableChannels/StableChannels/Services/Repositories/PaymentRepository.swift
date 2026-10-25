@@ -213,15 +213,16 @@ final class PaymentRepository {
         }
     }
 
-    /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
-    /// "removed" report that arrives after a block (or for another row type) must not fail
-    /// a deposit that is already in the chain.
+    /// Fails an on-chain receive or send whose transaction left the mempool. Only unconfirmed
+    /// rows: a "removed" report that arrives after a block (or for another row type) must not
+    /// fail a payment that is already in the chain. A dropped send must fail too, or its pending
+    /// row blocks books repair for good.
     func failPaymentByTxid(txid: String) throws {
         try rawSQL.execute(
             """
             UPDATE payments SET status = 'failed'
             WHERE txid = ? AND status = 'pending' AND confirmations = 0
-              AND payment_type = 'onchain' AND direction = 'received'
+              AND payment_type = 'onchain'
             """,
             params: [.text(txid)]
         )

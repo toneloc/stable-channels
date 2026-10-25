@@ -2390,6 +2390,25 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.status, "pending")
     }
 
+    func testRemovedTxFailsAPendingOnchainSend() throws {
+        XCTAssertTrue(try service.paymentRepo.recordPayment(
+            paymentId: "send-1",
+            paymentType: "onchain",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: receiveTxid
+        ))
+
+        try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
+
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "send-1")?.status, "failed")
+        XCTAssertFalse(try service.paymentRepo.hasPendingOutgoingPayment())
+    }
+
     func testRemovedTxDoesNotFailOtherPaymentTypes() throws {
         XCTAssertTrue(try service.paymentRepo.recordPayment(
             paymentId: "splice-1",
