@@ -2431,6 +2431,24 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try onchainReceiveCount(), 1)
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "first")
     }
+
+    func testMigrationKeepsTheCompletedDuplicateOverAnEarlierPendingOne() throws {
+        try service.rawSQL.execute("DROP INDEX idx_payments_onchain_receive_txid_unique")
+        for (paymentId, status, confirmations) in [("first", "pending", 0), ("second", "completed", 3)] {
+            try service.rawSQL.execute(
+                """
+                INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, confirmations, txid)
+                VALUES (?, 'onchain', 'received', 1000000, ?, ?, ?)
+                """,
+                params: [.text(paymentId), .text(status), .integer(Int64(confirmations)), .text(receiveTxid)]
+            )
+        }
+
+        service = try DatabaseService(dataDir: dataDir)
+
+        XCTAssertEqual(try onchainReceiveCount(), 1)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "second")
+    }
 }
 
 @MainActor

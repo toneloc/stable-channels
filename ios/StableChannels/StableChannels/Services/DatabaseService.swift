@@ -384,9 +384,8 @@ final class DatabaseService {
         }
 
         // One on-chain receive row per txid. Older installs may hold duplicates from the
-        // WebSocket and balance paths, so keep the first-recorded row before indexing. If a later
-        // duplicate was the completed one, the kept row is still pending; the confirmation poller
-        // moves it forward again from the txid.
+        // WebSocket and balance paths, so keep the most advanced row (completed, then most
+        // confirmations, then first recorded) before indexing. No other table references payments.id.
         let hasUniqueReceiveTxidIndex = try !rawSQL.query(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_onchain_receive_txid_unique'"
         ).isEmpty
@@ -394,9 +393,14 @@ final class DatabaseService {
             try rawSQL.execute("""
             DELETE FROM payments
             WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
-              AND id NOT IN (SELECT MIN(id) FROM payments
-                             WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
-                             GROUP BY txid)
+              AND id NOT IN (SELECT id FROM (
+                                 SELECT id, ROW_NUMBER() OVER (
+                                     PARTITION BY txid
+                                     ORDER BY status = 'completed' DESC, confirmations DESC, id
+                                 ) AS rank
+                                 FROM payments
+                                 WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
+                             ) WHERE rank = 1)
             """)
             try rawSQL.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_onchain_receive_txid_unique

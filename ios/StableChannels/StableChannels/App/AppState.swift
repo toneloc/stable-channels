@@ -3656,7 +3656,7 @@ class AppState {
             // transaction reached the wallet since the baseline; only the rest is a deposit it
             // missed. If the lookup fails, retry on the next poll rather than risk recording a
             // deposit twice.
-            // ponytail: an unknown baseline (first launch after upgrade) counts nothing as arrived, so a
+            // Known limitation: an unknown baseline (first launch after upgrade) counts nothing as arrived, so a
             // WebSocket receive in that one increase can still be recorded twice, as before this check.
             let arrivedTxids = DepositAttribution.arrivedTxids(
                 wallet: walletInboundTxids,
@@ -4049,8 +4049,11 @@ class AppState {
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
-        // Read with the balance, so deposit detection compares one consistent pair.
-        if let payments = nodeService.node?.listPayments() {
+        // Read right after the balance so deposit detection compares the two. They are separate
+        // reads: a wallet sync landing between them can put a txid in the baseline without its
+        // sats, and that one deposit may then be recorded twice. Balances are unaffected.
+        let payments = nodeService.node?.listPayments()
+        if let payments {
             walletInboundTxids = Self.inboundOnchainTxids(payments)
         }
         let rawOnchain = balances.totalOnchainBalanceSats
@@ -4084,9 +4087,9 @@ class AppState {
         // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
         // already incorporate the spend when .pending is reached.
         var paymentStatusMap: [String: PaymentStatus]?
-        let getPaymentStatus: (String) -> PaymentStatus? = { [weak self] tid in
+        let getPaymentStatus: (String) -> PaymentStatus? = { tid in
             if paymentStatusMap == nil {
-                guard let self, let payments = self.nodeService.node?.listPayments() else { return nil }
+                guard let payments else { return nil }
                 var map: [String: PaymentStatus] = [:]
                 for p in payments {
                     if case let .onchain(paymentTxid, _) = p.kind {

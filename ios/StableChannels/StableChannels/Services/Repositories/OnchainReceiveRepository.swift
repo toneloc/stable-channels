@@ -59,7 +59,7 @@ final class OnchainReceiveRepository {
                     )
                     return .adoptedPlaceholder
                 }
-                // ponytail: assumes the larger placeholder holds this deposit. A receive the close
+                // Known limitation: assumes the larger placeholder holds this deposit. A receive the close
                 // branch absorbed instead could shrink an unrelated placeholder; tying placeholders to
                 // the txids of their balance jump would remove that.
                 try rawSQL.execute(
