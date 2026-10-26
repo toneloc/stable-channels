@@ -12,6 +12,8 @@ import Foundation
 final class TxidLinkStore {
     private(set) var lastCloseTxid: String?
     private(set) var lastReceiveTxid: String?
+    /// The receive address `lastReceiveTxid` was seen paying, when known.
+    private(set) var lastReceiveTxidAddress: String?
     private(set) var onchainReceiveAddress: String?
 
     private let defaults: UserDefaults?
@@ -22,6 +24,7 @@ final class TxidLinkStore {
         static let closeAt = "last_close_txid_at"
         static let receive = "last_receive_txid"
         static let receiveAt = "last_receive_txid_at"
+        static let receiveTxidAddr = "last_receive_txid_address"
         static let receiveAddr = "last_receive_address"
     }
 
@@ -30,6 +33,7 @@ final class TxidLinkStore {
         let now = Date().timeIntervalSince1970
         self.lastCloseTxid = Self.restore(key: Key.close, atKey: Key.closeAt, now: now, defaults: defaults)
         self.lastReceiveTxid = Self.restore(key: Key.receive, atKey: Key.receiveAt, now: now, defaults: defaults)
+        self.lastReceiveTxidAddress = lastReceiveTxid == nil ? nil : defaults?.string(forKey: Key.receiveTxidAddr)
         self.onchainReceiveAddress = defaults?.string(forKey: Key.receiveAddr)
     }
 
@@ -38,9 +42,11 @@ final class TxidLinkStore {
         Self.persist(txid: txid, valueKey: Key.close, atKey: Key.closeAt, defaults: defaults)
     }
 
-    func setReceive(_ txid: String?) {
+    func setReceive(_ txid: String?, address: String? = nil) {
         lastReceiveTxid = txid
+        lastReceiveTxidAddress = txid == nil ? nil : address
         Self.persist(txid: txid, valueKey: Key.receive, atKey: Key.receiveAt, defaults: defaults)
+        defaults?.set(lastReceiveTxidAddress, forKey: Key.receiveTxidAddr)
     }
 
     func setReceiveAddress(_ address: String?) {

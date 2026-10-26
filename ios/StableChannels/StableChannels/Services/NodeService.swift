@@ -802,3 +802,37 @@ extension Error {
         }
     }
 }
+
+extension LightningPaymentResolution {
+    /// nil while LDK still reports the payment pending. An unreported fee is recorded as 0.
+    init?(_ payment: PaymentDetails) {
+        switch payment.status {
+        case .succeeded: self = .succeeded(feeMsat: payment.feePaidMsat ?? 0)
+        case .failed: self = .failed(reasonCode: nil)
+        case .pending: return nil
+        }
+    }
+}
+
+extension ReceiveTxidAdoption.WalletReceive {
+    /// nil for anything but an inbound on-chain payment with a known amount.
+    init?(_ payment: PaymentDetails) {
+        guard payment.direction == .inbound, case let .onchain(txid, _) = payment.kind,
+              let amountMsat = payment.amountMsat else { return nil }
+        self.init(txid: "\(txid)", amountMsat: Int64(amountMsat), seenAtSecs: Int64(payment.latestUpdateTimestamp))
+    }
+}
+
+extension ChannelSnapshot {
+    init(_ details: ChannelDetails) {
+        self.init(
+            userChannelId: details.userChannelId,
+            channelId: details.channelId,
+            counterpartyNodeId: details.counterpartyNodeId,
+            isChannelReady: details.isChannelReady,
+            outboundCapacityMsat: details.outboundCapacityMsat,
+            unspendablePunishmentReserve: details.unspendablePunishmentReserve,
+            channelValueSats: details.channelValueSats
+        )
+    }
+}

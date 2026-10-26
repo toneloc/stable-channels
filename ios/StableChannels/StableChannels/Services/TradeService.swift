@@ -13,9 +13,17 @@ final class TradeService {
     private let nodeService: NodeService
     private let databaseService: DatabaseService
 
-    init(nodeService: NodeService, databaseService: DatabaseService) {
+    /// The app-group balance cache, read when no live channel is available.
+    private let balanceCache: UserDefaults?
+
+    init(
+        nodeService: NodeService,
+        databaseService: DatabaseService,
+        balanceCache: UserDefaults? = UserDefaults(suiteName: Constants.appGroupIdentifier)
+    ) {
         self.nodeService = nodeService
         self.databaseService = databaseService
+        self.balanceCache = balanceCache
     }
 
     private func liveSnapshot(sc: StableChannel, price: Double) -> StabilizationSnapshot? {
@@ -26,7 +34,7 @@ final class TradeService {
                                          spendableSats: capacity, backingSats: sc.backingSats,
                                          expectedUSD: sc.expectedUSD.amount, price: price)
         }
-        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let ud = balanceCache
         let cachedSats = UInt64(bitPattern: Int64(ud?.integer(forKey: AppState.BalanceCacheKey.lightning) ?? 0))
         let hasReady = ud?.bool(forKey: AppState.BalanceCacheKey.hasReadyChannel) ?? false
         guard hasReady, cachedSats > 0 else { return nil }
@@ -140,6 +148,12 @@ final class TradeService {
             )
             paymentIdString = "\(paymentId)"
         } catch {
+            // LDK can fail to persist its payment row after starting the keysend. Leave the
+            // prepared row recoverable so it keeps the next trade blocked until resolved.
+            if let nodeError = error as? NodeError, case .PersistenceFailed = nodeError {
+                AuditService.log("TRADE_SEND_OUTCOME_UNKNOWN", data: ["trade_id": prepared.tradeId])
+                throw TradeValidationError.sendOutcomeUnknown
+            }
             _ = try? databaseService.channelRepo.markTradeSendFailed(tradeDbId: tradeDbId)
             throw error
         }

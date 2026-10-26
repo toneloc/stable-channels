@@ -8,6 +8,17 @@ private struct TxStatusResponse: Decodable {
         case confirmed
         case blockHeight = "block_height"
     }
+
+    var txStatus: TxStatus {
+        guard confirmed, let blockHeight, blockHeight > 0 else { return TxStatus(blockHeight: nil) }
+        return TxStatus(blockHeight: UInt32(blockHeight))
+    }
+}
+
+/// `/tx/:txid` body: the same `status` object `/tx/:txid/status` returns. Outputs are read by
+/// `MissedReceiveRecovery.outputsPaying`, the one address-matching rule.
+private struct TxResponse: Decodable {
+    let status: TxStatusResponse?
 }
 
 struct TxConfirmationResolver: TxConfirmationProvider {
@@ -33,24 +44,41 @@ struct TxConfirmationResolver: TxConfirmationProvider {
         )
     }
 
-    func blockHeight(for txid: String) async throws -> UInt32? {
+    func status(for txid: String) async throws -> EsploraLookup<TxStatus> {
         try Task.checkCancellation()
-        let result = await client.fetch(
+        let result = await client.lookup(
             endpointBuilder: { base in
                 ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"]
             },
-            resultParser: { (data: Data) -> UInt32? in
-                let status = try JSONDecoder().decode(TxStatusResponse.self, from: data)
-                // Return 0 sentinel for valid "not confirmed yet" responses so
-                // the client stops immediately instead of retrying with backoff.
-                // nil is reserved for actual parse failures that warrant a retry.
-                guard status.confirmed, let height = status.blockHeight, height > 0 else { return UInt32(0) }
-                return UInt32(height)
+            resultParser: { (data: Data) -> TxStatus? in
+                try JSONDecoder().decode(TxStatusResponse.self, from: data).txStatus
             }
         )
         try Task.checkCancellation()
-        // Convert the 0 sentinel back to nil for the caller (meaning "pending").
-        guard let height = result, height > 0 else { return nil }
-        return height
+        return result
+    }
+
+    /// One `/tx/:txid` request answers both "does it pay `address`" and the confirmation
+    /// status, so a receive row needs no second `/status` request.
+    func receiveCheck(for txid: String, paysTo address: String) async throws -> EsploraLookup<ReceiveTxCheck> {
+        try Task.checkCancellation()
+        guard !PaymentDestinationClassifier.normalizeAddress(address).isEmpty else { return .unavailable }
+        let result = await client.lookup(
+            endpointBuilder: { base in
+                ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)"]
+            },
+            resultParser: { (data: Data) -> ReceiveTxCheck? in
+                let tx = try JSONDecoder().decode(TxResponse.self, from: data)
+                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+                // A body without an output list cannot answer the address question.
+                guard let paying = MissedReceiveRecovery.outputsPaying(body, address: address) else { return nil }
+                return ReceiveTxCheck(
+                    paysToAddress: !paying.isEmpty,
+                    status: tx.status?.txStatus
+                )
+            }
+        )
+        try Task.checkCancellation()
+        return result
     }
 }

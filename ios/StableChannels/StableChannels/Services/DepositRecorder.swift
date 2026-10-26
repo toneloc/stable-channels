@@ -94,3 +94,22 @@ final class UnknownAddressDepositRecorder: DepositRecorder {
         }
     }
 }
+
+/// The persisted balance-delta baseline (`prevOnchainSats`), so a deposit deferred during a
+/// splice/close is still detected after a restart. The balance cache can't serve as the
+/// baseline: it is refreshed while detection is deferred. Seeded once from `seedKey`.
+enum DepositBaseline {
+    static let key = "deposit_baseline_sats"
+
+    static func load(defaults: UserDefaults?, seedKey: String) -> UInt64 {
+        guard let defaults else { return 0 }
+        if defaults.object(forKey: key) == nil {
+            defaults.set(defaults.integer(forKey: seedKey), forKey: key)
+        }
+        return UInt64(bitPattern: Int64(defaults.integer(forKey: key)))
+    }
+
+    static func save(_ sats: UInt64, defaults: UserDefaults?) {
+        defaults?.set(Int64(bitPattern: sats), forKey: key)
+    }
+}

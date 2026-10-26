@@ -1,5 +1,19 @@
 import Foundation
 
+/// Outcome of a per-transaction explorer lookup.
+enum EsploraLookup<Value: Sendable>: Sendable {
+    case found(Value)
+    /// Every explorer answered 404: the transaction is unknown to them.
+    case notFound
+    /// Outage, error response, unreadable body or cancellation: says nothing about the transaction.
+    case unavailable
+
+    var value: Value? {
+        if case .found(let value) = self { return value }
+        return nil
+    }
+}
+
 /// Esplora poller. Wraps the `/tx/.../outspend/...`, `/address/.../txs/...`
 /// calls shared by `CloseTxidResolver` and `OnchainTxidResolver`.
 /// Owns: chain-URL fallback, backoff with jitter, wall-clock budget, body
@@ -9,6 +23,12 @@ import Foundation
 ///   - `onResolved`: fires once on success.
 struct ResilientEsploraClient {
     struct Config {
+        /// One quick pass over the explorers, for best-effort background lookups that the next
+        /// tick retries anyway.
+        static func singlePass(chainURLs: [String]) -> Config {
+            Config(chainURLs: chainURLs, maxAttempts: 1, timeout: 10)
+        }
+
         let chainURLs: [String]
         let maxAttempts: Int
         let backoffSeconds: [UInt64]
@@ -101,10 +121,22 @@ struct ResilientEsploraClient {
         endpointBuilder: @escaping EndpointBuilder,
         resultParser: @escaping ResultParser<T>
     ) async -> T? {
+        await lookup(endpointBuilder: endpointBuilder, resultParser: resultParser).value
+    }
+
+    /// Like `fetch`, but tells "every explorer answered 404" (`.notFound`) apart from an
+    /// outage, error status or unreadable body (`.unavailable`). Only an attempt loop in
+    /// which every response was a 404 is `.notFound`; cancellation is `.unavailable`.
+    func lookup<T: Sendable>(
+        endpointBuilder: @escaping EndpointBuilder,
+        resultParser: @escaping ResultParser<T>
+    ) async -> EsploraLookup<T> {
         let start = Date()
+        var sawNotFound = false
+        var sawOtherFailure = false
         for attempt in 0..<config.maxAttempts {
             if Task.isCancelled {
-                return nil
+                return .unavailable
             }
             if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
                 break
@@ -122,10 +154,10 @@ struct ResilientEsploraClient {
                 do {
                     try await Task.sleep(nanoseconds: sleepNs)
                 } catch {
-                    return nil
+                    return .unavailable
                 }
                 if Task.isCancelled {
-                    return nil
+                    return .unavailable
                 }
                 if Date().timeIntervalSince(start) >= config.wallClockBudgetSeconds {
                     break
@@ -133,52 +165,62 @@ struct ResilientEsploraClient {
             }
             for base in config.chainURLs {
                 if Task.isCancelled {
-                    return nil
+                    return .unavailable
                 }
                 let paths = endpointBuilder(base)
                 for path in paths {
                     if Task.isCancelled {
-                        return nil
+                        return .unavailable
                     }
-                    guard let data = await fetchJSON(path: path) else { continue }
-                    do {
-                        if let hit = try resultParser(data) {
+                    switch await fetchResponse(path: path) {
+                    case .notFound:
+                        sawNotFound = true
+                    case .failed:
+                        sawOtherFailure = true
+                    case .ok(let data):
+                        if let hit = try? resultParser(data) {
                             Self.log("ESPLORA_RESOLVED", [
                                 "path": path,
                                 "attempt": "\(attempt)"
                             ])
-                            return hit
+                            return .found(hit)
                         }
-                    } catch {
-                        continue
+                        sawOtherFailure = true
                     }
                 }
             }
         }
-        return nil
+        return sawNotFound && !sawOtherFailure ? .notFound : .unavailable
     }
 
-    /// GET `path`. Returns the body on 200, nil on non-200, network
-    /// error, body too large, or invalid URL.
-    func fetchJSON(path: String) async -> Data? {
-        guard let url = URL(string: path) else { return nil }
+    enum HTTPOutcome {
+        case ok(Data)
+        case notFound
+        /// Non-200 status other than 404, network error, body too large, or invalid URL.
+        case failed
+    }
+
+    /// GET `path`. Returns the body on 200 and `.notFound` on 404.
+    func fetchResponse(path: String) async -> HTTPOutcome {
+        guard let url = URL(string: path) else { return .failed }
         var req = URLRequest(url: url, timeoutInterval: config.timeout)
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         do {
             let (data, response) = try await urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200
-            else { return nil }
+            guard let http = response as? HTTPURLResponse else { return .failed }
+            if http.statusCode == 404 { return .notFound }
+            guard http.statusCode == 200 else { return .failed }
             guard data.count <= Self.maxBodyBytes else {
                 Self.log("ESPLORA_BODY_TOO_LARGE", [
                     "path": path,
                     "size": "\(data.count)"
                 ])
-                return nil
+                return .failed
             }
-            return data
+            return .ok(data)
         } catch {
-            return nil
+            return .failed
         }
     }
 
@@ -197,14 +239,7 @@ struct ResilientEsploraClient {
 
     /// 64 lowercase hex chars.
     static func isValidTxid(_ s: String) -> Bool {
-        guard s.count == 64 else { return false }
-        for c in s {
-            switch c {
-            case "0"..."9", "a"..."f": continue
-            default: return false
-            }
-        }
-        return true
+        TradeProtocol.isCanonicalIdentifier(s)
     }
 
     /// Strip a trailing slash from a chain base URL.
