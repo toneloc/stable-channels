@@ -121,13 +121,25 @@ struct OnchainDepositBaseline: Equatable {
         removed[txid] = max(0, removedSats)
     }
 
-    /// Takes marked removals out once the node has synced past them, so the transaction replacing
-    /// one is a new increase. A balance below the baseline already left them out.
-    mutating func settleRemovals(wallet: Set<String>, balance: UInt64) {
-        guard !removed.isEmpty, balance < sats || wallet != txids else { return }
+    /// Takes marked removals out once the balance no longer holds them, so the transaction replacing
+    /// one is a new increase. They are out when the wallet stops listing them, or when the balance is
+    /// short of the baseline plus the txids the wallet added. A balance below the baseline already
+    /// left them out.
+    mutating func settleRemovals(wallet: WalletInboundOnchain, balance: UInt64) {
+        guard !removed.isEmpty else { return }
         if balance >= sats {
+            let listed = removed.keys.contains(where: wallet.txids.contains)
+            guard !listed || balance < sats + addedSats(wallet) else { return }
             sats -= min(sats, UInt64(removed.values.reduce(0, +)))
         }
         removed = [:]
+    }
+
+    /// The node's amounts for txids [wallet] lists that the baseline doesn't count. One without an
+    /// amount adds nothing, which keeps a removal counted.
+    private func addedSats(_ wallet: WalletInboundOnchain) -> UInt64 {
+        wallet.txids.subtracting(txids ?? []).reduce(0) { sum, txid in
+            sum + UInt64(max(0, wallet.sats[txid] ?? 0))
+        }
     }
 }

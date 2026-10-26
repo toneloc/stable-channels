@@ -994,6 +994,35 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testRemovedReceiveStillInTheBalanceIsNotAddedToANewDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The explorer lost txA but the node still holds it when an unrelated deposit lands.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 115_000, wallet: [txA, txB], walletSats: [txA: 50000, txB: 60000])
+        poll(appState, balance: 65000, wallet: [txB], walletSats: [txB: 60000])
+
+        XCTAssertEqual(try receivedSats(db), [60000])
+        XCTAssertEqual(appState.depositBaseline.sats, 65000)
+    }
+
+    @MainActor
+    func testReplacementWhileTheNodeStillListsTheOriginalRecordsOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The node lists the replaced txA next to txC, but only txC is in the balance.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txA, txC], walletSats: [txA: 50000, txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+    }
+
+    @MainActor
     func testIdentifiedDepositFallsBackWhenItsTxidHasAFailedRow() throws {
         let (_, db) = try makeDepositAppState()
         _ = try db.paymentRepo.recordPayment(

@@ -3609,7 +3609,7 @@ class AppState {
         if isSweeping || pendingSplice != nil {
             return
         }
-        depositBaseline.settleRemovals(wallet: walletInbound.txids, balance: currentOnchain)
+        depositBaseline.settleRemovals(wallet: walletInbound, balance: currentOnchain)
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {

@@ -2561,6 +2561,35 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try onchainReceiveCount(), 1)
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "second")
     }
+
+    func testMigrationKeepsTheSurvivorsBackingAndResolverLink() throws {
+        try service.rawSQL.execute("DROP INDEX idx_payments_onchain_receive_txid_unique")
+        let rows: [(String, String, Int64, Int64)] = [("first", "pending", 7, 0), ("second", "completed", 9, 1)]
+        for (paymentId, status, resolutionId, backingApplied) in rows {
+            try service.rawSQL.execute(
+                """
+                INSERT INTO payments (payment_id, payment_type, direction, amount_msat, status, txid,
+                                      resolution_id, backing_applied)
+                VALUES (?, 'onchain', 'received', 1000000, ?, ?, ?, ?)
+                """,
+                params: [.text(paymentId), .text(status), .text(receiveTxid),
+                         .integer(resolutionId), .integer(backingApplied)]
+            )
+        }
+
+        service = try DatabaseService(dataDir: dataDir)
+
+        let survivor = try service.rawSQL.query(
+            "SELECT payment_id, resolution_id, backing_applied FROM payments WHERE txid = ?",
+            params: [.text(receiveTxid)]
+        )
+        XCTAssertEqual(survivor.count, 1)
+        XCTAssertEqual(survivor.first?.string(0), "second")
+        XCTAssertEqual(survivor.first?.int64(1), 9)
+        XCTAssertEqual(survivor.first?.int64(2), 1)
+        // The removed row's resolver finds nothing pending rather than a stale row.
+        XCTAssertNil(service.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: 7))
+    }
 }
 
 @MainActor

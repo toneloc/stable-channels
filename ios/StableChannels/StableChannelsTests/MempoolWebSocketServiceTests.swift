@@ -1322,26 +1322,37 @@ final class MempoolWebSocketServiceTests: XCTestCase {
     func testRemovedReceiveLeavesTheBaselineOnceTheNodeSyncs() {
         let txA = String(repeating: "a", count: 64)
         let txB = String(repeating: "b", count: 64)
+        let txC = String(repeating: "c", count: 64)
         var baseline = OnchainDepositBaseline(sats: 55000, txids: [txA])
 
         // Not counted: nothing changes.
         baseline.markRemoved(txid: txB, sats: 50000)
-        baseline.settleRemovals(wallet: [txB], balance: 55000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txB]), balance: 55000)
         XCTAssertEqual(baseline.sats, 55000)
 
         // Counted: it stays while the node still shows the old wallet, then comes off once.
         baseline.markRemoved(txid: txA, sats: 50000)
-        baseline.settleRemovals(wallet: [txA], balance: 55000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txA]), balance: 55000)
         XCTAssertEqual(baseline.sats, 55000)
-        baseline.settleRemovals(wallet: [txB], balance: 55000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txB]), balance: 55000)
         XCTAssertEqual(baseline.sats, 5000)
-        baseline.settleRemovals(wallet: [txA, txB], balance: 55000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txB]), balance: 55000)
         XCTAssertEqual(baseline.sats, 5000)
+
+        // Still listed: a balance holding it plus the added deposit keeps it; one short of that left it.
+        var listed = OnchainDepositBaseline(sats: 55000, txids: [txA])
+        listed.markRemoved(txid: txA, sats: 50000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txB], sats: [txB: 60000]), balance: 115_000)
+        XCTAssertEqual(listed.sats, 55000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txC]), balance: 55000)
+        XCTAssertEqual(listed.sats, 55000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txC], sats: [txC: 50000]), balance: 55000)
+        XCTAssertEqual(listed.sats, 5000)
 
         // A balance that already fell below the baseline left it out; the poll advances to it.
         var dropped = OnchainDepositBaseline(sats: 55000, txids: [txA])
         dropped.markRemoved(txid: txA, sats: 50000)
-        dropped.settleRemovals(wallet: [txA], balance: 5000)
+        dropped.settleRemovals(wallet: WalletInboundOnchain(txids: [txA]), balance: 5000)
         XCTAssertEqual(dropped.sats, 55000)
         XCTAssertEqual(dropped.removed, [:])
 
