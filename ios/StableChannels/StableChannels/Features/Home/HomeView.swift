@@ -16,6 +16,8 @@ struct HomeView: View {
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
     @State private var notificationsEnabled = true
+    @State private var pendingOnchainReceives: [PaymentRecord] = []
+    @State private var pendingOnchainSends: [PaymentRecord] = []
 
     var body: some View {
         NavigationStack {
@@ -32,8 +34,8 @@ struct HomeView: View {
                     balanceBarSection
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
 
-                    if appState.onchainBalanceSats > 0 {
-                        HomeSavingsSectionView(showBTC: showBTC)
+                    if let onchainCard {
+                        HomeSavingsSectionView(card: onchainCard, showBTC: showBTC)
                     }
 
                     PriceChartCard(compact: true)
@@ -67,6 +69,7 @@ struct HomeView: View {
                 await appState.userInitiatedRefresh()
             }
         }
+        .task(id: pendingOnchainReloadKey) { loadPendingOnchain() }
         .onAppear {
             checkNotifications()
             Task.detached { [appState] in appState.ensureLSPConnected() }
@@ -176,6 +179,47 @@ struct HomeView: View {
         }
     }
 
+    // MARK: - Onchain Account
+
+    /// Pending onchain rows reload whenever a payment is saved or confirms, or the onchain balance moves.
+    private struct PendingOnchainReloadKey: Hashable {
+        let confirmationEpoch: Int
+        let paymentFlash: Bool
+        let onchainSats: UInt64
+        let spendableSats: UInt64
+    }
+
+    private var pendingOnchainReloadKey: PendingOnchainReloadKey {
+        PendingOnchainReloadKey(
+            confirmationEpoch: appState.confirmationUpdateEpoch,
+            paymentFlash: appState.paymentFlash,
+            onchainSats: appState.onchainBalanceSats,
+            spendableSats: appState.spendableOnchainSats
+        )
+    }
+
+    private func loadPendingOnchain() {
+        (pendingOnchainReceives, pendingOnchainSends) = appState.pendingOnchainActivity()
+    }
+
+    private var onchainCard: HomeOnchainCard? {
+        HomeOnchainRows.card(HomeOnchainRows.Inputs(
+            onchainBalanceSats: appState.onchainBalanceSats,
+            spendableOnchainSats: appState.spendableOnchainSats,
+            hasReadyChannel: appState.hasReadyChannel,
+            isSweeping: appState.isSweeping,
+            spliceTxid: appState.spliceTxid,
+            pendingSplice: appState.pendingSplice,
+            isChannelClosing: appState.isChannelClosing,
+            lastCloseTxid: appState.transactionLinkService.lastCloseTxid,
+            isOpeningChannel: appState.isOpeningChannel,
+            fundingTxid: appState.fundingTxid,
+            lastReceiveTxid: appState.transactionLinkService.lastReceiveTxid,
+            pendingReceives: pendingOnchainReceives,
+            pendingSends: pendingOnchainSends
+        ))
+    }
+
     // MARK: - Helpers
 
     private var receiveHintText: some View {
@@ -197,7 +241,7 @@ struct HomeView: View {
     }
 
     private func openPaymentDetail() {
-        guard let payment = appState.databaseService?.paymentRepo.latestReceivedPayment() else { return }
+        guard let payment = appState.latestReceivedPayment() else { return }
         paymentCoordinator.open(payment)
     }
 }

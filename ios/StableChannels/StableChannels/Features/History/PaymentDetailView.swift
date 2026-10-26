@@ -44,9 +44,8 @@ struct PaymentDetailView: View {
 
     @MainActor
     private func loadPayment() async {
-        guard let db = appState.databaseService else { return }
         do {
-            payment = try db.paymentRepo.getPayment(byId: paymentId)
+            payment = try appState.payment(byId: paymentId)
             loadError = false
         } catch {
             loadError = true
@@ -169,7 +168,7 @@ struct PaymentDetailView: View {
         guard shouldPreferUSDDisplay else { return nil }
         let price = (payment.btcPrice ?? 0) > 0 ? (payment.btcPrice ?? 0) : displayPrice
         guard price > 0 else { return nil }
-        return Double(payment.amountSats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: payment.amountSats, price: price)
     }
 
     private var shouldPreferUSDDisplay: Bool {

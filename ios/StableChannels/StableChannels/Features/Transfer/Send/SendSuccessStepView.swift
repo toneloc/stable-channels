@@ -24,16 +24,18 @@ struct SendSuccessStepView: View {
 
             Spacer()
 
-            Button {
-                onDismiss()
-            } label: {
-                Text(String(localized: "button_done", defaultValue: "Done"))
-                    .frame(maxWidth: .infinity)
+            if !model.isLightningPending {
+                Button {
+                    onDismiss()
+                } label: {
+                    Text(String(localized: "button_done", defaultValue: "Done"))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Color.blue)
+                .padding(.bottom, 16)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .tint(Color.blue)
-            .padding(.bottom, 16)
         }
         .padding(.horizontal, 20)
         .padding(.top, 16)
@@ -83,7 +85,7 @@ struct SendSuccessStepView: View {
             let sats = model.sentAmountSats
             let price = appState.accountingBTCPrice
             if price > 0 {
-                let usd = (Double(sats) / Double(Constants.satsInBTC)) * price
+                let usd = BitcoinUnits.usd(sats: sats, price: price)
                 Text(usd.usdFormatted)
                     .font(.system(size: 28, weight: .bold, design: .rounded))
             }

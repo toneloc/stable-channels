@@ -103,7 +103,7 @@ struct HistoryView: View {
     }
 
     private var historyDisplayPrice: Double {
-        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
+        appState.spotOrBookedPrice
     }
 
     private var trades: [TradeRecord] { history.trades }
@@ -354,7 +354,7 @@ private extension PaymentRecord {
         guard shouldPreferUSDDisplay else { return nil }
         let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
         guard price > 0 else { return nil }
-        return Double(amountSats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: amountSats, price: price)
     }
 }
 
