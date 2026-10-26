@@ -707,6 +707,156 @@ final class ResilientEsploraClientTests: XCTestCase {
             "ESPLORA_EXHAUSTED must not fire when a hit is found; got: \(log)"
         )
     }
+
+    // MARK: - lookup: 404 from every explorer vs outage
+
+    private func statusResponse(_ status: Int, body: String = "{}") -> (HTTPURLResponse, Data) {
+        let resp = HTTPURLResponse(
+            url: URL(string: "https://mock.local")!,
+            statusCode: status,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )!
+        return (resp, Data(body.utf8))
+    }
+
+    private func lookupTx(_ client: ResilientEsploraClient) async -> EsploraLookup<String> {
+        await client.lookup(
+            endpointBuilder: { base in ["\(ResilientEsploraClient.trimSlash(base))/tx/abc"] },
+            resultParser: { data in String(data: data, encoding: .utf8).flatMap { $0 == "{}" ? nil : $0 } }
+        )
+    }
+
+    func testLookup_everyExplorer404IsNotFound() async {
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(404) }
+
+        let result = await lookupTx(makeClient(maxAttempts: 2))
+
+        guard case .notFound = result else { return XCTFail("expected notFound, got \(result)") }
+        XCTAssertEqual(MockURLProtocol.callCount, 4)
+    }
+
+    func testLookup_404AndOutageIsUnavailable() async {
+        MockURLProtocol.requestHandler = { req in
+            req.url!.host == "primary.local" ? self.statusResponse(404) : self.statusResponse(503)
+        }
+
+        let result = await lookupTx(makeClient(maxAttempts: 1))
+
+        guard case .unavailable = result else { return XCTFail("expected unavailable, got \(result)") }
+    }
+
+    func testLookup_404AndUnreadableBodyIsUnavailable() async {
+        MockURLProtocol.requestHandler = { req in
+            req.url!.host == "primary.local" ? self.statusResponse(404) : self.statusResponse(200)
+        }
+
+        let result = await lookupTx(makeClient(maxAttempts: 1))
+
+        guard case .unavailable = result else { return XCTFail("expected unavailable, got \(result)") }
+    }
+
+    func testLookup_networkErrorIsUnavailable() async {
+        MockURLProtocol.requestHandler = nil
+
+        let result = await lookupTx(makeClient(maxAttempts: 1))
+
+        guard case .unavailable = result else { return XCTFail("expected unavailable, got \(result)") }
+    }
+
+    func testLookup_404OnPrimaryThenHitOnFallbackIsFound() async {
+        MockURLProtocol.requestHandler = { req in
+            req.url!.host == "primary.local" ? self.statusResponse(404) : self.statusResponse(200, body: "hit")
+        }
+
+        let result = await lookupTx(makeClient(maxAttempts: 1))
+
+        XCTAssertEqual(result.value, "hit")
+    }
+
+    // MARK: - TxConfirmationResolver
+
+    private func makeResolver() -> TxConfirmationResolver {
+        TxConfirmationResolver(
+            chainURLs: ["https://primary.local/api", "https://fallback.local/api"],
+            urlSession: session,
+            maxAttempts: 1
+        )
+    }
+
+    private static let txBody = """
+    {"vout":[{"scriptpubkey_address":"bc1qother"},{"scriptpubkey_address":"bc1qmine"},{}],
+     "status":{"confirmed":true,"block_height":100}}
+    """
+
+    func testReceiveCheck_singleRequestAnswersAddressAndStatus() async throws {
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: Self.txBody) }
+
+        let result = try await makeResolver().receiveCheck(for: validTxid, paysTo: "BC1QMINE")
+
+        XCTAssertEqual(
+            result.value,
+            ReceiveTxCheck(paysToAddress: true, status: TxStatus(blockHeight: 100))
+        )
+        XCTAssertEqual(MockURLProtocol.callCount, 1)
+        XCTAssertEqual(MockURLProtocol.seenURLs.first?.path, "/api/tx/\(validTxid)")
+    }
+
+    func testReceiveCheck_mismatchedAddress() async throws {
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: Self.txBody) }
+
+        let result = try await makeResolver().receiveCheck(for: validTxid, paysTo: "bc1qsomeoneelse")
+
+        XCTAssertEqual(result.value?.paysToAddress, false)
+    }
+
+    func testReceiveCheck_unconfirmedAndMissingStatus() async throws {
+        MockURLProtocol.requestHandler = { _ in
+            self.statusResponse(
+                200,
+                body: #"{"vout":[{"scriptpubkey_address":"bc1qmine"}],"status":{"confirmed":false}}"#
+            )
+        }
+        let unconfirmed = try await makeResolver().receiveCheck(for: validTxid, paysTo: "bc1qmine")
+        XCTAssertEqual(unconfirmed.value, ReceiveTxCheck(paysToAddress: true, status: TxStatus(blockHeight: nil)))
+
+        MockURLProtocol.requestHandler = { _ in
+            self.statusResponse(200, body: #"{"vout":[{"scriptpubkey_address":"bc1qmine"}]}"#)
+        }
+        let noStatus = try await makeResolver().receiveCheck(for: validTxid, paysTo: "bc1qmine")
+        XCTAssertEqual(noStatus.value, ReceiveTxCheck(paysToAddress: true, status: nil))
+    }
+
+    func testReceiveCheck_missingVoutIsUnavailableAndBlankAddressSkipsRequest() async throws {
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: #"{"status":{"confirmed":false}}"#) }
+        guard case .unavailable = try await makeResolver().receiveCheck(for: validTxid, paysTo: "bc1qmine") else {
+            return XCTFail("expected unavailable")
+        }
+        MockURLProtocol.callCount = 0
+        guard case .unavailable = try await makeResolver().receiveCheck(for: validTxid, paysTo: "  ") else {
+            return XCTFail("expected unavailable")
+        }
+        XCTAssertEqual(MockURLProtocol.callCount, 0)
+    }
+
+    func testStatus_404FromEveryExplorerIsNotFound() async throws {
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(404) }
+
+        guard case .notFound = try await makeResolver().status(for: validTxid) else {
+            return XCTFail("expected notFound")
+        }
+    }
+
+    func testStatus_confirmedAndUnconfirmed() async throws {
+        MockURLProtocol
+            .requestHandler = { _ in self.statusResponse(200, body: #"{"confirmed":true,"block_height":7}"#) }
+        let confirmed = try await makeResolver().status(for: validTxid)
+        XCTAssertEqual(confirmed.value, TxStatus(blockHeight: 7))
+
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: #"{"confirmed":false}"#) }
+        let unconfirmed = try await makeResolver().status(for: validTxid)
+        XCTAssertEqual(unconfirmed.value, TxStatus(blockHeight: nil))
+    }
 }
 
 /// Minimal actor-isolated box for capturing `onResolved` hits in tests.
