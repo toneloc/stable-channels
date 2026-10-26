@@ -812,7 +812,7 @@ final class StabilityServiceTests: XCTestCase {
     @MainActor
     private func explorerDrops(_ appState: AppState, _ db: DatabaseService, txid: String) throws {
         if let sats = try db.paymentRepo.failPaymentByTxid(txid: txid) {
-            appState.depositBaseline.markRemoved(txid: txid, sats: sats)
+            appState.receiveDropped(txid: txid, sats: sats)
         }
     }
 
@@ -1020,6 +1020,21 @@ final class StabilityServiceTests: XCTestCase {
 
         XCTAssertEqual(try receivedSats(db), [50000])
         XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+    }
+
+    @MainActor
+    func testRemovedReceiveComesOffAtTheNodesAmountNotTheFeeds() throws {
+        let (appState, db) = try makeDepositAppState()
+        // The feed overstates txA, and a close moves the baseline without correcting the row.
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+        appState.isChannelClosing = true
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+        appState.isChannelClosing = false
+
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
     }
 
     @MainActor

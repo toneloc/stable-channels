@@ -562,7 +562,7 @@ class AppState {
             self.confirmationRefreshResultVersion += 1
         }
         pollingService?.onReceiveDropped = { [weak self] txid, sats in
-            self?.depositBaseline.markRemoved(txid: txid, sats: sats)
+            self?.receiveDropped(txid: txid, sats: sats)
         }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
@@ -3597,6 +3597,12 @@ class AppState {
     }
 
     // MARK: - On-Chain Deposit Detection
+
+    /// The explorer confirmed a recorded receive gone. The baseline counted the node's amount, so that
+    /// is what comes off; the row's [sats] may be the feed's.
+    func receiveDropped(txid: String, sats: Int64) {
+        depositBaseline.markRemoved(txid: txid, sats: walletInbound.sats[txid] ?? sats)
+    }
 
     func detectOnchainDeposit() {
         // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
