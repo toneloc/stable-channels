@@ -94,14 +94,33 @@ class AppState {
     let blockHeightService = BlockHeightService(
         provider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs)
     )
-    let confirmationService = ConfirmationService(
-        provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
-    )
     var confirmationPollingService: ConfirmationPollingService?
     var spvHeaderChainService: SPVHeaderChainService?
     /// Incremented after each confirmation poll cycle completes a DB write.
     /// Views observe this to reload payment data at the right time.
     var confirmationUpdateEpoch: Int = 0
+
+    /// Tell payment views (Home, History, details) their rows changed.
+    func notifyPaymentsChanged() {
+        confirmationUpdateEpoch += 1
+    }
+
+    // MARK: - Payment queries (read-only, for views)
+
+    func pendingOnchainActivity() -> (receives: [PaymentRecord], sends: [PaymentRecord]) {
+        guard let repo = databaseService?.paymentRepo else { return ([], []) }
+        return (repo.pendingOnchainReceives(), repo.pendingOnchainSends())
+    }
+
+    func latestReceivedPayment() -> PaymentRecord? {
+        databaseService?.paymentRepo.latestReceivedPayment()
+    }
+
+    /// nil when there is no database yet; throws when the lookup fails.
+    func payment(byId id: Int64) throws -> PaymentRecord? {
+        try databaseService?.paymentRepo.getPayment(byId: id)
+    }
+
     var confirmationRefreshResult: ConfirmationRefreshResult?
     var confirmationRefreshResultVersion = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
@@ -160,7 +179,17 @@ class AppState {
     /// Single source of truth for trade quote pricing: uses validated accounting consensus when available,
     /// falling back to the last cached display price when consensus is warming up or during offline inspection.
     var effectiveTradePrice: Double {
-        accountingBTCPrice > 0 ? accountingBTCPrice : btcPrice
+        StabilityService.firstPositivePrice(accountingBTCPrice, btcPrice)
+    }
+
+    /// Live spot price, falling back to the channel's last booked price.
+    var spotOrBookedPrice: Double {
+        StabilityService.firstPositivePrice(btcPrice, stableChannel.latestPrice)
+    }
+
+    /// The channel's last booked price, falling back to the live spot price.
+    private var bookedOrSpotPrice: Double {
+        StabilityService.firstPositivePrice(stableChannel.latestPrice, btcPrice)
     }
 
     var statusMessage: String = ""
@@ -405,12 +434,12 @@ class AppState {
         guard btcPrice > 0 else {
             return stableUSD
         }
-        let btcUSD = Double(totalBalanceSats) / Double(Constants.satsInBTC) * btcPrice
+        let btcUSD = BitcoinUnits.usd(sats: totalBalanceSats, price: btcPrice)
         if btcUSD > 0 {
             return btcUSD
         }
         if stableChannel.stableReceiverBTC.sats > 0 {
-            return Double(stableChannel.stableReceiverBTC.sats) / Double(Constants.satsInBTC) * btcPrice
+            return BitcoinUnits.usd(sats: stableChannel.stableReceiverBTC.sats, price: btcPrice)
         }
         return stableUSD
     }
@@ -431,14 +460,21 @@ class AppState {
     private var spliceConfirmationTask: Task<Void, Never>?
     private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
-    /// Starts from the balance and wallet txids cached at the last refresh.
-    @ObservationIgnored var depositBaseline: OnchainDepositBaseline = {
-        let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return OnchainDepositBaseline(
-            sats: UInt64(bitPattern: Int64(ud?.integer(forKey: AppState.BalanceCacheKey.onchain) ?? 0)),
-            txids: ud?.stringArray(forKey: AppState.BalanceCacheKey.onchainTxids).map(Set.init)
-        )
-    }()
+    /// Persisted so a deposit deferred during a splice/close is still detected after a restart;
+    /// seeded once from the balance and wallet txids cached at the last refresh.
+    @ObservationIgnored var depositBaseline = OnchainDepositBaselineStore.load(
+        defaults: UserDefaults(suiteName: Constants.appGroupIdentifier),
+        seedSatsKey: BalanceCacheKey.onchain,
+        seedTxidsKey: BalanceCacheKey.onchainTxids
+    ) {
+        didSet {
+            guard depositBaseline.sats != oldValue.sats || depositBaseline.txids != oldValue.txids else { return }
+            OnchainDepositBaselineStore.save(
+                depositBaseline,
+                defaults: UserDefaults(suiteName: Constants.appGroupIdentifier)
+            )
+        }
+    }
 
     /// Inbound on-chain payments the wallet listed at the last balance refresh. Once the node has
     /// a transaction, its amount is used instead of the WebSocket feed's.
@@ -460,6 +496,12 @@ class AppState {
 
     let transactionLinkService = TransactionLinkService()
     let txidResolutionService = TxidResolutionService()
+    @ObservationIgnored private lazy var receiveRecoveryService = OnchainReceiveRecoveryService(
+        transactionLinkService: transactionLinkService,
+        makeClient: { [unowned self] in
+            ResilientEsploraClient(config: .singlePass(chainURLs: chainLookupURLs))
+        }
+    )
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
     var pendingTradePayments: [String: PendingTradePayment] = [:]
@@ -468,11 +510,6 @@ class AppState {
     /// acceptance or rejection lands here — the trade sheets read this instead of inferring
     /// success from absence in the pending map (a rejection also clears pending; the old
     /// absence heuristic showed "Order Confirmed" for rejected trades — e2e flow 13).
-    struct TradeOutcome: Equatable {
-        let accepted: Bool
-        let message: String
-    }
-
     var tradeOutcomes: [String: TradeOutcome] = [:]
 
     /// Rehydrate a trade's terminal outcome from SQLite. The NSE and background handlers
@@ -529,6 +566,7 @@ class AppState {
         priceHistoryProvider = PriceHistoryService(databaseService: db)
 
         txidResolutionService.databaseService = databaseService
+        receiveRecoveryService.databaseService = databaseService
         txidResolutionService.mempoolWebSocketService = mempoolWebSocketService
         txidResolutionService.configureResolvers(urls: Constants.esploraChainURLs)
 
@@ -549,12 +587,12 @@ class AppState {
             ConfirmationPollingService(
                 databaseService: db,
                 blockHeightService: blockHeightService,
-                confirmationService: confirmationService,
-                manualTipProvider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1),
+                confirmationService: ConfirmationService(provider: TxConfirmationResolver(chainURLs: chainLookupURLs)),
+                manualTipProvider: BlockHeightResolver(chainURLs: chainLookupURLs, maxAttempts: 1),
                 manualConfirmationService: ConfirmationService(
-                    provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1)
+                    provider: TxConfirmationResolver(chainURLs: chainLookupURLs, maxAttempts: 1)
                 ),
-                presenceProvider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
+                presenceProvider: TxConfirmationResolver(chainURLs: chainLookupURLs)
             )
         }
         confirmationPollingService = pollingService
@@ -566,9 +604,12 @@ class AppState {
         pollingService?.onReceiveDropped = { [weak self] txid, sats in
             self?.receiveDropped(txid: txid, sats: sats)
         }
+        pollingService?.onReceiveTxidMismatch = { [weak self] txid in
+            self?.transactionLinkService.clearReceiveTxid(ifMatching: txid)
+        }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
-            self.confirmationUpdateEpoch += 1
+            self.notifyPaymentsChanged()
             self.refreshBalances()
             self.syncWalletsInBackground()
         }
@@ -1037,6 +1078,7 @@ class AppState {
                 reregisterPushTokenIfNeeded()
                 // Check if NSE flagged a pending payment while app was killed
                 await processPendingPushPayment()
+                reconcilePendingLightningPayments()
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
@@ -1169,6 +1211,7 @@ class AppState {
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
                 await processPendingPushPayment()
+                reconcilePendingLightningPayments()
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
@@ -1385,6 +1428,7 @@ class AppState {
             // network_graph.bin would otherwise be written into the live DB).
             print("[App] Node still running (grace period), reconnecting")
             ensureLSPConnected()
+            reconcilePendingLightningPayments()
             refreshBalances()
             mempoolWebSocketService.connect()
             updateStableBalances()
@@ -1412,6 +1456,7 @@ class AppState {
             reregisterPushTokenIfNeeded()
             startStabilityTimer()
             await processPendingPushPayment()
+            reconcilePendingLightningPayments()
             clearSyncStatusMessage()
         } catch {
             print("[App] Node restart failed: \(error)")
@@ -1447,7 +1492,7 @@ class AppState {
         } else {
             return nil
         }
-        return Double(sats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: sats, price: price)
     }
 
     func sentPaymentStatusMessage(paymentId: PaymentId?) -> String {
@@ -1754,50 +1799,28 @@ class AppState {
             ])
 
         case .channelReady(let channelId, let userChannelId, _, _):
-            // In 0-conf channels, ChannelReady can fire before the splice tx confirms.
-            // Treat it as metadata only; the splice stays pending until the tx has 1 conf.
-            let channelIdChanged = stableChannel.userChannelId == userChannelId
-                && !stableChannel.channelId.isEmpty
-                && stableChannel.channelId != channelId
+            nodeService.refreshChannels()
+            let channels = nodeService.channels
+            persistSpliceEvent(SpliceEventReceipt(event: event) {
+                SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
+            }, ackToken: ackToken)
 
             stableChannel.channelId = channelId
             refreshBalances()
             updateStableBalances()
-
-            var pendingSpliceCandidate: String?
-            if stableChannel.userChannelId == userChannelId {
-                nodeService.refreshChannels()
-                let fundingTxid: String? = nodeService.channels
-                    .first(where: { "\($0.userChannelId)" == "\(userChannelId)" })
-                    .flatMap { $0.fundingTxo.map { "\($0.txid)" } }
-                let pendingDbTxid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? nil
-                pendingSpliceCandidate = [pendingDbTxid, spliceTxid]
-                    .compactMap { $0 }
-                    .first { candidate in
-                        !candidate.isEmpty && candidate == fundingTxid
-                    }
-            }
-            let isSplice = pendingSpliceCandidate != nil || channelIdChanged
-
-            if isSplice {
-                isSweeping = true
-                let txid = pendingSpliceCandidate ?? spliceTxid ?? fundingTxid
-                spliceTxid = txid
-                if let txid, !txid.isEmpty {
-                    startSpliceConfirmationMonitor(txid: txid)
-                }
-                statusMessage = "Move pending confirmation"
-            }
-
             saveChannelToDB()
+
+            // ChannelReady can precede confirmation: resume only the operation whose txid was
+            // durably attached, never a funding fallback.
+            resumePendingSpliceConfirmation()
 
             AuditService.log("CHANNEL_READY", data: [
                 "channel_id": channelId,
                 "user_channel_id": userChannelId
             ])
-            if !isSplice {
-                statusMessage = "Channel is ready"
-            }
+            statusMessage = SpliceCompletionPolicy.channelReadyStatus(
+                isSweeping: isSweeping, hasSpliceTxid: spliceTxid != nil
+            )
 
         case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
             handlePaymentReceived(
@@ -1817,6 +1840,7 @@ class AppState {
 
         case .paymentFailed(let paymentId, let paymentHash, let reason):
             // Check if this is a pending trade payment
+            let reasonCode = LightningPaymentRecovery.reasonCode(caseName: reason.map { "\($0)" })
             var failedTrade = paymentId.flatMap { pendingTradePayments["\($0)"] }
             if let pid = paymentId, failedTrade == nil,
                let payment = nodeService.node?.payment(paymentId: pid),
@@ -1824,12 +1848,16 @@ class AppState {
                let amountMsat = payment.amountMsat {
                 failedTrade = try? databaseService?.channelRepo.failUnattachedPreparedTrade(
                     paymentId: "\(pid)",
-                    amountMsat: amountMsat
+                    amountMsat: amountMsat,
+                    reasonCode: reasonCode
                 )
             }
             if let pid = paymentId, let trade = failedTrade {
                 pendingTradePayments.removeValue(forKey: "\(pid)")
-                _ = try? databaseService?.channelRepo.markTradeSendFailed(tradeDbId: trade.tradeDbId)
+                _ = try? databaseService?.channelRepo.markTradeSendFailed(
+                    tradeDbId: trade.tradeDbId,
+                    reasonCode: reasonCode
+                )
                 statusMessage = "Order failed"
 
                 AuditService.log("TRADE_FAILED", data: [
@@ -1845,7 +1873,7 @@ class AppState {
                         paymentId: "\(pid)", status: "failed"
                     )
                     // History and payment details reload only when this epoch moves.
-                    confirmationUpdateEpoch += 1
+                    notifyPaymentsChanged()
                     NotificationCenter.default.post(
                         name: .paymentFailed,
                         object: nil,
@@ -1879,7 +1907,8 @@ class AppState {
             handleSplicePending(
                 channelId: channelId,
                 userChannelId: userChannelId,
-                newFundingTxo: newFundingTxo
+                newFundingTxo: newFundingTxo,
+                ackToken: ackToken
             )
 
         case .spliceNegotiationFailed(let channelId, let userChannelId, _):
@@ -2001,13 +2030,19 @@ class AppState {
             "payment_hash": paymentHashStr
         ])
 
-        let price = stableChannel.latestPrice
-        let amountUSD: Double? = price > 0 ? (Double(amountMsat) / 1000.0 / 100_000_000.0) * price : nil
+        // A stability receipt is credited against the target at the trusted accounting price.
+        let price = StabilityService.receiptPrice(
+            isStabilityPayment: isStabilityPayment,
+            accountingPrice: accountingBTCPrice,
+            bookedPrice: stableChannel.latestPrice
+        )
+        let amountUSD: Double? = price > 0 ? BitcoinUnits.usd(msats: amountMsat, price: price) : nil
         let paymentType = isStabilityPayment ? "stability" : "lightning"
         let backingDelta: Int64? = isStabilityPayment ? Int64(amountMsat / 1000) : nil
 
-        // Atomically insert payment row and increment backing sats in one SQLite transaction.
-        // On DB failure, veto the ack so LDK re-delivers the event.
+        // Atomically record the full payment and credit only the local backing shortfall (#320).
+        // On DB failure (including no trusted price for a stability receipt), veto the ack so
+        // LDK re-delivers the event.
         guard let databaseService else {
             ackToken?.shouldAck = false
             return
@@ -2410,7 +2445,7 @@ class AppState {
                 feeMsat: feePaidMsat
             )
             // History and payment details reload only when this epoch moves.
-            confirmationUpdateEpoch += 1
+            notifyPaymentsChanged()
             var userInfo: [String: Any] = ["paymentId": pidStr, "paymentHash": paymentHashStr]
             if let fee = feePaidMsat { userInfo["feePaidMsat"] = fee }
             NotificationCenter.default.post(
@@ -2544,9 +2579,9 @@ class AppState {
     ) async throws {
         // Snapshot here: AppState globals could be wrong for rapid re-tap or multi-channel
         let balanceSats = stableChannel.stableReceiverBTC.sats
-        let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+        let price = spotOrBookedPrice
         let balanceUSD: Double? = price > 0
-            ? Double(balanceSats) / Double(Constants.satsInBTC) * price
+            ? BitcoinUnits.usd(sats: balanceSats, price: price)
             : nil
         let counterparty: String? = stableChannel.counterparty.isEmpty
             ? nil
@@ -2735,36 +2770,61 @@ class AppState {
     private func handleSplicePending(
         channelId: ChannelId,
         userChannelId: UserChannelId,
-        newFundingTxo: OutPoint
+        newFundingTxo: OutPoint,
+        ackToken: EventAckToken? = nil
     ) {
-        fundingTxid = "\(newFundingTxo.txid)"
-        isSweeping = true
-
         AuditService.log("SPLICE_PENDING", data: [
             "channel_id": "\(channelId)",
             "user_channel_id": "\(userChannelId)",
             "funding_txo": "\(newFundingTxo)"
         ])
 
-        // Record/update splice payment
         let txidStr = "\(newFundingTxo.txid)"
+        let receipt = SpliceEventReceipt(
+            kind: .negotiated, userChannelId: userChannelId, channelId: channelId,
+            identityTxid: txidStr, funding: newFundingTxo
+        )
+        guard persistSpliceEvent(receipt, ackToken: ackToken) else { return }
+        // The recorder matched this event to the operation that started it. A replay for a
+        // finished or unknown operation must not take over the in-memory splice state or monitor.
+        guard (try? databaseService?.spliceRepo.isPendingSplice(txid: txidStr)) == true else {
+            AuditService.log("SPLICE_TXID_UNMATCHED", data: [
+                "channel_id": "\(channelId)",
+                "user_channel_id": "\(userChannelId)",
+                "txid": txidStr
+            ])
+            return
+        }
+
+        fundingTxid = txidStr
+        isSweeping = true
         spliceTxid = txidStr
-
-        // Both splice directions persist their initiation row (status='pending',
-        // txid NULL) before the native call (beginSpliceOut / sweepToChannel), so
-        // this event only stamps the negotiated txid onto that row. This also
-        // covers a restart replay: pendingSplice is in-memory and lost across
-        // relaunch, but the latest pending NULL-txid splice row is this splice's
-        // initiation row — stamping it lets ChannelReady complete it and keeps
-        // the no-txid expiry from sweeping it to 'expired' (and if the sweep
-        // already ran, stamping recovers the expired row back to 'pending').
         pendingSplice = nil
-        try? databaseService?.spliceRepo.setPendingSpliceTxid(txidStr)
-
         refreshBalances()
         updateStableBalances()
         statusMessage = "Splice pending"
         startSpliceConfirmationMonitor(txid: txidStr)
+    }
+
+    /// Commits a splice event before NodeService acknowledges it; on failure the event stays in
+    /// LDK and is redelivered.
+    @discardableResult
+    private func persistSpliceEvent(_ receipt: SpliceEventReceipt?, ackToken: EventAckToken?) -> Bool {
+        guard let receipt else { return true }
+        do {
+            guard let databaseService else {
+                throw DatabaseError.executeFailed("Database unavailable for splice history")
+            }
+            try databaseService.spliceRepo.recordEvent(receipt)
+            return true
+        } catch {
+            ackToken?.shouldAck = false
+            AuditService.log("SPLICE_EVENT_PERSIST_FAILED", data: [
+                "event_key": receipt.eventKey,
+                "error": error.localizedDescription
+            ])
+            return false
+        }
     }
 
     // MARK: - Splice Negotiation Failure & State Teardown
@@ -2840,12 +2900,10 @@ class AppState {
         do {
             for check in try databaseService.spliceRepo.pendingFailureChecks() {
                 let capturedGeneration = spliceGeneration
-                var urls: [String] = []
-                for url in [chainURL, Constants.primaryChainURL, Constants.fallbackChainURL]
-                    where !urls.contains(url) {
-                    urls.append(url)
-                }
-                let status = await spliceBroadcastChecker.checkStatus(txid: check.txid, endpointURLs: urls)
+                let status = await spliceBroadcastChecker.checkStatus(
+                    txid: check.txid,
+                    endpointURLs: chainLookupURLs
+                )
                 // A reset or a new splice can happen across the await. Leave the obligation
                 // intact for a later pass; this result must not tear down newer state.
                 guard !Task.isCancelled, self.databaseService === databaseService,
@@ -2910,7 +2968,7 @@ class AppState {
             if let capacity, capacity == 0 {
                 return
             }
-            let owedUsd = Double(sc.backingSats) / Double(Constants.satsInBTC) * price
+            let owedUsd = BitcoinUnits.usd(sats: sc.backingSats, price: price)
                 - sc.expectedUSD.amount
             throw StabilitySpendError.surplusSettling(owedUSD: owedUsd)
         }
@@ -2928,7 +2986,7 @@ class AppState {
         )
     }
 
-    func beginSpliceOut(amountSats: UInt64, address: String) throws {
+    func beginSpliceOut(amountSats: UInt64, address: String, channel: SpliceChannelIdentity) throws {
         guard !isSweeping else {
             throw SpliceOperationError.inProgress
         }
@@ -2940,23 +2998,19 @@ class AppState {
         // restart: on mainnet spliceNegotiated can arrive minutes after the
         // user taps send, and without a durable row the splice would vanish
         // from history (and from Stable USD accounting) if the app died first.
-        // The txid is stamped onto this row by handleSplicePending.
+        // The channel identity is saved with the row so its events can only match this operation.
         let price = accountingBTCPrice
         let amountUSD: Double? = price > 0
-            ? Double(amountSats) / Double(Constants.satsInBTC) * price
+            ? BitcoinUnits.usd(sats: amountSats, price: price)
             : nil
-        let recorded: Bool
         do {
-            recorded = try db.paymentRepo.recordPayment(
-                paymentId: nil,
+            try db.spliceRepo.recordPendingSplice(
                 paymentType: "splice_out",
-                direction: "sent",
                 amountMsat: amountSats * 1000,
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil,
-                counterparty: nil,
-                status: "pending",
-                address: address
+                address: address,
+                channel: channel
             )
         } catch {
             AuditService.log("SPLICE_OUT_PERSISTENCE_FAILED", data: [
@@ -2965,13 +3019,6 @@ class AppState {
                 "error": error.localizedDescription
             ])
             throw SpliceOperationError.persistenceFailed(underlyingDescription: error.localizedDescription)
-        }
-        guard recorded else {
-            AuditService.log("SPLICE_OUT_PERSISTENCE_REJECTED", data: [
-                "address": address,
-                "amount_sats": "\(amountSats)"
-            ])
-            throw SpliceOperationError.persistenceFailed(underlyingDescription: "Payment record rejected")
         }
         spliceGeneration &+= 1
         isSweeping = true
@@ -2984,7 +3031,7 @@ class AppState {
         isSweeping = false
         // The initiation row was persisted before the native call; the native
         // call failed, so mark that (NULL-txid) row failed. Failed rows are
-        // terminal — setPendingSpliceTxid will never stamp or resurrect them.
+        // terminal — no later event can stamp or resurrect them.
         if pendingSplice != nil {
             databaseService?.spliceRepo.failLatestPendingSplice()
         }
@@ -3003,10 +3050,26 @@ class AppState {
         monitoredSpliceTxid = normalizedTxid
         let monitorGeneration = spliceGeneration
         spliceConfirmationTask = Task { [weak self] in
+            // Sync once per confirmed txid, not every retry: completion can stay deferred for
+            // reasons unrelated to wallet freshness (e.g. no trusted price yet).
+            var walletSyncedForThisTxid = false
             while !Task.isCancelled {
                 guard let self else { return }
                 if await self.isTxConfirmed(normalizedTxid) {
-                    if self.completeConfirmedSplice(txid: normalizedTxid, expectedGeneration: monitorGeneration) {
+                    // Sync the on-chain wallet before accounting for completion, or the enlarged
+                    // Lightning balance can be read alongside a stale on-chain balance and briefly
+                    // double-count the spliced amount.
+                    if !walletSyncedForThisTxid {
+                        let nodeService = self.nodeService
+                        walletSyncedForThisTxid = await Task.detached(priority: .utility) {
+                            (try? nodeService.syncWallets()) != nil
+                        }.value
+                    }
+                    if walletSyncedForThisTxid,
+                       self.completeConfirmedSplice(
+                           txid: normalizedTxid,
+                           expectedGeneration: monitorGeneration
+                       ) {
                         return
                     }
                 }
@@ -3024,11 +3087,43 @@ class AppState {
         return monitorActive && monitoredTxid != nil && monitoredTxid == normalizedResumed
     }
 
+    /// A lock restored for a pre-negotiation row outlives that row's expiry only in memory; drop it
+    /// once the row is gone. A failed check reads as "still pending".
+    private func releaseStaleSpliceLock() {
+        let shouldRelease = SpliceCompletionPolicy.shouldReleaseStaleLock(
+            isSweeping: isSweeping,
+            hasSpliceTxid: spliceTxid != nil,
+            isMonitoringConfirmation: spliceConfirmationTask != nil,
+            hasPendingSpliceRow: isSweeping ? (try? databaseService?.spliceRepo.hasPendingSplice()) : nil
+        )
+        guard shouldRelease else { return }
+        isSweeping = false
+        pendingSplice = nil
+        AuditService.log("SPLICE_STALE_LOCK_RELEASED", data: [:])
+    }
+
     private func resumePendingSpliceConfirmation() {
         retryDeferredTradeResponses()
         Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
-        guard let hasSplice = try? databaseService?.spliceRepo.hasPendingSplice(), hasSplice else { return }
-        let txid = (try? databaseService?.spliceRepo.getPendingSpliceTxid()) ?? spliceTxid ?? fundingTxid
+        guard let spliceRepo = databaseService?.spliceRepo else { return }
+        do {
+            let channels = nodeService.channels
+            try spliceRepo.recoverReadyEvents { userChannelId, channelId in
+                SpliceEventReceipt.liveFunding(in: channels, userChannelId: userChannelId, channelId: channelId)
+                    .map { (txid: $0.txid, vout: $0.vout) }
+            }
+        } catch {
+            AuditService.log("SPLICE_READY_RECOVERY_FAILED", data: ["error": error.localizedDescription])
+        }
+        guard let hasSplice = try? spliceRepo.hasPendingSplice() else { return }
+        guard hasSplice else {
+            releaseStaleSpliceLock()
+            return
+        }
+        // A saved pre-negotiation operation still blocks a second splice after restart, even
+        // before its txid has arrived.
+        isSweeping = true
+        guard let txid = (try? spliceRepo.getPendingSpliceTxid()) ?? nil else { return }
         let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
             monitorActive: spliceConfirmationTask != nil,
             monitoredTxid: monitoredSpliceTxid,
@@ -3037,45 +3132,29 @@ class AppState {
         if !alreadyMonitoring {
             spliceGeneration &+= 1
         }
-        isSweeping = true
         spliceTxid = txid
-        if let txid, !txid.isEmpty {
-            startSpliceConfirmationMonitor(txid: txid)
-        }
+        startSpliceConfirmationMonitor(txid: txid)
     }
 
     private func isTxConfirmed(_ txid: String) async -> Bool {
-        var urls: [String] = []
-        for url in [chainURL, Constants.primaryChainURL, Constants.fallbackChainURL] where !urls.contains(url) {
-            urls.append(url)
+        let lookup = try? await TxConfirmationResolver(chainURLs: chainLookupURLs, maxAttempts: 1, esploraTimeout: 10)
+            .status(for: txid)
+        guard case .found(let status)? = lookup else {
+            AuditService.log("SPLICE_CONFIRMATION_CHECK_FAILED", data: ["txid": txid])
+            return false
         }
-        for baseURL in urls {
-            guard let url =
-                URL(string: "\(baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")))/tx/\(txid)/status")
-            else {
-                continue
-            }
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                    continue
-                }
-                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-                if json?["confirmed"] as? Bool == true {
-                    return true
-                }
-            } catch {
-                AuditService.log("SPLICE_CONFIRMATION_CHECK_FAILED", data: [
-                    "txid": txid,
-                    "error": error.localizedDescription
-                ])
-            }
-        }
-        return false
+        return status.blockHeight != nil
     }
 
     @discardableResult
-    private func completeConfirmedSplice(txid: String, expectedGeneration: UInt64) -> Bool {
+    private func completeConfirmedSplice(
+        txid: String,
+        expectedGeneration: UInt64
+    ) -> Bool {
+        // A captured event whose txid assignment collided (e.g. with a self-send deposit row) left
+        // the row's txid NULL, and completeSplice(txid:) needs an exact match. Retry from captured
+        // events only; a no-op once a splice row carries the txid.
+        try? databaseService?.spliceRepo.recoverAssignments()
         let price = accountingBTCPrice
         guard price > 0.0 else {
             // Defer: without a trusted price, don't finalize or clear state. Retry on next tick.
@@ -3086,18 +3165,43 @@ class AppState {
         refreshBalances()
         updateStableBalances()
 
-        // Reconcile stable books FIRST, before marking row completed.
-        if let usdDeducted = StabilityService.reconcileOutgoing(&stableChannel, price: price) {
+        // Reconcile stable books FIRST, before marking row completed, against the stored row so
+        // a signed correction or background settlement is never overwritten by a stale snapshot.
+        guard let databaseService else { return false }
+        let repair: StabilityService.RepairResult?
+        do {
+            let books = try databaseService.channelRepo.reconcileOutgoingBacking(
+                userChannelId: stableChannel.userChannelId,
+                receiverSats: stableChannel.stableReceiverBTC.sats,
+                price: price
+            )
+            StabilityService.adoptStoredBooks(
+                &stableChannel, expectedUSD: books.expectedUSD, backingSats: books.backingSats
+            )
+            repair = books.repair
+        } catch {
+            if case DatabaseError.missingChannelRow = error {
+                // Recreate the row from in-memory state; the next tick reconciles against it.
+                saveChannelToDB()
+            }
+            AuditService.log("SPLICE_RECONCILE_DEFERRED", data: [
+                "txid": txid,
+                "reason": "persistence_failed",
+                "error": error.localizedDescription
+            ])
+            return false
+        }
+        if let repair {
             stableChannel.lastStabilityPayment = Int64(Date().timeIntervalSince1970)
-            saveChannelToDB()
             AuditService.log("SPLICE_OUT_STABLE_DEDUCTED", data: [
-                "usd_deducted": "\(usdDeducted)",
+                "usd_deducted": "\(repair.usdDeducted)",
                 "new_expected_usd": "\(stableChannel.expectedUSD.amount)",
                 "btc_price": "\(price)"
             ])
         }
+        saveChannelToDB(preserveBacking: true)
 
-        let completed = databaseService?.spliceRepo.completeSplice(txid: txid) == true
+        let completed = databaseService.spliceRepo.completeSplice(txid: txid)
         guard completed else {
             AuditService.log("SPLICE_COMPLETE_DEFERRED", data: [
                 "txid": txid,
@@ -3106,11 +3210,26 @@ class AppState {
             return false
         }
         // History only reloads when this epoch moves; bump to ensure confirmation badge updates.
-        confirmationUpdateEpoch += 1
+        notifyPaymentsChanged()
         refreshBalances()
         updateStableBalances()
 
         if spliceGeneration == expectedGeneration {
+            // A self-send splice-out raises the on-chain balance by its own amount; advance the
+            // frozen deposit-detector baseline before clearing the lock below, so the next tick
+            // does not record that rise as a phantom deposit. Read from the completed row, not
+            // in-memory splice state that may belong to a newer operation.
+            if let row = databaseService.paymentRepo.payment(txid: txid),
+               let baseline = SpliceCompletionPolicy.advancedOnchainBaseline(
+                   baselineSats: depositBaseline.sats,
+                   currentOnchainSats: onchainBalanceSats,
+                   completedRow: row,
+                   destinationIsOwnAddress: databaseService.paymentRepo.isOwnReceiveAddress(
+                       row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+                   )
+               ) {
+                depositBaseline.sats = baseline
+            }
             isSweeping = false
             pendingSplice = nil
             sweepOnchainStart = 0
@@ -3293,6 +3412,8 @@ class AppState {
     }
 
     func runStabilityCheck() {
+        // An abandoned move's lock must heal while the app stays open, not only at the next restart.
+        releaseStaleSpliceLock()
         guard reconcilePendingOutgoingStabilityPayment() else { return }
 
         let price = accountingBTCPrice
@@ -3450,7 +3571,7 @@ class AppState {
         do {
             let paidUSD = min(
                 abs(result.dollarsFromPar),
-                Double(amountMsat) / 1000.0 / Double(Constants.satsInBTC) * price
+                BitcoinUnits.usd(msats: amountMsat, price: price)
             )
             _ = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: paymentIdString,
@@ -3487,6 +3608,28 @@ class AppState {
                 "error": error.localizedDescription
             ])
         }
+    }
+
+    /// Repair outbound Lightning rows whose terminal event was acknowledged while the app was
+    /// backgrounded (NSE) or by a process that died before updating history.
+    private func reconcilePendingLightningPayments() {
+        guard let databaseService, let node = nodeService.node,
+              let pendingIds = try? databaseService.paymentRepo.pendingOutgoingLightningPaymentIds()
+        else { return }
+        // ponytail: user sends only; trade fees and stability sends never use these row types.
+        let repaired = LightningPaymentRecovery.reconcilePending(
+            paymentIds: pendingIds,
+            lookup: { node.payment(paymentId: $0).flatMap(LightningPaymentResolution.init) },
+            apply: { paymentId, resolution in
+                (try? databaseService.paymentRepo.updatePaymentStatus(
+                    paymentId: paymentId, status: resolution.rowStatus, feeMsat: resolution.rowFeeMsat
+                )) != nil
+            }
+        )
+        guard repaired > 0 else { return }
+        // History and payment details reload only when this epoch moves.
+        notifyPaymentsChanged()
+        AuditService.log("PENDING_LIGHTNING_RECONCILED", data: ["count": "\(repaired)"])
     }
 
     private func reconcilePendingOutgoingStabilityPayment(status: String = "pending") -> Bool {
@@ -3563,7 +3706,7 @@ class AppState {
 
         do {
             let amountUSD = pending.price > 0
-                ? Double(pending.amountMsat) / 1000.0 / Double(Constants.satsInBTC) * pending.price
+                ? BitcoinUnits.usd(msats: pending.amountMsat, price: pending.price)
                 : nil
             let persistence = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: pending.paymentId,
@@ -3615,10 +3758,19 @@ class AppState {
         // on-chain balance can swing for unrelated reasons then. The baseline is NOT advanced
         // while deferred, so a deposit landing mid-operation is picked up once it clears instead
         // of being lost.
+        // Recovery records by txid, so it can run during a splice: the repository skips the
+        // splice's own txid and refuses while a splice has no txid yet (#421).
+        receiveRecoveryService.recoverMissedReceive(
+            address: transactionLinkService.onchainReceiveAddress,
+            price: bookedOrSpotPrice
+        )
         if isSweeping || pendingSplice != nil {
             return
         }
         depositBaseline.settleRemovals(wallet: walletInbound, balance: currentOnchain)
+        // Only attaches txids to rows for deposits already received, so it waits for the same
+        // splice/close guard; retried on every tick.
+        receiveRecoveryService.resolveTxidlessReceives(walletReceives: walletOnchainReceives)
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {
@@ -3680,7 +3832,7 @@ class AppState {
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
-            let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+            let price = bookedOrSpotPrice
             let amountUSD = OnchainAmount.usd(sats: remainderSats, price: price)
 
             // UUID -> unique depositId -> recordPayment dedup on retry.
@@ -3730,6 +3882,15 @@ class AppState {
         depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
     }
 
+    /// The wallet's own inbound on-chain payments, for placeholder txid adoption.
+    private func walletOnchainReceives() -> [ReceiveTxidAdoption.WalletReceive] {
+        nodeService.node?.listPayments().compactMap(ReceiveTxidAdoption.WalletReceive.init) ?? []
+    }
+
+    private var chainLookupURLs: [String] {
+        Constants.chainLookupURLs(preferred: chainURL)
+    }
+
     func handleWebSocketTransactionDetected(event: WebSocketEvent) {
         guard let db = databaseService else { return }
 
@@ -3762,7 +3923,7 @@ class AppState {
             )
             if amountSats >= DepositAttribution.minDepositSats,
                let amountMsat = OnchainAmount.msats(fromSats: amountSats) {
-                let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
+                let price = bookedOrSpotPrice
                 let amountUSD = OnchainAmount.usd(sats: amountSats, price: price)
 
                 do {
@@ -3852,7 +4013,6 @@ class AppState {
                 return
             }
 
-            let feeRateSatVb = await feeRateService.currentRate()
             let spendable = balances.spendableOnchainBalanceSats
             guard spendable > 0 else {
                 statusMessage = "Insufficient onchain balance"
@@ -3860,30 +4020,34 @@ class AppState {
                 return
             }
             let sweepAmount = spendable
-            let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+            let price = spotOrBookedPrice
             let amountUSD: Double? = price > 0
-                ? Double(sweepAmount) / Double(Constants.satsInBTC) * price
+                ? BitcoinUnits.usd(sats: sweepAmount, price: price)
                 : nil
 
             // Persist before the native call so spliceNegotiated always has a
             // row to stamp with the txid, even if the event is delivered before
             // spliceInWithAll returns (and so the operation survives a restart).
-            let recorded = (try? databaseService?.paymentRepo.recordPayment(
-                paymentId: nil,
+            let recorded = (try? databaseService?.spliceRepo.recordPendingSplice(
                 paymentType: "splice_in",
-                direction: "received",
                 amountMsat: sweepAmount * 1000,
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil,
-                counterparty: nil,
-                status: "pending"
-            )) ?? false
+                channel: SpliceChannelIdentity(
+                    userChannelId: channel.userChannelId,
+                    channelId: channel.channelId,
+                    previousFundingTxid: channel.fundingTxo?.txid
+                )
+            )) != nil
             guard recorded else {
                 statusMessage = "Could not save pending move — move not started"
                 isSweeping = false
                 return
             }
             pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
+            // Fetched only once the pending row exists: across this await the stability tick's
+            // stale-lock release must see a pending splice, not an unbacked isSweeping lock.
+            let feeRateSatVb = await feeRateService.currentRate()
 
             do {
                 try nodeService.spliceInWithAll(
@@ -4218,10 +4382,10 @@ class AppState {
     /// Update the StableChannel struct from current LDK channel data + price.
     private func updateStableBalances() {
         let oldUserChannelId = stableChannel.userChannelId
-        let price = btcPrice > 0 ? btcPrice : stableChannel.latestPrice
+        let price = spotOrBookedPrice
         StabilityService.updateBalances(
             &stableChannel,
-            channels: nodeService.channels,
+            channels: nodeService.channels.map(ChannelSnapshot.init),
             onchainBalanceSats: onchainBalanceSats,
             price: price
         )

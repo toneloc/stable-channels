@@ -50,20 +50,9 @@ struct OnchainTxidResolver {
             for transaction in arr {
                 if let txid = transaction["txid"] as? String,
                    ResilientEsploraClient.isValidTxid(txid), !context.0.contains(txid),
-                   let outputs = transaction["vout"] as? [[String: Any]] {
-                    let received = outputs.filter { $0["scriptpubkey_address"] as? String == address }
-                        .compactMap { $0["value"] as? Int64 }
-                    // Bind to an incoming output, not merely an address-history entry (which
-                    // also includes spends). Non-matching aggregate deposits remain pending.
-                    guard !received.isEmpty,
-                          received.allSatisfy({ $0 > 0 && $0 <= context.1 }) else { continue }
-                    var total: Int64 = 0
-                    for value in received {
-                        let sum = total.addingReportingOverflow(value)
-                        if sum.overflow { return nil }
-                        total = sum.partialValue
-                    }
-                    guard total == context.1 else { continue }
+                   // Bind to an incoming output, not merely an address-history entry (which
+                   // also includes spends). Non-matching aggregate deposits remain pending.
+                   context.1 > 0, MissedReceiveRecovery.satsPaidTo(transaction, address: address) == context.1 {
                     return txid
                 }
             }

@@ -398,10 +398,6 @@ final class OnchainReceiveRepository {
     /// Bounds the placeholder scans; a wallet never has this many deposits pending at once.
     private static let maxPendingPlaceholders = 64
 
-    static func receivePaymentId(txid: String) -> String {
-        "onchain_receive_\(txid)"
-    }
-
     /// Whether `txid` is already accounted for by a payment row, a resolution row, or the
     /// receive row id it would get.
     private func isTracked(txid: String) throws -> Bool {

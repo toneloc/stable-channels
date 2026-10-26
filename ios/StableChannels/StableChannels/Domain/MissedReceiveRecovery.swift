@@ -62,23 +62,6 @@ enum MissedReceiveRecovery {
         }
         return total
     }
-
-    /// Whether a balance delta is already accounted for: the latest txid seen paying the
-    /// current receive address still has a pending row (a confirmed one is an earlier deposit,
-    /// so the new delta is not it). Never used to label the delta, since it can hold several
-    /// deposits that landed between two checks (#317); the others get their own rows from the
-    /// websocket or recovery.
-    static func isDeltaAlreadyRecorded(
-        lastReceiveTxid: String?,
-        lastReceiveTxidAddress: String?,
-        receiveAddress: String?,
-        txidHasPendingRow: (String) -> Bool
-    ) -> Bool {
-        guard let txid = lastReceiveTxid, !txid.isEmpty,
-              let address = receiveAddress, !address.isEmpty,
-              lastReceiveTxidAddress == address else { return false }
-        return txidHasPendingRow(txid)
-    }
 }
 
 /// The balance-delta path writes one placeholder for everything that arrived between two

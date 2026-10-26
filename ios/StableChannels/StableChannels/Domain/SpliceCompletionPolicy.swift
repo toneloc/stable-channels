@@ -12,7 +12,7 @@ enum SpliceCompletionPolicy {
     /// Capped at the current balance (network fees can make the actual rise slightly smaller).
     /// An external destination never raises our balance, so it never moves the baseline.
     static func advancedOnchainBaseline(
-        prevOnchainSats: UInt64,
+        baselineSats: UInt64,
         currentOnchainSats: UInt64,
         completedRow: PaymentRecord,
         destinationIsOwnAddress: Bool
@@ -20,7 +20,7 @@ enum SpliceCompletionPolicy {
         guard completedRow.paymentType == spliceOutPaymentType,
               completedRow.direction == sentDirection,
               destinationIsOwnAddress else { return nil }
-        let (sum, overflow) = prevOnchainSats.addingReportingOverflow(completedRow.amountSats)
+        let (sum, overflow) = baselineSats.addingReportingOverflow(completedRow.amountSats)
         return overflow ? currentOnchainSats : min(sum, currentOnchainSats)
     }
 

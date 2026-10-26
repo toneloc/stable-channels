@@ -70,6 +70,8 @@ final class ConfirmationPollingService {
     var onRefreshResult: (@MainActor (ConfirmationRefreshResult) -> Void)?
     /// A receive the explorer confirmed gone, with the sats it failed.
     var onReceiveDropped: (@MainActor (_ txid: String, _ sats: Int64) -> Void)?
+    /// Fires with a received row's txid after it was detached for not paying the row's address.
+    var onReceiveTxidMismatch: (@MainActor (String) -> Void)?
 
     init(
         databaseService: DatabaseService,
@@ -158,19 +160,23 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = failStaleTxidlessRows()
         let currentHeight = blockHeightService.currentHeight
-        guard currentHeight > 0 else { return }
+        guard currentHeight > 0 else {
+            if anyUpdated { onUpdate?() }
+            return
+        }
 
         let pending: [PaymentRecord]
         do {
             pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
         } catch {
             logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
+            if anyUpdated { onUpdate?() }
             onRefreshResult?(.databaseUnavailable)
             return
         }
 
-        var anyUpdated = false
         var failedLookups = 0
         for payment in pending {
             guard !Task.isCancelled else { return }
@@ -243,6 +249,10 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = failStaleTxidlessRows()
+        defer {
+            if anyUpdated { onUpdate?() }
+        }
         let currentHeight: UInt32
         do {
             let height: UInt32
@@ -271,10 +281,6 @@ final class ConfirmationPollingService {
             return .databaseUnavailable
         }
 
-        var anyUpdated = false
-        defer {
-            if anyUpdated { onUpdate?() }
-        }
         var failedLookups = 0
         for payment in pending {
             try Task.checkCancellation()
@@ -307,13 +313,14 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = failStaleTxidlessRows()
         // Refresh authoritative chain tip from Esplora first.
         guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
+            if anyUpdated { onUpdate?() }
             onRefreshResult?(.chainTipUnavailable)
             return
         }
 
-        var anyUpdated = false
         var failedLookups = 0
 
         // 1. Process pending payments
@@ -348,7 +355,7 @@ final class ConfirmationPollingService {
                     forceRecheck: true
                 )
                 switch outcome {
-                case .pending:
+                case .pending, .notFound:
                     // Esplora reports transaction is no longer confirmed — downgrade to pending
                     do {
                         try databaseService.paymentRepo.downgradePaymentToPending(paymentId: payment.id)
@@ -382,7 +389,8 @@ final class ConfirmationPollingService {
                     }
                 case .error:
                     failedLookups += 1
-                case .noTxid:
+                case .noTxid, .addressMismatch:
+                    // A completed row is only revalidated for reorgs, never re-attributed.
                     break
                 }
             }
@@ -402,6 +410,21 @@ final class ConfirmationPollingService {
         case updated
         case unchanged
         case failed
+    }
+
+    /// Ages out txid-less onchain rows; returns whether any row changed.
+    private func failStaleTxidlessRows() -> Bool {
+        let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
+        do {
+            let failed = try databaseService.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff)
+            if failed > 0 {
+                AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: ["txidless_rows": "\(failed)"])
+            }
+            return failed > 0
+        } catch {
+            logger.error("Failed to age out txid-less onchain rows: \(error.localizedDescription)")
+            return false
+        }
     }
 
     private func resolve(
@@ -436,6 +459,26 @@ final class ConfirmationPollingService {
                 logger.error("Failed to update confirmations: \(error.localizedDescription)")
                 return .failed
             }
+        case .notFound:
+            // Only an authoritative "not found" may retire an old row; an outage must leave it
+            // pollable so a later recovery can still confirm it.
+            let now = Int64(Date().timeIntervalSince1970)
+            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now) else { return .failed }
+            do {
+                guard try databaseService.paymentRepo.failUnconfirmedOnchainRow(id: payment.id) else {
+                    return .unchanged
+                }
+                AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: [
+                    "payment_id": "\(payment.id)",
+                    "txid": payment.txid ?? ""
+                ])
+                return .updated
+            } catch {
+                logger.error("Failed to fail stale onchain row: \(error.localizedDescription)")
+                return .failed
+            }
+        case .addressMismatch:
+            return clearMismatchedReceiveTxid(payment)
         case .error(let message):
             AuditService.log("CONFIRMATION_RESOLVE_FAILED", data: [
                 "payment_id": "\(payment.id)",
@@ -445,5 +488,23 @@ final class ConfirmationPollingService {
         case .pending, .noTxid:
             return .unchanged
         }
+    }
+
+    private func clearMismatchedReceiveTxid(_ payment: PaymentRecord) -> ResolveResult {
+        let txid = payment.txid ?? ""
+        let cleared: Bool
+        do {
+            cleared = try databaseService.paymentRepo.clearPaymentTxid(id: payment.id)
+        } catch {
+            logger.error("Failed to clear mismatched receive txid: \(error.localizedDescription)")
+            return .failed
+        }
+        onReceiveTxidMismatch?(txid)
+        AuditService.log("ONCHAIN_TXID_ADDRESS_MISMATCH", data: [
+            "payment_id": "\(payment.id)",
+            "txid": txid,
+            "address": payment.address ?? ""
+        ])
+        return cleared ? .updated : .unchanged
     }
 }
