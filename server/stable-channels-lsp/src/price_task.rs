@@ -1,4 +1,4 @@
-//! Background task that keeps the `stable_channels::price_feeds` cache warm and publishes each fresh price on a watch channel so startup can wait for the first non-zero value.
+//! Background task that keeps the `stable_channels::price_feeds` cache warm and publishes each fresh price on a watch channel; startup no longer waits on it, since loading the channel list needs no price.
 
 use std::time::Duration;
 

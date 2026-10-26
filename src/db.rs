@@ -1196,7 +1196,25 @@ impl Database {
         native_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
-        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, false)
+        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, false, false)
+            .map(|_| ())
+    }
+
+    /// Record a newly seen channel at a $0 target with all its sats native, unless it already has a row, open or closed, under either notation of its id or under its channel id. True if it was recorded.
+    pub fn insert_channel_if_absent(&self, channel_id: &str, user_channel_id: &str, native_sats: u64) -> SqliteResult<bool> {
+        self.save_channel_inner(channel_id, user_channel_id, 0.0, 0, native_sats, None, false, true)
+    }
+
+    /// A channel's row, open or closed, keyed under either notation of its id; None when it has none or more than one.
+    pub fn load_channel_any_notation(&self, user_channel_id: &str) -> SqliteResult<Option<ChannelRecord>> {
+        let key = {
+            let conn = self.conn.lock().unwrap();
+            channel_books(&conn, user_channel_id)?.map(|row| row.0)
+        };
+        match key {
+            Some(key) => self.load_channel(&key),
+            None => Ok(None),
+        }
     }
 
     /// Save a channel after a forwarded spend. A spend is not a newer allocation decision, so a
@@ -1211,7 +1229,8 @@ impl Database {
         native_sats: u64,
         note: Option<&str>,
     ) -> SqliteResult<()> {
-        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, true)
+        self.save_channel_inner(channel_id, user_channel_id, expected_usd, backing_sats, native_sats, note, true, false)
+            .map(|_| ())
     }
 
     fn save_channel_inner(
@@ -1223,11 +1242,27 @@ impl Database {
         native_sats: u64,
         note: Option<&str>,
         keep_pending_rollback: bool,
-    ) -> SqliteResult<()> {
+        only_if_absent: bool,
+    ) -> SqliteResult<bool> {
         let conn = self.conn.lock().unwrap();
         conn.execute_batch("BEGIN IMMEDIATE")?;
         let mut mirror = None;
         let result = (|| {
+            if only_if_absent {
+                let wanted = user_channel_id_value(user_channel_id);
+                let mut stmt = conn.prepare("SELECT user_channel_id, channel_id FROM channels")?;
+                let taken = stmt
+                    .query_map([], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)))?
+                    .collect::<SqliteResult<Vec<_>>>()?
+                    .into_iter()
+                    .any(|(row_id, row_channel)| {
+                        row_channel == channel_id
+                            || row_id.is_some_and(|id| id == user_channel_id || (wanted.is_some() && user_channel_id_value(&id) == wanted))
+                    });
+                if taken {
+                    return Ok(false);
+                }
+            }
             let before: Option<(f64, i64, i64, String, Option<i64>, Option<String>)> = conn
                 .query_row(
                     "SELECT expected_usd, stable_sats, native_sats, channel_id, closed_at, note
@@ -1257,7 +1292,7 @@ impl Database {
                     .as_ref()
                     .map_or(true, |previous| previous.5.as_deref() != note);
             if !row_changed {
-                return Ok(());
+                return Ok(false);
             }
             if let (true, Some((old_expected, old_backing, old_native, ..))) = (keep_pending_rollback, &before) {
                 // Move the snapshot by the same spend, only where it matched the row being replaced.
@@ -1312,7 +1347,7 @@ impl Database {
                 )?;
             }
             if !accounting_changed {
-                return Ok(());
+                return Ok(true);
             }
             let live_receiver_sats = backing_sats.saturating_add(native_sats);
             let draft = LedgerEventDraft {
@@ -1366,7 +1401,7 @@ impl Database {
             if outcome.inserted {
                 mirror = Some((draft, outcome.event_id));
             }
-            Ok(())
+            Ok(true)
         })();
         let committed = finish_transaction(&conn, result);
         if committed.is_ok() {
@@ -7861,6 +7896,31 @@ mod tests {
         assert_eq!(settlement_outcome(&db), "pending");
         assert_eq!(db.load_channel("26").unwrap().unwrap().backing_sats, 10_000);
         assert_eq!(db.load_channel("0x1a").unwrap().unwrap().backing_sats, 7_000);
+    }
+
+    #[test]
+    fn a_new_channel_is_recorded_only_if_it_has_no_row() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.insert_channel_if_absent("physical", "189476124653200987495269098788434301048", 40_000).unwrap());
+        let record = db.load_channel("189476124653200987495269098788434301048").unwrap().unwrap();
+        assert_eq!((record.expected_usd, record.backing_sats, record.native_sats), (0.0, 0, 40_000));
+
+        db.save_channel("physical", "189476124653200987495269098788434301048", 50.0, 50_000, 0, Some("vip")).unwrap();
+        db.mark_channel_closed("189476124653200987495269098788434301048").unwrap();
+        assert!(!db.insert_channel_if_absent("physical", "189476124653200987495269098788434301048", 40_000).unwrap(), "a closed row is a row");
+        assert!(!db.insert_channel_if_absent("spliced", "189476124653200987495269098788434301048", 40_000).unwrap(), "same id under a new channel id");
+        assert!(!db.insert_channel_if_absent("physical", "other", 40_000).unwrap(), "same channel id under another key");
+        let record = db.load_channel("189476124653200987495269098788434301048").unwrap().unwrap();
+        assert_eq!((record.expected_usd, record.backing_sats, record.note.as_deref()), (50.0, 50_000, Some("vip")));
+    }
+
+    #[test]
+    fn a_row_in_the_other_notation_counts_as_the_same_channel() {
+        let db = Database::open_in_memory().unwrap();
+        db.save_channel("physical", "0x1a", 50.0, 50_000, 0, None).unwrap();
+        assert!(!db.insert_channel_if_absent("spliced", "26", 40_000).unwrap());
+        assert_eq!(db.load_channel_any_notation("26").unwrap().unwrap().expected_usd, 50.0);
+        assert!(db.load_channel_any_notation("27").unwrap().is_none());
     }
 
     #[test]
