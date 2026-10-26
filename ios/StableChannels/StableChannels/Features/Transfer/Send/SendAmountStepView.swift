@@ -56,7 +56,7 @@ struct SendAmountStepView: View {
         let insufficientLabel = sats > available
             ? String(localized: "error_insufficient_funds", defaultValue: "Insufficient funds")
             : String(localized: "error_insufficient_funds_incl_fee", defaultValue: "Insufficient funds incl. fee")
-        let usd = (Double(available) / Double(Constants.satsInBTC)) * appState.accountingBTCPrice
+        let usd = BitcoinUnits.usd(sats: available, price: appState.accountingBTCPrice)
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {

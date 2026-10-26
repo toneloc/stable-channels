@@ -66,6 +66,11 @@ final class SendFlowModel {
         .of(isPendingSettlement: isPendingSettlement, txid: successTxid)
     }
 
+    /// A dispatched Lightning payment whose result is not yet known; its receipt offers no Done.
+    var isLightningPending: Bool {
+        PaymentResultControls.isLightningPending(paymentId: successPaymentId, isPendingSettlement: isPendingSettlement)
+    }
+
     /// Returns the effective fee rate using live recommended fees when available,
     /// or nil when the rate has not loaded and standard tier is selected.
     var effectiveFeeRateSatVb: Double? {
@@ -393,7 +398,7 @@ final class SendFlowModel {
     private func balanceDescription(_ sats: UInt64, appState: AppState) -> String {
         let price = appState.accountingBTCPrice
         guard price > 0 else { return "\(sats.btcSpacedFormatted) BTC" }
-        let usd = (Double(sats) / Double(Constants.satsInBTC)) * price
+        let usd = BitcoinUnits.usd(sats: sats, price: price)
         return "\(sats.btcSpacedFormatted) BTC (≈ \(usd.usdFormatted))"
     }
 
