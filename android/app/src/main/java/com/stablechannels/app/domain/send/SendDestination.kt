@@ -72,3 +72,12 @@ sealed class DestinationClassification {
 
     data class Invalid(val reason: DestinationRejection) : DestinationClassification()
 }
+
+/** The amount the destination itself carries (a BIP-21 amount or a fixed invoice), or null. */
+val SendDestination.presetSats: Long?
+    get() =
+        when (this) {
+            is SendDestination.Onchain -> amountSats
+            is SendDestination.Bolt11 -> amountMsat?.let { it / 1000 }
+            else -> null
+        }?.takeIf { it > 0 }
