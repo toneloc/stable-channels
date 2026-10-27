@@ -426,8 +426,8 @@ class NodeService: NodeServiceProtocol {
 
         do {
             if force {
-                // Unilateral close for when the LSP is unreachable (#363). Our funds stay
-                // timelocked for the channel's spend delay.
+                // Unilateral close (#363). With the LSP as a trusted peer, ldk-node does not
+                // broadcast our close: it reaches the chain when the LSP broadcasts its own (#456).
                 try node.forceCloseChannel(
                     userChannelId: userChannelId,
                     counterpartyNodeId: counterpartyNodeId,

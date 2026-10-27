@@ -102,17 +102,6 @@ struct ChannelSettingsView: View {
                         }
                     }
 
-                    // Shown even when the channel is not usable (#363).
-                    Section {
-                        Button(
-                            String(localized: "button_force_close", defaultValue: "Emergency force close"),
-                            role: .destructive
-                        ) {
-                            showForceCloseSheet = true
-                        }
-                        .disabled(!appState.isOnline)
-                        .foregroundStyle(appState.isOnline ? .red : .secondary)
-                    }
                 } else {
                     Section {
                         HStack {
@@ -122,6 +111,19 @@ struct ChannelSettingsView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                }
+
+                // Shown while the channel is listed, even when it is not usable or its close is
+                // stuck (#363).
+                Section {
+                    Button(
+                        String(localized: "button_force_close", defaultValue: "Emergency force close"),
+                        role: .destructive
+                    ) {
+                        showForceCloseSheet = true
+                    }
+                    .disabled(!appState.isOnline)
+                    .foregroundStyle(appState.isOnline ? .red : .secondary)
                 }
             } else if appState.isChannelClosing {
                 Section {
@@ -260,6 +262,7 @@ struct ChannelSettingsView: View {
 
 private struct ForceCloseSheet: View {
     let onConfirm: () -> Void
+    @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
     @State private var input = ""
 
@@ -317,7 +320,7 @@ private struct ForceCloseSheet: View {
                         dismiss()
                         onConfirm()
                     }
-                    .disabled(!ForceCloseConfirmation.isConfirmed(input))
+                    .disabled(!appState.isOnline || !ForceCloseConfirmation.isConfirmed(input))
                 }
             }
             .navigationTitle(String(localized: "button_force_close", defaultValue: "Emergency force close"))

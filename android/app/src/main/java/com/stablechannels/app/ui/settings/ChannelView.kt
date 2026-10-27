@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -14,9 +15,11 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.OfflineBadge
@@ -78,17 +81,10 @@ fun ChannelView(appState: AppState) {
                 CloseChannelButton(enabled = isOnline, onClick = { showCloseConfirm = true })
             }
 
-            // Shown even when the channel is not usable (#363).
             Spacer(Modifier.height(12.dp))
-            NeutralTextButton(
-                onClick = {
-                    forceCloseInput = ""
-                    showForceClose = true
-                },
-                enabled = isOnline,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Emergency force close", color = MaterialTheme.colorScheme.error)
+            ForceCloseButton(enabled = isOnline) {
+                forceCloseInput = ""
+                showForceClose = true
             }
         } else if (isClosing) {
             // Channel is closing — show status
@@ -113,6 +109,14 @@ fun ChannelView(appState: AppState) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            // A close that started but never finished still lists the channel.
+            if (channels.isNotEmpty()) {
+                Spacer(Modifier.height(32.dp))
+                ForceCloseButton(enabled = isOnline) {
+                    forceCloseInput = ""
+                    showForceClose = true
+                }
             }
         } else if (hasCachedChannel) {
             ChannelStatusRow(isReady = hasReadyChannel, isOnline = isOnline)
@@ -206,15 +210,27 @@ fun ChannelView(appState: AppState) {
                         onValueChange = { forceCloseInput = it },
                         label = { Text("Type ${ForceCloseConfirmation.PHRASE} to confirm") },
                         singleLine = true,
+                        keyboardOptions =
+                            KeyboardOptions(
+                                capitalization = KeyboardCapitalization.Characters,
+                                autoCorrectEnabled = false,
+                            ),
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
             },
             confirmButton = {
                 NeutralTextButton(
-                    enabled = ForceCloseConfirmation.isConfirmed(forceCloseInput),
+                    enabled = isOnline && ForceCloseConfirmation.isConfirmed(forceCloseInput),
                     onClick = {
                         showForceClose = false
+                        AuditService.log(
+                            "CHANNEL_CLOSE_REQUESTED",
+                            mapOf(
+                                "user_channel_id" to forceCloseChannel.userChannelId,
+                                "force" to true,
+                            ),
+                        )
                         appState.isChannelClosing = true
                         appState.setStatus("Force closing channel...")
                         appState.prepareChannelCloseTracking(forceCloseChannel.userChannelId)
@@ -226,6 +242,13 @@ fun ChannelView(appState: AppState) {
                                 )
                                 appState.refreshBalances()
                             } catch (e: Exception) {
+                                AuditService.log(
+                                    "CHANNEL_CLOSE_REQUEST_FAILED",
+                                    mapOf(
+                                        "user_channel_id" to forceCloseChannel.userChannelId,
+                                        "error" to (e.message ?: e.javaClass.simpleName),
+                                    ),
+                                )
                                 appState.setStatus("Force close failed: ${e.message}")
                                 appState.isChannelClosing = false
                             }
@@ -362,4 +385,17 @@ private fun ForceCloseWarning(red: String, before: String = "", after: String = 
             append(after)
         }
     )
+}
+
+/** Shown while a channel is listed, even when it is not usable or its close is stuck (#363). */
+@Composable
+private fun ForceCloseButton(enabled: Boolean, onClick: () -> Unit) {
+    NeutralTextButton(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Emergency force close")
+    }
 }

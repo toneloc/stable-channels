@@ -238,8 +238,8 @@ class NodeService(private val context: Context) {
     }
 
     /**
-     * Unilateral close for when the LSP is unreachable. Our funds stay timelocked for the channel's
-     * spend delay.
+     * Unilateral close. With the LSP as a trusted peer, ldk-node does not broadcast our close: it
+     * reaches the chain when the LSP broadcasts its own (#456).
      */
     fun forceCloseChannel(userChannelId: String, counterpartyNodeId: String) {
         val n = node ?: throw NodeServiceError()
