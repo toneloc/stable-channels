@@ -16,18 +16,18 @@ final class StaggeredTaskLauncherTests: XCTestCase {
     }
 
     func testLaunch_withDelay_delaysStart() async {
-        let sut = StaggeredTaskLauncher()
-        let start = Date()
+        let sleeps = SleepLog()
+        let sut = StaggeredTaskLauncher(sleep: { await sleeps.record($0) })
         var didRun = false
         let exp = expectation(description: "body ran")
         sut.launch(opId: "a", delaySeconds: 1) {
             didRun = true
             exp.fulfill()
         }
-        await fulfillment(of: [exp], timeout: 5)
-        let elapsed = Date().timeIntervalSince(start)
+        await fulfillment(of: [exp], timeout: 1)
         XCTAssertTrue(didRun)
-        XCTAssertGreaterThanOrEqual(elapsed, 0.9, "Expected delay >= 0.9s, got \(elapsed)")
+        let recorded = await sleeps.values
+        XCTAssertEqual(recorded, [1_000_000_000], "A 1s delay must wait 1s before the body runs")
     }
 
     func testLaunch_replacesExistingTask_cancelsOld() async {

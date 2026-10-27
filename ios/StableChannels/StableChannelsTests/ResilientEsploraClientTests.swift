@@ -4,6 +4,8 @@ import XCTest
 final class ResilientEsploraClientTests: XCTestCase {
     private let validTxid = String(repeating: "a", count: 64)
     private var session: URLSession!
+    /// Backoff waits are recorded, not slept, so the tests run in milliseconds.
+    private var sleeps = SleepLog()
 
     override func setUp() {
         super.setUp()
@@ -13,6 +15,7 @@ final class ResilientEsploraClientTests: XCTestCase {
 
         MockURLProtocol.requestHandler = nil
         MockURLProtocol.callCount = 0
+        sleeps = SleepLog()
         MockURLProtocol.seenURLs = []
 
         // Reset the audit log path so audit log tests can capture clean output.
@@ -55,7 +58,8 @@ final class ResilientEsploraClientTests: XCTestCase {
             wallClockBudgetSeconds: wallClockBudgetSeconds,
             onExhausted: onExhausted
         )
-        return ResilientEsploraClient(urlSession: session, config: cfg)
+        let sleeps = sleeps
+        return ResilientEsploraClient(urlSession: session, config: cfg, sleep: { await sleeps.record($0) })
     }
 
     // Default parser used by most tests: extracts a valid txid from the
@@ -261,17 +265,18 @@ final class ResilientEsploraClientTests: XCTestCase {
             ["\(ResilientEsploraClient.trimSlash(base))/tx/abc/outspend/0"]
         }
 
-        let start = Date()
         await client.run(
             endpointBuilder: builder,
             resultParser: parser,
             onResolved: { _ in }
         )
-        let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertGreaterThanOrEqual(
-            elapsed, 1.0,
-            "Backoff of 1s before attempt 2 must elapse before completion"
+        let recorded = await sleeps.values
+        XCTAssertEqual(recorded.count, 2, "Attempts 2 and 3 each wait their backoff")
+        XCTAssertEqual(recorded.first, 0, "A 0s backoff waits nothing")
+        XCTAssertTrue(
+            (750_000_000 ... 1_250_000_000).contains(recorded.last ?? 0),
+            "The 1s backoff before attempt 3 must wait 0.75-1.25s, got \(recorded)"
         )
     }
 
@@ -361,9 +366,6 @@ final class ResilientEsploraClientTests: XCTestCase {
     // MARK: - Production hardening: jitter, budget, body cap, onExhausted, telemetry
 
     func testRun_appliesBackoffJitter() async {
-        // With base backoff [1] and 2 attempts, attempt 2 sleeps ~1s ±25%.
-        // We allow 0.75..1.5s to be CI-tolerant. If the test is flaky on a
-        // particular runner, set backoff to [0] and skip the assertion.
         MockURLProtocol.requestHandler = { _ in
             self.jsonResponse(body: ["spent": false])
         }
@@ -377,35 +379,30 @@ final class ResilientEsploraClientTests: XCTestCase {
             ["\(ResilientEsploraClient.trimSlash(base))/tx/abc/outspend/0"]
         }
 
-        let start = Date()
         await client.run(
             endpointBuilder: builder,
             resultParser: parser,
             onResolved: { _ in }
         )
-        let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertGreaterThanOrEqual(
-            elapsed, 0.75,
-            "Jittered backoff of base 1s must elapse at least 0.75s (jitter lower bound 0.75x)"
-        )
-        // Generous upper slack: loaded CI runners add hundreds of ms of scheduler
-        // latency on top of the 1.25x jitter ceiling (observed 1.57s in CI). The
-        // lower bound is the meaningful assertion; the upper bound only guards
-        // against backoff being wildly longer than configured.
-        XCTAssertLessThanOrEqual(
-            elapsed, 3.0,
-            "Jittered backoff of base 1s must elapse well under 3s (1.25x jitter + runner slack)"
+        let recorded = await sleeps.values
+        XCTAssertEqual(recorded.count, 1)
+        XCTAssertTrue(
+            (750_000_000 ... 1_250_000_000).contains(recorded.first ?? 0),
+            "Jittered backoff of base 1s must wait 0.75-1.25s, got \(recorded)"
         )
     }
 
     func testRun_jitteredBackoff_helperStaysInBand() {
         // Direct unit test of the helper: 1000 samples, all in [0.75x, 1.25x].
-        for _ in 0..<1000 {
-            let j = ResilientEsploraClient.jitteredBackoff(base: 1000)
-            XCTAssertGreaterThanOrEqual(j, 750)
-            XCTAssertLessThanOrEqual(j, 1250)
+        var samples = Set<UInt64>()
+        for _ in 0 ..< 1000 {
+            let j = ResilientEsploraClient.jitteredBackoffNanoseconds(base: 1)
+            XCTAssertGreaterThanOrEqual(j, 750_000_000)
+            XCTAssertLessThanOrEqual(j, 1_250_000_000)
+            samples.insert(j)
         }
+        XCTAssertGreaterThan(samples.count, 1, "A 1s base must actually be jittered, not rounded to 1s")
     }
 
     func testRun_respectsWallClockBudget() async {
@@ -440,6 +437,8 @@ final class ResilientEsploraClientTests: XCTestCase {
         )
         let v = await resolved.value
         XCTAssertNil(v, "onResolved must not fire when wall-clock budget is exceeded")
+        let recorded = await sleeps.values
+        XCTAssertTrue(recorded.isEmpty, "The 10s backoff must be skipped, not slept")
     }
 
     func testRun_capsBodyAt1MB() async {
@@ -710,6 +709,12 @@ final class ResilientEsploraClientTests: XCTestCase {
 }
 
 /// Minimal actor-isolated box for capturing `onResolved` hits in tests.
+/// Records requested sleeps (nanoseconds) instead of waiting.
+actor SleepLog {
+    private(set) var values: [UInt64] = []
+    func record(_ nanoseconds: UInt64) { values.append(nanoseconds) }
+}
+
 actor ResolvedBox<T: Sendable> {
     var value: T?
     func set(_ v: T) { value = v }
