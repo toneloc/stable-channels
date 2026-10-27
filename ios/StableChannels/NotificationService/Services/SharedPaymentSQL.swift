@@ -48,6 +48,12 @@ enum SharedPaymentSQL {
     ORDER BY id DESC LIMIT 2
     """
 
+    /// ?1 payment id, ?2 trade payment id, ?3 trade row id. Fee settled, the trade awaits its result.
+    static let adoptPaidPaymentForUnattachedTrade = """
+    UPDATE trades SET payment_id = ?, trade_payment_id = ?, status = 'fee_paid'
+    WHERE id = ? AND trade_payment_id IS NULL AND status = 'prepared'
+    """
+
     /// ?1 payment id, ?2 trade payment id, ?3 reason code, ?4 trade row id.
     static let adoptFailedPaymentForUnattachedTrade = """
     UPDATE trades

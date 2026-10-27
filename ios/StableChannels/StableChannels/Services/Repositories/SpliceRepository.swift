@@ -56,6 +56,7 @@ final class SpliceRepository {
 
     /// Persists the pending history row and the operation identity in one transaction, before the
     /// native splice call, so every later event can only be matched to this operation.
+    /// `selfSend` records, while it is still provable, that the destination is our own address.
     @discardableResult
     func recordPendingSplice(
         paymentType: String,
@@ -63,6 +64,7 @@ final class SpliceRepository {
         amountUSD: Double?,
         btcPrice: Double?,
         address: String? = nil,
+        selfSend: Bool = false,
         channel: SpliceChannelIdentity
     ) throws -> Int64 {
         guard paymentType == "splice_in" || paymentType == "splice_out",
@@ -84,16 +86,44 @@ final class SpliceRepository {
             let rowId = rawSQL.lastInsertRowId
             try rawSQL.execute(
                 """
-                INSERT INTO splice_operations (payment_row_id, user_channel_id, channel_id, previous_funding_txid)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO splice_operations (payment_row_id, user_channel_id, channel_id, previous_funding_txid, self_send)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 params: [
                     .integer(rowId), .text(channel.userChannelId), .text(channel.channelId),
-                    channel.previousFundingTxid.map { .text($0) } ?? .null
+                    channel.previousFundingTxid.map { .text($0) } ?? .null, .integer(selfSend ? 1 : 0)
                 ]
             )
             return rowId
         }
+    }
+
+    /// Once the node accepted the splice recorded as `rowId`, older overdue attempts on the same
+    /// channel can no longer negotiate; make them terminal so they stop competing for its events.
+    /// Only call after the native call succeeded: before it, an older negotiation may still be live.
+    func retireSupersededSplices(byRowId rowId: Int64) throws {
+        try rawSQL.execute(
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE status = 'expired' AND txid IS NULL AND id < ?1 AND id IN (
+                SELECT o.payment_row_id FROM splice_operations o
+                JOIN splice_operations n ON n.user_channel_id = o.user_channel_id AND n.channel_id = o.channel_id
+                WHERE n.payment_row_id = ?1
+            )
+            """,
+            params: [.integer(rowId)]
+        )
+    }
+
+    /// Whether the splice row carrying `txid` was recorded as paying our own address.
+    func isSelfSendSplice(txid: String) throws -> Bool {
+        try !rawSQL.query(
+            """
+            SELECT 1 FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+            WHERE p.txid = ? AND s.self_send = 1 LIMIT 1
+            """,
+            params: [.text(txid)]
+        ).isEmpty
     }
 
     /// Commits the event receipt and any txid it lets an operation claim; once this returns the

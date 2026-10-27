@@ -175,6 +175,22 @@ final class LightningPaymentRecoveryTests: XCTestCase {
         XCTAssertEqual(try service.channelRepo.unresolvedTradePayments()[paymentId]?.status, "fee_paid")
     }
 
+    func testBackgroundSuccessAdoptsAnUnattachedTradeFee() throws {
+        let trade = prepare()
+        _ = try service.channelRepo.recordPreparedTrade(trade)
+
+        XCTAssertTrue(nse.recordOutgoingPaymentSuccess(paymentId: paymentId, feeMsat: 1) { trade.feeMsat })
+        XCTAssertEqual(try service.channelRepo.unresolvedTradePayments()[paymentId]?.status, "fee_paid")
+    }
+
+    func testUnmatchedBackgroundSuccessIsStillAckedAndLeavesTheTradePrepared() throws {
+        let trade = prepare()
+        _ = try service.channelRepo.recordPreparedTrade(trade)
+
+        XCTAssertTrue(nse.recordOutgoingPaymentSuccess(paymentId: paymentId, feeMsat: 1) { trade.feeMsat + 1 })
+        XCTAssertEqual(try tradeRow(), ["prepared", ""])
+    }
+
     func testSuccessWithoutPaymentIdIsAckedWithoutWriting() {
         XCTAssertTrue(nse.recordOutgoingPaymentSuccess(paymentId: "", feeMsat: nil))
     }

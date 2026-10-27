@@ -69,6 +69,7 @@ struct PendingSplice {
     let direction: String // "in" or "out"
     let amountSats: UInt64
     let address: String? // For splice_out
+    var rowId: Int64? // Persisted history row, once recorded
 }
 
 // MARK: - Database Records

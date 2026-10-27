@@ -405,22 +405,13 @@ final class ChannelRepository {
             let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs)
                 - TradeProtocol.responseRetryWindowSecs)
             let rows = try rawSQL.query(
-                """
-                SELECT id, new_expected_usd, quote_price, action
-                FROM trades
-                WHERE trade_payment_id IS NULL AND status = 'prepared'
-                  AND fee_msat = ? AND created_at >= ?
-                ORDER BY id DESC LIMIT 2
-                """,
+                "SELECT id, new_expected_usd, quote_price, action \(SharedPaymentSQL.unattachedPreparedTradeMatch)",
                 params: [.integer(Int64(amountMsat)), .integer(cutoff)]
             )
             guard rows.count == 1, let row = rows.first else { return nil }
             let tradeDbId = row.int64(0)
             let changed = try rawSQL.executeReturningChanges(
-                """
-                UPDATE trades SET payment_id = ?, trade_payment_id = ?, status = 'fee_paid'
-                WHERE id = ? AND trade_payment_id IS NULL AND status = 'prepared'
-                """,
+                SharedPaymentSQL.adoptPaidPaymentForUnattachedTrade,
                 params: [.text(paymentId), .text(paymentId), .integer(tradeDbId)]
             )
             guard changed == 1 else {

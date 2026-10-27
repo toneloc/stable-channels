@@ -17,14 +17,16 @@ struct SpliceEventReceipt: Equatable {
     let kind: Kind
     let userChannelId: String
     let channelId: String
-    /// Txid carried by the event itself. Deduplication uses only this, never a live lookup, so
-    /// an outpoint-less ready replay cannot capture a newer operation.
+    /// Txid carried by the event itself.
     let identityTxid: String?
     let fundingTxid: String?
     let fundingVout: UInt32?
 
+    /// Keyed by the funding it resolved to, so each outpoint-less ready on a channel (the open,
+    /// then every splice) is stored once instead of all sharing one key. A stale replay still
+    /// cannot claim an operation: matching excludes the funding the operation started from.
     var eventKey: String {
-        "\(kind.rawValue):\(userChannelId):\(channelId):\(identityTxid ?? "unknown")"
+        "\(kind.rawValue):\(userChannelId):\(channelId):\(identityTxid ?? fundingTxid ?? "unknown")"
     }
 
     /// Maps an LDK event; nil for anything that is not SpliceNegotiated or ChannelReady.
@@ -75,10 +77,19 @@ enum SpliceEventAcknowledgement {
     /// A negotiation failure needs the foreground's broadcast-verified bookkeeping, so it is only
     /// acknowledged while no splice is pending.
     static func backgroundMayAcknowledge(_ event: Event, db: PaymentDatabase, node: LDKNode.Node) -> Bool {
+        backgroundMayAcknowledge(event, db: db, channels: node.listChannels)
+    }
+
+    /// `channels` is read only for events that need the live channel funding.
+    static func backgroundMayAcknowledge(
+        _ event: Event,
+        db: PaymentDatabase,
+        channels listChannels: () -> [ChannelDetails]
+    ) -> Bool {
         if case .spliceNegotiationFailed = event {
             return db.hasPendingSplice() == false
         }
-        let channels = node.listChannels()
+        let channels = listChannels()
         let receipt = SpliceEventReceipt(event: event) {
             SpliceEventReceipt.liveFunding(in: channels, userChannelId: $0, channelId: $1)
         }

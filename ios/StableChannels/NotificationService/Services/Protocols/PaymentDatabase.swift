@@ -33,7 +33,7 @@ protocol PaymentDatabase {
     /// nil when the database cannot be read.
     func hasPendingSplice() -> Bool?
     /// Commit an outbound payment's success; false means do not ack the LDK event.
-    func recordOutgoingPaymentSuccess(paymentId: String, feeMsat: UInt64?) -> Bool
+    func recordOutgoingPaymentSuccess(paymentId: String, feeMsat: UInt64?, lookupAmountMsat: () -> UInt64?) -> Bool
     /// Commit an outbound payment's failure; false means do not ack the LDK event.
     func recordOutgoingPaymentFailure(
         paymentId: String,

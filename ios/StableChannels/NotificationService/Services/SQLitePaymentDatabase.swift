@@ -1080,10 +1080,27 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
     // MARK: - Outbound Lightning Outcomes (persisted before the LDK event is acked)
 
-    func recordOutgoingPaymentSuccess(paymentId: String, feeMsat: UInt64?) -> Bool {
+    /// A trade fee whose payment id was never attached is adopted by amount, as the foreground
+    /// does. No match still acks: the trade then resolves from the LSP's signed result.
+    func recordOutgoingPaymentSuccess(
+        paymentId: String,
+        feeMsat: UInt64?,
+        lookupAmountMsat: () -> UInt64? = { nil }
+    ) -> Bool {
         guard !paymentId.isEmpty else { return true }
         guard let db = openDB() else { return false }
         defer { sqlite3_close(db) }
+        guard let (tradeExists, hasUnattached) = tradeCorrelation(db, paymentId: paymentId) else { return false }
+        if !tradeExists, hasUnattached, let amountMsat = lookupAmountMsat() {
+            _ = adoptUnattachedPreparedTrade(
+                db, paymentId: paymentId, amountMsat: amountMsat,
+                sql: SharedPaymentSQL.adoptPaidPaymentForUnattachedTrade
+            ) { statement, tradeDbId in
+                self.bindText(statement, 1, paymentId)
+                self.bindText(statement, 2, paymentId)
+                sqlite3_bind_int64(statement, 3, tradeDbId)
+            }
+        }
         guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
         // Fee settlement is not trade acceptance: the trade waits for its signed result.
         let committed = execute(db, SharedPaymentSQL.markTradeFeePaid) { self.bindText($0, 1, paymentId) }
@@ -1105,12 +1122,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         guard !paymentId.isEmpty else { return true }
         guard let db = openDB() else { return false }
         defer { sqlite3_close(db) }
-        guard let tradeExists = exists(db, "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1", paymentId),
-              let hasUnattached = exists(
-                  db,
-                  "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
-                  nil
-              ) else { return false }
+        guard let (tradeExists, hasUnattached) = tradeCorrelation(db, paymentId: paymentId) else { return false }
         let target = LightningPaymentRecovery.failureTarget(
             paymentId: paymentId,
             pendingStabilityPaymentId: loadPendingSend()?.paymentId,
@@ -1129,13 +1141,33 @@ final class SQLitePaymentDatabase: PaymentDatabase {
                 self.bindText($0, 2, paymentId)
             }
         case .unattachedTrade(let amountMsat):
-            if failUnattachedPreparedTrade(db, paymentId: paymentId, amountMsat: amountMsat, reasonCode: reasonCode) {
-                return true
+            let adopted = adoptUnattachedPreparedTrade(
+                db, paymentId: paymentId, amountMsat: amountMsat,
+                sql: SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade
+            ) { statement, tradeDbId in
+                self.bindText(statement, 1, paymentId)
+                self.bindText(statement, 2, paymentId)
+                self.bindOptionalText(statement, 3, reasonCode)
+                sqlite3_bind_int64(statement, 4, tradeDbId)
             }
+            if adopted { return true }
             return markPaymentFailed(db, paymentId: paymentId)
         case .payment:
             return markPaymentFailed(db, paymentId: paymentId)
         }
+    }
+
+    /// Whether a trade already carries this payment id, and whether any prepared trade still lacks
+    /// one; nil when either lookup could not run.
+    private func tradeCorrelation(_ db: OpaquePointer?,
+                                  paymentId: String) -> (tradeExists: Bool, hasUnattached: Bool)? {
+        guard let tradeExists = exists(db, "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1", paymentId),
+              let hasUnattached = exists(
+                  db,
+                  "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
+                  nil
+              ) else { return nil }
+        return (tradeExists, hasUnattached)
     }
 
     private func markPaymentFailed(_ db: OpaquePointer?, paymentId: String) -> Bool {
@@ -1145,13 +1177,14 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         }
     }
 
-    /// Same rule and SQL as ChannelRepository.failUnattachedPreparedTrade: exactly one recent prepared
-    /// trade with this fee amount adopts the failed payment id.
-    private func failUnattachedPreparedTrade(
+    /// Same rule and SQL as ChannelRepository's unattached-trade adoption: exactly one recent prepared
+    /// trade with this fee amount adopts the payment id through `sql` (bound with its trade row id).
+    private func adoptUnattachedPreparedTrade(
         _ db: OpaquePointer?,
         paymentId: String,
         amountMsat: UInt64,
-        reasonCode: String?
+        sql: String,
+        bind: (OpaquePointer?, Int64) -> Void
     ) -> Bool {
         let now = UInt64(Date().timeIntervalSince1970)
         guard TradeProtocol.isCanonicalIdentifier(paymentId), amountMsat <= UInt64(Int64.max),
@@ -1174,12 +1207,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             rollback(db)
             return false
         }
-        let updated = execute(db, SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade) {
-            self.bindText($0, 1, paymentId)
-            self.bindText($0, 2, paymentId)
-            self.bindOptionalText($0, 3, reasonCode)
-            sqlite3_bind_int64($0, 4, tradeDbId)
-        } && sqlite3_changes(db) == 1
+        let updated = execute(db, sql) { bind($0, tradeDbId) } && sqlite3_changes(db) == 1
         guard updated, sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
             rollback(db)
             return false

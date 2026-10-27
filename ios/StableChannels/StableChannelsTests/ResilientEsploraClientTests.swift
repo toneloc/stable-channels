@@ -802,6 +802,19 @@ final class ResilientEsploraClientTests: XCTestCase {
         XCTAssertEqual(MockURLProtocol.seenURLs.first?.path, "/api/tx/\(validTxid)")
     }
 
+    func testReceiveCheck_largeBatchOverTheDefaultCapStillConfirms() async throws {
+        let filler = String(repeating: "{\"scriptpubkey_address\":\"bc1qother\"},", count: 40_000)
+        let body = """
+        {"vout":[\(filler){"scriptpubkey_address":"bc1qmine"}],"status":{"confirmed":true,"block_height":100}}
+        """
+        XCTAssertGreaterThan(body.utf8.count, ResilientEsploraClient.Config.defaultMaxBodyBytes)
+        MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: body) }
+
+        let result = try await makeResolver().receiveCheck(for: validTxid, paysTo: "bc1qmine")
+
+        XCTAssertEqual(result.value, ReceiveTxCheck(paysToAddress: true, status: TxStatus(blockHeight: 100)))
+    }
+
     func testReceiveCheck_mismatchedAddress() async throws {
         MockURLProtocol.requestHandler = { _ in self.statusResponse(200, body: Self.txBody) }
 
