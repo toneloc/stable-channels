@@ -148,7 +148,8 @@ actor ToRemoteRecovery {
         guard let fundingTxid = s.fundingTxid, now() >= s.nextAt else { return }
         let result = await findByFunding(fundingTxid, vout: s.fundingVout, keys: keys)
         let time = now()
-        let ends = result?.spent == true || time >= s.until
+        // An explorer that can't be reached is not an answer, so even a one-time check is retried.
+        let ends = result.map { $0.spent || time >= s.until } ?? false
         let added = (result?.outputs ?? []).filter { output in
             !s.found.contains { $0.txid == output.txid && $0.vout == output.vout }
         }

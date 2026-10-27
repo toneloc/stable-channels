@@ -161,7 +161,8 @@ class ToRemoteRecovery(
         val result = findByFunding(fundingTxid, s.fundingVout, keys)
         val found = result?.first.orEmpty()
         val time = now()
-        val ends = result?.second == true || time >= s.until
+        // An explorer that can't be reached is not an answer, so even a one-time check is retried.
+        val ends = result != null && (result.second || time >= s.until)
         val added = found.filter { o -> s.found.none { it.txid == o.txid && it.vout == o.vout } }
         update {
             if (it.generation != s.generation) return@update it
