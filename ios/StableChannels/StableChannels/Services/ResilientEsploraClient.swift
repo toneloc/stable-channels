@@ -44,12 +44,21 @@ struct ResilientEsploraClient {
     /// 200/JSON body -> resolved value, or `nil` to try the next path.
     typealias ResultParser<T> = @Sendable (Data) throws -> T?
 
+    /// Waits the given nanoseconds between attempts; tests pass a recorder instead of waiting.
+    typealias Sleep = @Sendable (UInt64) async throws -> Void
+
     let urlSession: URLSession
     let config: Config
+    private let sleep: Sleep
 
-    init(urlSession: URLSession = .shared, config: Config) {
+    init(
+        urlSession: URLSession = .shared,
+        config: Config,
+        sleep: @escaping Sleep = { try await Task.sleep(nanoseconds: $0) }
+    ) {
         self.urlSession = urlSession
         self.config = config
+        self.sleep = sleep
     }
 
     /// 1 MB cap on response body. Long-history `/address/.../txs/chain`
@@ -113,14 +122,14 @@ struct ResilientEsploraClient {
                 let base = config.backoffSeconds[
                     min(attempt - 1, config.backoffSeconds.count - 1)
                 ]
-                let sleepNs = Self.jitteredBackoff(base: base) * 1_000_000_000
+                let sleepNs = Self.jitteredBackoffNanoseconds(base: base)
                 // Skip the sleep if it would blow the wall-clock budget.
                 if Date().timeIntervalSince(start) + (Double(sleepNs) / 1_000_000_000)
                     >= config.wallClockBudgetSeconds {
                     break
                 }
                 do {
-                    try await Task.sleep(nanoseconds: sleepNs)
+                    try await sleep(sleepNs)
                 } catch {
                     return nil
                 }
@@ -189,12 +198,12 @@ struct ResilientEsploraClient {
         }
     }
 
-    /// +/-25% multiplicative jitter on a base backoff. Prevents N wallet
-    /// instances from hammering the public mempool in lockstep.
-    /// Rounded so a 1s base doesn't truncate to 0 at the lower bound.
-    static func jitteredBackoff(base: UInt64) -> UInt64 {
+    /// +/-25% multiplicative jitter on a base backoff in seconds, returned in nanoseconds.
+    /// Prevents N wallet instances from hammering the public mempool in lockstep. Computed
+    /// in nanoseconds so a 1s base still spreads across 0.75-1.25s instead of rounding to 1s.
+    static func jitteredBackoffNanoseconds(base: UInt64) -> UInt64 {
         let jitter = Double.random(in: 0.75...1.25)
-        return UInt64((Double(base) * jitter).rounded())
+        return UInt64(Double(base) * jitter * 1_000_000_000)
     }
 
     /// Terse AuditService wrapper.
