@@ -121,6 +121,44 @@ class AppState {
         try databaseService?.paymentRepo.getPayment(byId: id)
     }
 
+    func payment(paymentId: String) -> PaymentRecord? {
+        databaseService?.paymentRepo.payment(paymentId: paymentId)
+    }
+
+    /// Throws when there is no database yet or the lookup fails.
+    func recentTrades(limit: Int) throws -> [TradeRecord] {
+        guard let databaseService else { throw DatabaseError.openFailed("Database unavailable") }
+        return try databaseService.channelRepo.getRecentTrades(limit: limit)
+    }
+
+    /// Throws when there is no database yet or the lookup fails.
+    func recentPayments(limit: Int) throws -> [PaymentRecord] {
+        guard let databaseService else { throw DatabaseError.openFailed("Database unavailable") }
+        return try databaseService.paymentRepo.getRecentPayments(limit: limit)
+    }
+
+    /// Records a send the user just started as pending history; best effort.
+    func recordOutgoingPending(
+        paymentId: String,
+        paymentType: String,
+        amountMsat: UInt64,
+        price: Double,
+        address: String?,
+        txid: String?
+    ) {
+        // Home and History list pending rows only when this epoch moves.
+        defer { notifyPaymentsChanged() }
+        try? databaseService?.paymentRepo.recordOutgoingPending(
+            paymentId: paymentId,
+            paymentType: paymentType,
+            amountMsat: amountMsat,
+            amountUSD: price > 0 ? BitcoinUnits.usd(msats: amountMsat, price: price) : nil,
+            btcPrice: price > 0 ? price : nil,
+            address: address,
+            txid: txid
+        )
+    }
+
     var confirmationRefreshResult: ConfirmationRefreshResult?
     var confirmationRefreshResultVersion = 0
     let mempoolWebSocketService: MempoolWebSocketProtocol = MempoolWebSocketService()
@@ -2976,13 +3014,17 @@ class AppState {
         let amountUSD: Double? = price > 0
             ? BitcoinUnits.usd(sats: amountSats, price: price)
             : nil
+        let rowId: Int64
         do {
-            try db.spliceRepo.recordPendingSplice(
+            rowId = try db.spliceRepo.recordPendingSplice(
                 paymentType: "splice_out",
                 amountMsat: amountSats * 1000,
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil,
                 address: address,
+                selfSend: db.paymentRepo.isOwnReceiveAddress(
+                    address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+                ),
                 channel: channel
             )
         } catch {
@@ -2995,8 +3037,18 @@ class AppState {
         }
         spliceGeneration &+= 1
         isSweeping = true
-        pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address)
+        pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address, rowId: rowId)
         statusMessage = "Move pending..."
+    }
+
+    /// The node accepted the splice just started; older overdue attempts on its channel are dead.
+    func spliceStartAccepted() {
+        guard let rowId = pendingSplice?.rowId else { return }
+        do {
+            try databaseService?.spliceRepo.retireSupersededSplices(byRowId: rowId)
+        } catch {
+            AuditService.log("SPLICE_RETIRE_FAILED", data: ["error": error.localizedDescription])
+        }
     }
 
     func cancelPendingSpliceStart() {
@@ -3197,9 +3249,10 @@ class AppState {
                    prevOnchainSats: prevOnchainSats,
                    currentOnchainSats: onchainBalanceSats,
                    completedRow: row,
-                   destinationIsOwnAddress: databaseService.paymentRepo.isOwnReceiveAddress(
-                       row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
-                   )
+                   destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid)) == true
+                       || databaseService.paymentRepo.isOwnReceiveAddress(
+                           row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+                       )
                ) {
                 prevOnchainSats = baseline
             }
@@ -3589,7 +3642,7 @@ class AppState {
         guard let databaseService, let node = nodeService.node,
               let pendingIds = try? databaseService.paymentRepo.pendingOutgoingLightningPaymentIds()
         else { return }
-        // ponytail: user sends only; trade fees and stability sends never use these row types.
+        // User sends only; trade fees and stability sends never use these row types.
         let repaired = LightningPaymentRecovery.reconcilePending(
             paymentIds: pendingIds,
             lookup: { node.payment(paymentId: $0).flatMap(LightningPaymentResolution.init) },
@@ -3968,7 +4021,7 @@ class AppState {
             return
         }
         isSweeping = true
-        statusMessage = "Fetching fee rate..."
+        statusMessage = "Starting move..."
 
         Task { @MainActor in
             guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
@@ -3997,7 +4050,7 @@ class AppState {
             // Persist before the native call so spliceNegotiated always has a
             // row to stamp with the txid, even if the event is delivered before
             // spliceInWithAll returns (and so the operation survives a restart).
-            let recorded = (try? databaseService?.spliceRepo.recordPendingSplice(
+            let rowId = try? databaseService?.spliceRepo.recordPendingSplice(
                 paymentType: "splice_in",
                 amountMsat: sweepAmount * 1000,
                 amountUSD: amountUSD,
@@ -4007,29 +4060,26 @@ class AppState {
                     channelId: channel.channelId,
                     previousFundingTxid: channel.fundingTxo?.txid
                 )
-            )) != nil
-            guard recorded else {
+            )
+            guard let rowId else {
                 statusMessage = "Could not save pending move — move not started"
                 isSweeping = false
                 return
             }
-            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil)
-            // Fetched only once the pending row exists: across this await the stability tick's
-            // stale-lock release must see a pending splice, not an unbacked isSweeping lock.
-            let feeRateSatVb = await feeRateService.currentRate()
+            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil, rowId: rowId)
 
             do {
                 try nodeService.spliceInWithAll(
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId
                 )
+                spliceStartAccepted()
                 sweepOnchainStart = balances.totalOnchainBalanceSats
                 spliceGeneration &+= 1
                 statusMessage = "Moving all onchain funds to channel..."
 
                 AuditService.log("SWEEP_TO_CHANNEL", data: [
                     "amount_sats": "\(sweepAmount)",
-                    "fee_rate_sat_vb": "\(feeRateSatVb)",
                     "mode": "splice_in_with_all"
                 ])
             } catch {

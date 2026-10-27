@@ -196,6 +196,7 @@ struct SendPaymentExecutor {
                 appState.cancelPendingSpliceStart()
                 throw error
             }
+            appState.spliceStartAccepted()
             return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .spliceOut)
         } else {
             let txid = try appState.nodeService.sendOnchain(
@@ -257,16 +258,8 @@ struct SendPaymentExecutor {
         txid: String? = nil,
         appState: AppState
     ) {
-        // Home and History list pending rows only when this epoch moves.
-        defer { appState.notifyPaymentsChanged() }
-        try? appState.databaseService?.paymentRepo.recordOutgoingPending(
-            paymentId: id,
-            paymentType: type,
-            amountMsat: msat,
-            amountUSD: price > 0 ? BitcoinUnits.usd(msats: msat, price: price) : nil,
-            btcPrice: price > 0 ? price : nil,
-            address: address,
-            txid: txid
+        appState.recordOutgoingPending(
+            paymentId: id, paymentType: type, amountMsat: msat, price: price, address: address, txid: txid
         )
     }
 }

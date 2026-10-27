@@ -412,7 +412,8 @@ final class ConfirmationPollingService {
             // Only an authoritative "not found" may retire an old row; an outage must leave it
             // pollable so a later recovery can still confirm it.
             let now = Int64(Date().timeIntervalSince1970)
-            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now) else { return .failed }
+            // A fresh row the explorers have not indexed yet is still pending, not a failed lookup.
+            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now) else { return .unchanged }
             do {
                 guard try databaseService.paymentRepo.failUnconfirmedOnchainRow(id: payment.id) else {
                     return .unchanged

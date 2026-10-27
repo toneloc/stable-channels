@@ -39,7 +39,9 @@ struct TxConfirmationResolver: TxConfirmationProvider {
                 maxAttempts: maxAttempts,
                 backoffSeconds: backoffSeconds,
                 timeout: esploraTimeout,
-                wallClockBudgetSeconds: wallClockBudgetSeconds
+                wallClockBudgetSeconds: wallClockBudgetSeconds,
+                // A receive paid by a large batch must still confirm from its full `/tx` body.
+                maxBodyBytes: ResilientEsploraClient.Config.fullTransactionMaxBodyBytes
             )
         )
     }

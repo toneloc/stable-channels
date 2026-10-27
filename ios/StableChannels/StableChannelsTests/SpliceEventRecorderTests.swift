@@ -156,6 +156,61 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertNil(try row(id).txid)
     }
 
+    // MARK: - Retry after an overdue attempt
+
+    func testRetriedSpliceAfterAnExpiredAttemptGetsItsTxid() throws {
+        let first = try begin()
+        try ageOut(first)
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+        let retry = try begin()
+
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+
+        XCTAssertEqual(try row(retry).txid, newFunding, "the pending retry is preferred over the expired attempt")
+        XCTAssertEqual(try row(first).status, "expired")
+        XCTAssertNil(try row(first).txid)
+    }
+
+    func testTwoExpiredAttemptsStayAmbiguous() throws {
+        let first = try begin()
+        let second = try begin()
+        try ageOut(first)
+        try ageOut(second)
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+
+        XCTAssertNil(try row(first).txid)
+        XCTAssertNil(try row(second).txid)
+    }
+
+    func testAcceptedSpliceRetiresOnlyOlderExpiredAttemptsOnItsChannel() throws {
+        let stale = try begin()
+        let otherChannel = try begin(userChannelId: "43", channelId: "chan-b")
+        try ageOut(stale)
+        try ageOut(otherChannel)
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+        let accepted = try begin()
+
+        try service.spliceRepo.retireSupersededSplices(byRowId: accepted)
+
+        XCTAssertEqual(try row(stale).status, "failed")
+        XCTAssertEqual(try row(otherChannel).status, "expired")
+        XCTAssertEqual(try row(accepted).status, "pending")
+    }
+
+    func testSelfSendIsReadBackFromTheOperation() throws {
+        let identity = SpliceChannelIdentity(userChannelId: ucid, channelId: cid, previousFundingTxid: oldFunding)
+        let own = try service.spliceRepo.recordPendingSplice(
+            paymentType: "splice_out", amountMsat: 1000, amountUSD: nil, btcPrice: nil,
+            address: "bc1qown", selfSend: true, channel: identity
+        )
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+        XCTAssertEqual(try row(own).txid, newFunding)
+        XCTAssertTrue(try service.spliceRepo.isSelfSendSplice(txid: newFunding))
+        XCTAssertFalse(try service.spliceRepo.isSelfSendSplice(txid: oldFunding))
+    }
+
     // MARK: - ChannelReady
 
     func testReadyAloneRecoversWithUnchangedChannelIdUsingTheEventFunding() throws {
@@ -204,9 +259,23 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertNil(SpliceEventReceipt.liveFunding(in: [], userChannelId: ucid, channelId: cid))
     }
 
-    func testEventKeyComesFromTheEventNotTheLiveSnapshot() {
-        XCTAssertEqual(ready(eventFunding: nil, liveFunding: newFunding).eventKey, "ready:42:chan-a:unknown")
+    func testEventKeyPrefersTheEventTxidThenTheResolvedFunding() {
+        XCTAssertEqual(
+            ready(eventFunding: oldFunding, liveFunding: newFunding).eventKey,
+            "ready:42:chan-a:\(oldFunding)"
+        )
+        XCTAssertEqual(ready(eventFunding: nil, liveFunding: newFunding).eventKey, "ready:42:chan-a:\(newFunding)")
+        XCTAssertEqual(ready(eventFunding: nil).eventKey, "ready:42:chan-a:unknown")
         XCTAssertEqual(negotiated(newFunding).eventKey, "negotiated:42:chan-a:\(newFunding)")
+    }
+
+    func testOutpointLessReadyAfterTheOpenStillReachesTheSplice() throws {
+        try service.spliceRepo.recordEvent(ready(eventFunding: nil, liveFunding: oldFunding))
+        let id = try begin()
+        try service.spliceRepo.recordEvent(ready(eventFunding: nil, liveFunding: newFunding))
+
+        XCTAssertEqual(try eventCount(), 2)
+        XCTAssertEqual(try row(id).txid, newFunding)
     }
 
     // MARK: - Legacy rows and identity
@@ -296,8 +365,12 @@ final class SpliceEventRecorderTests: XCTestCase {
     }
 
     func testBackgroundLeavesASpliceFailureForTheForegroundOnlyWhileAnOperationIsPending() throws {
-        XCTAssertEqual(backgroundDB.hasPendingSplice(), false)
+        let failure = Event.spliceNegotiationFailed(channelId: cid, userChannelId: ucid, counterpartyNodeId: "peer")
+        func mayAcknowledge() -> Bool {
+            SpliceEventAcknowledgement.backgroundMayAcknowledge(failure, db: backgroundDB, channels: { [] })
+        }
+        XCTAssertTrue(mayAcknowledge())
         try begin()
-        XCTAssertEqual(backgroundDB.hasPendingSplice(), true)
+        XCTAssertFalse(mayAcknowledge(), "the foreground owns a failure while a splice is pending")
     }
 }

@@ -558,16 +558,22 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
     func testHistoryPreservesGoodRowsAndNetworkErrorAcrossReloads() throws {
         let id = try recordPendingPayment(txid: "history_preserve")
         var history = HistoryContent()
-        history.reload(database: db)
+        func reloadFromDatabase() {
+            history.reload(
+                loadTrades: { try db.channelRepo.getRecentTrades(limit: 50) },
+                loadPayments: { try db.paymentRepo.getRecentPayments(limit: 50) }
+            )
+        }
+        reloadFromDatabase()
         history.networkError = ConfirmationRefreshResult.timedOut.errorMessage
         let networkError = history.networkError
-        history.reload(database: nil)
+        history.reload(loadTrades: { throw DatabaseError.openFailed("none") }, loadPayments: { [] })
         XCTAssertEqual(history.payments.map(\.id), [id])
         XCTAssertNotNil(history.errorMessage)
         history.reload(loadTrades: { [] }, loadPayments: { throw URLError(.unknown) })
         XCTAssertEqual(history.payments.map(\.id), [id])
         XCTAssertNotNil(history.loadError)
-        history.reload(database: db)
+        reloadFromDatabase()
         XCTAssertNil(history.loadError)
         XCTAssertEqual(history.errorMessage, networkError)
         history.networkError = ConfirmationRefreshResult.completed(failedLookups: 0).errorMessage
@@ -708,7 +714,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
 
         let result = try await pollingService.refresh()
 
-        XCTAssertEqual(result, .completed(failedLookups: 2))
+        XCTAssertEqual(result, .completed(failedLookups: 0), "not indexed yet is pending, not a failed lookup")
         XCTAssertEqual(try db.paymentRepo.getPayment(byId: young)?.status, "pending")
         XCTAssertEqual(try db.paymentRepo.getPayment(byId: confirmed)?.status, "pending")
     }

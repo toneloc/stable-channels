@@ -38,6 +38,14 @@ struct ResilientEsploraClient {
         let wallClockBudgetSeconds: TimeInterval
         /// Fires once after the attempt loop falls through without a hit.
         let onExhausted: (@Sendable () async -> Void)?
+        /// Larger bodies count as a failed lookup.
+        let maxBodyBytes: Int
+
+        /// 1 MB: long-history `/address/.../txs/chain` can blow past this, and a hostile or buggy
+        /// mempool could push hundreds of MB into memory otherwise.
+        static let defaultMaxBodyBytes = 1_048_576
+        /// A full `/tx` body for the largest standard transaction (400k vbytes of outputs).
+        static let fullTransactionMaxBodyBytes = 32 * 1_048_576
 
         init(
             chainURLs: [String],
@@ -45,6 +53,7 @@ struct ResilientEsploraClient {
             backoffSeconds: [UInt64] = [1, 4, 16, 64, 256],
             timeout: TimeInterval = 5,
             wallClockBudgetSeconds: TimeInterval = 900,
+            maxBodyBytes: Int = defaultMaxBodyBytes,
             onExhausted: (@Sendable () async -> Void)? = nil
         ) {
             precondition(!chainURLs.isEmpty, "ResilientEsploraClient needs at least one chain URL")
@@ -53,6 +62,7 @@ struct ResilientEsploraClient {
             self.backoffSeconds = backoffSeconds
             self.timeout = timeout
             self.wallClockBudgetSeconds = wallClockBudgetSeconds
+            self.maxBodyBytes = maxBodyBytes
             self.onExhausted = onExhausted
         }
     }
@@ -71,11 +81,6 @@ struct ResilientEsploraClient {
         self.urlSession = urlSession
         self.config = config
     }
-
-    /// 1 MB cap on response body. Long-history `/address/.../txs/chain`
-    /// can blow past this; a hostile or buggy mempool could push hundreds
-    /// of MB into memory otherwise.
-    private static let maxBodyBytes = 1_048_576
 
     /// Run the poll loop. Calls `onResolved` once on success, or returns
     /// (and fires `onExhausted`) after `maxAttempts` or the wall-clock
@@ -211,7 +216,7 @@ struct ResilientEsploraClient {
             guard let http = response as? HTTPURLResponse else { return .failed }
             if http.statusCode == 404 { return .notFound }
             guard http.statusCode == 200 else { return .failed }
-            guard data.count <= Self.maxBodyBytes else {
+            guard data.count <= config.maxBodyBytes else {
                 Self.log("ESPLORA_BODY_TOO_LARGE", [
                     "path": path,
                     "size": "\(data.count)"

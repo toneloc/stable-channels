@@ -158,7 +158,10 @@ struct HistoryView: View {
     }
 
     private func loadHistory() {
-        history.reload(database: appState.databaseService)
+        history.reload(
+            loadTrades: { try appState.recentTrades(limit: 50) },
+            loadPayments: { try appState.recentPayments(limit: 50) }
+        )
     }
 }
 
@@ -178,17 +181,6 @@ struct HistoryContent {
     mutating func clearErrors() {
         networkError = nil
         loadError = nil
-    }
-
-    mutating func reload(database: DatabaseService?) {
-        guard let database else {
-            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
-            return
-        }
-        reload(
-            loadTrades: { try database.channelRepo.getRecentTrades(limit: 50) },
-            loadPayments: { try database.paymentRepo.getRecentPayments(limit: 50) }
-        )
     }
 
     mutating func reload(

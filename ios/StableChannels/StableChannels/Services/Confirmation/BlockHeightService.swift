@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+import Observation
 import os.log
 
 @Observable

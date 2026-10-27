@@ -10,7 +10,8 @@ enum SpliceEventRecorder {
             payment_row_id INTEGER PRIMARY KEY,
             user_channel_id TEXT NOT NULL,
             channel_id TEXT NOT NULL,
-            previous_funding_txid TEXT
+            previous_funding_txid TEXT,
+            self_send INTEGER NOT NULL DEFAULT 0
         )
         """,
         """
@@ -36,7 +37,9 @@ enum SpliceEventRecorder {
     ///   reviving them).
     /// - tracked: a NULL-txid operation on the same channel. LDK keeps the channel id across a
     ///   splice, so a ready event must also prove funding moved off the saved outpoint, or an
-    ///   initial channel-ready replay would look like a splice.
+    ///   initial channel-ready replay would look like a splice. A `pending` operation is preferred
+    ///   over `expired` ones, so an overdue attempt left behind by a retry cannot make the retry
+    ///   ambiguous.
     /// - legacy: rows created before operation identity was persisted, scoped to the saved channel.
     static let insertEventSQL = """
     WITH
@@ -47,13 +50,16 @@ enum SpliceEventRecorder {
         LIMIT 2
     ),
     tracked AS (
-        SELECT p.id FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+        SELECT p.id, p.status = 'pending' AS live
+        FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
         WHERE p.status IN ('pending', 'expired') AND p.txid IS NULL
           AND s.user_channel_id = ?3 AND s.channel_id = ?4
           AND CASE WHEN ?2 = 'ready'
               THEN s.previous_funding_txid IS NOT NULL AND (?5 IS NULL OR s.previous_funding_txid != ?5)
               ELSE s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?5 END
-        LIMIT 2
+    ),
+    preferred AS (
+        SELECT id FROM tracked WHERE live = (SELECT MAX(live) FROM tracked) LIMIT 2
     ),
     legacy AS (
         SELECT p.id FROM payments p
@@ -66,7 +72,7 @@ enum SpliceEventRecorder {
     INSERT OR IGNORE INTO splice_events (event_key, event_type, user_channel_id, channel_id, txid, vout, payment_row_id)
     SELECT ?1, ?2, ?3, ?4, ?5, ?6, CASE
         WHEN EXISTS (SELECT 1 FROM exact) THEN (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM exact)
-        WHEN EXISTS (SELECT 1 FROM tracked) THEN (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM tracked)
+        WHEN EXISTS (SELECT 1 FROM tracked) THEN (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM preferred)
         ELSE (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(id) END FROM legacy)
     END
     """
