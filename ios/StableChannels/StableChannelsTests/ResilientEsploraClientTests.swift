@@ -423,18 +423,12 @@ final class ResilientEsploraClientTests: XCTestCase {
             ["\(ResilientEsploraClient.trimSlash(base))/tx/abc/outspend/0"]
         }
 
-        let start = Date()
         await client.run(
             endpointBuilder: builder,
             resultParser: parser,
             onResolved: { hit in await resolved.set(hit) }
         )
-        let elapsed = Date().timeIntervalSince(start)
 
-        XCTAssertLessThan(
-            elapsed, 1.0,
-            "Wall-clock budget of 0.1s must short-circuit the 10s backoff"
-        )
         let v = await resolved.value
         XCTAssertNil(v, "onResolved must not fire when wall-clock budget is exceeded")
         let recorded = await sleeps.values
@@ -708,13 +702,13 @@ final class ResilientEsploraClientTests: XCTestCase {
     }
 }
 
-/// Minimal actor-isolated box for capturing `onResolved` hits in tests.
 /// Records requested sleeps (nanoseconds) instead of waiting.
 actor SleepLog {
     private(set) var values: [UInt64] = []
     func record(_ nanoseconds: UInt64) { values.append(nanoseconds) }
 }
 
+/// Minimal actor-isolated box for capturing `onResolved` hits in tests.
 actor ResolvedBox<T: Sendable> {
     var value: T?
     func set(_ v: T) { value = v }

@@ -40,9 +40,13 @@ jobs:
           udid=$(xcrun simctl list devices available -j \
             | jq -r '.devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"][]? | select(.name == "iPhone 17") | .udid' \
             | head -n 1)
-          test -n "$udid"
+          if [ -z "$udid" ]; then
+            xcrun simctl list devices available
+            exit 1
+          fi
           echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          xcrun simctl boot "$udid"
+          # Already booted is fine; bootstatus -b below boots it if needed.
+          xcrun simctl boot "$udid" || true
 
       - name: Cache Swift packages
         uses: actions/cache@v4
