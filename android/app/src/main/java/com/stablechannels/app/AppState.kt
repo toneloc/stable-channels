@@ -3567,6 +3567,7 @@ class AppState(private val context: Context) : ViewModel() {
                     refreshTradeUncertainty()
                     runStabilityCheck()
                     detectOnchainDeposit()
+                    autoSpliceIn()
                     pollPaymentConfirmations()
                 }
             }
@@ -4235,6 +4236,59 @@ class AppState(private val context: Context) : ViewModel() {
                     setOnchainReceiveAddress(null)
                 }
             }
+    }
+
+    private var autoSpliceInAttemptAtMs: Long? = null
+    private val _autoSpliceInStep = MutableStateFlow(AutoSpliceIn.Step.IDLE)
+    /** Home shows Move only while the fee cap holds funds back. */
+    val autoSpliceInStep: StateFlow<AutoSpliceIn.Step> = _autoSpliceInStep
+
+    /** Moves confirmed on-chain funds into the channel without a tap on Move (#445). */
+    private fun autoSpliceIn() {
+        val step =
+            try {
+                AutoSpliceIn.decide(
+                    canSplice =
+                        _isOnline.value &&
+                            !isSweeping &&
+                            pendingSplice == null &&
+                            !isChannelClosing &&
+                            pendingClosePaymentId == null &&
+                            nodeService.channels.any { it.isChannelReady },
+                    spendableSats = _spendableOnchainSats.value,
+                    newestConfirmations = ::newestOnchainConfirmations,
+                    lastAttemptAtMs = autoSpliceInAttemptAtMs,
+                    nowMs = System.currentTimeMillis(),
+                    feeRateSatVb = ::fetchFeeRate,
+                )
+            } catch (e: Exception) {
+                Log.w("AppState", "Auto splice-in check failed: ${e.message}")
+                return
+            }
+        if (step != _autoSpliceInStep.value) {
+            AuditService.log("AUTO_SPLICE_IN", mapOf("step" to step.name))
+            _autoSpliceInStep.value = step
+        }
+        if (step == AutoSpliceIn.Step.SPLICE) {
+            autoSpliceInAttemptAtMs = System.currentTimeMillis()
+            sweepToChannel()
+        }
+    }
+
+    /** Confirmations of the newest confirmed wallet transaction; the splice spends all of them. */
+    private fun newestOnchainConfirmations(): Int? {
+        val node = nodeService.node ?: return null
+        val heights =
+            node.listPayments().mapNotNull { p ->
+                val status = (p.kind as? PaymentKind.Onchain)?.status
+                (status as? ConfirmationStatus.Confirmed)?.height?.toInt()?.takeIf {
+                    p.status != PaymentStatus.FAILED
+                }
+            }
+        return AutoSpliceIn.newestConfirmations(
+            heights,
+            node.status().currentBestBlock.height.toInt(),
+        )
     }
 
     fun sweepToChannel() {
