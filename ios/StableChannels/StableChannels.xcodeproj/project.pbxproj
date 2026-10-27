@@ -183,10 +183,12 @@
 		49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */; };
 		49DDD00E3054000100B5A146 /* ChannelAllocationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */; };
 		49DDD0103054000100B5A146 /* BookRepairPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */; };
+		445A00023054000100B5A146 /* AutoSpliceIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 445A00013054000100B5A146 /* AutoSpliceIn.swift */; };
 		49DDD0123054000100B5A146 /* StabilityRepairProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */; };
 		49DDD0143054000100B5A146 /* RepairBooksUseCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */; };
 		49DDD0163054000100B5A146 /* StabilityStatusAdapters.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0153054000100B5A146 /* StabilityStatusAdapters.swift */; };
 		49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */; };
+		445A00043054000100B5A146 /* AutoSpliceInTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 445A00033054000100B5A146 /* AutoSpliceInTests.swift */; };
 		49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */; };
 		49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */; };
 		49DDD0203054000100B5A146 /* SliderConversionMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */; };
@@ -466,10 +468,12 @@
 		49DDD00B3054000100B5A146 /* HomeSyncStatusSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSyncStatusSectionView.swift; sourceTree = "<group>"; };
 		49DDD00D3054000100B5A146 /* ChannelAllocationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelAllocationTests.swift; sourceTree = "<group>"; };
 		49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepairPolicy.swift; sourceTree = "<group>"; };
+		445A00013054000100B5A146 /* AutoSpliceIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoSpliceIn.swift; sourceTree = "<group>"; };
 		49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityRepairProtocols.swift; sourceTree = "<group>"; };
 		49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepairBooksUseCase.swift; sourceTree = "<group>"; };
 		49DDD0153054000100B5A146 /* StabilityStatusAdapters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityStatusAdapters.swift; sourceTree = "<group>"; };
 		49DDD0173054000100B5A146 /* BookRepairPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookRepairPolicyTests.swift; sourceTree = "<group>"; };
+		445A00033054000100B5A146 /* AutoSpliceInTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutoSpliceInTests.swift; sourceTree = "<group>"; };
 		49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepairBooksUseCaseTests.swift; sourceTree = "<group>"; };
 		49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StabilityStatusAdaptersTests.swift; sourceTree = "<group>"; };
 		49DDD01F3054000100B5A146 /* SliderConversionMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SliderConversionMetricsTests.swift; sourceTree = "<group>"; };
@@ -590,6 +594,7 @@
 		2788439C4BA338889A92627F /* Domain */ = {
 			isa = PBXGroup;
 			children = (
+				445A00013054000100B5A146 /* AutoSpliceIn.swift */,
 				ABD66CEF54B4AD55A14B6FE1 /* BackupModels.swift */,
 				49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */,
 				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
@@ -1083,6 +1088,7 @@
 			isa = PBXGroup;
 			children = (
 				4993591430712D1500D6B50E /* AddressVisualChunkerTests.swift */,
+				445A00033054000100B5A146 /* AutoSpliceInTests.swift */,
 				49DDD0213054000100B5A146 /* BalanceBarStateTests.swift */,
 				49DDD0233054000100B5A146 /* BalanceBarTradeCalculatorTests.swift */,
 				4993591530712D1500D6B50E /* Base58CheckTests.swift */,
@@ -1303,6 +1309,7 @@
 				49107191307CF1B6005314F1 /* SendDomainPolicyTests.swift in Sources */,
 				49DDD0243054000100B5A146 /* BalanceBarTradeCalculatorTests.swift in Sources */,
 				49DDD0183054000100B5A146 /* BookRepairPolicyTests.swift in Sources */,
+				445A00043054000100B5A146 /* AutoSpliceInTests.swift in Sources */,
 				49DDD01A3054000100B5A146 /* RepairBooksUseCaseTests.swift in Sources */,
 				49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */,
 				E7E67B65EAD4FF5732460856 /* ChannelSweepTests.swift in Sources */,
@@ -1336,6 +1343,7 @@
 				49DDD00A3054000100B5A146 /* HomeBalanceSectionView.swift in Sources */,
 				49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */,
 				49DDD0103054000100B5A146 /* BookRepairPolicy.swift in Sources */,
+				445A00023054000100B5A146 /* AutoSpliceIn.swift in Sources */,
 				49DDD0123054000100B5A146 /* StabilityRepairProtocols.swift in Sources */,
 				49DDD0143054000100B5A146 /* RepairBooksUseCase.swift in Sources */,
 				49DDD0163054000100B5A146 /* StabilityStatusAdapters.swift in Sources */,

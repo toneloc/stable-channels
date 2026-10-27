@@ -430,6 +430,9 @@ class AppState {
     private var spliceConfirmationTask: Task<Void, Never>?
     private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
+    /// Latest automatic splice-in decision; Home shows Move only while fees are too high.
+    var autoSpliceInStep: AutoSpliceIn.Step = .idle
+    private var autoSpliceInLastAttemptAt: Date?
     var prevOnchainSats: UInt64 = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
@@ -763,6 +766,8 @@ class AppState {
         transactionLinkService.clearReceiveTxid()
         pendingTradePayments.removeAll()
         pendingSplice = nil
+        autoSpliceInStep = .idle
+        autoSpliceInLastAttemptAt = nil
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
@@ -3150,6 +3155,7 @@ class AppState {
                     self?.runStabilityCheck()
                     self?.detectOnchainDeposit()
                 }
+                await self?.autoSpliceIn()
                 await self?.retryPendingSpliceFailureChecks()
             }
         }
@@ -3871,6 +3877,59 @@ class AppState {
                 databaseService?.spliceRepo.failLatestPendingSplice()
             }
         }
+    }
+
+    // MARK: - Auto Splice-In
+
+    /// Runs on the stability tick and moves confirmed on-chain funds into the channel through
+    /// `sweepToChannel`, so the splice lifecycle and History rows match a manual Move.
+    func autoSpliceIn() async {
+        let now = Date()
+        let step = await AutoSpliceIn.decide(
+            canSplice: canAutoSpliceIn(),
+            spendableSats: nodeService.spendableOnchainSats(),
+            newestConfirmations: { newestOnchainConfirmations() },
+            lastAttemptAt: autoSpliceInLastAttemptAt,
+            now: now,
+            feeRateSatVb: { await autoSpliceInFeeRateSatVb() }
+        )
+        if step != autoSpliceInStep {
+            autoSpliceInStep = step
+            AuditService.log("AUTO_SPLICE_IN", data: ["step": "\(step)"])
+        }
+        // The fee lookup suspends, so a splice or close may have started in the meantime.
+        guard step == .splice, canAutoSpliceIn() else { return }
+        autoSpliceInLastAttemptAt = now
+        sweepToChannel()
+    }
+
+    private func canAutoSpliceIn() -> Bool {
+        guard nodeService.isRunning, isOnline,
+              nodeService.channels.contains(where: \.isChannelReady) else { return false }
+        guard !isSweeping, pendingSplice == nil, !isChannelClosing else { return false }
+        return databaseService?.pendingOpRepo.fetchPendingOperations()
+            .contains(where: { $0.opType == "channel_close" }) != true
+    }
+
+    /// Confirmations of the newest confirmed on-chain wallet transaction, or nil when none is known.
+    private func newestOnchainConfirmations() -> Int? {
+        guard let node = nodeService.node else { return nil }
+        let heights = node.listPayments().compactMap { payment -> Int? in
+            guard payment.status != .failed,
+                  case .onchain(_, .confirmed(_, let height, _)) = payment.kind else { return nil }
+            return Int(height)
+        }
+        return AutoSpliceIn.newestConfirmations(
+            confirmedHeights: heights,
+            tipHeight: Int(node.status().currentBestBlock.height)
+        )
+    }
+
+    /// The 6-block (hourFee) rate from the fee lookup used for on-chain send estimates.
+    private func autoSpliceInFeeRateSatVb() async -> UInt64? {
+        let rate = await feeRateService.recommendedFees().hourFee
+        guard rate.isFinite, rate > 0 else { return nil }
+        return UInt64(rate.rounded())
     }
 
     /// Starts the node with the current chainURL, and automatically falls back to the
