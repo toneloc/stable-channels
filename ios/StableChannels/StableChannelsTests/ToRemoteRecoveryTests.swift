@@ -520,6 +520,20 @@ final class ToRemoteRecoveryTests: XCTestCase {
         XCTAssertFalse(active)
     }
 
+    func testAOneTimeRestoreCheckIsRetriedWhileTheExplorerIsDown() async {
+        var recovery = recovery()
+        await recovery.startAfterRestore(fundingTxid: funding, repeats: false)
+        await runNow(recovery)
+        let waiting = await recovery.state.fundingTxid
+        XCTAssertEqual(waiting, funding)
+
+        closePaysUs()
+        recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
+        await runNow(recovery)
+        let pending = await recovery.pendingSats
+        XCTAssertEqual(pending, 94467)
+    }
+
     func testARestoreWithoutAFundingTxidLooksForNothing() async {
         let recovery = recovery()
         await recovery.startAfterRestore(fundingTxid: nil, repeats: true)

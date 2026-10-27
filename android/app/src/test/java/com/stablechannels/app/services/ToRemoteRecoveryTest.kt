@@ -484,6 +484,19 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
+    fun aOneTimeRestoreCheckIsRetriedWhileTheExplorerIsDown() {
+        val recovery = recovery()
+        recovery.startAfterRestore(funding, 0, repeat = false)
+        recovery.runNow()
+        assertEquals(funding, recovery.state.fundingTxid)
+
+        closePaysUs()
+        clock += ToRemoteRecovery.backoffMs(1)
+        recovery.runNow()
+        assertEquals(94_467, recovery.pendingSats)
+    }
+
+    @Test
     fun aRestoreWithoutAFundingTxidLooksForNothing() {
         val recovery = recovery()
         recovery.startAfterRestore(null, null, repeat = true)
