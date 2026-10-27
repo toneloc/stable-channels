@@ -4039,10 +4039,38 @@ class AppState {
             await recovery.run(
                 seed: seed,
                 destination: { await MainActor.run { try? nodeService.newOnchainAddress() } },
-                feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) }
+                feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) },
+                onSwept: { [weak self] txid, sats, address in
+                    await self?.recordRecoveredClose(txid: txid, sats: sats, address: address)
+                }
             )
             toRemotePendingSats = await recovery.pendingSats
             publishClosedChannelFunds()
+        }
+    }
+
+    /// LDK never saw this channel close, so nothing else records it in History. The row also lets
+    /// detectOnchainDeposit() count the sweep as the close's funds, not a new deposit.
+    private func recordRecoveredClose(txid: String, sats: UInt64, address: String) {
+        let price = btcPrice
+        do {
+            try databaseService?.paymentRepo.recordPayment(
+                paymentId: txid,
+                paymentType: "channel_close",
+                direction: "received",
+                amountMsat: sats * 1000,
+                amountUSD: price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil,
+                btcPrice: price > 0 ? price : nil,
+                counterparty: nil,
+                status: "pending",
+                txid: txid,
+                address: address
+            )
+        } catch {
+            AuditService.log("TO_REMOTE_PAYMENT_ROW_FAILED", data: [
+                "txid": txid,
+                "error": "\(error)"
+            ])
         }
     }
 

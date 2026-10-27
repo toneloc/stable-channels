@@ -105,16 +105,24 @@ final class ToRemoteRecoveryTests: XCTestCase {
 
     private var addressRequests = AddressCounter()
 
+    private final class SweptLog: @unchecked Sendable {
+        var entries: [String] = []
+    }
+
+    private var swept = SweptLog()
+
     private func runNow(_ recovery: ToRemoteRecovery, feeRate: UInt64? = 2) async {
         let address = address
         let counter = addressRequests
+        let swept = swept
         await recovery.run(
             seed: Self.seed,
             destination: {
                 counter.count += 1
                 return address
             },
-            feeRateSatVb: { feeRate }
+            feeRateSatVb: { feeRate },
+            onSwept: { txid, sats, to in swept.entries.append("\(txid) \(sats) \(to)") }
         )
     }
 
@@ -174,6 +182,8 @@ final class ToRemoteRecoveryTests: XCTestCase {
                 + "3fa9265709d8ce05cdcc967b82b24179af2981998657cead51b200000000"
         )
         XCTAssertEqual(tx.vsize, 111)
+        XCTAssertEqual(tx.txid, "aa1eb195d898f73cff841f257000b4dcdf496d340c7c53d8e7e357b40873e269")
+        XCTAssertEqual(tx.amountSats, 94067)
     }
 
     func testFeeRateSweepPaysAtLeastTheRateAndSkipsDust() throws {
@@ -357,6 +367,34 @@ final class ToRemoteRecoveryTests: XCTestCase {
         XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 2)
         XCTAssertEqual(ToRemoteMockURLProtocol.posted.first, ToRemoteMockURLProtocol.posted.last)
         XCTAssertEqual(addressRequests.count, 1)
+    }
+
+    /// History gets the close from the sweep, as LDK never reports it (#364).
+    func testOnlyABroadcastSweepIsReported() async throws {
+        closePaysUs()
+        var recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        closeConfirmed()
+        ToRemoteMockURLProtocol.postStatus = 400
+        await runNow(recovery)
+        XCTAssertTrue(swept.entries.isEmpty)
+
+        ToRemoteMockURLProtocol.postStatus = 200
+        recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
+        await runNow(recovery)
+        let key = try XCTUnwrap(Self.keys.match(try XCTUnwrap(Data(hex: ours))))
+        let destination = try XCTUnwrap(Bech32.segwitScriptPubKey(address, expectedHrp: "bc"))
+        let sweep = try XCTUnwrap(ToRemoteSweep.build(
+            key: key,
+            txid: close,
+            vout: 3,
+            valueSats: 94467,
+            destinationScript: destination,
+            feeRateSatVb: 2
+        ))
+        XCTAssertEqual(ToRemoteMockURLProtocol.posted.last, sweep.hex)
+        XCTAssertEqual(swept.entries, ["\(sweep.txid) \(sweep.amountSats) \(address)"])
     }
 
     func testNoFeeRateMeansNoBroadcastYet() async {
