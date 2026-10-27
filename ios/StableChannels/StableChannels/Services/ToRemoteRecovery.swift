@@ -117,17 +117,19 @@ actor ToRemoteRecovery {
     }
 
     /// Does whatever is due. Cheap to call often; returns at once while another run is going.
-    /// `seed` is the 64-byte wallet seed.
+    /// `seed` is the 64-byte wallet seed. `onSwept` gets each broadcast sweep's txid, the sats it
+    /// pays the wallet and the address.
     func run(
         seed: Data,
         destination: @Sendable () async -> String?,
-        feeRateSatVb: @Sendable () async -> UInt64?
+        feeRateSatVb: @Sendable () async -> UInt64?,
+        onSwept: @Sendable (String, UInt64, String) async -> Void = { _, _, _ in }
     ) async {
         guard state.active, !running, let keys = keys(for: seed) else { return }
         running = true
         defer { running = false }
         if !state.found.isEmpty {
-            await settle(keys, destination: destination, feeRateSatVb: feeRateSatVb)
+            await settle(keys, destination: destination, feeRateSatVb: feeRateSatVb, onSwept: onSwept)
         }
         if state.fundingTxid != nil {
             await search(keys)
@@ -226,7 +228,8 @@ actor ToRemoteRecovery {
     private func settle(
         _ keys: ToRemoteKeys,
         destination: @Sendable () async -> String?,
-        feeRateSatVb: @Sendable () async -> UInt64?
+        feeRateSatVb: @Sendable () async -> UInt64?,
+        onSwept: @Sendable (String, UInt64, String) async -> Void
     ) async {
         guard now() - lastSettleAt >= Self.settleIntervalSeconds else { return }
         lastSettleAt = now()
@@ -279,12 +282,16 @@ actor ToRemoteRecovery {
                 }
                 continue
             }
-            await log("TO_REMOTE_SWEEP_BROADCAST", [
+            let result = await broadcast(tx.hex)
+            log("TO_REMOTE_SWEEP_BROADCAST", [
                 "outpoint": "\(output.txid):\(output.vout)",
-                "result": broadcast(tx.hex),
+                "result": result,
                 "sats": output.valueSats,
                 "fee_rate": feeRate
             ])
+            if !result.hasPrefix("error:") {
+                await onSwept(tx.txid, tx.amountSats, address)
+            }
         }
         guard !done.isEmpty else { return }
         update {

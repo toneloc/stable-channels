@@ -11,6 +11,10 @@ enum ToRemoteSweep {
     struct Signed: Equatable {
         let hex: String
         let vsize: Int
+        /// Hash of the transaction without its witness.
+        let txid: String
+        /// What the sweep pays the wallet.
+        let amountSats: UInt64
     }
 
     static func withFee(
@@ -42,7 +46,12 @@ enum ToRemoteSweep {
         let base = join([le(UInt32(2)), inputsAndOutputs, le(UInt32(0))])
         let tx = join([le(UInt32(2)), Data([0x00, 0x01]), inputsAndOutputs, witness, le(UInt32(0))])
         let weight = base.count * 3 + tx.count
-        return Signed(hex: tx.map { String(format: "%02x", $0) }.joined(), vsize: (weight + 3) / 4)
+        return Signed(
+            hex: tx.map { String(format: "%02x", $0) }.joined(),
+            vsize: (weight + 3) / 4,
+            txid: hash256(base).reversed().map { String(format: "%02x", $0) }.joined(),
+            amountSats: valueSats - feeSats
+        )
     }
 
     /// Signs with the fee for `feeRateSatVb`, or returns nil when what's left would be dust.
