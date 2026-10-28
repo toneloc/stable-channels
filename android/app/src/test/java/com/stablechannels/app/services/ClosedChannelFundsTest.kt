@@ -40,9 +40,8 @@ class ClosedChannelFundsTest {
         sweeps: List<PendingSweepBalance> = emptyList(),
         open: Set<String> = emptySet(),
         coopClosed: Set<String> = emptySet(),
-        walletTxids: Set<String> = emptySet(),
         height: Int = 900_000,
-    ) = ClosedChannelFunds.from(lightning, sweeps, open, coopClosed, { it in walletTxids }, height)
+    ) = ClosedChannelFunds.from(lightning, sweeps, open, coopClosed, height)
 
     @Test
     fun openChannelIsNotCounted() {
@@ -105,7 +104,7 @@ class ClosedChannelFundsTest {
     }
 
     @Test
-    fun sweepIsCountedUntilItConfirms() {
+    fun sweepIsCountedUntilItIsBroadcast() {
         val sweeps =
             listOf(
                 PendingSweepBalance.PendingBroadcast("closed", 39_000uL),
@@ -117,7 +116,7 @@ class ClosedChannelFundsTest {
                 ),
             )
         assertEquals(
-            ClosedChannelFunds(40_000, null),
+            ClosedChannelFunds(39_000, null),
             from(sweeps = sweeps, height = 900_020),
         )
     }
@@ -157,7 +156,7 @@ class ClosedChannelFundsTest {
 
     /** Case A: the LSP force-closes and LDK, which still has the channel data, sweeps the funds. */
     @Test
-    fun lspForceCloseShowsTheCardUntilTheSweepConfirms() {
+    fun lspForceCloseShowsTheCardUntilTheSweepIsBroadcast() {
         assertNull(from(listOf(onClose("closed", 50_000)), open = setOf("closed")))
         // Closed, the close tx not confirmed yet.
         assertEquals(ClosedChannelFunds(50_000, null), from(listOf(onClose("closed", 50_000))))
@@ -171,8 +170,8 @@ class ClosedChannelFundsTest {
             ClosedChannelFunds(49_800, null),
             from(sweeps = listOf(PendingSweepBalance.PendingBroadcast("closed", 49_800uL))),
         )
-        assertEquals(
-            ClosedChannelFunds(49_800, null),
+        // Sweep broadcast: the wallet counts it from its next sync, so the card goes.
+        assertNull(
             from(
                 sweeps =
                     listOf(
@@ -183,9 +182,8 @@ class ClosedChannelFundsTest {
                             49_800uL,
                         )
                     )
-            ),
+            )
         )
-        // Sweep confirmed: the wallet shows it, so the card goes.
         assertNull(
             from(
                 sweeps =
@@ -309,12 +307,22 @@ class ClosedChannelFundsTest {
         assertFalse(ClosedChannelFunds.isCooperative(null))
     }
 
+    /** The total adds these to the wallet balance, so a broadcast sweep must not be among them. */
     @Test
-    fun aSweepIsNotCountedOnceTheWalletHasItsTx() {
-        val sweep =
-            PendingSweepBalance.BroadcastAwaitingConfirmation("closed", 900_002u, "sweep", 49_800uL)
-        assertEquals(ClosedChannelFunds(49_800, null), from(sweeps = listOf(sweep)))
-        assertNull(from(sweeps = listOf(sweep), walletTxids = setOf("sweep")))
+    fun onlySweepsNotYetBroadcastAreAdded() {
+        val sweeps =
+            listOf(
+                PendingSweepBalance.PendingBroadcast("a", 39_000uL),
+                PendingSweepBalance.BroadcastAwaitingConfirmation("b", 900_002u, "sweep", 6_188uL),
+                PendingSweepBalance.AwaitingThresholdConfirmations(
+                    "c",
+                    "sweep",
+                    "block",
+                    900_003u,
+                    1_000uL,
+                ),
+            )
+        assertEquals(39_000L, ClosedChannelFunds.unbroadcastSweepSats(sweeps))
     }
 
     @Test
@@ -336,7 +344,7 @@ class ClosedChannelFundsTest {
     fun ldkHandlesACloseUntilItsSweepConfirms() {
         val sweep =
             PendingSweepBalance.BroadcastAwaitingConfirmation("closed", 900_002u, "sweep", 49_800uL)
-        assertNull(from(sweeps = listOf(sweep), walletTxids = setOf("sweep")))
+        assertNull(from(sweeps = listOf(sweep)))
         assertTrue(ClosedChannelFunds.ldkHandlesClose(null, listOf(sweep)))
         assertTrue(
             ClosedChannelFunds.ldkHandlesClose(ClosedChannelFunds(50_000, null), emptyList())

@@ -9,7 +9,7 @@ import org.lightningdevkit.ldknode.PendingSweepBalance
  * Funds from a closed channel that are not in the onchain wallet yet (#358). After a force close
  * they are timelocked on chain, then LDK sweeps them to the wallet. Open channels are left out. A
  * coop close pays straight to the wallet, so it is left out whether or not it has confirmed. A
- * sweep is counted until the wallet has its tx.
+ * sweep is counted until LDK broadcasts it: the wallet counts it from its next sync.
  */
 data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
     companion object {
@@ -35,11 +35,21 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
 
         /**
          * Whether LDK still handles a close itself. Its sweep counts until it confirms, though the
-         * card leaves it out once the wallet has its tx.
+         * card leaves it out once it is broadcast.
          */
         fun ldkHandlesClose(ldk: ClosedChannelFunds?, pendingSweeps: List<PendingSweepBalance>) =
             ldk != null ||
                 pendingSweeps.any { it is PendingSweepBalance.BroadcastAwaitingConfirmation }
+
+        /**
+         * Sweeps LDK has not broadcast yet. A broadcast sweep is left out, as the wallet counts it
+         * once it sees the tx. LDK re-signs an unconfirmed sweep each block to a new wallet
+         * address, so its latest txid is often not the one the mempool and the wallet have.
+         */
+        fun unbroadcastSweepSats(pendingSweeps: List<PendingSweepBalance>): Long =
+            pendingSweeps.filterIsInstance<PendingSweepBalance.PendingBroadcast>().sumOf {
+                it.amountSatoshis.toLong()
+            }
 
         fun isCooperative(reason: ClosureReason?): Boolean =
             reason is ClosureReason.LegacyCooperativeClosure ||
@@ -51,7 +61,6 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
             pendingSweeps: List<PendingSweepBalance>,
             openChannelIds: Set<String>,
             coopClosedChannelIds: Set<String>,
-            isWalletTx: (String) -> Boolean,
             currentHeight: Int,
         ): ClosedChannelFunds? {
             var amountSats = 0L
@@ -84,17 +93,7 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
                         amountSats += balance.amountSatoshis.toLong()
                 }
             }
-            for (sweep in pendingSweeps) {
-                when (sweep) {
-                    is PendingSweepBalance.PendingBroadcast ->
-                        amountSats += sweep.amountSatoshis.toLong()
-                    is PendingSweepBalance.BroadcastAwaitingConfirmation ->
-                        if (!isWalletTx(sweep.latestSpendingTxid)) {
-                            amountSats += sweep.amountSatoshis.toLong()
-                        }
-                    is PendingSweepBalance.AwaitingThresholdConfirmations -> {}
-                }
-            }
+            amountSats += unbroadcastSweepSats(pendingSweeps)
             if (amountSats <= 0L) return null
             return ClosedChannelFunds(
                 amountSats = amountSats,

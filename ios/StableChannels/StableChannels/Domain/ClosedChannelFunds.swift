@@ -4,17 +4,27 @@ import LDKNode
 /// Funds from a closed channel that are not in the onchain wallet yet (#358). After a force close
 /// they are timelocked on chain, then LDK sweeps them to the wallet. Open channels are left out. A
 /// coop close pays straight to the wallet, so it is left out whether or not it has confirmed. A
-/// sweep is counted until the wallet has its tx.
+/// sweep is counted until LDK broadcasts it: the wallet counts it from its next sync.
 struct ClosedChannelFunds: Equatable {
     let amountSats: UInt64
     let blocksLeft: UInt32?
 
     /// Whether LDK still handles a close itself. Its sweep counts until it confirms, though the card
-    /// leaves it out once the wallet has its tx.
+    /// leaves it out once it is broadcast.
     static func ldkHandlesClose(_ ldk: ClosedChannelFunds?, pendingSweeps: [PendingSweepBalance]) -> Bool {
         ldk != nil || pendingSweeps.contains {
             if case .broadcastAwaitingConfirmation = $0 { return true }
             return false
+        }
+    }
+
+    /// Sweeps LDK has not broadcast yet. A broadcast sweep is left out, as the wallet counts it once it
+    /// sees the tx. LDK re-signs an unconfirmed sweep each block to a new wallet address, so its latest
+    /// txid is often not the one the mempool and the wallet have.
+    static func unbroadcastSweepSats(_ pendingSweeps: [PendingSweepBalance]) -> UInt64 {
+        pendingSweeps.reduce(0) { sum, sweep in
+            if case let .pendingBroadcast(_, amount) = sweep { return sum + amount }
+            return sum
         }
     }
 
@@ -33,7 +43,6 @@ struct ClosedChannelFunds: Equatable {
         pendingSweeps: [PendingSweepBalance],
         openChannelIds: Set<String>,
         coopClosedChannelIds: Set<String>,
-        isWalletTx: (String) -> Bool,
         currentHeight: UInt32
     ) -> ClosedChannelFunds? {
         var amountSats: UInt64 = 0
@@ -62,16 +71,7 @@ struct ClosedChannelFunds: Equatable {
                 amountSats += amount
             }
         }
-        for sweep in pendingSweeps {
-            switch sweep {
-            case let .pendingBroadcast(_, amount):
-                amountSats += amount
-            case let .broadcastAwaitingConfirmation(_, _, txid, amount):
-                if !isWalletTx(txid) { amountSats += amount }
-            case .awaitingThresholdConfirmations:
-                break
-            }
-        }
+        amountSats += unbroadcastSweepSats(pendingSweeps)
         guard amountSats > 0 else { return nil }
         return ClosedChannelFunds(
             amountSats: amountSats,

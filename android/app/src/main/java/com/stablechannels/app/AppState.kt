@@ -4745,18 +4745,9 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.update { it.copy(counterparty = liveCounterparty) }
             }
         }
-        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
-        // These funds are NOT yet in total_onchain_balance_sats
-        var sweepSats = 0L
-        for (pending in balances.pendingBalancesFromChannelClosures) {
-            when (pending) {
-                is PendingSweepBalance.PendingBroadcast ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                is PendingSweepBalance.BroadcastAwaitingConfirmation ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                else -> {}
-            }
-        }
+        // Not in total_onchain_balance_sats yet. A broadcast sweep is, once the wallet syncs.
+        val sweepSats =
+            ClosedChannelFunds.unbroadcastSweepSats(balances.pendingBalancesFromChannelClosures)
         _pendingSweepBalanceSats.value = sweepSats
 
         _lightningBalanceSats.value = lightning
@@ -4770,11 +4761,6 @@ class AppState(private val context: Context) : ViewModel() {
                 openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
                 coopClosedChannelIds =
                     coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty(),
-                isWalletTx = { txid ->
-                    nodeService.node?.listPayments().orEmpty().any {
-                        (it.kind as? PaymentKind.Onchain)?.txid == txid
-                    }
-                },
                 currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
             )
         publishClosedChannelFunds()
