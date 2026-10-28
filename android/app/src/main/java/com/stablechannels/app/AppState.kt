@@ -117,6 +117,25 @@ class AppState(private val context: Context) : ViewModel() {
             }
         }
 
+        /**
+         * The funds of closed channels that [calculateTotalBalance] leaves out, for the Home card,
+         * so no amount shows twice. LDK's lightning balance includes them, and the total counts the
+         * sweeps LDK has not broadcast when there is no channel.
+         */
+        fun closedChannelFundsLeftOut(
+            funds: ClosedChannelFunds?,
+            lightning: Long,
+            channelState: ChannelState,
+        ): ClosedChannelFunds? =
+            when {
+                funds == null -> null
+                channelState.isChannelClosing -> funds
+                channelState.isOpeningChannel -> if (lightning > 0) funds.sweepsOnly() else funds
+                channelState.isSweeping -> funds.sweepsOnly()
+                !channelState.hasReady && !channelState.hasAnyChannel -> funds.withoutSweeps()
+                else -> funds.sweepsOnly()
+            }
+
         fun calculateTotalBalance(
             lightning: Long,
             onchain: Long,
@@ -4667,7 +4686,7 @@ class AppState(private val context: Context) : ViewModel() {
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
-        _closedChannelFunds.value =
+        val closedFunds =
             ClosedChannelFunds.from(
                 lightningBalances = balances.lightningBalances,
                 pendingSweeps = balances.pendingBalancesFromChannelClosures,
@@ -4701,18 +4720,22 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        val channelState =
+            ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = nodeService.channels.isNotEmpty(),
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping,
+            )
         _totalBalanceSats.value =
             calculateTotalBalance(
                 lightning = lightning,
                 onchain = onchain,
-                hasReady = hasReady,
-                isChannelClosing = isChannelClosing,
-                isSweeping = isSweeping,
                 pendingSweep = sweepSats,
-                isOpeningChannel = isOpeningChannel,
-                hasAnyChannel = hasAnyChannel,
+                channelState = channelState,
             )
+        _closedChannelFunds.value = closedChannelFundsLeftOut(closedFunds, lightning, channelState)
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet

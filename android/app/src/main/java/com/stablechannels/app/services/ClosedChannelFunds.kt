@@ -11,7 +11,20 @@ import org.lightningdevkit.ldknode.PendingSweepBalance
  * coop close pays straight to the wallet, so it is left out whether or not it has confirmed. A
  * sweep is counted until LDK broadcasts it: the wallet counts it from its next sync.
  */
-data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
+data class ClosedChannelFunds(
+    val amountSats: Long,
+    val blocksLeft: Int?,
+    /** The part in sweeps LDK has not broadcast. The rest is in LDK's lightning balance. */
+    val sweepSats: Long = 0,
+) {
+    /** Only the sweeps LDK has not broadcast, for a total that counts LDK's lightning balance. */
+    fun sweepsOnly(): ClosedChannelFunds? =
+        if (sweepSats > 0) ClosedChannelFunds(sweepSats, null, sweepSats) else null
+
+    /** Without the sweeps LDK has not broadcast, for a total that counts them. */
+    fun withoutSweeps(): ClosedChannelFunds? =
+        if (amountSats > sweepSats) ClosedChannelFunds(amountSats - sweepSats, blocksLeft) else null
+
     companion object {
         private const val MINUTES_PER_BLOCK = 10
 
@@ -81,11 +94,13 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
                         amountSats += balance.amountSatoshis.toLong()
                 }
             }
-            amountSats += unbroadcastSweepSats(pendingSweeps)
+            val sweepSats = unbroadcastSweepSats(pendingSweeps)
+            amountSats += sweepSats
             if (amountSats <= 0L) return null
             return ClosedChannelFunds(
                 amountSats = amountSats,
                 blocksLeft = unlockHeight?.let { maxOf(it - currentHeight, 0) },
+                sweepSats = sweepSats,
             )
         }
     }

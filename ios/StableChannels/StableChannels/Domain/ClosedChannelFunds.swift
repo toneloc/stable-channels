@@ -8,6 +8,18 @@ import LDKNode
 struct ClosedChannelFunds: Equatable {
     let amountSats: UInt64
     let blocksLeft: UInt32?
+    /// The part in sweeps LDK has not broadcast. The rest is in LDK's lightning balance.
+    var sweepSats: UInt64 = 0
+
+    /// Only the sweeps LDK has not broadcast, for a total that counts LDK's lightning balance.
+    var sweepsOnly: ClosedChannelFunds? {
+        sweepSats > 0 ? ClosedChannelFunds(amountSats: sweepSats, blocksLeft: nil, sweepSats: sweepSats) : nil
+    }
+
+    /// Without the sweeps LDK has not broadcast, for a total that counts them.
+    var withoutSweeps: ClosedChannelFunds? {
+        amountSats > sweepSats ? ClosedChannelFunds(amountSats: amountSats - sweepSats, blocksLeft: blocksLeft) : nil
+    }
 
     /// Sweeps LDK has not broadcast yet. A broadcast sweep is left out, as the wallet counts it once it
     /// sees the tx. LDK re-signs an unconfirmed sweep each block to a new wallet address, so its latest
@@ -62,11 +74,13 @@ struct ClosedChannelFunds: Equatable {
                 amountSats += amount
             }
         }
-        amountSats += unbroadcastSweepSats(pendingSweeps)
+        let sweepSats = unbroadcastSweepSats(pendingSweeps)
+        amountSats += sweepSats
         guard amountSats > 0 else { return nil }
         return ClosedChannelFunds(
             amountSats: amountSats,
-            blocksLeft: unlockHeight.map { $0 > currentHeight ? $0 - currentHeight : 0 }
+            blocksLeft: unlockHeight.map { $0 > currentHeight ? $0 - currentHeight : 0 },
+            sweepSats: sweepSats
         )
     }
 

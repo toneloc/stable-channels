@@ -92,7 +92,7 @@ final class ClosedChannelFundsTests: XCTestCase {
                 coopClosedChannelIds: [],
                 currentHeight: 900_020
             ),
-            ClosedChannelFunds(amountSats: 39000, blocksLeft: nil)
+            ClosedChannelFunds(amountSats: 39000, blocksLeft: nil, sweepSats: 39000)
         )
     }
 
@@ -144,7 +144,7 @@ final class ClosedChannelFundsTests: XCTestCase {
     }
 
     /// Case A: the LSP force-closes and LDK, which still has the channel data, sweeps the funds.
-    func testLspForceCloseShowsTheCardUntilTheSweepIsBroadcast() {
+    func testLspForceCloseIsCountedUntilTheSweepIsBroadcast() {
         XCTAssertNil(from([onClose("closed", 50000)], open: ["closed"]))
         // Closed, the close tx not confirmed yet.
         XCTAssertEqual(from([onClose("closed", 50000)]), ClosedChannelFunds(amountSats: 50000, blocksLeft: nil))
@@ -156,9 +156,9 @@ final class ClosedChannelFundsTests: XCTestCase {
         // LDK sweeps it to the wallet.
         XCTAssertEqual(
             from(sweeps: [.pendingBroadcast(channelId: "closed", amountSatoshis: 49800)]),
-            ClosedChannelFunds(amountSats: 49800, blocksLeft: nil)
+            ClosedChannelFunds(amountSats: 49800, blocksLeft: nil, sweepSats: 49800)
         )
-        // Sweep broadcast: the wallet counts it from its next sync, so the card goes.
+        // Sweep broadcast: the wallet counts it from its next sync.
         XCTAssertNil(from(sweeps: [.broadcastAwaitingConfirmation(
             channelId: "closed",
             latestBroadcastHeight: 900_002,
@@ -260,5 +260,43 @@ final class ClosedChannelFundsTests: XCTestCase {
             )
         ]
         XCTAssertEqual(ClosedChannelFunds.unbroadcastSweepSats(sweeps), 39000)
+    }
+
+    func testTheLastOfSeveralUnlocksIsShown() {
+        let funds = from([awaiting(30000, 900_010, .holderForceClosed), awaiting(20000, 900_144, .holderForceClosed)])
+        XCTAssertEqual(funds, ClosedChannelFunds(amountSats: 50000, blocksLeft: 144))
+    }
+
+    /// A closed channel has 50,000 sats in LDK's lightning balance and a 30,000 sat sweep LDK has not
+    /// broadcast. Whatever the channel state, the Home total and the card count each sat once.
+    func testTheCardShowsOnlyWhatTheTotalLeavesOut() {
+        let funds = ClosedChannelFunds(amountSats: 80000, blocksLeft: 10, sweepSats: 30000)
+        func home(_ state: BalanceCalculator.ChannelState, openChannelSats: UInt64 = 0) -> [UInt64?] {
+            let lightning = openChannelSats + 50000
+            let total = BalanceCalculator.calculateTotalBalance(
+                lightning: lightning,
+                onchain: 20000,
+                pendingSweep: 30000,
+                channelState: state
+            )
+            let card = BalanceCalculator.closedChannelFundsLeftOut(funds, lightning: lightning, channelState: state)
+            return [total, card?.amountSats]
+        }
+
+        // No channel: the total counts the sweep, the card the rest.
+        XCTAssertEqual(home(.init(hasReadyChannel: false)), [50000, 50000])
+        // A channel open: the total counts the lightning balance, the card the sweep.
+        XCTAssertEqual(
+            home(.init(hasReadyChannel: true, hasAnyChannel: true), openChannelSats: 100_000),
+            [170_000, 30000]
+        )
+        // Closing: the total is the onchain balance alone.
+        XCTAssertEqual(home(.init(hasReadyChannel: false, isChannelClosing: true)), [20000, 80000])
+        // Opening, and moving onchain funds into the channel: the lightning balance alone.
+        XCTAssertEqual(home(.init(hasReadyChannel: false, isOpeningChannel: true)), [50000, 30000])
+        XCTAssertEqual(
+            home(.init(hasReadyChannel: true, hasAnyChannel: true, isSweeping: true), openChannelSats: 100_000),
+            [150_000, 30000]
+        )
     }
 }

@@ -217,7 +217,8 @@ class AppState {
     }()
 
     var pendingSweepBalanceSats: UInt64 = 0
-    var closedChannelFunds: ClosedChannelFunds?
+    /// LDK's funds of closed channels, from the last refresh.
+    var ldkClosedChannelFunds: ClosedChannelFunds?
     /// Channels closed cooperatively, which the closed channel card leaves out (#358).
     private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
@@ -258,20 +259,35 @@ class AppState {
             || !(fundingTxid?.isEmpty ?? true)
     }
 
-    var totalBalanceSats: UInt64 {
-        let hasAny = !nodeService.channels.isEmpty
-            || !stableChannel.channelId.isEmpty
-            || !stableChannel.userChannelId.isEmpty
-            || hasReadyChannel
-        return AppState.calculateTotalBalance(
-            lightning: lightningBalanceSats,
-            onchain: onchainBalanceSats,
+    /// The channel state the total, and so the closed channel card, follow.
+    private var balanceChannelState: BalanceCalculator.ChannelState {
+        BalanceCalculator.ChannelState(
             hasReadyChannel: hasReadyChannel,
-            hasAnyChannel: hasAny,
+            hasAnyChannel: !nodeService.channels.isEmpty
+                || !stableChannel.channelId.isEmpty
+                || !stableChannel.userChannelId.isEmpty
+                || hasReadyChannel,
             isChannelClosing: isChannelClosing,
             isOpeningChannel: isOpeningChannel,
-            isSweeping: isSweeping,
-            pendingSweep: pendingSweepBalanceSats
+            isSweeping: isSweeping
+        )
+    }
+
+    var totalBalanceSats: UInt64 {
+        BalanceCalculator.calculateTotalBalance(
+            lightning: lightningBalanceSats,
+            onchain: onchainBalanceSats,
+            pendingSweep: pendingSweepBalanceSats,
+            channelState: balanceChannelState
+        )
+    }
+
+    /// What the total leaves out of LDK's funds of closed channels, for the Home card.
+    var closedChannelFunds: ClosedChannelFunds? {
+        BalanceCalculator.closedChannelFundsLeftOut(
+            ldkClosedChannelFunds,
+            lightning: lightningBalanceSats,
+            channelState: balanceChannelState
         )
     }
 
@@ -759,7 +775,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
-        closedChannelFunds = nil
+        ldkClosedChannelFunds = nil
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -4082,7 +4098,7 @@ class AppState {
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
         spendableOnchainSats = spendable
-        closedChannelFunds = ClosedChannelFunds.from(
+        ldkClosedChannelFunds = ClosedChannelFunds.from(
             lightningBalances: balances.lightningBalances,
             pendingSweeps: balances.pendingBalancesFromChannelClosures,
             openChannelIds: Set(nodeService.channels.map(\.channelId)),
