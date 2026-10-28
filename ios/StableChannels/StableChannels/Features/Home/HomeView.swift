@@ -32,7 +32,7 @@ struct HomeView: View {
                     balanceBarSection
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
 
-                    // Funds of a closed channel are left out of the total until swept to the wallet
+                    // Funds of a closed channel the total leaves out, until they reach the wallet
                     if let funds = appState.closedChannelFunds {
                         HomeClosedChannelView(funds: funds, btcPrice: appState.btcPrice)
                     }

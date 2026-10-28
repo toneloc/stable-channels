@@ -1,5 +1,6 @@
 package com.stablechannels.app.services
 
+import com.stablechannels.app.AppState
 import com.stablechannels.app.ui.home.ClosedChannelFundsMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -116,7 +117,7 @@ class ClosedChannelFundsTest {
                 ),
             )
         assertEquals(
-            ClosedChannelFunds(39_000, null),
+            ClosedChannelFunds(39_000, null, sweepSats = 39_000),
             from(sweeps = sweeps, height = 900_020),
         )
     }
@@ -156,7 +157,7 @@ class ClosedChannelFundsTest {
 
     /** Case A: the LSP force-closes and LDK, which still has the channel data, sweeps the funds. */
     @Test
-    fun lspForceCloseShowsTheCardUntilTheSweepIsBroadcast() {
+    fun lspForceCloseIsCountedUntilTheSweepIsBroadcast() {
         assertNull(from(listOf(onClose("closed", 50_000)), open = setOf("closed")))
         // Closed, the close tx not confirmed yet.
         assertEquals(ClosedChannelFunds(50_000, null), from(listOf(onClose("closed", 50_000))))
@@ -167,10 +168,10 @@ class ClosedChannelFundsTest {
         )
         // LDK sweeps it to the wallet.
         assertEquals(
-            ClosedChannelFunds(49_800, null),
+            ClosedChannelFunds(49_800, null, sweepSats = 49_800),
             from(sweeps = listOf(PendingSweepBalance.PendingBroadcast("closed", 49_800uL))),
         )
-        // Sweep broadcast: the wallet counts it from its next sync, so the card goes.
+        // Sweep broadcast: the wallet counts it from its next sync.
         assertNull(
             from(
                 sweeps =
@@ -358,5 +359,64 @@ class ClosedChannelFundsTest {
                 49_800uL,
             )
         assertFalse(ClosedChannelFunds.ldkHandlesClose(null, listOf(confirmed)))
+    }
+
+    @Test
+    fun theLastOfSeveralUnlocksIsShown() {
+        val funds =
+            from(
+                listOf(
+                    awaiting(30_000, 900_010, BalanceSource.HOLDER_FORCE_CLOSED),
+                    awaiting(20_000, 900_144, BalanceSource.HOLDER_FORCE_CLOSED),
+                )
+            )
+        assertEquals(ClosedChannelFunds(50_000, 144), funds)
+    }
+
+    /**
+     * A closed channel has 50,000 sats in LDK's lightning balance and a 30,000 sat sweep LDK has
+     * not broadcast. Whatever the channel state, the Home total and the card count each sat once.
+     */
+    @Test
+    fun theCardShowsOnlyWhatTheTotalLeavesOut() {
+        val funds = ClosedChannelFunds(80_000, 10, sweepSats = 30_000)
+        fun home(state: AppState.Companion.ChannelState, openChannelSats: Long = 0L) =
+            (openChannelSats + 50_000).let { lightning ->
+                AppState.calculateTotalBalance(
+                    lightning = lightning,
+                    onchain = 20_000,
+                    pendingSweep = 30_000,
+                    channelState = state,
+                ) to AppState.closedChannelFundsLeftOut(funds, lightning, state)?.amountSats
+            }
+
+        // No channel: the total counts the sweep, the card the rest.
+        assertEquals(50_000L to 50_000L, home(AppState.Companion.ChannelState(hasReady = false)))
+        // A channel open: the total counts the lightning balance, the card the sweep.
+        assertEquals(
+            170_000L to 30_000L,
+            home(AppState.Companion.ChannelState(hasReady = true, hasAnyChannel = true), 100_000),
+        )
+        // Closing: the total is the onchain balance alone.
+        assertEquals(
+            20_000L to 80_000L,
+            home(AppState.Companion.ChannelState(hasReady = false, isChannelClosing = true)),
+        )
+        // Opening, and moving onchain funds into the channel: the lightning balance alone.
+        assertEquals(
+            50_000L to 30_000L,
+            home(AppState.Companion.ChannelState(hasReady = false, isOpeningChannel = true)),
+        )
+        assertEquals(
+            150_000L to 30_000L,
+            home(
+                AppState.Companion.ChannelState(
+                    hasReady = true,
+                    hasAnyChannel = true,
+                    isSweeping = true,
+                ),
+                100_000,
+            ),
+        )
     }
 }

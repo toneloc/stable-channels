@@ -217,11 +217,11 @@ class AppState {
     }()
 
     var pendingSweepBalanceSats: UInt64 = 0
-    var closedChannelFunds: ClosedChannelFunds?
-    @ObservationIgnored private var ldkClosedChannelFunds: ClosedChannelFunds?
+    /// LDK's funds of closed channels, from the last refresh.
+    var ldkClosedChannelFunds: ClosedChannelFunds?
     // Funds of a channel the LSP force-closed after this app lost its channel data (#364).
     @ObservationIgnored let toRemoteRecovery = ToRemoteRecovery(chainURLs: Constants.esploraChainURLs)
-    @ObservationIgnored private var toRemotePendingSats: UInt64 = 0
+    private var toRemotePendingSats: UInt64 = 0
     @ObservationIgnored private var toRemoteRecoveryTask: Task<Void, Never>?
     /// Channels closed cooperatively, which the closed channel card leaves out (#358).
     private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
@@ -263,20 +263,39 @@ class AppState {
             || !(fundingTxid?.isEmpty ?? true)
     }
 
-    var totalBalanceSats: UInt64 {
-        let hasAny = !nodeService.channels.isEmpty
-            || !stableChannel.channelId.isEmpty
-            || !stableChannel.userChannelId.isEmpty
-            || hasReadyChannel
-        return AppState.calculateTotalBalance(
-            lightning: lightningBalanceSats,
-            onchain: onchainBalanceSats,
+    /// The channel state the total, and so the closed channel card, follow.
+    private var balanceChannelState: BalanceCalculator.ChannelState {
+        BalanceCalculator.ChannelState(
             hasReadyChannel: hasReadyChannel,
-            hasAnyChannel: hasAny,
+            hasAnyChannel: !nodeService.channels.isEmpty
+                || !stableChannel.channelId.isEmpty
+                || !stableChannel.userChannelId.isEmpty
+                || hasReadyChannel,
             isChannelClosing: isChannelClosing,
             isOpeningChannel: isOpeningChannel,
-            isSweeping: isSweeping,
-            pendingSweep: pendingSweepBalanceSats
+            isSweeping: isSweeping
+        )
+    }
+
+    var totalBalanceSats: UInt64 {
+        BalanceCalculator.calculateTotalBalance(
+            lightning: lightningBalanceSats,
+            onchain: onchainBalanceSats,
+            pendingSweep: pendingSweepBalanceSats,
+            channelState: balanceChannelState
+        )
+    }
+
+    /// What the total leaves out of LDK's funds of closed channels, or else what the on-chain recovery
+    /// found, for the Home card.
+    var closedChannelFunds: ClosedChannelFunds? {
+        ClosedChannelFunds.orRecovered(
+            BalanceCalculator.closedChannelFundsLeftOut(
+                ldkClosedChannelFunds,
+                lightning: lightningBalanceSats,
+                channelState: balanceChannelState
+            ),
+            recoveredSats: toRemotePendingSats
         )
     }
 
@@ -771,7 +790,8 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
-        closedChannelFunds = nil
+        ldkClosedChannelFunds = nil
+        toRemotePendingSats = 0
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -4022,11 +4042,6 @@ class AppState {
         return try await confirmationPollingService.refresh()
     }
 
-    /// LDK's closed channel funds, or else what the on-chain recovery found.
-    private func publishClosedChannelFunds() {
-        closedChannelFunds = ClosedChannelFunds.orRecovered(ldkClosedChannelFunds, recoveredSats: toRemotePendingSats)
-    }
-
     /// Looks on chain for funds of a channel LDK no longer knows (#364).
     private func runToRemoteRecovery(ldkHandlesClose: Bool) {
         guard toRemoteRecoveryTask == nil else { return }
@@ -4055,7 +4070,6 @@ class AppState {
             }
             // Also when recovery may not run, so a reset by a restore clears the card.
             toRemotePendingSats = await recovery.pendingSats
-            publishClosedChannelFunds()
         }
     }
 
@@ -4181,7 +4195,6 @@ class AppState {
             ),
             currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
         )
-        publishClosedChannelFunds()
         runToRemoteRecovery(ldkHandlesClose: ClosedChannelFunds.ldkHandlesClose(
             ldkClosedChannelFunds,
             pendingSweeps: balances.pendingBalancesFromChannelClosures
