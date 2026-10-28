@@ -33,6 +33,8 @@ final class ClosedChannelFundsTests: XCTestCase {
             lightningBalances: [onClose("open", 50000)],
             pendingSweeps: [],
             openChannelIds: ["open"],
+            coopClosedChannelIds: [],
+            isWalletTx: { _ in false },
             currentHeight: 900_000
         ))
     }
@@ -43,6 +45,8 @@ final class ClosedChannelFundsTests: XCTestCase {
                 lightningBalances: [onClose("closed", 50000)],
                 pendingSweeps: [],
                 openChannelIds: [],
+                coopClosedChannelIds: [],
+                isWalletTx: { _ in false },
                 currentHeight: 900_000
             ),
             ClosedChannelFunds(amountSats: 50000, blocksLeft: nil)
@@ -55,6 +59,8 @@ final class ClosedChannelFundsTests: XCTestCase {
                 lightningBalances: [awaiting(40000, 900_144, .holderForceClosed)],
                 pendingSweeps: [],
                 openChannelIds: [],
+                coopClosedChannelIds: [],
+                isWalletTx: { _ in false },
                 currentHeight: 900_000
             ),
             ClosedChannelFunds(amountSats: 40000, blocksLeft: 144)
@@ -66,6 +72,8 @@ final class ClosedChannelFundsTests: XCTestCase {
             lightningBalances: [awaiting(40000, 900_005, .coopClose)],
             pendingSweeps: [],
             openChannelIds: [],
+            coopClosedChannelIds: [],
+            isWalletTx: { _ in false },
             currentHeight: 900_000
         ))
     }
@@ -85,6 +93,8 @@ final class ClosedChannelFundsTests: XCTestCase {
                 lightningBalances: [],
                 pendingSweeps: sweeps,
                 openChannelIds: [],
+                coopClosedChannelIds: [],
+                isWalletTx: { _ in false },
                 currentHeight: 900_020
             ),
             ClosedChannelFunds(amountSats: 40000, blocksLeft: nil)
@@ -96,6 +106,8 @@ final class ClosedChannelFundsTests: XCTestCase {
             lightningBalances: [awaiting(40000, 899_990, .holderForceClosed)],
             pendingSweeps: [],
             openChannelIds: [],
+            coopClosedChannelIds: [],
+            isWalletTx: { _ in false },
             currentHeight: 900_000
         )
         XCTAssertEqual(funds?.blocksLeft, 0)
@@ -125,12 +137,16 @@ final class ClosedChannelFundsTests: XCTestCase {
     private func from(
         _ lightning: [LightningBalance] = [],
         sweeps: [PendingSweepBalance] = [],
-        open: Set<String> = []
+        open: Set<String> = [],
+        coopClosed: Set<String> = [],
+        walletTxids: Set<String> = []
     ) -> ClosedChannelFunds? {
         ClosedChannelFunds.from(
             lightningBalances: lightning,
             pendingSweeps: sweeps,
             openChannelIds: open,
+            coopClosedChannelIds: coopClosed,
+            isWalletTx: { walletTxids.contains($0) },
             currentHeight: 900_000
         )
     }
@@ -180,15 +196,20 @@ final class ClosedChannelFundsTests: XCTestCase {
         )
     }
 
-    func testPendingHtlcsOfAClosedChannelAreCounted() {
+    func testPendingHtlcsOfAClosedChannelAreCountedAsLdkCountsThem() {
         let funds = from([
             .contentiousClaimable(
                 channelId: "closed", counterpartyNodeId: peer, amountSatoshis: 1000,
                 timeoutHeight: 900_010, paymentHash: "h", paymentPreimage: "p"
             ),
+            // Our own payment: the recipient may claim it.
             .maybeTimeoutClaimableHtlc(
                 channelId: "closed", counterpartyNodeId: peer, amountSatoshis: 2000,
                 claimableHeight: 900_010, paymentHash: "h", outboundPayment: true
+            ),
+            .maybeTimeoutClaimableHtlc(
+                channelId: "closed", counterpartyNodeId: peer, amountSatoshis: 500,
+                claimableHeight: 900_010, paymentHash: "h", outboundPayment: false
             ),
             .maybePreimageClaimableHtlc(
                 channelId: "closed", counterpartyNodeId: peer, amountSatoshis: 3000,
@@ -196,6 +217,49 @@ final class ClosedChannelFundsTests: XCTestCase {
             ),
             .counterpartyRevokedOutputClaimable(channelId: "closed", counterpartyNodeId: peer, amountSatoshis: 4000)
         ])
-        XCTAssertEqual(funds, ClosedChannelFunds(amountSats: 10000, blocksLeft: nil))
+        XCTAssertEqual(funds, ClosedChannelFunds(amountSats: 5500, blocksLeft: nil))
+    }
+
+    func testPendingHtlcsOfAnOpenChannelAreNotCounted() {
+        let funds = from([
+            onClose("open", 50000),
+            .maybeTimeoutClaimableHtlc(
+                channelId: "open", counterpartyNodeId: peer, amountSatoshis: 2000,
+                claimableHeight: 900_010, paymentHash: "h", outboundPayment: false
+            ),
+            .maybePreimageClaimableHtlc(
+                channelId: "open", counterpartyNodeId: peer, amountSatoshis: 3000,
+                expiryHeight: 900_010, paymentHash: "h"
+            )
+        ], open: ["open"])
+        XCTAssertNil(funds)
+    }
+
+    func testACooperativeCloseIsNotCountedBeforeItConfirms() {
+        XCTAssertNil(from([onClose("closed", 50000)], coopClosed: ["closed"]))
+        XCTAssertEqual(
+            from([onClose("coop", 50000), onClose("forced", 40000)], coopClosed: ["coop"]),
+            ClosedChannelFunds(amountSats: 40000, blocksLeft: nil)
+        )
+    }
+
+    func testOnlyCooperativeClosuresAreCooperative() {
+        XCTAssertTrue(ClosedChannelFunds.isCooperative(.locallyInitiatedCooperativeClosure))
+        XCTAssertTrue(ClosedChannelFunds.isCooperative(.counterpartyInitiatedCooperativeClosure))
+        XCTAssertTrue(ClosedChannelFunds.isCooperative(.legacyCooperativeClosure))
+        XCTAssertFalse(ClosedChannelFunds.isCooperative(.holderForceClosed(broadcastedLatestTxn: true, message: "m")))
+        XCTAssertFalse(ClosedChannelFunds.isCooperative(.counterpartyForceClosed(peerMsg: "m")))
+        XCTAssertFalse(ClosedChannelFunds.isCooperative(nil))
+    }
+
+    func testASweepIsNotCountedOnceTheWalletHasItsTx() {
+        let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(
+            channelId: "closed",
+            latestBroadcastHeight: 900_002,
+            latestSpendingTxid: "sweep",
+            amountSatoshis: 49800
+        )
+        XCTAssertEqual(from(sweeps: [sweep]), ClosedChannelFunds(amountSats: 49800, blocksLeft: nil))
+        XCTAssertNil(from(sweeps: [sweep], walletTxids: ["sweep"]))
     }
 }

@@ -1,15 +1,15 @@
 package com.stablechannels.app.services
 
 import org.lightningdevkit.ldknode.BalanceSource
+import org.lightningdevkit.ldknode.ClosureReason
 import org.lightningdevkit.ldknode.LightningBalance
 import org.lightningdevkit.ldknode.PendingSweepBalance
 
 /**
  * Funds from a closed channel that are not in the onchain wallet yet (#358). After a force close
- * they are timelocked on chain, then LDK sweeps them to the wallet. A closed channel is reported as
- * ClaimableOnChannelClose until its close tx confirms, so that is counted only for channels no
- * longer open. Confirmed coop close funds are left out: they are already in the wallet. A sweep
- * stays counted until it confirms, as the wallet may not show it before then.
+ * they are timelocked on chain, then LDK sweeps them to the wallet. Open channels are left out. A
+ * coop close pays straight to the wallet, so it is left out whether or not it has confirmed. A
+ * sweep is counted until the wallet has its tx.
  */
 data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
     companion object {
@@ -29,18 +29,27 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
 
         private fun count(n: Int, unit: String) = if (n == 1) "1 $unit" else "$n ${unit}s"
 
+        fun isCooperative(reason: ClosureReason?): Boolean =
+            reason is ClosureReason.LegacyCooperativeClosure ||
+                reason is ClosureReason.CounterpartyInitiatedCooperativeClosure ||
+                reason is ClosureReason.LocallyInitiatedCooperativeClosure
+
         fun from(
             lightningBalances: List<LightningBalance>,
             pendingSweeps: List<PendingSweepBalance>,
             openChannelIds: Set<String>,
+            coopClosedChannelIds: Set<String>,
+            isWalletTx: (String) -> Boolean,
             currentHeight: Int,
         ): ClosedChannelFunds? {
             var amountSats = 0L
             var unlockHeight: Int? = null
             for (balance in lightningBalances) {
                 when (balance) {
+                    // The wallet shows a coop close as soon as it sees the close tx.
                     is LightningBalance.ClaimableOnChannelClose -> {
-                        if (balance.channelId in openChannelIds) continue
+                        val id = balance.channelId
+                        if (id in openChannelIds || id in coopClosedChannelIds) continue
                         amountSats += balance.amountSatoshis.toLong()
                     }
                     is LightningBalance.ClaimableAwaitingConfirmations -> {
@@ -51,10 +60,14 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
                     }
                     is LightningBalance.ContentiousClaimable ->
                         amountSats += balance.amountSatoshis.toLong()
-                    is LightningBalance.MaybeTimeoutClaimableHtlc ->
+                    // Counted as LDK's claimable_amount_satoshis counts them: an HTLC of our own
+                    // payment, or one waiting for a preimage, may never come back to us. An open
+                    // channel lists its pending HTLCs too.
+                    is LightningBalance.MaybeTimeoutClaimableHtlc -> {
+                        if (balance.outboundPayment || balance.channelId in openChannelIds) continue
                         amountSats += balance.amountSatoshis.toLong()
-                    is LightningBalance.MaybePreimageClaimableHtlc ->
-                        amountSats += balance.amountSatoshis.toLong()
+                    }
+                    is LightningBalance.MaybePreimageClaimableHtlc -> {}
                     is LightningBalance.CounterpartyRevokedOutputClaimable ->
                         amountSats += balance.amountSatoshis.toLong()
                 }
@@ -64,7 +77,9 @@ data class ClosedChannelFunds(val amountSats: Long, val blocksLeft: Int?) {
                     is PendingSweepBalance.PendingBroadcast ->
                         amountSats += sweep.amountSatoshis.toLong()
                     is PendingSweepBalance.BroadcastAwaitingConfirmation ->
-                        amountSats += sweep.amountSatoshis.toLong()
+                        if (!isWalletTx(sweep.latestSpendingTxid)) {
+                            amountSats += sweep.amountSatoshis.toLong()
+                        }
                     is PendingSweepBalance.AwaitingThresholdConfirmations -> {}
                 }
             }

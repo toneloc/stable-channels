@@ -2,36 +2,53 @@ import Foundation
 import LDKNode
 
 /// Funds from a closed channel that are not in the onchain wallet yet (#358). After a force close
-/// they are timelocked on chain, then LDK sweeps them to the wallet. A closed channel is reported as
-/// claimableOnChannelClose until its close tx confirms, so that is counted only for channels no
-/// longer open. Confirmed coop close funds are left out: they are already in the wallet. A sweep
-/// stays counted until it confirms, as the wallet may not show it before then.
+/// they are timelocked on chain, then LDK sweeps them to the wallet. Open channels are left out. A
+/// coop close pays straight to the wallet, so it is left out whether or not it has confirmed. A
+/// sweep is counted until the wallet has its tx.
 struct ClosedChannelFunds: Equatable {
     let amountSats: UInt64
     let blocksLeft: UInt32?
+
+    static func isCooperative(_ reason: ClosureReason?) -> Bool {
+        switch reason {
+        case .legacyCooperativeClosure, .counterpartyInitiatedCooperativeClosure,
+             .locallyInitiatedCooperativeClosure:
+            true
+        default:
+            false
+        }
+    }
 
     static func from(
         lightningBalances: [LightningBalance],
         pendingSweeps: [PendingSweepBalance],
         openChannelIds: Set<String>,
+        coopClosedChannelIds: Set<String>,
+        isWalletTx: (String) -> Bool,
         currentHeight: UInt32
     ) -> ClosedChannelFunds? {
         var amountSats: UInt64 = 0
         var unlockHeight: UInt32?
         for balance in lightningBalances {
             switch balance {
+            // The wallet shows a coop close as soon as it sees the close tx.
             case let .claimableOnChannelClose(channelId, _, amount, _, _, _, _, _):
-                if !openChannelIds.contains(channelId) { amountSats += amount }
+                if openChannelIds.contains(channelId) || coopClosedChannelIds.contains(channelId) { continue }
+                amountSats += amount
             case let .claimableAwaitingConfirmations(_, _, amount, confirmationHeight, source):
                 if source == .coopClose { continue }
                 amountSats += amount
                 unlockHeight = max(unlockHeight ?? confirmationHeight, confirmationHeight)
             case let .contentiousClaimable(_, _, amount, _, _, _):
                 amountSats += amount
-            case let .maybeTimeoutClaimableHtlc(_, _, amount, _, _, _):
+            // Counted as LDK's claimable_amount_satoshis counts them: an HTLC of our own payment, or
+            // one waiting for a preimage, may never come back to us. An open channel lists its
+            // pending HTLCs too.
+            case let .maybeTimeoutClaimableHtlc(channelId, _, amount, _, _, outboundPayment):
+                if outboundPayment || openChannelIds.contains(channelId) { continue }
                 amountSats += amount
-            case let .maybePreimageClaimableHtlc(_, _, amount, _, _):
-                amountSats += amount
+            case .maybePreimageClaimableHtlc:
+                break
             case let .counterpartyRevokedOutputClaimable(_, _, amount):
                 amountSats += amount
             }
@@ -40,8 +57,8 @@ struct ClosedChannelFunds: Equatable {
             switch sweep {
             case let .pendingBroadcast(_, amount):
                 amountSats += amount
-            case let .broadcastAwaitingConfirmation(_, _, _, amount):
-                amountSats += amount
+            case let .broadcastAwaitingConfirmation(_, _, txid, amount):
+                if !isWalletTx(txid) { amountSats += amount }
             case .awaitingThresholdConfirmations:
                 break
             }

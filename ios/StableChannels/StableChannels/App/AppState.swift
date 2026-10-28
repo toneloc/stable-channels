@@ -218,6 +218,8 @@ class AppState {
 
     var pendingSweepBalanceSats: UInt64 = 0
     var closedChannelFunds: ClosedChannelFunds?
+    /// Channels closed cooperatively, which the closed channel card leaves out (#358).
+    private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -757,6 +759,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
+        closedChannelFunds = nil
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -2597,6 +2600,11 @@ class AppState {
         counterpartyNodeId: PublicKey?,
         reason: ClosureReason?
     ) {
+        if ClosedChannelFunds.isCooperative(reason) {
+            let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            let ids = shared?.stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            shared?.set(ids + ["\(channelId)"], forKey: Self.coopClosedChannelIdsKey)
+        }
         let balanceSats = stableChannel.stableReceiverBTC.sats
 
         var data: [String: Any] = [
@@ -4091,6 +4099,16 @@ class AppState {
             lightningBalances: balances.lightningBalances,
             pendingSweeps: balances.pendingBalancesFromChannelClosures,
             openChannelIds: Set(nodeService.channels.map(\.channelId)),
+            coopClosedChannelIds: Set(
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            ),
+            isWalletTx: { txid in
+                nodeService.node?.listPayments().contains {
+                    if case let .onchain(paymentTxid, _) = $0.kind { return paymentTxid == txid }
+                    return false
+                } ?? false
+            },
             currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
         )
 
