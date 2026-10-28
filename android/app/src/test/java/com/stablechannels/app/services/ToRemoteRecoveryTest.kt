@@ -515,12 +515,13 @@ class ToRemoteRecoveryTest {
         recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
-        // The restore lands while the sweep asks the node for an address.
+        // The restore lands while the sweep asks the node for an address. It looks for the close
+        // of the saved funding txid again, with the restored wallet's keys.
         runBlocking {
             recovery.run(
                 { keys },
                 {
-                    recovery.startAfterRestore(null, null, repeat = false)
+                    recovery.startAfterRestore(funding, 0, repeat = true)
                     address
                 },
                 { feeRate },
@@ -529,6 +530,20 @@ class ToRemoteRecoveryTest {
         assertNull(recovery.state.destination)
         assertTrue(posted.isEmpty())
         assertTrue(swept.isEmpty())
+        // Not searched with the replaced wallet's keys.
+        assertTrue(recovery.state.found.isEmpty())
+        assertEquals(funding, recovery.state.fundingTxid)
+    }
+
+    @Test
+    fun aNativeLibraryThatFailsToLoadDoesNotCrash() {
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        // As when R8 strips secp256k1's JNI loader.
+        runBlocking {
+            recovery.run({ throw ExceptionInInitializerError() }, { address }, { feeRate })
+        }
+        assertTrue(recovery.state.active)
     }
 
     @Test

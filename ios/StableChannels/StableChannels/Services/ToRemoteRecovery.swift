@@ -131,11 +131,20 @@ actor ToRemoteRecovery {
         guard state.active, !running, let keys = keys(for: seed) else { return }
         running = true
         defer { running = false }
+        // A restore can reset the state while this waits on the explorer. The keys and what this run
+        // found then belong to the replaced wallet, so it stops before saving or broadcasting anything.
+        let generation = state.generation
         if !state.found.isEmpty {
-            await settle(keys, destination: destination, feeRateSatVb: feeRateSatVb, onSwept: onSwept)
+            await settle(
+                keys,
+                generation: generation,
+                destination: destination,
+                feeRateSatVb: feeRateSatVb,
+                onSwept: onSwept
+            )
         }
         if state.fundingTxid != nil {
-            await search(keys)
+            await search(keys, generation: generation)
         }
     }
 
@@ -146,9 +155,9 @@ actor ToRemoteRecovery {
         return keys
     }
 
-    private func search(_ keys: ToRemoteKeys) async {
+    private func search(_ keys: ToRemoteKeys, generation: Int) async {
         let s = state
-        guard let fundingTxid = s.fundingTxid, now() >= s.nextAt else { return }
+        guard s.generation == generation, let fundingTxid = s.fundingTxid, now() >= s.nextAt else { return }
         let result = await findByFunding(fundingTxid, vout: s.fundingVout, keys: keys)
         let time = now()
         // An explorer that can't be reached is not an answer, so even a one-time check is retried.
@@ -157,7 +166,7 @@ actor ToRemoteRecovery {
             !s.found.contains { $0.txid == output.txid && $0.vout == output.vout }
         }
         update { current in
-            guard current.generation == s.generation else { return }
+            guard current.generation == generation else { return }
             current.found += added
             if ends {
                 current.fundingTxid = nil
@@ -232,15 +241,13 @@ actor ToRemoteRecovery {
 
     private func settle(
         _ keys: ToRemoteKeys,
+        generation: Int,
         destination: @Sendable () async -> String?,
         feeRateSatVb: @Sendable () async -> UInt64?,
         onSwept: @Sendable (String, UInt64, String) async -> Void
     ) async {
         guard now() - lastSettleAt >= Self.settleIntervalSeconds else { return }
         lastSettleAt = now()
-        // A restore can reset the state while this waits on the explorer. What this settle found then
-        // belongs to the replaced wallet, so it stops before saving or broadcasting anything.
-        let generation = state.generation
         var done: [Output] = []
         for output in state.found {
             guard let spend = await getJSON("/tx/\(output.txid)/outspend/\(output.vout)") as? [String: Any] else {

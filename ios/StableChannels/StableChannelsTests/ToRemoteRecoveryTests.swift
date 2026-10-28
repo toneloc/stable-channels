@@ -581,8 +581,30 @@ final class ToRemoteRecoveryTests: XCTestCase {
             },
             feeRateSatVb: { 2 }
         )
-        let destination = await recovery.state.destination
-        XCTAssertNil(destination)
+        let state = await recovery.state
+        XCTAssertNil(state.destination)
+        XCTAssertTrue(ToRemoteMockURLProtocol.posted.isEmpty)
+        // The restore looks for the close again, but not with the replaced wallet's keys.
+        XCTAssertTrue(state.found.isEmpty)
+        XCTAssertEqual(state.fundingTxid, funding)
+    }
+
+    func testARestoreDuringTheFeeLookupStopsTheSweep() async {
+        closePaysUs()
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        closeConfirmed()
+        let address = address
+        // The address is saved before the restore lands.
+        await recovery.run(
+            seed: Self.seed,
+            destination: { address },
+            feeRateSatVb: {
+                await recovery.startAfterRestore(fundingTxid: nil, repeats: false)
+                return 2
+            }
+        )
         XCTAssertTrue(ToRemoteMockURLProtocol.posted.isEmpty)
     }
 

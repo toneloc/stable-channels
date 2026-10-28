@@ -140,9 +140,13 @@ class ToRemoteRecovery(
         if (!state.active || !running.tryLock()) return
         try {
             withContext(Dispatchers.IO) {
+                // A restore can reset the state while this waits on the explorer. The keys and what
+                // this run found then belong to the replaced wallet, so it stops before saving or
+                // broadcasting anything.
+                val generation = state.generation
                 val k = keys() ?: return@withContext
-                if (state.found.isNotEmpty()) settle(k, destination, feeRateSatVb)
-                if (state.fundingTxid != null) search(k)
+                if (state.found.isNotEmpty()) settle(k, generation, destination, feeRateSatVb)
+                if (state.fundingTxid != null) search(k, generation)
             }
         } catch (e: CancellationException) {
             throw e
@@ -155,10 +159,10 @@ class ToRemoteRecovery(
         }
     }
 
-    private fun search(keys: ToRemoteKeys) {
+    private fun search(keys: ToRemoteKeys, generation: Int) {
         val s = state
         val fundingTxid = s.fundingTxid ?: return
-        if (now() < s.nextAt) return
+        if (s.generation != generation || now() < s.nextAt) return
         val result = findByFunding(fundingTxid, s.fundingVout, keys)
         val found = result?.first.orEmpty()
         val time = now()
@@ -166,7 +170,7 @@ class ToRemoteRecovery(
         val ends = result != null && (result.second || time >= s.until)
         val added = found.filter { o -> s.found.none { it.txid == o.txid && it.vout == o.vout } }
         update {
-            if (it.generation != s.generation) return@update it
+            if (it.generation != generation) return@update it
             it.copy(
                 found = it.found + added,
                 fundingTxid = if (ends) null else it.fundingTxid,
@@ -240,14 +244,12 @@ class ToRemoteRecovery(
 
     private fun settle(
         keys: ToRemoteKeys,
+        generation: Int,
         destination: () -> String?,
         feeRateSatVb: () -> Long?,
     ) {
         if (now() - lastSettleAt < SETTLE_INTERVAL_MS) return
         lastSettleAt = now()
-        // A restore can reset the state while this waits on the explorer. What this settle found
-        // then belongs to the replaced wallet, so it stops before saving or broadcasting anything.
-        val generation = state.generation
         val done = mutableListOf<Output>()
         for (output in state.found) {
             val spend = getObject("/tx/${output.txid}/outspend/${output.vout}") ?: continue
