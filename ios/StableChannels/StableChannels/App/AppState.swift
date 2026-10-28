@@ -4075,21 +4075,8 @@ class AppState {
         let onchain = effective.onchain
         let spendable = effective.spendable
 
-        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
-        // These funds are NOT yet in total_onchain_balance_sats
-        // (Desktop src/user.rs lines 5989-6002 parity)
-        var sweepSats: UInt64 = 0
-        for pending in balances.pendingBalancesFromChannelClosures {
-            switch pending {
-            case let .pendingBroadcast(_, amountSatoshis):
-                sweepSats += amountSatoshis
-            case let .broadcastAwaitingConfirmation(_, _, _, amountSatoshis):
-                sweepSats += amountSatoshis
-            default:
-                break
-            }
-        }
-        pendingSweepBalanceSats = sweepSats
+        // Not in total_onchain_balance_sats yet. A broadcast sweep is, once the wallet syncs.
+        pendingSweepBalanceSats = ClosedChannelFunds.unbroadcastSweepSats(balances.pendingBalancesFromChannelClosures)
 
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
@@ -4103,12 +4090,6 @@ class AppState {
                 UserDefaults(suiteName: Constants.appGroupIdentifier)?
                     .stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
             ),
-            isWalletTx: { txid in
-                nodeService.node?.listPayments().contains {
-                    if case let .onchain(paymentTxid, _) = $0.kind { return paymentTxid == txid }
-                    return false
-                } ?? false
-            },
             currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
         )
 

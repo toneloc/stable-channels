@@ -34,7 +34,6 @@ final class ClosedChannelFundsTests: XCTestCase {
             pendingSweeps: [],
             openChannelIds: ["open"],
             coopClosedChannelIds: [],
-            isWalletTx: { _ in false },
             currentHeight: 900_000
         ))
     }
@@ -46,7 +45,6 @@ final class ClosedChannelFundsTests: XCTestCase {
                 pendingSweeps: [],
                 openChannelIds: [],
                 coopClosedChannelIds: [],
-                isWalletTx: { _ in false },
                 currentHeight: 900_000
             ),
             ClosedChannelFunds(amountSats: 50000, blocksLeft: nil)
@@ -60,7 +58,6 @@ final class ClosedChannelFundsTests: XCTestCase {
                 pendingSweeps: [],
                 openChannelIds: [],
                 coopClosedChannelIds: [],
-                isWalletTx: { _ in false },
                 currentHeight: 900_000
             ),
             ClosedChannelFunds(amountSats: 40000, blocksLeft: 144)
@@ -73,12 +70,11 @@ final class ClosedChannelFundsTests: XCTestCase {
             pendingSweeps: [],
             openChannelIds: [],
             coopClosedChannelIds: [],
-            isWalletTx: { _ in false },
             currentHeight: 900_000
         ))
     }
 
-    func testSweepIsCountedUntilItConfirms() {
+    func testSweepIsCountedUntilItIsBroadcast() {
         let sweeps: [PendingSweepBalance] = [
             .pendingBroadcast(channelId: "closed", amountSatoshis: 39000),
             .broadcastAwaitingConfirmation(
@@ -94,10 +90,9 @@ final class ClosedChannelFundsTests: XCTestCase {
                 pendingSweeps: sweeps,
                 openChannelIds: [],
                 coopClosedChannelIds: [],
-                isWalletTx: { _ in false },
                 currentHeight: 900_020
             ),
-            ClosedChannelFunds(amountSats: 40000, blocksLeft: nil)
+            ClosedChannelFunds(amountSats: 39000, blocksLeft: nil)
         )
     }
 
@@ -107,7 +102,6 @@ final class ClosedChannelFundsTests: XCTestCase {
             pendingSweeps: [],
             openChannelIds: [],
             coopClosedChannelIds: [],
-            isWalletTx: { _ in false },
             currentHeight: 900_000
         )
         XCTAssertEqual(funds?.blocksLeft, 0)
@@ -138,21 +132,19 @@ final class ClosedChannelFundsTests: XCTestCase {
         _ lightning: [LightningBalance] = [],
         sweeps: [PendingSweepBalance] = [],
         open: Set<String> = [],
-        coopClosed: Set<String> = [],
-        walletTxids: Set<String> = []
+        coopClosed: Set<String> = []
     ) -> ClosedChannelFunds? {
         ClosedChannelFunds.from(
             lightningBalances: lightning,
             pendingSweeps: sweeps,
             openChannelIds: open,
             coopClosedChannelIds: coopClosed,
-            isWalletTx: { walletTxids.contains($0) },
             currentHeight: 900_000
         )
     }
 
     /// Case A: the LSP force-closes and LDK, which still has the channel data, sweeps the funds.
-    func testLspForceCloseShowsTheCardUntilTheSweepConfirms() {
+    func testLspForceCloseShowsTheCardUntilTheSweepIsBroadcast() {
         XCTAssertNil(from([onClose("closed", 50000)], open: ["closed"]))
         // Closed, the close tx not confirmed yet.
         XCTAssertEqual(from([onClose("closed", 50000)]), ClosedChannelFunds(amountSats: 50000, blocksLeft: nil))
@@ -166,16 +158,13 @@ final class ClosedChannelFundsTests: XCTestCase {
             from(sweeps: [.pendingBroadcast(channelId: "closed", amountSatoshis: 49800)]),
             ClosedChannelFunds(amountSats: 49800, blocksLeft: nil)
         )
-        XCTAssertEqual(
-            from(sweeps: [.broadcastAwaitingConfirmation(
-                channelId: "closed",
-                latestBroadcastHeight: 900_002,
-                latestSpendingTxid: "sweep",
-                amountSatoshis: 49800
-            )]),
-            ClosedChannelFunds(amountSats: 49800, blocksLeft: nil)
-        )
-        // Sweep confirmed: the wallet shows it, so the card goes.
+        // Sweep broadcast: the wallet counts it from its next sync, so the card goes.
+        XCTAssertNil(from(sweeps: [.broadcastAwaitingConfirmation(
+            channelId: "closed",
+            latestBroadcastHeight: 900_002,
+            latestSpendingTxid: "sweep",
+            amountSatoshis: 49800
+        )]))
         XCTAssertNil(from(sweeps: [.awaitingThresholdConfirmations(
             channelId: "closed",
             latestSpendingTxid: "sweep",
@@ -252,14 +241,24 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertFalse(ClosedChannelFunds.isCooperative(nil))
     }
 
-    func testASweepIsNotCountedOnceTheWalletHasItsTx() {
-        let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(
-            channelId: "closed",
-            latestBroadcastHeight: 900_002,
-            latestSpendingTxid: "sweep",
-            amountSatoshis: 49800
-        )
-        XCTAssertEqual(from(sweeps: [sweep]), ClosedChannelFunds(amountSats: 49800, blocksLeft: nil))
-        XCTAssertNil(from(sweeps: [sweep], walletTxids: ["sweep"]))
+    /// The total adds these to the wallet balance, so a broadcast sweep must not be among them.
+    func testOnlySweepsNotYetBroadcastAreAdded() {
+        let sweeps: [PendingSweepBalance] = [
+            .pendingBroadcast(channelId: "a", amountSatoshis: 39000),
+            .broadcastAwaitingConfirmation(
+                channelId: "b",
+                latestBroadcastHeight: 900_002,
+                latestSpendingTxid: "sweep",
+                amountSatoshis: 6188
+            ),
+            .awaitingThresholdConfirmations(
+                channelId: "c",
+                latestSpendingTxid: "sweep",
+                confirmationHash: "block",
+                confirmationHeight: 900_003,
+                amountSatoshis: 1000
+            )
+        ]
+        XCTAssertEqual(ClosedChannelFunds.unbroadcastSweepSats(sweeps), 39000)
     }
 }
