@@ -197,7 +197,8 @@ class ToRemoteRecovery(
         vout: Int?,
         keys: ToRemoteKeys,
     ): Pair<List<Output>, Boolean>? {
-        val spends = getArray("/tx/$txid/outspends") ?: return null
+        // A funding tx no explorer knows is not spent. That is an answer, unlike no reply.
+        val spends = getArray("/tx/$txid/outspends", emptyIfMissing = true) ?: return null
         val indices = vout?.let { listOf(it) } ?: (0 until spends.length()).toList()
         var fundingSpent = false
         val found = mutableListOf<Output>()
@@ -320,25 +321,30 @@ class ToRemoteRecovery(
         saveState(json.encodeToString(state))
     }
 
-    private fun get(path: String): String? {
+    /**
+     * The reply, or with [emptyIfMissing] "[]" when an explorer has no such path and none replied.
+     */
+    private fun get(path: String, emptyIfMissing: Boolean = false): String? {
+        var missing = false
         for (base in chainUrls()) {
             try {
                 val request = Request.Builder().url(base.trimEnd('/') + path).build()
                 http.newCall(request).execute().use { response ->
                     if (response.isSuccessful) return response.body?.string()
+                    if (response.code == 404) missing = true
                 }
             } catch (_: Exception) {
                 /* try next */
             }
         }
-        return null
+        return if (missing && emptyIfMissing) "[]" else null
     }
 
     private fun getObject(path: String) =
         get(path)?.let { runCatching { JSONObject(it) }.getOrNull() }
 
-    private fun getArray(path: String) =
-        get(path)?.let { runCatching { JSONArray(it) }.getOrNull() }
+    private fun getArray(path: String, emptyIfMissing: Boolean = false) =
+        get(path, emptyIfMissing)?.let { runCatching { JSONArray(it) }.getOrNull() }
 
     /** Returns the txid, or the last error when no explorer accepted the transaction. */
     private fun broadcast(hex: String): String {

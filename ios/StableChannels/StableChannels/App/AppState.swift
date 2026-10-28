@@ -4029,21 +4029,24 @@ class AppState {
             guard let self else { return }
             defer { toRemoteRecoveryTask = nil }
             let recovery = toRemoteRecovery
-            guard await recovery.onRefresh(
+            let mayRun = await recovery.onRefresh(
                 savedFundingTxid: savedFunding,
                 ldkHasChannels: ldkHasChannels,
                 ldkHandlesClose: ldkHandlesClose
-            ), let seed = walletSeed() else { return }
-            let nodeService = nodeService
-            let feeRateService = feeRateService
-            await recovery.run(
-                seed: seed,
-                destination: { await MainActor.run { try? nodeService.newOnchainAddress() } },
-                feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) },
-                onSwept: { [weak self] txid, sats, address in
-                    await self?.recordRecoveredClose(txid: txid, sats: sats, address: address)
-                }
             )
+            if mayRun, let seed = walletSeed() {
+                let nodeService = nodeService
+                let feeRateService = feeRateService
+                await recovery.run(
+                    seed: seed,
+                    destination: { await MainActor.run { try? nodeService.newOnchainAddress() } },
+                    feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) },
+                    onSwept: { [weak self] txid, sats, address in
+                        await self?.recordRecoveredClose(txid: txid, sats: sats, address: address)
+                    }
+                )
+            }
+            // Also when recovery may not run, so a reset by a restore clears the card.
             toRemotePendingSats = await recovery.pendingSats
             publishClosedChannelFunds()
         }

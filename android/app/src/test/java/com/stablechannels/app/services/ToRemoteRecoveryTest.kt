@@ -37,6 +37,8 @@ class ToRemoteRecoveryTest {
     private val address = "bc1qmf6gnapjkfg4pg675v7y2l94vtv7s4evevr40l"
 
     private val routes = mutableMapOf<String, String>()
+    // Paths the explorer says it doesn't have. Any other unknown path is an explorer error.
+    private val missing = mutableSetOf<String>()
     private val posted = mutableListOf<String>()
     // Requests arrive on the server's threads.
     private val requested = Collections.synchronizedList(mutableListOf<String>())
@@ -60,7 +62,7 @@ class ToRemoteRecoveryTest {
                         routes[path]?.let {
                             return MockResponse().setBody(it)
                         }
-                        return MockResponse().setResponseCode(404)
+                        return MockResponse().setResponseCode(if (path in missing) 404 else 503)
                     }
                 }
             start()
@@ -494,6 +496,16 @@ class ToRemoteRecoveryTest {
         clock += ToRemoteRecovery.backoffMs(1)
         recovery.runNow()
         assertEquals(94_467, recovery.pendingSats)
+    }
+
+    @Test
+    fun aFundingTxNoExplorerKnowsIsNotSpent() {
+        missing += "/tx/$funding/outspends"
+        val recovery = recovery()
+        recovery.startAfterRestore(funding, 0, repeat = false)
+        recovery.runNow()
+        assertFalse(recovery.state.active)
+        assertEquals(funding, recovery.state.checkedFundingTxid)
     }
 
     @Test
