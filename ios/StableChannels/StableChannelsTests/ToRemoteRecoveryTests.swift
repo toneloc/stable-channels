@@ -565,6 +565,27 @@ final class ToRemoteRecoveryTests: XCTestCase {
         XCTAssertEqual(pending, 94467)
     }
 
+    func testARestoreDuringASweepStopsIt() async {
+        closePaysUs()
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        closeConfirmed()
+        let address = address
+        // The restore lands while the sweep asks the node for an address.
+        await recovery.run(
+            seed: Self.seed,
+            destination: {
+                await recovery.startAfterRestore(fundingTxid: nil, repeats: false)
+                return address
+            },
+            feeRateSatVb: { 2 }
+        )
+        let destination = await recovery.state.destination
+        XCTAssertNil(destination)
+        XCTAssertTrue(ToRemoteMockURLProtocol.posted.isEmpty)
+    }
+
     func testARestoreWithoutAFundingTxidLooksForNothing() async {
         let recovery = recovery()
         await recovery.startAfterRestore(fundingTxid: nil, repeats: true)

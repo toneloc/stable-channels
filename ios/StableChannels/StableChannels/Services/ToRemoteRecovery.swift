@@ -238,6 +238,9 @@ actor ToRemoteRecovery {
     ) async {
         guard now() - lastSettleAt >= Self.settleIntervalSeconds else { return }
         lastSettleAt = now()
+        // A restore can reset the state while this waits on the explorer. What this settle found then
+        // belongs to the replaced wallet, so it stops before saving or broadcasting anything.
+        let generation = state.generation
         var done: [Output] = []
         for output in state.found {
             guard let spend = await getJSON("/tx/\(output.txid)/outspend/\(output.vout)") as? [String: Any] else {
@@ -250,8 +253,10 @@ actor ToRemoteRecovery {
             // The output is locked until one block after the close confirms (1 OP_CSV).
             guard let status = await getJSON("/tx/\(output.txid)/status") as? [String: Any],
                   status["confirmed"] as? Bool == true else { continue }
+            guard state.generation == generation else { return }
             var address = state.destination
             if address == nil, let fresh = await destination() {
+                guard state.generation == generation else { return }
                 address = fresh
                 update { $0.destination = fresh }
             }
@@ -287,6 +292,7 @@ actor ToRemoteRecovery {
                 }
                 continue
             }
+            guard state.generation == generation else { return }
             let result = await broadcast(tx.hex)
             log("TO_REMOTE_SWEEP_BROADCAST", [
                 "outpoint": "\(output.txid):\(output.vout)",
@@ -298,7 +304,7 @@ actor ToRemoteRecovery {
                 await onSwept(tx.txid, tx.amountSats, address)
             }
         }
-        guard !done.isEmpty else { return }
+        guard !done.isEmpty, state.generation == generation else { return }
         update {
             $0.found.removeAll { done.contains($0) }
             if $0.found.isEmpty { $0.destination = nil }
