@@ -2,9 +2,12 @@ package com.stablechannels.app.services
 
 import com.stablechannels.app.ui.home.ClosedChannelFundsMessage
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.lightningdevkit.ldknode.BalanceSource
+import org.lightningdevkit.ldknode.ClosureReason
 import org.lightningdevkit.ldknode.LightningBalance
 import org.lightningdevkit.ldknode.PendingSweepBalance
 
@@ -32,14 +35,23 @@ class ClosedChannelFundsTest {
             source,
         )
 
+    private fun from(
+        lightning: List<LightningBalance> = emptyList(),
+        sweeps: List<PendingSweepBalance> = emptyList(),
+        open: Set<String> = emptySet(),
+        coopClosed: Set<String> = emptySet(),
+        walletTxids: Set<String> = emptySet(),
+        height: Int = 900_000,
+    ) = ClosedChannelFunds.from(lightning, sweeps, open, coopClosed, { it in walletTxids }, height)
+
     @Test
     fun openChannelIsNotCounted() {
         assertNull(
-            ClosedChannelFunds.from(
+            from(
                 listOf(onClose("open", 50_000)),
                 emptyList(),
                 setOf("open"),
-                900_000,
+                height = 900_000,
             )
         )
     }
@@ -47,11 +59,11 @@ class ClosedChannelFundsTest {
     @Test
     fun closedChannelBeforeCloseTxConfirmsIsCounted() {
         val funds =
-            ClosedChannelFunds.from(
+            from(
                 listOf(onClose("closed", 50_000)),
                 emptyList(),
                 emptySet(),
-                900_000,
+                height = 900_000,
             )
         assertEquals(ClosedChannelFunds(50_000, null), funds)
     }
@@ -59,11 +71,11 @@ class ClosedChannelFundsTest {
     @Test
     fun holderForceCloseReportsBlocksLeft() {
         val funds =
-            ClosedChannelFunds.from(
+            from(
                 listOf(awaiting(40_000, 900_144, BalanceSource.HOLDER_FORCE_CLOSED)),
                 emptyList(),
                 emptySet(),
-                900_000,
+                height = 900_000,
             )
         assertEquals(ClosedChannelFunds(40_000, 144), funds)
     }
@@ -71,11 +83,11 @@ class ClosedChannelFundsTest {
     @Test
     fun counterpartyForceCloseIsCounted() {
         val funds =
-            ClosedChannelFunds.from(
+            from(
                 listOf(awaiting(40_000, 900_001, BalanceSource.COUNTERPARTY_FORCE_CLOSED)),
                 emptyList(),
                 emptySet(),
-                900_000,
+                height = 900_000,
             )
         assertEquals(ClosedChannelFunds(40_000, 1), funds)
     }
@@ -83,11 +95,11 @@ class ClosedChannelFundsTest {
     @Test
     fun confirmedCoopCloseIsNotCounted() {
         assertNull(
-            ClosedChannelFunds.from(
+            from(
                 listOf(awaiting(40_000, 900_005, BalanceSource.COOP_CLOSE)),
                 emptyList(),
                 emptySet(),
-                900_000,
+                height = 900_000,
             )
         )
     }
@@ -106,18 +118,18 @@ class ClosedChannelFundsTest {
             )
         assertEquals(
             ClosedChannelFunds(40_000, null),
-            ClosedChannelFunds.from(emptyList(), sweeps, emptySet(), 900_020),
+            from(sweeps = sweeps, height = 900_020),
         )
     }
 
     @Test
     fun blocksLeftNeverGoesNegative() {
         val funds =
-            ClosedChannelFunds.from(
+            from(
                 listOf(awaiting(40_000, 899_990, BalanceSource.HOLDER_FORCE_CLOSED)),
                 emptyList(),
                 emptySet(),
-                900_000,
+                height = 900_000,
             )
         assertEquals(0, funds?.blocksLeft)
     }
@@ -142,12 +154,6 @@ class ClosedChannelFundsTest {
         assertEquals("144 blocks (about 1 day)", ClosedChannelFunds.blocksText(144))
         assertEquals("288 blocks (about 2 days)", ClosedChannelFunds.blocksText(288))
     }
-
-    private fun from(
-        lightning: List<LightningBalance> = emptyList(),
-        sweeps: List<PendingSweepBalance> = emptyList(),
-        open: Set<String> = emptySet(),
-    ) = ClosedChannelFunds.from(lightning, sweeps, open, 900_000)
 
     /** Case A: the LSP force-closes and LDK, which still has the channel data, sweeps the funds. */
     @Test
@@ -208,7 +214,7 @@ class ClosedChannelFundsTest {
     }
 
     @Test
-    fun pendingHtlcsOfAClosedChannelAreCounted() {
+    fun pendingHtlcsOfAClosedChannelAreCountedAsLdkCountsThem() {
         val funds =
             from(
                 listOf(
@@ -220,6 +226,7 @@ class ClosedChannelFundsTest {
                         "h",
                         "p",
                     ),
+                    // Our own payment: the recipient may claim it.
                     LightningBalance.MaybeTimeoutClaimableHtlc(
                         "closed",
                         peer,
@@ -227,6 +234,14 @@ class ClosedChannelFundsTest {
                         900_010u,
                         "h",
                         true,
+                    ),
+                    LightningBalance.MaybeTimeoutClaimableHtlc(
+                        "closed",
+                        peer,
+                        500uL,
+                        900_010u,
+                        "h",
+                        false,
                     ),
                     LightningBalance.MaybePreimageClaimableHtlc(
                         "closed",
@@ -238,7 +253,68 @@ class ClosedChannelFundsTest {
                     LightningBalance.CounterpartyRevokedOutputClaimable("closed", peer, 4_000uL),
                 )
             )
-        assertEquals(ClosedChannelFunds(10_000, null), funds)
+        assertEquals(ClosedChannelFunds(5_500, null), funds)
+    }
+
+    @Test
+    fun pendingHtlcsOfAnOpenChannelAreNotCounted() {
+        val funds =
+            from(
+                listOf(
+                    onClose("open", 50_000),
+                    LightningBalance.MaybeTimeoutClaimableHtlc(
+                        "open",
+                        peer,
+                        2_000uL,
+                        900_010u,
+                        "h",
+                        false,
+                    ),
+                    LightningBalance.MaybePreimageClaimableHtlc(
+                        "open",
+                        peer,
+                        3_000uL,
+                        900_010u,
+                        "h",
+                    ),
+                ),
+                open = setOf("open"),
+            )
+        assertNull(funds)
+    }
+
+    @Test
+    fun aCooperativeCloseIsNotCountedBeforeItConfirms() {
+        assertNull(from(listOf(onClose("closed", 50_000)), coopClosed = setOf("closed")))
+        assertEquals(
+            ClosedChannelFunds(40_000, null),
+            from(
+                listOf(onClose("coop", 50_000), onClose("forced", 40_000)),
+                coopClosed = setOf("coop"),
+            ),
+        )
+    }
+
+    @Test
+    fun onlyCooperativeClosuresAreCooperative() {
+        assertTrue(
+            ClosedChannelFunds.isCooperative(ClosureReason.LocallyInitiatedCooperativeClosure)
+        )
+        assertTrue(
+            ClosedChannelFunds.isCooperative(ClosureReason.CounterpartyInitiatedCooperativeClosure)
+        )
+        assertTrue(ClosedChannelFunds.isCooperative(ClosureReason.LegacyCooperativeClosure))
+        assertFalse(ClosedChannelFunds.isCooperative(ClosureReason.HolderForceClosed(true, "m")))
+        assertFalse(ClosedChannelFunds.isCooperative(ClosureReason.CounterpartyForceClosed("m")))
+        assertFalse(ClosedChannelFunds.isCooperative(null))
+    }
+
+    @Test
+    fun aSweepIsNotCountedOnceTheWalletHasItsTx() {
+        val sweep =
+            PendingSweepBalance.BroadcastAwaitingConfirmation("closed", 900_002u, "sweep", 49_800uL)
+        assertEquals(ClosedChannelFunds(49_800, null), from(sweeps = listOf(sweep)))
+        assertNull(from(sweeps = listOf(sweep), walletTxids = setOf("sweep")))
     }
 
     @Test
@@ -253,5 +329,26 @@ class ClosedChannelFundsTest {
         assertEquals(ldk, ClosedChannelFunds.orRecovered(ldk, 94_467))
         assertEquals(ClosedChannelFunds(94_467, null), ClosedChannelFunds.orRecovered(null, 94_467))
         assertNull(ClosedChannelFunds.orRecovered(null, 0))
+    }
+
+    /** Recovery waits for LDK's own sweep to confirm, even once the card leaves it out. */
+    @Test
+    fun ldkHandlesACloseUntilItsSweepConfirms() {
+        val sweep =
+            PendingSweepBalance.BroadcastAwaitingConfirmation("closed", 900_002u, "sweep", 49_800uL)
+        assertNull(from(sweeps = listOf(sweep), walletTxids = setOf("sweep")))
+        assertTrue(ClosedChannelFunds.ldkHandlesClose(null, listOf(sweep)))
+        assertTrue(
+            ClosedChannelFunds.ldkHandlesClose(ClosedChannelFunds(50_000, null), emptyList())
+        )
+        val confirmed =
+            PendingSweepBalance.AwaitingThresholdConfirmations(
+                "closed",
+                "sweep",
+                "block",
+                900_003u,
+                49_800uL,
+            )
+        assertFalse(ClosedChannelFunds.ldkHandlesClose(null, listOf(confirmed)))
     }
 }

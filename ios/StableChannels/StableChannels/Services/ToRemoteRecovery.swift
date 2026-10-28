@@ -110,10 +110,13 @@ actor ToRemoteRecovery {
     }
 
     /// After a restore from seed: starts over, as found outputs and the sweep address may belong to
-    /// the wallet that was replaced, then looks for the close of `fundingTxid` when it is known.
+    /// the wallet that was replaced, then looks for the close of `fundingTxid`. The app forgets the
+    /// funding txid of a closed channel, so that channel's is looked up again: what was found for it
+    /// is found again when the same seed is restored.
     func startAfterRestore(fundingTxid: String?, repeats: Bool) {
+        let lookup = fundingTxid ?? state.fundingTxid ?? state.checkedFundingTxid
         update { $0 = State(generation: $0.generation + 1) }
-        if let fundingTxid { start(fundingTxid: fundingTxid, fundingVout: nil, repeats: repeats) }
+        if let lookup { start(fundingTxid: lookup, fundingVout: nil, repeats: repeats) }
     }
 
     /// Does whatever is due. Cheap to call often; returns at once while another run is going.
@@ -181,7 +184,8 @@ actor ToRemoteRecovery {
         vout: UInt32?,
         keys: ToRemoteKeys
     ) async -> (outputs: [Output], spent: Bool)? {
-        guard let spends = await getJSON("/tx/\(txid)/outspends") as? [Any] else { return nil }
+        // A funding tx no explorer knows is not spent. That is an answer, unlike no reply.
+        guard let spends = await getJSON("/tx/\(txid)/outspends", emptyIfMissing: true) as? [Any] else { return nil }
         let indices = vout.map { [Int($0)] } ?? Array(spends.indices)
         var fundingSpent = false
         var found: [Output] = []
@@ -318,16 +322,23 @@ actor ToRemoteRecovery {
         URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + path)
     }
 
-    private nonisolated func getJSON(_ path: String) async -> Any? {
+    /// The reply, or with `emptyIfMissing` an empty array when an explorer has no such path and none
+    /// replied.
+    private nonisolated func getJSON(_ path: String, emptyIfMissing: Bool = false) async -> Any? {
+        var missing = false
         for base in chainURLs {
             guard let url = url(base, path) else { continue }
             var request = URLRequest(url: url)
             request.timeoutInterval = 10
             guard let (data, response) = try? await session.data(for: request),
-                  let http = response as? HTTPURLResponse, (200 ..< 300).contains(http.statusCode) else { continue }
+                  let http = response as? HTTPURLResponse else { continue }
+            guard (200 ..< 300).contains(http.statusCode) else {
+                if http.statusCode == 404 { missing = true }
+                continue
+            }
             if let json = try? JSONSerialization.jsonObject(with: data) { return json }
         }
-        return nil
+        return missing && emptyIfMissing ? [Any]() : nil
     }
 
     /// Returns the txid, or the last error when no explorer accepted the transaction.

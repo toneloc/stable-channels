@@ -3,6 +3,8 @@ import XCTest
 
 private final class ToRemoteMockURLProtocol: URLProtocol {
     static var routes: [String: String] = [:]
+    /// Paths the explorer says it doesn't have. Any other unknown path is an explorer error.
+    static var missing: Set<String> = []
     static var posted: [String] = []
     /// Paths asked for; requests arrive on URLSession threads, hence the lock.
     static var requested: [String] = []
@@ -27,7 +29,7 @@ private final class ToRemoteMockURLProtocol: URLProtocol {
         } else if let route = Self.routes[url.path] {
             body = route
         } else {
-            status = 404
+            status = Self.missing.contains(url.path) ? 404 : 503
             body = ""
         }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
@@ -79,6 +81,7 @@ final class ToRemoteRecoveryTests: XCTestCase {
     override func setUp() {
         super.setUp()
         ToRemoteMockURLProtocol.routes = [:]
+        ToRemoteMockURLProtocol.missing = []
         ToRemoteMockURLProtocol.posted = []
         ToRemoteMockURLProtocol.requested = []
         ToRemoteMockURLProtocol.postStatus = 200
@@ -531,6 +534,34 @@ final class ToRemoteRecoveryTests: XCTestCase {
         recovery = later(by: ToRemoteRecovery.backoffSeconds(1))
         await runNow(recovery)
         let pending = await recovery.pendingSats
+        XCTAssertEqual(pending, 94467)
+    }
+
+    func testAFundingTxNoExplorerKnowsIsNotSpent() async {
+        ToRemoteMockURLProtocol.missing = ["/api/tx/\(funding)/outspends"]
+        let recovery = recovery()
+        await recovery.startAfterRestore(fundingTxid: funding, repeats: false)
+        await runNow(recovery)
+        let state = await recovery.state
+        XCTAssertFalse(state.active)
+        XCTAssertEqual(state.checkedFundingTxid, funding)
+    }
+
+    func testARestoreLooksAgainForTheCloseOfAChannelTheAppForgot() async {
+        closePaysUs()
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        var pending = await recovery.pendingSats
+        XCTAssertEqual(pending, 94467)
+
+        // The app forgets the funding txid when the channel closes, so the restore passes none.
+        await recovery.startAfterRestore(fundingTxid: nil, repeats: false)
+        let state = await recovery.state
+        XCTAssertTrue(state.found.isEmpty)
+        XCTAssertEqual(state.fundingTxid, funding)
+        await runNow(recovery)
+        pending = await recovery.pendingSats
         XCTAssertEqual(pending, 94467)
     }
 
