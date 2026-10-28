@@ -1289,7 +1289,8 @@ final class MempoolWebSocketServiceTests: XCTestCase {
                 remainderSats: 60_000,
                 amountCorrections: [txA: 50_000],
                 matchedRecordedReceive: true,
-                missedTxid: txB
+                missedTxid: txB,
+                unrecordedTxids: [txB]
             )
         )
         XCTAssertEqual(

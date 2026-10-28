@@ -2289,7 +2289,8 @@ final class DatabaseServiceTests: XCTestCase {
         )
     }
 
-    private func recordPlaceholder(sats: Int64, address: String = "bc1qws") throws {
+    /// A balance-fallback row for a jump whose unexplained arrivals were [candidates].
+    private func recordPlaceholder(sats: Int64, address: String = "bc1qws", candidates: Set<String>? = nil) throws {
         let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: address))
         XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
             paymentId: "onchain_deposit_1",
@@ -2298,6 +2299,10 @@ final class DatabaseServiceTests: XCTestCase {
             btcPrice: nil,
             resolutionId: resolutionId
         ))
+        try service.onchainRepo.recordDepositCandidates(
+            paymentId: "onchain_deposit_1",
+            txids: candidates ?? [receiveTxid]
+        )
     }
 
     func testWebSocketReceiveIsRecordedOncePerTxid() throws {
@@ -2400,7 +2405,7 @@ final class DatabaseServiceTests: XCTestCase {
 
     func testTwoDepositsInOneBalanceJumpSplitThePlaceholder() throws {
         let other = String(repeating: "d", count: 64)
-        try recordPlaceholder(sats: 80_000)
+        try recordPlaceholder(sats: 80_000, candidates: [receiveTxid, other])
 
         XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, balanceCounted: true), .splitFromPlaceholder)
         XCTAssertEqual(try recordWebSocketReceive(sats: 30_000, txid: other, balanceCounted: true), .adoptedPlaceholder)
@@ -2411,6 +2416,35 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(rest.paymentId, "onchain_deposit_1")
         XCTAssertEqual(rest.amountMsat, 30_000_000)
         XCTAssertEqual(try XCTUnwrap(rest.amountUSD), 30, accuracy: 0.001)
+    }
+
+    func testWebSocketReceiveDoesNotTakeOverAPlaceholderOfAnotherBalanceJump() throws {
+        // The baseline counts this txid, but the placeholder was written for a different jump.
+        try recordPlaceholder(sats: 50_000, candidates: [String(repeating: "d", count: 64)])
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, balanceCounted: true), .inserted)
+
+        XCTAssertEqual(try onchainReceiveCount(), 2)
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "onchain_deposit_1")?.amountMsat, 50_000_000)
+        XCTAssertNil(service.paymentRepo.payment(paymentId: "onchain_deposit_1")?.txid)
+    }
+
+    func testWebSocketReceiveDoesNotShrinkALargerPlaceholderOfAnotherBalanceJump() throws {
+        try recordPlaceholder(sats: 150_000, candidates: [String(repeating: "d", count: 64)])
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 40_000, balanceCounted: true), .inserted)
+
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "onchain_deposit_1")?.amountMsat, 150_000_000)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 40_000_000)
+    }
+
+    func testWebSocketReceiveDoesNotTakeOverAPlaceholderWithoutCandidates() throws {
+        // Rows written before this change, or after a crash between the row and its candidates.
+        try recordPlaceholder(sats: 50_000, candidates: [])
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, balanceCounted: true), .inserted)
+
+        XCTAssertEqual(try onchainReceiveCount(), 2)
     }
 
     func testFailedReceiveIsNotSubtractedFromTheBalance() throws {

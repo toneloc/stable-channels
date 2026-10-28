@@ -443,6 +443,8 @@ class AppState {
     /// Inbound on-chain payments the wallet listed at the last balance refresh. Once the node has
     /// a transaction, its amount is used instead of the WebSocket feed's.
     @ObservationIgnored var walletInbound = WalletInboundOnchain()
+    /// The txid list last cached, so a refresh rewrites it only when it changes.
+    @ObservationIgnored private var cachedOnchainTxids: Set<String>?
 
     var fundingTxid: String? = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -784,6 +786,7 @@ class AppState {
         shared?.set(Int64(0), forKey: BalanceCacheKey.lightning)
         shared?.set(Int64(0), forKey: BalanceCacheKey.onchain)
         shared?.removeObject(forKey: BalanceCacheKey.onchainTxids)
+        cachedOnchainTxids = nil
         shared?.set(Int64(0), forKey: BalanceCacheKey.spendable)
         shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
@@ -3703,13 +3706,12 @@ class AppState {
                 depositId: depositId,
                 depositSats: remainderSats,
                 amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil
+                btcPrice: price > 0 ? price : nil,
+                candidateTxids: missed.candidateTxids
             )
             let recorded = recorder.record(deposit: deposit, address: address)
-            if !recorded {
-                depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
-                return
-            }
+            // Leave the baseline so the next poll records the deposit instead of dropping it.
+            guard recorded else { return }
             if let txid = missed.txid {
                 transactionLinkService.setReceiveTxid(txid)
             }
@@ -3745,7 +3747,6 @@ class AppState {
 
         case .removed(let target, let txid):
             guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
-            AuditService.log("WEBSOCKET_TX_REMOVED", data: ["txid": txid, "target": target])
             Task { [weak self] in await self?.confirmationPollingService?.failIfDropped(txid: txid) }
 
         case .receive(let target, let txid, let feedSats):
@@ -4140,7 +4141,10 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
         ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
-        ud?.set(walletInbound.txids.sorted(), forKey: BalanceCacheKey.onchainTxids)
+        if walletInbound.txids != cachedOnchainTxids {
+            ud?.set(walletInbound.txids.sorted(), forKey: BalanceCacheKey.onchainTxids)
+            cachedOnchainTxids = walletInbound.txids
+        }
         ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
         ud?.set(hasReadyChannel, forKey: BalanceCacheKey.hasReadyChannel)
         if btcPrice > 0 {

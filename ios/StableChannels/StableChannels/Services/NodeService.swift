@@ -780,18 +780,8 @@ enum StabilityFreshness {
     }
 }
 
-/// The wallet's inbound on-chain payments that have not failed, read from the node's payment
-/// list in the form deposit attribution needs.
-struct WalletInboundOnchain: Equatable {
-    let txids: Set<String>
-    /// The node's amount for each txid that has one.
-    let sats: [String: Int64]
-
-    init(txids: Set<String> = [], sats: [String: Int64] = [:]) {
-        self.txids = txids
-        self.sats = sats
-    }
-
+/// Reads the wallet's inbound on-chain payments from the node's payment list.
+extension WalletInboundOnchain {
     init(_ payments: [PaymentDetails]) {
         var txids: Set<String> = []
         var sats: [String: Int64] = [:]

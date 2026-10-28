@@ -21,6 +21,8 @@ enum DepositAttribution {
         /// The transaction the remainder is, when exactly one arrived txid has no recorded receive
         /// and the node's amount for it is the remainder.
         let missedTxid: String?
+        /// Arrived txids with no recorded receive: the only transactions the remainder can be.
+        let unrecordedTxids: Set<String>
     }
 
     /// Attributes an increase of [depositSats] to the receives [recorded] (by txid) for the [arrived]
@@ -35,15 +37,13 @@ enum DepositAttribution {
             depositSats: depositSats,
             recordedSats: accountedSats(recorded: recorded, walletSats: walletSats)
         )
+        let unrecorded = arrived.subtracting(recorded.keys)
         return Outcome(
             remainderSats: remainder,
             amountCorrections: amountCorrections(recorded: recorded, walletSats: walletSats),
             matchedRecordedReceive: !recorded.isEmpty,
-            missedTxid: missedTxid(
-                remainderSats: remainder,
-                unrecorded: arrived.subtracting(recorded.keys),
-                walletSats: walletSats
-            )
+            missedTxid: missedTxid(remainderSats: remainder, unrecorded: unrecorded, walletSats: walletSats),
+            unrecordedTxids: unrecorded
         )
     }
 
@@ -87,6 +87,19 @@ enum DepositAttribution {
             return overflow ? .max : total
         }
         return max(0, depositSats - recorded)
+    }
+}
+
+/// The wallet's inbound on-chain payments that have not failed, in the form deposit attribution
+/// needs.
+struct WalletInboundOnchain: Equatable {
+    let txids: Set<String>
+    /// The node's amount for each txid that has one.
+    let sats: [String: Int64]
+
+    init(txids: Set<String> = [], sats: [String: Int64] = [:]) {
+        self.txids = txids
+        self.sats = sats
     }
 }
 

@@ -11,6 +11,11 @@ final class OnchainReceiveRepository {
         case inserted
     }
 
+    /// The payment id of the receive row for [txid].
+    static func receivePaymentId(txid: String) -> String {
+        "onchain_receive_\(txid)"
+    }
+
     private let rawSQL: RawSQL
 
     init(rawSQL: RawSQL) {
@@ -20,10 +25,10 @@ final class OnchainReceiveRepository {
     /// Records a receive seen on the WebSocket, at most once per txid.
     ///
     /// Once the wallet balance has counted the transaction ([balanceCounted]), the balance fallback
-    /// recorded it as a txid-less placeholder: one of exactly this amount takes the txid, and a
-    /// larger one (several deposits in one balance jump) gives this amount up to a new row. Before
-    /// the balance counts it, no placeholder can be this deposit, so a new row is written and the
-    /// fallback later subtracts it by txid.
+    /// may have recorded it as a txid-less placeholder listing this txid as a candidate: one of
+    /// exactly this amount takes the txid, and a larger one (several deposits in one balance jump)
+    /// gives this amount up to a new row. Any other placeholder belongs to another deposit, so a new
+    /// row is written, as it is before the balance counts the transaction.
     func recordWebSocketReceive(
         txid: String,
         address: String,
@@ -39,7 +44,8 @@ final class OnchainReceiveRepository {
             )
             if !existing.isEmpty { return .alreadyRecorded }
 
-            if balanceCounted, let placeholder = try fallbackRow(covering: amountMsat, address: address) {
+            if balanceCounted,
+               let placeholder = try fallbackRow(for: txid, covering: amountMsat, address: address) {
                 let rowId = placeholder.int64(0)
                 if placeholder.int64(2) == Int64(amountMsat) {
                     if let resolutionId = placeholder.optInt64(1) {
@@ -59,9 +65,6 @@ final class OnchainReceiveRepository {
                     )
                     return .adoptedPlaceholder
                 }
-                // Known limitation: assumes the larger placeholder holds this deposit. A receive the close
-                // branch absorbed instead could shrink an unrelated placeholder; tying placeholders to
-                // the txids of their balance jump would remove that.
                 try rawSQL.execute(
                     """
                     UPDATE payments
@@ -92,18 +95,21 @@ final class OnchainReceiveRepository {
         }
     }
 
-    /// The oldest pending, txid-less fallback row for [address] that is at least [amountMsat],
-    /// preferring one of exactly that amount: (id, resolution_id, amount_msat).
-    private func fallbackRow(covering amountMsat: UInt64, address: String) throws -> [Any?]? {
+    /// The oldest pending, txid-less fallback row for [address] that lists [txid] as a candidate and
+    /// is at least [amountMsat], preferring one of exactly that amount: (id, resolution_id, amount_msat).
+    private func fallbackRow(for txid: String, covering amountMsat: UInt64, address: String) throws -> [Any?]? {
         try rawSQL.query(
             """
             SELECT p.id, p.resolution_id, p.amount_msat FROM payments p
             LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
             WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
               AND p.txid IS NULL AND p.amount_msat >= ? AND (r.address IS NULL OR r.address = ?)
+              AND EXISTS (
+                  SELECT 1 FROM onchain_deposit_candidates c WHERE c.payment_id = p.payment_id AND c.txid = ?
+              )
             ORDER BY p.amount_msat = ? DESC, p.id ASC LIMIT 1
             """,
-            params: [.integer(Int64(amountMsat)), .text(address), .integer(Int64(amountMsat))]
+            params: [.integer(Int64(amountMsat)), .text(address), .text(txid), .integer(Int64(amountMsat))]
         ).first
     }
 
@@ -123,7 +129,7 @@ final class OnchainReceiveRepository {
             VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', ?, ?)
             """,
             params: [
-                .text("onchain_receive_\(txid)"),
+                .text(Self.receivePaymentId(txid: txid)),
                 .integer(Int64(amountMsat)),
                 amountUSD.map { .real($0) } ?? .null,
                 btcPrice.map { .real($0) } ?? .null,
@@ -164,6 +170,17 @@ final class OnchainReceiveRepository {
             params: [.integer(since)] + txids.sorted().map { .text($0) }
         ).reduce(into: [:]) { sats, row in
             if let txid = row.optString(0) { sats[txid] = row.int64(1) / 1000 }
+        }
+    }
+
+    /// Records the txids that could be the balance-fallback deposit [paymentId]: the arrivals of its
+    /// balance jump no recorded receive explained. Only these may later take the row over.
+    func recordDepositCandidates(paymentId: String, txids: Set<String>) throws {
+        for txid in txids.sorted() {
+            try rawSQL.execute(
+                "INSERT OR IGNORE INTO onchain_deposit_candidates (payment_id, txid) VALUES (?, ?)",
+                params: [.text(paymentId), .text(txid)]
+            )
         }
     }
 

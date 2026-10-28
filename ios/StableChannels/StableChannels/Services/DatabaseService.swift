@@ -212,6 +212,13 @@ final class DatabaseService {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS onchain_deposit_candidates (
+                payment_id TEXT NOT NULL,
+                txid TEXT NOT NULL,
+                PRIMARY KEY (payment_id, txid)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS onchain_receive_txids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,

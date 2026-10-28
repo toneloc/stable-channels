@@ -4,7 +4,7 @@ import Foundation
 ///
 /// - `KnownAddress`: insert a resolution row, write a payment row linked
 ///   via `resolutionId`, and kick the Esplora resolver.
-/// - `UnknownAddress`: write a completed payment row with no resolver
+/// - `UnknownAddress`: write a pending payment row with no resolver
 ///   (the explorer link is unavailable until the user re-generates an
 ///   address).
 ///
@@ -28,6 +28,8 @@ struct OnchainDepositReconciler {
     struct MissedDeposit: Equatable {
         let sats: Int64
         let txid: String?
+        /// The arrived txids the deposit can be when [txid] is unknown.
+        let candidateTxids: Set<String>
     }
 
     let repository: OnchainReceiveRepository
@@ -75,7 +77,11 @@ struct OnchainDepositReconciler {
                 "remainder_sats": "\(attribution.remainderSats)"
             ])
         }
-        return MissedDeposit(sats: attribution.remainderSats, txid: attribution.missedTxid)
+        return MissedDeposit(
+            sats: attribution.remainderSats,
+            txid: attribution.missedTxid,
+            candidateTxids: attribution.unrecordedTxids
+        )
     }
 }
 
@@ -84,6 +90,24 @@ struct DepositRecordInput {
     let depositSats: Int64
     let amountUSD: Double?
     let btcPrice: Double?
+    /// The arrived txids this deposit can be. A late WebSocket receive takes the row over only for
+    /// one of these; a row without any is never taken over.
+    var candidateTxids: Set<String> = []
+}
+
+/// Stores a fallback row's candidate txids after the row. A crash or failure in between leaves a row
+/// without candidates, which a WebSocket receive never takes over: it records its own row instead.
+@MainActor
+private func recordCandidates(_ deposit: DepositRecordInput, databaseService: DatabaseService) {
+    guard !deposit.candidateTxids.isEmpty else { return }
+    do {
+        try databaseService.onchainRepo.recordDepositCandidates(
+            paymentId: deposit.depositId,
+            txids: deposit.candidateTxids
+        )
+    } catch {
+        AuditService.log("ONCHAIN_DEPOSIT_CANDIDATES_FAILED", data: ["error": "\(error)"])
+    }
 }
 
 /// Records when the current receive address is known. Crash-safe ordering:
@@ -116,12 +140,13 @@ final class KnownAddressDepositRecorder: DepositRecorder {
             _ = databaseService?.onchainRepo.deleteOnchainReceiveResolution(id: resolutionId)
             return false
         }
+        if let databaseService { recordCandidates(deposit, databaseService: databaseService) }
         onLaunchResolver(resolutionId, address)
         return true
     }
 }
 
-/// Records when no current receive address is known. Writes a completed
+/// Records when no current receive address is known. Writes a pending
 /// payment row with no resolver; user can re-generate an address to see
 /// the on-chain link. Returns `false` if the write fails so the caller
 /// can leave the deposit baseline unchanged and retry on the next balance
@@ -147,6 +172,7 @@ final class UnknownAddressDepositRecorder: DepositRecorder {
                 counterparty: nil,
                 status: "pending"
             )
+            recordCandidates(deposit, databaseService: databaseService)
             return true
         } catch {
             return false
@@ -173,7 +199,7 @@ final class IdentifiedDepositRecorder: DepositRecorder {
         guard let databaseService else { return false }
         do {
             let inserted = try databaseService.paymentRepo.recordPayment(
-                paymentId: "onchain_receive_\(txid)",
+                paymentId: OnchainReceiveRepository.receivePaymentId(txid: txid),
                 paymentType: "onchain",
                 direction: "received",
                 amountMsat: UInt64(deposit.depositSats) * 1000,

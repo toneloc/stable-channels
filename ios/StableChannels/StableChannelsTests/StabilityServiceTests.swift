@@ -1134,6 +1134,40 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testReceiveTheCloseBranchCountedDoesNotShrinkAnEarlierDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        // txA (150k) arrives without a WebSocket event: the fallback records it, unidentified.
+        poll(appState, balance: 155_000, wallet: [txA])
+        // txB (40k) lands while a close is in flight: the baseline counts it without a row.
+        appState.isChannelClosing = true
+        poll(appState, balance: 195_000, wallet: [txA, txB])
+        appState.isChannelClosing = false
+
+        webSocketReceive(appState, txid: txB, sats: 40000)
+
+        XCTAssertEqual(try receivedSats(db), [40000, 150_000])
+    }
+
+    @MainActor
+    func testDepositWhoseWriteFailedIsRecordedOnTheNextPoll() throws {
+        let (appState, db) = try makeDepositAppState()
+        try db.rawSQL.execute(
+            """
+            CREATE TRIGGER fail_deposit_insert BEFORE INSERT ON payments
+            BEGIN SELECT RAISE(ABORT, 'forced deposit write failure'); END
+            """
+        )
+
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [])
+        XCTAssertEqual(appState.depositBaseline.sats, 5000)
+
+        try db.rawSQL.execute("DROP TRIGGER fail_deposit_insert")
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
     func testWebSocketReceivePointsThePendingDepositLinkAtItsTxid() throws {
         let (appState, _) = try makeDepositAppState()
         appState.transactionLinkService.setReceiveTxid(txC)

@@ -106,7 +106,13 @@ final class ConfirmationPollingService {
 
     /// Retries the removal checks the explorer has not answered yet.
     func retryRemovalChecks() async {
-        guard let txids = try? databaseService.paymentRepo.pendingRemovalChecks() else { return }
+        let txids: [String]
+        do {
+            txids = try databaseService.paymentRepo.pendingRemovalChecks()
+        } catch {
+            AuditService.log("REMOVAL_CHECKS_READ_FAILED", data: ["error": "\(error)"])
+            return
+        }
         for txid in txids {
             guard !Task.isCancelled else { return }
             await checkRemoval(txid: txid)
