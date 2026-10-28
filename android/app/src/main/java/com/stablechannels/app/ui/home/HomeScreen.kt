@@ -244,7 +244,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 Spacer(Modifier.height(8.dp))
             }
 
-            // Funds of a closed channel are left out of the total until swept to the wallet
+            // Funds of a closed channel the total leaves out, until they reach the wallet
             closedChannelFunds?.let { funds ->
                 ClosedChannelFundsCard(funds, btcPrice)
                 Spacer(Modifier.height(12.dp))
