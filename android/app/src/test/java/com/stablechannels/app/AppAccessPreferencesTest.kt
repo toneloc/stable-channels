@@ -86,42 +86,44 @@ class AppAccessPreferencesTest {
     }
 
     // ---------------------------------------------------------------------------
-    // shouldRequireAuthForSeedPhrase
+    // seedPhraseRequiresAuth
     // ---------------------------------------------------------------------------
 
     @Test
-    fun `seed phrase viewing requires auth if security settings enabled`() {
+    fun `seed access requires auth with default toggles when the device can authenticate`() {
         assertTrue(
-            shouldRequireAuthForSeedPhrasePure(
-                appUnlockEnabled = true,
-                paymentConfirmationEnabled = false,
-            )
-        )
-        assertTrue(
-            shouldRequireAuthForSeedPhrasePure(
-                appUnlockEnabled = false,
-                paymentConfirmationEnabled = true,
-            )
-        )
-        assertTrue(
-            shouldRequireAuthForSeedPhrasePure(
-                appUnlockEnabled = true,
-                paymentConfirmationEnabled = true,
-            )
-        )
-        assertFalse(
-            shouldRequireAuthForSeedPhrasePure(
-                appUnlockEnabled = false,
-                paymentConfirmationEnabled = false,
+            AppAccessPreferencesManager.seedPhraseRequiresAuth(
+                AppAccessPreferences(),
+                deviceCanAuthenticate = true,
             )
         )
     }
 
-    private fun shouldRequireAuthForSeedPhrasePure(
-        appUnlockEnabled: Boolean,
-        paymentConfirmationEnabled: Boolean,
-    ): Boolean {
-        return appUnlockEnabled || paymentConfirmationEnabled
+    @Test
+    fun `seed access needs no auth without a screen lock and with toggles off`() {
+        assertFalse(
+            AppAccessPreferencesManager.seedPhraseRequiresAuth(
+                AppAccessPreferences(),
+                deviceCanAuthenticate = false,
+            )
+        )
+    }
+
+    @Test
+    fun `seed access requires auth whenever a toggle is on`() {
+        val toggledOn =
+            listOf(
+                AppAccessPreferences(appUnlockEnabled = true),
+                AppAccessPreferences(paymentConfirmationEnabled = true),
+                AppAccessPreferences(appUnlockEnabled = true, paymentConfirmationEnabled = true),
+            )
+        for (prefs in toggledOn) {
+            for (deviceCanAuthenticate in listOf(true, false)) {
+                assertTrue(
+                    AppAccessPreferencesManager.seedPhraseRequiresAuth(prefs, deviceCanAuthenticate)
+                )
+            }
+        }
     }
 
     // ---------------------------------------------------------------------------

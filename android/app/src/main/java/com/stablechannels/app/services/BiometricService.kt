@@ -67,6 +67,16 @@ object BiometricService {
     }
 
     /**
+     * Reports whether [authenticate] can prompt (biometric or device credential). False without a
+     * screen lock, and on API 28-29 where this authenticator pair is unsupported.
+     */
+    fun isAuthenticationAvailable(context: Context): Boolean {
+        val biometricManager = BiometricManager.from(context)
+        return biometricManager.canAuthenticate(BIOMETRIC_STRONG or DEVICE_CREDENTIAL) ==
+            BiometricManager.BIOMETRIC_SUCCESS
+    }
+
+    /**
      * Presents the BiometricPrompt and returns the authentication result.
      *
      * Uses suspendCancellableCoroutine to wrap the callback-based BiometricPrompt API. When

@@ -1,7 +1,6 @@
 package com.stablechannels.app.ui.settings
 
 import android.content.Context
-import androidx.biometric.BiometricManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -11,12 +10,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.fragment.app.FragmentActivity
+import com.stablechannels.app.services.AppAccessPreferencesManager
+import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.ui.components.inkColor
 import com.stablechannels.app.ui.components.onInkColor
+import kotlinx.coroutines.launch
 
 @Composable
 fun AppAccessView() {
     val context = LocalContext.current
+    val activity = context as? FragmentActivity
+    val scope = rememberCoroutineScope()
     val prefs = context.getSharedPreferences("app_access_prefs", Context.MODE_PRIVATE)
 
     var appUnlockEnabled by remember {
@@ -25,13 +30,30 @@ fun AppAccessView() {
     var paymentConfirmEnabled by remember {
         mutableStateOf(prefs.getBoolean("payment_confirmation_enabled", false))
     }
+    var isAuthenticating by remember { mutableStateOf(false) }
 
-    val biometricManager = BiometricManager.from(context)
-    val biometricsAvailable =
-        biometricManager.canAuthenticate(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        ) == BiometricManager.BIOMETRIC_SUCCESS
+    val biometricsAvailable = BiometricService.isAuthenticationAvailable(context)
+
+    // Turning a toggle off needs auth first, so someone holding the unlocked phone can't
+    // remove the protection. Turning one on does not.
+    fun changeToggle(
+        current: Boolean,
+        requested: Boolean,
+        reason: String,
+        save: (Boolean) -> Unit,
+    ) {
+        if (!AppAccessPreferencesManager.requiresAuthForToggleChange(current, requested)) {
+            save(requested)
+            return
+        }
+        if (activity == null || isAuthenticating) return
+        isAuthenticating = true
+        scope.launch {
+            val result = BiometricService.authenticate(activity, reason)
+            if (result == BiometricService.AuthResult.SUCCESS) save(requested)
+            isAuthenticating = false
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (!biometricsAvailable) {
@@ -79,11 +101,13 @@ fun AppAccessView() {
                     checked = appUnlockEnabled,
                     onCheckedChange = { newValue ->
                         if (biometricsAvailable) {
-                            appUnlockEnabled = newValue
-                            prefs.edit().putBoolean("app_unlock_enabled", newValue).apply()
+                            changeToggle(appUnlockEnabled, newValue, "Disable App Unlock") {
+                                appUnlockEnabled = it
+                                prefs.edit().putBoolean("app_unlock_enabled", it).apply()
+                            }
                         }
                     },
-                    enabled = biometricsAvailable,
+                    enabled = biometricsAvailable && !isAuthenticating,
                     colors =
                         SwitchDefaults.colors(
                             checkedThumbColor = onInkColor(),
@@ -125,14 +149,17 @@ fun AppAccessView() {
                     checked = paymentConfirmEnabled,
                     onCheckedChange = { newValue ->
                         if (biometricsAvailable) {
-                            paymentConfirmEnabled = newValue
-                            prefs
-                                .edit()
-                                .putBoolean("payment_confirmation_enabled", newValue)
-                                .apply()
+                            changeToggle(
+                                paymentConfirmEnabled,
+                                newValue,
+                                "Disable Payment Confirmation",
+                            ) {
+                                paymentConfirmEnabled = it
+                                prefs.edit().putBoolean("payment_confirmation_enabled", it).apply()
+                            }
                         }
                     },
-                    enabled = biometricsAvailable,
+                    enabled = biometricsAvailable && !isAuthenticating,
                     colors =
                         SwitchDefaults.colors(
                             checkedThumbColor = onInkColor(),
