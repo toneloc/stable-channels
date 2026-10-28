@@ -107,7 +107,7 @@ struct RestoreSeedSheet: View {
             } message: {
                 Text(String(
                     localized: "message_restore_force_close",
-                    defaultValue: "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain. The app then moves your funds to your onchain wallet automatically. Only continue if this is your only way back into the wallet."
+                    defaultValue: "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain. If the channel was open on this phone, the app then moves your funds to your onchain wallet automatically. Only continue if this is your only way back into the wallet."
                 ))
             }
             .alert(

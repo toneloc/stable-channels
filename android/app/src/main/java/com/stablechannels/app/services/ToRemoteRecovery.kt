@@ -146,8 +146,9 @@ class ToRemoteRecovery(
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            // A malformed explorer reply must not crash the app on every refresh.
+        } catch (e: Throwable) {
+            // A malformed explorer reply, or a native library that fails to load, must not crash
+            // the app on every refresh.
             log("TO_REMOTE_ERROR", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
         } finally {
             running.unlock()
@@ -244,6 +245,9 @@ class ToRemoteRecovery(
     ) {
         if (now() - lastSettleAt < SETTLE_INTERVAL_MS) return
         lastSettleAt = now()
+        // A restore can reset the state while this waits on the explorer. What this settle found
+        // then belongs to the replaced wallet, so it stops before saving or broadcasting anything.
+        val generation = state.generation
         val done = mutableListOf<Output>()
         for (output in state.found) {
             val spend = getObject("/tx/${output.txid}/outspend/${output.vout}") ?: continue
@@ -254,8 +258,11 @@ class ToRemoteRecovery(
             // The output is locked until one block after the close confirms (1 OP_CSV).
             val status = getObject("/tx/${output.txid}/status") ?: continue
             if (!status.optBoolean("confirmed")) continue
+            if (state.generation != generation) return
             val address = state.destination ?: destination() ?: continue
-            if (state.destination == null) update { it.copy(destination = address) }
+            if (state.destination == null) {
+                update { if (it.generation == generation) it.copy(destination = address) else it }
+            }
             val script =
                 Bitcoin.addressToPublicKeyScript(Chain.Mainnet.chainHash, address).right?.let {
                     Script.write(it)
@@ -288,6 +295,7 @@ class ToRemoteRecovery(
                 }
                 continue
             }
+            if (state.generation != generation) return
             val result = broadcast(ByteVector(Transaction.write(tx)).toHex())
             log(
                 "TO_REMOTE_SWEEP_BROADCAST",
@@ -304,6 +312,7 @@ class ToRemoteRecovery(
         }
         if (done.isEmpty()) return
         update { s ->
+            if (s.generation != generation) return@update s
             val left = s.found.filterNot { it in done }
             s.copy(found = left, destination = if (left.isEmpty()) null else s.destination)
         }

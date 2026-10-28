@@ -509,6 +509,29 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
+    fun aRestoreDuringASweepStopsIt() {
+        closePaysUs()
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        recovery.runNow()
+        closeConfirmed()
+        // The restore lands while the sweep asks the node for an address.
+        runBlocking {
+            recovery.run(
+                { keys },
+                {
+                    recovery.startAfterRestore(null, null, repeat = false)
+                    address
+                },
+                { feeRate },
+            )
+        }
+        assertNull(recovery.state.destination)
+        assertTrue(posted.isEmpty())
+        assertTrue(swept.isEmpty())
+    }
+
+    @Test
     fun aRestoreWithoutAFundingTxidLooksForNothing() {
         val recovery = recovery()
         recovery.startAfterRestore(null, null, repeat = true)
