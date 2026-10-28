@@ -18,6 +18,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AppAccessPreferencesManager
 import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.services.BiometricService
 import com.stablechannels.app.services.NodeService
@@ -41,6 +42,7 @@ fun BackupView(appState: AppState) {
     var showSeedWords by remember { mutableStateOf(false) }
     var seedAuthError by remember { mutableStateOf<String?>(null) }
     var showRestore by remember { mutableStateOf(false) }
+    var restoreAuthError by remember { mutableStateOf<String?>(null) }
     var restoreMnemonic by remember { mutableStateOf("") }
     var restoreError by remember { mutableStateOf<String?>(null) }
     var isRestoring by remember { mutableStateOf(false) }
@@ -81,8 +83,7 @@ fun BackupView(appState: AppState) {
                     seedAuthError = null
                 } else {
                     val requireAuth =
-                        com.stablechannels.app.services.AppAccessPreferencesManager
-                            .shouldRequireAuthForSeedPhrase(context)
+                        AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)
                     if (requireAuth) {
                         // Showing seed words — require biometric auth
                         scope.launch {
@@ -252,12 +253,38 @@ fun BackupView(appState: AppState) {
 
         Spacer(Modifier.height(16.dp))
 
-        // Restore from seed
+        // Restore from seed — wipes this wallet, so it needs the same auth as viewing the seed
         InkButton(
-            onClick = { showRestore = true },
+            onClick = {
+                restoreAuthError = null
+                if (!AppAccessPreferencesManager.shouldRequireAuthForSeedPhrase(context)) {
+                    showRestore = true
+                } else if (activity == null) {
+                    restoreAuthError = "Authentication required"
+                } else {
+                    scope.launch {
+                        val authResult =
+                            BiometricService.authenticate(activity, "Restore from seed")
+                        if (authResult == BiometricService.AuthResult.SUCCESS) {
+                            showRestore = true
+                        } else {
+                            restoreAuthError = "Authentication required"
+                        }
+                    }
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text("Restore from Seed")
+        }
+
+        restoreAuthError?.let {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 
