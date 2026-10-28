@@ -19,15 +19,15 @@ struct FullscreenQRZoomView: View {
                     .frame(width: side, height: side)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .accessibilityLabel(String(localized: "QR Code", defaultValue: "QR Code"))
-            .accessibilityHint(String(localized: "Tap to close", defaultValue: "Tap to close"))
+            .accessibilityLabel(String(localized: .labelQrCode))
+            .accessibilityHint(String(localized: .labelTapToClose))
 
             VStack {
                 Spacer()
                 HStack(spacing: 4) {
                     Image(systemName: "xmark.circle")
                         .font(.caption)
-                    Text(String(localized: "Tap to close", defaultValue: "Tap to close"))
+                    Text(String(localized: .labelTapToClose))
                         .font(.caption)
                 }
                 .foregroundStyle(.white.opacity(0.7))

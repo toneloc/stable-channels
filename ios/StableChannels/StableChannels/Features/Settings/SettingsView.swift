@@ -15,11 +15,8 @@ struct SettingsView: View {
                 SettingsBanner(
                     icon: "shield.lefthalf.filled.badge.checkmark",
                     iconColor: .green,
-                    title: String(localized: "disclaimer_custody_title", defaultValue: "Your keys, your coins."),
-                    bodyText: String(
-                        localized: "disclaimer_custody_body",
-                        defaultValue: "Stable Channels is a self-custodial wallet. You control your private keys. Third parties do not custody, access, or freeze your funds."
-                    ),
+                    title: String(localized: .disclaimerCustodyTitle),
+                    bodyText: String(localized: .disclaimerCustodyBody),
                     borderColor: .green
                 )
 
@@ -32,7 +29,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "banknote.fill",
                             color: .green,
-                            text: String(localized: "link_stable_position", defaultValue: "Stable Position")
+                            text: String(localized: .linkStablePosition)
                         )
                     }
                     NavigationLink {
@@ -41,7 +38,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "arrow.left.arrow.right.circle.fill",
                             color: Color.stablePrimary,
-                            text: String(localized: "link_channel", defaultValue: "Channel")
+                            text: String(localized: .linkChannel)
                         )
                     }
                     NavigationLink {
@@ -50,7 +47,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "lock.doc.fill",
                             color: .orange,
-                            text: String(localized: "link_backup", defaultValue: "Backup")
+                            text: String(localized: .linkBackup)
                         )
                     }
                     if appState.onchainBalanceSats > 0 {
@@ -60,12 +57,12 @@ struct SettingsView: View {
                             rowLabel(
                                 icon: "bitcoinsign.circle.fill",
                                 color: Color.stablePrimary,
-                                text: String(localized: "link_send_on_chain", defaultValue: "Send Onchain")
+                                text: String(localized: .linkSendOnChain)
                             )
                         }
                     }
                 } header: {
-                    Text(String(localized: "section_wallet", defaultValue: "Wallet"))
+                    Text(String(localized: .sectionWallet))
                         .font(.headline)
                         .foregroundStyle(.green)
                 }
@@ -79,7 +76,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "sparkles",
                             color: .purple,
-                            text: String(localized: "link_appearance", defaultValue: "Appearance")
+                            text: String(localized: .linkAppearance)
                         )
                     }
                     NavigationLink {
@@ -88,11 +85,11 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "bell.and.waves.left.and.right.fill",
                             color: .red,
-                            text: String(localized: "link_notifications", defaultValue: "Notifications")
+                            text: String(localized: .linkNotifications)
                         )
                     }
                 } header: {
-                    Text(String(localized: "section_preferences", defaultValue: "Preferences"))
+                    Text(String(localized: .sectionPreferences))
                         .font(.headline)
                         .foregroundStyle(.purple)
                 }
@@ -106,7 +103,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "cube.transparent.fill",
                             color: Color.stablePrimary,
-                            text: String(localized: "link_node", defaultValue: "Node")
+                            text: String(localized: .linkNode)
                         )
                     }
                     NavigationLink {
@@ -115,7 +112,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "wifi.router.fill",
                             color: .green,
-                            text: String(localized: "link_push_connectivity", defaultValue: "Push Connectivity")
+                            text: String(localized: .linkPushConnectivity)
                         )
                     }
                     NavigationLink {
@@ -124,11 +121,11 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "server.rack",
                             color: .cyan,
-                            text: String(localized: "link_lsp", defaultValue: "Lightning Service Provider")
+                            text: String(localized: .linkLsp)
                         )
                     }
                 } header: {
-                    Text(String(localized: "section_node_network", defaultValue: "Node & Network"))
+                    Text(String(localized: .sectionNodeNetwork))
                         .font(.headline)
                         .foregroundStyle(Color.stablePrimary)
                 }
@@ -142,11 +139,11 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "faceid",
                             color: .indigo,
-                            text: String(localized: "link_app_access", defaultValue: "App Access")
+                            text: String(localized: .linkAppAccess)
                         )
                     }
                 } header: {
-                    Text(String(localized: "section_privacy_security", defaultValue: "Privacy & Security"))
+                    Text(String(localized: .sectionPrivacySecurity))
                         .font(.headline)
                         .foregroundStyle(.indigo)
                 }
@@ -158,11 +155,11 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "stethoscope",
                             color: .green,
-                            text: "Logs & Diagnostics"
+                            text: String(localized: .titleLogsDiagnostics)
                         )
                     }
                 } header: {
-                    Text("Support")
+                    Text(String(localized: .headerSupport))
                         .font(.headline)
                         .foregroundStyle(.primary)
                 }
@@ -176,7 +173,7 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "questionmark.circle.fill",
                             color: .secondary,
-                            text: String(localized: "link_about", defaultValue: "About")
+                            text: String(localized: .linkAbout)
                         )
                     }
                     Button {
@@ -187,16 +184,16 @@ struct SettingsView: View {
                         rowLabel(
                             icon: "hand.raised.fill",
                             color: .secondary,
-                            text: String(localized: "link_privacy_policy", defaultValue: "Privacy Policy")
+                            text: String(localized: .linkPrivacyPolicy)
                         )
                     }
                 } header: {
-                    Text(String(localized: "section_about", defaultValue: "About"))
+                    Text(String(localized: .sectionAbout))
                         .font(.headline)
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle(String(localized: "title_settings", defaultValue: "Settings"))
+            .navigationTitle(String(localized: .titleSettings))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
                 await appState.userInitiatedRefresh()

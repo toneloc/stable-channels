@@ -36,7 +36,7 @@ struct SeedDisplayView: View {
             HStack {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
-                Text(String(localized: "warning_seed", defaultValue: "Never share your seed words"))
+                Text(String(localized: .warningSeed))
                     .font(.caption.bold())
                     .foregroundStyle(.orange)
             }
@@ -70,7 +70,7 @@ struct SeedDisplayView: View {
                 } label: {
                     HStack {
                         Image(systemName: "doc.on.doc")
-                        Text(String(localized: "button_copy_seed", defaultValue: "Copy to Clipboard"))
+                        Text(String(localized: .buttonCopySeed))
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 12)
@@ -82,7 +82,7 @@ struct SeedDisplayView: View {
             if copiedSeed {
                 HStack {
                     Image(systemName: "checkmark")
-                    Text(String(localized: "button_copied", defaultValue: "Copied"))
+                    Text(String(localized: .buttonCopied))
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
@@ -92,26 +92,23 @@ struct SeedDisplayView: View {
 
             if showCopyWarning {
                 VStack(spacing: 8) {
-                    Text(String(localized: "warning_copy_seed_title", defaultValue: "Copy Seed Words?"))
+                    Text(String(localized: .warningCopySeedTitle))
                         .font(.caption.bold())
 
-                    Text(String(
-                        localized: "warning_copy_seed_message",
-                        defaultValue: "Clipboard is shared with other apps."
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
+                    Text(String(localized: .warningCopySeedMessage))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
 
                     HStack(spacing: 12) {
-                        Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+                        Button(String(localized: .buttonCancel)) {
                             showCopyWarning = false
                         }
                         .font(.caption)
                         .buttonStyle(.bordered)
                         .controlSize(.small)
 
-                        Button(String(localized: "button_copy_anyway", defaultValue: "Copy Anyway")) {
+                        Button(String(localized: .buttonCopyAnyway)) {
                             copySeedToClipboard()
                             showCopyWarning = false
                         }

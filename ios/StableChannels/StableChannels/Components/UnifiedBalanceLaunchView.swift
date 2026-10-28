@@ -224,7 +224,7 @@ private struct UnifiedLaunchPreviewContainer: View {
             )
 
             VStack(spacing: 6) {
-                Text(String(localized: "app_name", defaultValue: "Stable Channels"))
+                Text(String(localized: .appName))
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.primary)
 

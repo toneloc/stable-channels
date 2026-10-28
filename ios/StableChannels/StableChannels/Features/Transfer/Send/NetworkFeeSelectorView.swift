@@ -12,7 +12,7 @@ struct NetworkFeeSelectorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(String(localized: "header_speed_fee", defaultValue: "Confirmation Speed"))
+                Text(String(localized: .headerSpeedFee))
                     .font(.footnote.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()

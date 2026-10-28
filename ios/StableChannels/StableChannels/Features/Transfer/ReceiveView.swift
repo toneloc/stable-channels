@@ -46,11 +46,11 @@ struct ReceiveView: View {
 
                 Spacer()
             }
-            .navigationTitle(String(localized: "title_receive", defaultValue: "Receive"))
+            .navigationTitle(String(localized: .titleReceive))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
+                    Button(String(localized: .buttonDone)) { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
                     Button {
@@ -58,7 +58,7 @@ struct ReceiveView: View {
                     } label: {
                         Image(systemName: "link")
                     }
-                    .accessibilityLabel(String(localized: "toolbar_on_chain", defaultValue: "Onchain"))
+                    .accessibilityLabel(String(localized: .toolbarOnChain))
                 }
             }
             .navigationDestination(isPresented: $showOnChain) {
@@ -82,10 +82,10 @@ struct ReceiveView: View {
 
     private var amountInput: some View {
         VStack(spacing: 16) {
-            Text(String(localized: "placeholder_amount", defaultValue: "Amount (USD)"))
+            Text(String(localized: .placeholderAmount))
                 .font(.headline)
 
-            TextField(String(localized: "placeholder_amount_usd", defaultValue: "0.00"), text: $amountUSD)
+            TextField(String(localized: .placeholderAmountUsd), text: $amountUSD)
                 .keyboardType(.decimalPad)
                 .font(.system(size: 32, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
@@ -98,7 +98,7 @@ struct ReceiveView: View {
                             let textWidth = amountUSD.size(withAttributes: [
                                 .font: UIFont.rounded(ofSize: 32, weight: .bold)
                             ]).width
-                            Text(String(localized: "label_dollar_sign", defaultValue: "$"))
+                            Text(String(localized: .labelDollarSign))
                                 .font(.system(size: 32, weight: .bold, design: .rounded))
                                 .position(x: geo.size.width / 2 - textWidth / 2 - 10,
                                           y: geo.size.height / 2)
@@ -113,35 +113,26 @@ struct ReceiveView: View {
             }
 
             if !hasChannel {
-                Text(String(
-                    localized: "info_first_payment",
-                    defaultValue: "Get your first payment over Lightning to activate your account"
-                ))
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal)
+                Text(String(localized: .infoFirstPayment))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
 
-                Text(String(
-                    format: NSLocalizedString("max_channel_limit", comment: ""),
-                    Int64(Constants.maxChannelUSD)
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                Text(.maxChannelLimit(Int(Constants.maxChannelUSD)))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             if !hasChannel && enteredUSDValue > Constants.maxChannelUSD {
                 let maxAmount = Int(Constants.maxChannelUSD)
-                let limitStr = String(
-                    localized: "error_exceeds_limit",
-                    defaultValue: "Amount exceeds $\(maxAmount) channel limit"
-                )
+                let limitStr = String(localized: .errorExceedsLimit(maxAmount))
                 Text(limitStr)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
 
-            Button(String(localized: "button_generate_invoice", defaultValue: "Generate Invoice")) {
+            Button(String(localized: .buttonGenerateInvoice)) {
                 createInvoice()
             }
             .buttonStyle(.borderedProminent)
@@ -149,7 +140,7 @@ struct ReceiveView: View {
             .disabled(enteredSats == 0 || (!hasChannel && enteredUSDValue > Constants.maxChannelUSD))
 
             if hasChannel {
-                Button(String(localized: "button_any_amount", defaultValue: "Any Amount")) {
+                Button(String(localized: .buttonAnyAmount)) {
                     createVariableInvoice()
                 }
                 .buttonStyle(.bordered)
@@ -175,7 +166,7 @@ struct ReceiveView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text(String(localized: "label_any_amount", defaultValue: "Any amount"))
+                Text(String(localized: .labelAnyAmount))
                     .font(.title3)
                     .foregroundStyle(.secondary)
             }
@@ -197,7 +188,7 @@ struct ReceiveView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.up.left.and.arrow.down.right")
                             .font(.caption2)
-                        Text(String(localized: "Tap to enlarge", defaultValue: "Tap to enlarge"))
+                        Text(String(localized: .labelTapToEnlarge))
                             .font(.caption2)
                     }
                     .foregroundStyle(.secondary)
@@ -205,7 +196,7 @@ struct ReceiveView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text(String(localized: "label_your_invoice", defaultValue: "Your Lightning Invoice"))
+                Text(String(localized: .labelYourInvoice))
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -230,7 +221,7 @@ struct ReceiveView: View {
                     .overlay(alignment: .center) {
                         if isCopied {
                             Label(
-                                String(localized: "button_copied", defaultValue: "Copied"),
+                                String(localized: .buttonCopied),
                                 systemImage: "checkmark.circle.fill"
                             )
                             .font(.subheadline.weight(.semibold))
@@ -259,7 +250,7 @@ struct ReceiveView: View {
                         .background(.ultraThinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "button_copy_invoice", defaultValue: "Copy Invoice"))
+                .accessibilityLabel(String(localized: .buttonCopyInvoice))
 
                 Button {
                     shareQR()
@@ -270,7 +261,7 @@ struct ReceiveView: View {
                         .background(.ultraThinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "button_share_qr", defaultValue: "Share QR"))
+                .accessibilityLabel(String(localized: .buttonShareQr))
 
                 Button {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
@@ -283,7 +274,7 @@ struct ReceiveView: View {
                         .background(.ultraThinMaterial, in: Circle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(String(localized: "button_enlarge_qr", defaultValue: "Enlarge QR"))
+                .accessibilityLabel(String(localized: .buttonEnlargeQr))
             }
         }
     }

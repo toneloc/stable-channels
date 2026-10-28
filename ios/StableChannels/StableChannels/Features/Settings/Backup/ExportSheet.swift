@@ -21,11 +21,11 @@ struct ExportSheet: View {
                 .padding(20)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(String(localized: "export_backup", defaultValue: "Export Backup"))
+            .navigationTitle(String(localized: .exportBackup))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
+                    Button(String(localized: .buttonCancel)) { dismiss() }
                         .foregroundStyle(.secondary)
                 }
             }
@@ -53,17 +53,14 @@ struct ExportSheet: View {
                     .foregroundStyle(.blue)
             }
 
-            Text(String(localized: "export_title", defaultValue: "Export Your Backup"))
+            Text(String(localized: .exportTitle))
                 .font(.title2.bold())
                 .foregroundStyle(.primary)
 
-            Text(String(
-                localized: "export_description",
-                defaultValue: "Add a passphrase to protect your exported backup. You'll need this to restore."
-            ))
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
+            Text(String(localized: .exportDescription))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .padding(.top, 8)
     }
@@ -73,29 +70,29 @@ struct ExportSheet: View {
     private var exportContent: some View {
         VStack(spacing: 16) {
             PassphraseCard(
-                label: String(localized: "passphrase", defaultValue: "Passphrase"),
-                prompt: String(localized: "enter_passphrase", defaultValue: "Enter passphrase"),
+                label: String(localized: .passphrase),
+                prompt: String(localized: .enterPassphrase),
                 text: $passphrase,
                 isNew: true
             )
 
             PassphraseCard(
-                label: String(localized: "confirm_passphrase", defaultValue: "Confirm Passphrase"),
-                prompt: String(localized: "confirm_passphrase_hint", defaultValue: "Confirm your passphrase"),
+                label: String(localized: .confirmPassphrase),
+                prompt: String(localized: .confirmPassphraseHint),
                 text: $confirmPassphrase,
                 isNew: true
             )
 
             if !passphrase.isEmpty && passphrase.count < 12 {
                 RequirementBadge(
-                    text: String(localized: "passphrase_min_length", defaultValue: "At least 12 characters required"),
+                    text: String(localized: .passphraseMinLength),
                     isMet: false
                 )
             }
 
             if !passphrase.isEmpty && !confirmPassphrase.isEmpty && passphrase != confirmPassphrase {
                 RequirementBadge(
-                    text: String(localized: "passphrase_mismatch", defaultValue: "Passphrases don't match"),
+                    text: String(localized: .passphraseMismatch),
                     isMet: false
                 )
             }
@@ -113,7 +110,7 @@ struct ExportSheet: View {
                     } else {
                         Image(systemName: "square.and.arrow.up")
                     }
-                    Text(String(localized: "export", defaultValue: "Export"))
+                    Text(String(localized: .export))
                         .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
@@ -145,7 +142,7 @@ struct ExportSheet: View {
 
         do {
             guard let mnemonic = NodeService.shared.savedMnemonic else {
-                errorMessage = String(localized: "error_no_seed", defaultValue: "No seed available")
+                errorMessage = String(localized: .errorNoSeed)
                 return
             }
             let encryptedData = try CryptoService.encrypt(mnemonic: mnemonic, passphrase: passphrase).data
@@ -156,7 +153,7 @@ struct ExportSheet: View {
             exportURL = tempURL
             showingShareSheet = true
         } catch {
-            errorMessage = String(localized: "error_export_failed", defaultValue: "Export failed")
+            errorMessage = String(localized: .errorExportFailed)
         }
     }
 }

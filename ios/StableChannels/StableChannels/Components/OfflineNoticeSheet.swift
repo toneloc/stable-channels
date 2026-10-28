@@ -31,19 +31,16 @@ struct OfflinePageView: View {
                 }
 
             VStack(spacing: 8) {
-                Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                Text(String(localized: .offlineTitle))
                     .font(.title3.weight(.bold))
                     .foregroundStyle(.primary)
 
-                Text(String(
-                    localized: "offline_body",
-                    defaultValue: "Cannot connect to the server without an internet connection. Your wallet and keys remain safe on this device."
-                ))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(3)
-                .padding(.horizontal, 32)
+                Text(String(localized: .offlineBody))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+                    .padding(.horizontal, 32)
             }
 
             VStack(spacing: 12) {
@@ -61,7 +58,7 @@ struct OfflinePageView: View {
                                 value: isSpinning
                             )
 
-                        Text(String(localized: "try_again", defaultValue: "Try again"))
+                        Text(String(localized: .tryAgain))
                             .font(.subheadline.weight(.medium))
                     }
                     .foregroundStyle(.primary)
@@ -94,7 +91,7 @@ struct OfflinePageView: View {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         onGoToHome()
                     } label: {
-                        Text(String(localized: "go_to_home", defaultValue: "Go to Home"))
+                        Text(String(localized: .goToHome))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
@@ -148,7 +145,7 @@ struct OfflineBadgeView: View {
 
             if let subtitle {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                    Text(String(localized: .offlineTitle))
                         .font(.caption.bold())
                         .foregroundStyle(.red)
                     Text(subtitle)
@@ -156,7 +153,7 @@ struct OfflineBadgeView: View {
                         .foregroundStyle(.secondary)
                 }
             } else {
-                Text(String(localized: "offline_title", defaultValue: "No Internet Connection"))
+                Text(String(localized: .offlineTitle))
                     .font(.caption.bold())
                     .foregroundStyle(.red)
             }

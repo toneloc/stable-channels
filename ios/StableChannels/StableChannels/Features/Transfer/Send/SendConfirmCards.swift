@@ -40,7 +40,7 @@ struct SendConfirmAssetCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "header_account_asset", defaultValue: "Asset & Network"))
+            Text(String(localized: .headerAccountAsset))
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
 
@@ -51,7 +51,7 @@ struct SendConfirmAssetCard: View {
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "label_bitcoin", defaultValue: "Bitcoin"))
+                    Text(String(localized: .labelBitcoin))
                         .font(.headline)
                     Text(verbatim: routeDescription)
                         .font(.caption)
@@ -81,7 +81,7 @@ struct SendConfirmAddressCard: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 if hasCopiedAddress {
-                    Text(String(localized: "label_copied", defaultValue: "Copied"))
+                    Text(String(localized: .labelCopied))
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(.orange)
                         .transition(.opacity)
@@ -123,7 +123,7 @@ struct SendConfirmReceivesCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "header_recipient_receives", defaultValue: "Recipient Receives"))
+            Text(String(localized: .headerRecipientReceives))
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
 
@@ -155,13 +155,13 @@ struct SendConfirmLNURLInvoiceCard: View {
         if let errorMessage {
             VStack(alignment: .leading, spacing: 8) {
                 SendErrorBanner(message: errorMessage)
-                Button(String(localized: "button_retry", defaultValue: "Retry"), action: onRetry)
+                Button(String(localized: .buttonRetry), action: onRetry)
                     .buttonStyle(.bordered)
             }
         } else if isLoading {
             HStack(spacing: 8) {
                 ProgressView()
-                Text(String(localized: "label_fetching_invoice", defaultValue: "Fetching invoice..."))
+                Text(String(localized: .labelFetchingInvoice))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -173,7 +173,7 @@ struct SendConfirmLNURLInvoiceCard: View {
 
 /// Displays the fee breakdown and total debit from user's balance.
 struct SendConfirmFeeTotalCard: View {
-    var feeLabel: String = .init(localized: "label_total_fees", defaultValue: "Network Fee")
+    var feeLabel = String(localized: .labelTotalFees)
     let estimatedFeeSats: UInt64
     var rateSatVb: Double?
     let totalDebitSats: UInt64
@@ -218,7 +218,7 @@ struct SendConfirmFeeTotalCard: View {
             Divider()
 
             HStack {
-                Text(String(localized: "label_total_spent", defaultValue: "Total Debit"))
+                Text(String(localized: .labelTotalSpent))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 let totalUSD = (Double(totalDebitSats) / Double(Constants.satsInBTC)) * btcPrice

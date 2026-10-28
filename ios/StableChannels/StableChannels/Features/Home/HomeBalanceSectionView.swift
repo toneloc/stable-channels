@@ -27,16 +27,16 @@ struct HomeBalanceSectionView: View {
 
     var body: some View {
         VStack(spacing: 4) {
-            Text(String(localized: "label_total_balance", defaultValue: "Total Balance"))
+            Text(String(localized: .labelTotalBalance))
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
             if !hasBalance && appState.isSyncing {
-                Text(String(localized: "label_dash", defaultValue: "—"))
+                Text(String(localized: .labelDash))
                     .font(.system(size: 42, weight: .bold, design: .rounded))
                     .foregroundStyle(.secondary)
 
-                Text(String(localized: "loading_balance", defaultValue: "Loading balance..."))
+                Text(String(localized: .loadingBalance))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             } else if showBTC {
@@ -47,7 +47,7 @@ struct HomeBalanceSectionView: View {
                         font: .system(size: 32, weight: .bold, design: .monospaced),
                         baseColor: appState.paymentFlash ? .green : .primary
                     )
-                    Text(String(localized: "label_btc", defaultValue: "BTC"))
+                    Text(String(localized: .labelBtc))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -66,7 +66,7 @@ struct HomeBalanceSectionView: View {
                         font: .system(size: 42, weight: .bold, design: .rounded),
                         baseColor: appState.paymentFlash ? .green : .primary
                     )
-                    Text(String(localized: "label_usd", defaultValue: "USD"))
+                    Text(String(localized: .labelUsd))
                         .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
@@ -78,7 +78,7 @@ struct HomeBalanceSectionView: View {
                         font: .caption,
                         baseColor: .secondary
                     )
-                    Text(String(localized: "label_btc", defaultValue: "BTC"))
+                    Text(String(localized: .labelBtc))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

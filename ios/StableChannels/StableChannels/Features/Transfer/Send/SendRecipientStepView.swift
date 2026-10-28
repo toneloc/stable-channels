@@ -41,16 +41,13 @@ struct SendRecipientStepView: View {
 
     private var recipientCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(String(localized: "header_recipient", defaultValue: "To"))
+            Text(String(localized: .headerRecipient))
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.secondary)
 
             HStack(alignment: .top, spacing: 8) {
                 TextField(
-                    String(
-                        localized: "placeholder_send_destination",
-                        defaultValue: "Address, invoice, or name@domain.com"
-                    ),
+                    String(localized: .placeholderSendDestination),
                     text: $model.inputText,
                     axis: .vertical
                 )
@@ -73,7 +70,7 @@ struct SendRecipientStepView: View {
                     }
                     .buttonStyle(.plain)
                     .padding(.top, 2)
-                    .accessibilityLabel(Text(String(localized: "button_paste", defaultValue: "Paste")))
+                    .accessibilityLabel(Text(String(localized: .buttonPaste)))
                 } else {
                     Button {
                         UISelectionFeedbackGenerator().selectionChanged()
@@ -100,7 +97,7 @@ struct SendRecipientStepView: View {
         let sats = model.availableSpendableSats(appState: appState)
         let price = appState.accountingBTCPrice
         return HStack(spacing: 4) {
-            Text(String(localized: "available_balance", defaultValue: "Available: "))
+            Text(String(localized: .availableBalance))
                 .foregroundStyle(.secondary)
             Text(verbatim: "\(sats.btcSpacedFormatted) BTC")
                 .foregroundStyle(.primary)
@@ -121,7 +118,7 @@ struct SendRecipientStepView: View {
             isInputFocused = false
             model.startProceedFromRecipient(appState: appState)
         } label: {
-            Text(String(localized: "button_continue", defaultValue: "Continue"))
+            Text(String(localized: .buttonContinue))
                 .font(.headline)
                 .frame(maxWidth: .infinity)
         }

@@ -161,10 +161,7 @@ extension SendFlowModel {
         guard let quote = lnurlQuote else { return nil }
         guard !quote.isExpired(at: Date()) else {
             startLNURLQuoteFetch(appState: appState)
-            errorMessage = String(
-                localized: "error_lnurl_invoice_refreshed",
-                defaultValue: "The invoice expired. Review the new invoice and slide again."
-            )
+            errorMessage = String(localized: .errorLnurlInvoiceRefreshed)
             return nil
         }
         return quote
@@ -221,10 +218,7 @@ extension SendFlowModel {
         case .proceed:
             nil
         case .offline:
-            String(
-                localized: "error_offline_send",
-                defaultValue: "You’re offline. Payments cannot be sent until network connectivity is restored."
-            )
+            String(localized: .errorOfflineSend)
         case .feeRateNotReady:
             feeRateNotReadyMessage
         case .invalidAmount:
