@@ -60,6 +60,8 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
+        private const val COOP_CLOSED_IDS = "ids"
+
         /**
          * Whether resuming a pending splice confirmation on this call should skip bumping
          * [spliceGeneration]. True only when this process is already actively monitoring the exact
@@ -801,6 +803,10 @@ class AppState(private val context: Context) : ViewModel() {
     private val _closedChannelFunds = MutableStateFlow<ClosedChannelFunds?>(null)
     val closedChannelFunds: StateFlow<ClosedChannelFunds?> = _closedChannelFunds
     @Volatile private var ldkClosedChannelFunds: ClosedChannelFunds? = null
+
+    /** Channels closed cooperatively, which the closed channel card leaves out (#358). */
+    private val coopClosedChannels
+        get() = context.getSharedPreferences("coop_closed_channels", Context.MODE_PRIVATE)
 
     private val pendingLock = Any()
 
@@ -3440,6 +3446,10 @@ class AppState(private val context: Context) : ViewModel() {
         counterpartyNodeId: String?,
         reason: ClosureReason?,
     ) {
+        if (ClosedChannelFunds.isCooperative(reason)) {
+            val ids = coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty()
+            coopClosedChannels.edit().putStringSet(COOP_CLOSED_IDS, ids + channelId).apply()
+        }
         val sc = _stableChannel.value
         if (
             sc.channelId == channelId ||
@@ -4758,6 +4768,13 @@ class AppState(private val context: Context) : ViewModel() {
                 lightningBalances = balances.lightningBalances,
                 pendingSweeps = balances.pendingBalancesFromChannelClosures,
                 openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
+                coopClosedChannelIds =
+                    coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty(),
+                isWalletTx = { txid ->
+                    nodeService.node?.listPayments().orEmpty().any {
+                        (it.kind as? PaymentKind.Onchain)?.txid == txid
+                    }
+                },
                 currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
             )
         publishClosedChannelFunds()
@@ -4767,7 +4784,11 @@ class AppState(private val context: Context) : ViewModel() {
                 savedFundingTxid = fundingTxid,
                 savedFundingVout = fundingVout,
                 ldkHasChannels = nodeService.channels.isNotEmpty(),
-                ldkHandlesClose = ldkClosedChannelFunds != null,
+                ldkHandlesClose =
+                    ClosedChannelFunds.ldkHandlesClose(
+                        ldkClosedChannelFunds,
+                        balances.pendingBalancesFromChannelClosures,
+                    ),
             )
         ) {
             viewModelScope.launch(Dispatchers.IO) {

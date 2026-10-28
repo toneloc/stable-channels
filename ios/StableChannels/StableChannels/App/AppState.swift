@@ -223,6 +223,8 @@ class AppState {
     @ObservationIgnored let toRemoteRecovery = ToRemoteRecovery(chainURLs: Constants.esploraChainURLs)
     @ObservationIgnored private var toRemotePendingSats: UInt64 = 0
     @ObservationIgnored private var toRemoteRecoveryTask: Task<Void, Never>?
+    /// Channels closed cooperatively, which the closed channel card leaves out (#358).
+    private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -769,6 +771,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
+        closedChannelFunds = nil
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -2609,6 +2612,11 @@ class AppState {
         counterpartyNodeId: PublicKey?,
         reason: ClosureReason?
     ) {
+        if ClosedChannelFunds.isCooperative(reason) {
+            let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            let ids = shared?.stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            shared?.set(ids + ["\(channelId)"], forKey: Self.coopClosedChannelIdsKey)
+        }
         let balanceSats = stableChannel.stableReceiverBTC.sats
 
         var data: [String: Any] = [
@@ -4020,11 +4028,10 @@ class AppState {
     }
 
     /// Looks on chain for funds of a channel LDK no longer knows (#364).
-    private func runToRemoteRecovery() {
+    private func runToRemoteRecovery(ldkHandlesClose: Bool) {
         guard toRemoteRecoveryTask == nil else { return }
         let savedFunding = fundingTxid
         let ldkHasChannels = !nodeService.channels.isEmpty
-        let ldkHandlesClose = ldkClosedChannelFunds != nil
         toRemoteRecoveryTask = Task { [weak self] in
             guard let self else { return }
             defer { toRemoteRecoveryTask = nil }
@@ -4181,10 +4188,23 @@ class AppState {
             lightningBalances: balances.lightningBalances,
             pendingSweeps: balances.pendingBalancesFromChannelClosures,
             openChannelIds: Set(nodeService.channels.map(\.channelId)),
+            coopClosedChannelIds: Set(
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            ),
+            isWalletTx: { txid in
+                nodeService.node?.listPayments().contains {
+                    if case let .onchain(paymentTxid, _) = $0.kind { return paymentTxid == txid }
+                    return false
+                } ?? false
+            },
             currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
         )
         publishClosedChannelFunds()
-        runToRemoteRecovery()
+        runToRemoteRecovery(ldkHandlesClose: ClosedChannelFunds.ldkHandlesClose(
+            ldkClosedChannelFunds,
+            pendingSweeps: balances.pendingBalancesFromChannelClosures
+        ))
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {
