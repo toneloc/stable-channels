@@ -2520,10 +2520,17 @@ final class DatabaseServiceTests: XCTestCase {
             )
         }
 
+        var removedRows: Any?
+        AuditService.onLog = { event, data in
+            if event == "DB_DUPLICATE_RECEIVES_REMOVED" { removedRows = data["rows"] }
+        }
+        defer { AuditService.onLog = nil }
+
         service = try DatabaseService(dataDir: dataDir)
 
         XCTAssertEqual(try onchainReceiveCount(), 1)
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.paymentId, "first")
+        XCTAssertEqual(removedRows as? Int, 1)
     }
 
     func testMigrationKeepsTheCompletedDuplicateOverAnEarlierPendingOne() throws {

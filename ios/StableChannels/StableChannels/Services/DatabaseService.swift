@@ -396,7 +396,7 @@ final class DatabaseService {
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_onchain_receive_txid_unique'"
         ).isEmpty
         if !hasUniqueReceiveTxidIndex {
-            try rawSQL.execute("""
+            let removedDuplicates = try rawSQL.executeReturningChanges("""
             DELETE FROM payments
             WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
               AND id NOT IN (SELECT id FROM (
@@ -408,6 +408,9 @@ final class DatabaseService {
                                  WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
                              ) WHERE rank = 1)
             """)
+            if removedDuplicates > 0 {
+                AuditService.log("DB_DUPLICATE_RECEIVES_REMOVED", data: ["rows": removedDuplicates])
+            }
             try rawSQL.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_onchain_receive_txid_unique
             ON payments(txid) WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
