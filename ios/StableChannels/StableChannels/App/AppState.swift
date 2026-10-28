@@ -217,6 +217,10 @@ class AppState {
     }()
 
     var pendingSweepBalanceSats: UInt64 = 0
+    /// LDK's funds of closed channels, from the last refresh.
+    var ldkClosedChannelFunds: ClosedChannelFunds?
+    /// Channels closed cooperatively, which the closed channel card leaves out (#358).
+    private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
     // Balance (derived) — initialized from cache for instant display
     var lightningBalanceSats: UInt64 = {
@@ -255,20 +259,35 @@ class AppState {
             || !(fundingTxid?.isEmpty ?? true)
     }
 
-    var totalBalanceSats: UInt64 {
-        let hasAny = !nodeService.channels.isEmpty
-            || !stableChannel.channelId.isEmpty
-            || !stableChannel.userChannelId.isEmpty
-            || hasReadyChannel
-        return AppState.calculateTotalBalance(
-            lightning: lightningBalanceSats,
-            onchain: onchainBalanceSats,
+    /// The channel state the total, and so the closed channel card, follow.
+    private var balanceChannelState: BalanceCalculator.ChannelState {
+        BalanceCalculator.ChannelState(
             hasReadyChannel: hasReadyChannel,
-            hasAnyChannel: hasAny,
+            hasAnyChannel: !nodeService.channels.isEmpty
+                || !stableChannel.channelId.isEmpty
+                || !stableChannel.userChannelId.isEmpty
+                || hasReadyChannel,
             isChannelClosing: isChannelClosing,
             isOpeningChannel: isOpeningChannel,
-            isSweeping: isSweeping,
-            pendingSweep: pendingSweepBalanceSats
+            isSweeping: isSweeping
+        )
+    }
+
+    var totalBalanceSats: UInt64 {
+        BalanceCalculator.calculateTotalBalance(
+            lightning: lightningBalanceSats,
+            onchain: onchainBalanceSats,
+            pendingSweep: pendingSweepBalanceSats,
+            channelState: balanceChannelState
+        )
+    }
+
+    /// What the total leaves out of LDK's funds of closed channels, for the Home card.
+    var closedChannelFunds: ClosedChannelFunds? {
+        BalanceCalculator.closedChannelFundsLeftOut(
+            ldkClosedChannelFunds,
+            lightning: lightningBalanceSats,
+            channelState: balanceChannelState
         )
     }
 
@@ -756,6 +775,7 @@ class AppState {
         hasReadyChannel = false
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
+        ldkClosedChannelFunds = nil
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -2596,6 +2616,11 @@ class AppState {
         counterpartyNodeId: PublicKey?,
         reason: ClosureReason?
     ) {
+        if ClosedChannelFunds.isCooperative(reason) {
+            let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+            let ids = shared?.stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            shared?.set(ids + ["\(channelId)"], forKey: Self.coopClosedChannelIdsKey)
+        }
         let balanceSats = stableChannel.stableReceiverBTC.sats
 
         var data: [String: Any] = [
@@ -4066,26 +4091,23 @@ class AppState {
         let onchain = effective.onchain
         let spendable = effective.spendable
 
-        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
-        // These funds are NOT yet in total_onchain_balance_sats
-        // (Desktop src/user.rs lines 5989-6002 parity)
-        var sweepSats: UInt64 = 0
-        for pending in balances.pendingBalancesFromChannelClosures {
-            switch pending {
-            case let .pendingBroadcast(_, amountSatoshis):
-                sweepSats += amountSatoshis
-            case let .broadcastAwaitingConfirmation(_, _, _, amountSatoshis):
-                sweepSats += amountSatoshis
-            default:
-                break
-            }
-        }
-        pendingSweepBalanceSats = sweepSats
+        // Not in total_onchain_balance_sats yet. A broadcast sweep is, once the wallet syncs.
+        pendingSweepBalanceSats = ClosedChannelFunds.unbroadcastSweepSats(balances.pendingBalancesFromChannelClosures)
 
         lightningBalanceSats = lightning
         onchainBalanceSats = onchain
         hasReadyChannel = nodeService.channels.contains { $0.isChannelReady }
         spendableOnchainSats = spendable
+        ldkClosedChannelFunds = ClosedChannelFunds.from(
+            lightningBalances: balances.lightningBalances,
+            pendingSweeps: balances.pendingBalancesFromChannelClosures,
+            openChannelIds: Set(nodeService.channels.map(\.channelId)),
+            coopClosedChannelIds: Set(
+                UserDefaults(suiteName: Constants.appGroupIdentifier)?
+                    .stringArray(forKey: Self.coopClosedChannelIdsKey) ?? []
+            ),
+            currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
+        )
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {

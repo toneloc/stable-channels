@@ -60,6 +60,8 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
+        private const val COOP_CLOSED_IDS = "ids"
+
         /**
          * Whether resuming a pending splice confirmation on this call should skip bumping
          * [spliceGeneration]. True only when this process is already actively monitoring the exact
@@ -115,6 +117,25 @@ class AppState(private val context: Context) : ViewModel() {
                 else -> lightning + onchain
             }
         }
+
+        /**
+         * The funds of closed channels that [calculateTotalBalance] leaves out, for the Home card,
+         * so no amount shows twice. LDK's lightning balance includes them, and the total counts the
+         * sweeps LDK has not broadcast when there is no channel.
+         */
+        fun closedChannelFundsLeftOut(
+            funds: ClosedChannelFunds?,
+            lightning: Long,
+            channelState: ChannelState,
+        ): ClosedChannelFunds? =
+            when {
+                funds == null -> null
+                channelState.isChannelClosing -> funds
+                channelState.isOpeningChannel -> if (lightning > 0) funds.sweepsOnly() else funds
+                channelState.isSweeping -> funds.sweepsOnly()
+                !channelState.hasReady && !channelState.hasAnyChannel -> funds.withoutSweeps()
+                else -> funds.sweepsOnly()
+            }
 
         fun calculateTotalBalance(
             lightning: Long,
@@ -814,6 +835,13 @@ class AppState(private val context: Context) : ViewModel() {
                 .getLong(BalanceCacheKey.SPENDABLE, 0L)
         )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
+
+    private val _closedChannelFunds = MutableStateFlow<ClosedChannelFunds?>(null)
+    val closedChannelFunds: StateFlow<ClosedChannelFunds?> = _closedChannelFunds
+
+    /** Channels closed cooperatively, which the closed channel card leaves out (#358). */
+    private val coopClosedChannels
+        get() = context.getSharedPreferences("coop_closed_channels", Context.MODE_PRIVATE)
 
     private val pendingLock = Any()
 
@@ -3424,6 +3452,10 @@ class AppState(private val context: Context) : ViewModel() {
         counterpartyNodeId: String?,
         reason: ClosureReason?,
     ) {
+        if (ClosedChannelFunds.isCooperative(reason)) {
+            val ids = coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty()
+            coopClosedChannels.edit().putStringSet(COOP_CLOSED_IDS, ids + channelId).apply()
+        }
         val sc = _stableChannel.value
         if (
             sc.channelId == channelId ||
@@ -4668,24 +4700,24 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.update { it.copy(counterparty = liveCounterparty) }
             }
         }
-        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
-        // These funds are NOT yet in total_onchain_balance_sats
-        var sweepSats = 0L
-        for (pending in balances.pendingBalancesFromChannelClosures) {
-            when (pending) {
-                is PendingSweepBalance.PendingBroadcast ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                is PendingSweepBalance.BroadcastAwaitingConfirmation ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                else -> {}
-            }
-        }
+        // Not in total_onchain_balance_sats yet. A broadcast sweep is, once the wallet syncs.
+        val sweepSats =
+            ClosedChannelFunds.unbroadcastSweepSats(balances.pendingBalancesFromChannelClosures)
         _pendingSweepBalanceSats.value = sweepSats
 
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
+        val closedFunds =
+            ClosedChannelFunds.from(
+                lightningBalances = balances.lightningBalances,
+                pendingSweeps = balances.pendingBalancesFromChannelClosures,
+                openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
+                coopClosedChannelIds =
+                    coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty(),
+                currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
+            )
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
         // confirm. Check this close's confirmations specifically, not aggregate spendable
@@ -4711,18 +4743,22 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        val channelState =
+            ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = nodeService.channels.isNotEmpty(),
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping,
+            )
         _totalBalanceSats.value =
             calculateTotalBalance(
                 lightning = lightning,
                 onchain = onchain,
-                hasReady = hasReady,
-                isChannelClosing = isChannelClosing,
-                isSweeping = isSweeping,
                 pendingSweep = sweepSats,
-                isOpeningChannel = isOpeningChannel,
-                hasAnyChannel = hasAnyChannel,
+                channelState = channelState,
             )
+        _closedChannelFunds.value = closedChannelFundsLeftOut(closedFunds, lightning, channelState)
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet
