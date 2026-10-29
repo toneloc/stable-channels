@@ -400,7 +400,8 @@ class NodeService: NodeServiceProtocol {
         balanceSats: UInt64,
         balanceUsd: Double?,
         btcPrice: Double?,
-        counterparty: String?
+        counterparty: String?,
+        force: Bool = false
     ) async throws {
         guard let node else { throw NodeServiceError.notRunning }
 
@@ -419,14 +420,25 @@ class NodeService: NodeServiceProtocol {
 
         AuditService.log("CHANNEL_CLOSE_REQUESTED", data: [
             "user_channel_id": "\(userChannelId)",
-            "funding_outpoint": "\(fundingOutpointTxid):\(fundingOutpointVout)"
+            "funding_outpoint": "\(fundingOutpointTxid):\(fundingOutpointVout)",
+            "force": force
         ])
 
         do {
-            try node.closeChannel(
-                userChannelId: userChannelId,
-                counterpartyNodeId: counterpartyNodeId
-            )
+            if force {
+                // Unilateral close (#363). With the LSP as a trusted peer, ldk-node does not
+                // broadcast our close: it reaches the chain when the LSP broadcasts its own (#456).
+                try node.forceCloseChannel(
+                    userChannelId: userChannelId,
+                    counterpartyNodeId: counterpartyNodeId,
+                    reason: "user_emergency_force_close"
+                )
+            } else {
+                try node.closeChannel(
+                    userChannelId: userChannelId,
+                    counterpartyNodeId: counterpartyNodeId
+                )
+            }
         } catch {
             databaseService?.pendingOpRepo.updatePendingOperation(
                 opId: opId,

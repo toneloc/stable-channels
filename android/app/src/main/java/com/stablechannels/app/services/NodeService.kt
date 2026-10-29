@@ -244,6 +244,15 @@ class NodeService(private val context: Context) {
         n.closeChannel(userChannelId, counterpartyNodeId)
     }
 
+    /**
+     * Unilateral close. With the LSP as a trusted peer, ldk-node does not broadcast our close: it
+     * reaches the chain when the LSP broadcasts its own (#456).
+     */
+    fun forceCloseChannel(userChannelId: String, counterpartyNodeId: String) {
+        val n = node ?: throw NodeServiceError()
+        n.forceCloseChannel(userChannelId, counterpartyNodeId, "user_emergency_force_close")
+    }
+
     fun spliceIn(userChannelId: String, counterpartyNodeId: String, amountSats: Long) {
         val n = node ?: throw NodeServiceError()
         n.spliceIn(userChannelId, counterpartyNodeId, amountSats.toULong())

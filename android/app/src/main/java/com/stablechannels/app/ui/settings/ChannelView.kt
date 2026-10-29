@@ -3,6 +3,7 @@ package com.stablechannels.app.ui.settings
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -10,10 +11,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.stablechannels.app.AppState
+import com.stablechannels.app.services.AuditService
 import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.OfflineBadge
@@ -28,6 +34,8 @@ fun ChannelView(appState: AppState) {
     val sc by appState.stableChannel.collectAsState()
     val scope = rememberCoroutineScope()
     var showCloseConfirm by remember { mutableStateOf(false) }
+    var showForceClose by remember { mutableStateOf(false) }
+    var forceCloseInput by remember { mutableStateOf("") }
 
     // Observe the closing flag and channel readiness as Compose state. This screen used to read
     // the plain appState.isChannelClosing getter and derive readiness from nodeService.channels,
@@ -72,6 +80,12 @@ fun ChannelView(appState: AppState) {
                 Spacer(Modifier.height(32.dp))
                 CloseChannelButton(enabled = isOnline, onClick = { showCloseConfirm = true })
             }
+
+            Spacer(Modifier.height(12.dp))
+            ForceCloseButton(enabled = isOnline) {
+                forceCloseInput = ""
+                showForceClose = true
+            }
         } else if (isClosing) {
             // Channel is closing — show status
             Spacer(Modifier.height(32.dp))
@@ -95,6 +109,14 @@ fun ChannelView(appState: AppState) {
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+            // A close that started but never finished still lists the channel.
+            if (channels.isNotEmpty()) {
+                Spacer(Modifier.height(32.dp))
+                ForceCloseButton(enabled = isOnline) {
+                    forceCloseInput = ""
+                    showForceClose = true
+                }
             }
         } else if (hasCachedChannel) {
             ChannelStatusRow(isReady = hasReadyChannel, isOnline = isOnline)
@@ -154,6 +176,90 @@ fun ChannelView(appState: AppState) {
             },
             dismissButton = {
                 NeutralTextButton(onClick = { showCloseConfirm = false }) { Text("Cancel") }
+            },
+        )
+    }
+
+    val forceCloseChannel = channels.firstOrNull()
+    if (showForceClose && forceCloseChannel != null) {
+        AlertDialog(
+            onDismissRequest = { showForceClose = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 3.dp,
+            title = { Text("Emergency force close") },
+            text = {
+                Column {
+                    ForceCloseWarning(
+                        red = "Use this only if a normal close does not work.",
+                        after = " A normal close is faster and cheaper.",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ForceCloseWarning(
+                        before =
+                            "The provider puts the close on chain, then your funds move to your onchain wallet. This usually takes a few hours. ",
+                        red = "If the provider is offline, it waits until the provider is back.",
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    ForceCloseWarning(
+                        red = "Do not uninstall the app or clear its data until the funds arrive.",
+                        after = " The app needs its channel data to claim them.",
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = forceCloseInput,
+                        onValueChange = { forceCloseInput = it },
+                        label = { Text("Type ${ForceCloseConfirmation.PHRASE} to confirm") },
+                        singleLine = true,
+                        keyboardOptions =
+                            KeyboardOptions(
+                                capitalization = KeyboardCapitalization.Characters,
+                                autoCorrectEnabled = false,
+                            ),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            },
+            confirmButton = {
+                NeutralTextButton(
+                    enabled = isOnline && ForceCloseConfirmation.isConfirmed(forceCloseInput),
+                    onClick = {
+                        showForceClose = false
+                        AuditService.log(
+                            "CHANNEL_CLOSE_REQUESTED",
+                            mapOf(
+                                "user_channel_id" to forceCloseChannel.userChannelId,
+                                "force" to true,
+                            ),
+                        )
+                        appState.isChannelClosing = true
+                        appState.setStatus("Force closing channel...")
+                        appState.prepareChannelCloseTracking(forceCloseChannel.userChannelId)
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                appState.nodeService.forceCloseChannel(
+                                    forceCloseChannel.userChannelId,
+                                    forceCloseChannel.counterpartyNodeId,
+                                )
+                                appState.refreshBalances()
+                            } catch (e: Exception) {
+                                AuditService.log(
+                                    "CHANNEL_CLOSE_REQUEST_FAILED",
+                                    mapOf(
+                                        "user_channel_id" to forceCloseChannel.userChannelId,
+                                        "error" to (e.message ?: e.javaClass.simpleName),
+                                    ),
+                                )
+                                appState.setStatus("Force close failed: ${e.message}")
+                                appState.isChannelClosing = false
+                            }
+                        }
+                    },
+                ) {
+                    Text("Force close")
+                }
+            },
+            dismissButton = {
+                NeutralTextButton(onClick = { showForceClose = false }) { Text("Cancel") }
             },
         )
     }
@@ -265,5 +371,31 @@ private fun CloseChannelButton(enabled: Boolean, onClick: () -> Unit) {
         border = BorderStroke(1.dp, if (enabled) red else red.copy(alpha = 0.38f)),
     ) {
         Text("Close channel")
+    }
+}
+
+/** A paragraph of the force close warning with its key sentence in red. */
+@Composable
+private fun ForceCloseWarning(red: String, before: String = "", after: String = "") {
+    val color = MaterialTheme.colorScheme.error
+    Text(
+        buildAnnotatedString {
+            append(before)
+            withStyle(SpanStyle(color = color)) { append(red) }
+            append(after)
+        }
+    )
+}
+
+/** Shown while a channel is listed, even when it is not usable or its close is stuck (#363). */
+@Composable
+private fun ForceCloseButton(enabled: Boolean, onClick: () -> Unit) {
+    NeutralTextButton(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Text("Emergency force close")
     }
 }

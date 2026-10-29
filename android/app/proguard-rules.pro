@@ -8,6 +8,10 @@
 -keep class * implements com.sun.jna.Callback { *; }
 -dontwarn java.awt.**
 
+# secp256k1-kmp (to_remote recovery, #364) finds its JNI loader by name at runtime, and the JNI code
+# looks up its Java classes by name.
+-keep class fr.acinq.secp256k1.** { *; }
+
 # Kotlin Serialization
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
