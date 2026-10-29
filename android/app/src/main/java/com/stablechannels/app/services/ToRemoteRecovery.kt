@@ -1,5 +1,6 @@
 package com.stablechannels.app.services
 
+import com.stablechannels.app.util.Constants
 import fr.acinq.bitcoin.Bitcoin
 import fr.acinq.bitcoin.ByteVector
 import fr.acinq.bitcoin.Chain
@@ -269,34 +270,44 @@ class ToRemoteRecovery(
                 Bitcoin.addressToPublicKeyScript(Chain.Mainnet.chainHash, address).right?.let {
                     Script.write(it)
                 } ?: continue
-            // The explorer's estimate can round to 0; 1 sat/vB is the floor the sweep pays.
-            val feeRate = (feeRateSatVb() ?: continue).coerceAtLeast(1)
+            // The explorer's estimate can round to 0 and has no ceiling: the sweep pays at least
+            // 1 sat/vB, and at most what a manual send may.
+            val estimate =
+                (feeRateSatVb() ?: continue).coerceIn(1, Constants.MAX_FEE_RATE_SAT_VB.toLong())
             val key = keys.keys[output.keyIndex]
-            val tx =
-                ToRemoteSweep.build(
-                    key,
-                    output.txid,
-                    output.vout,
-                    output.valueSats,
-                    script,
-                    feeRate,
+            val atFloor =
+                ToRemoteSweep.build(key, output.txid, output.vout, output.valueSats, script, 1)
+            if (atFloor == null) {
+                // Dropped only when even 1 sat/vB would leave dust.
+                log(
+                    "TO_REMOTE_DUST",
+                    mapOf(
+                        "outpoint" to "${output.txid}:${output.vout}",
+                        "sats" to output.valueSats,
+                    ),
                 )
-            if (tx == null) {
-                // Waits for lower fees; dropped only when even 1 sat/vB would leave dust.
-                val sweepable =
-                    ToRemoteSweep.build(key, output.txid, output.vout, output.valueSats, script, 1)
-                if (sweepable == null) {
-                    log(
-                        "TO_REMOTE_DUST",
-                        mapOf(
-                            "outpoint" to "${output.txid}:${output.vout}",
-                            "sats" to output.valueSats,
-                        ),
-                    )
-                    done += output
-                }
+                done += output
                 continue
             }
+            // Waiting for lower fees costs nothing, as only our key can spend the output, so it
+            // waits while the fee is over a tenth of the output. When even 1 sat/vB is, waiting
+            // would never end, so it pays 1 sat/vB.
+            val maxFee = output.valueSats / 10
+            val feeRate =
+                if (output.valueSats - atFloor.txOut.single().amount.sat > maxFee) 1L else estimate
+            val tx =
+                if (feeRate == 1L) atFloor
+                else
+                    ToRemoteSweep.build(
+                            key,
+                            output.txid,
+                            output.vout,
+                            output.valueSats,
+                            script,
+                            feeRate,
+                        )
+                        ?.takeIf { output.valueSats - it.txOut.single().amount.sat <= maxFee }
+                        ?: continue
             if (state.generation != generation) return
             val result = broadcast(ByteVector(Transaction.write(tx)).toHex())
             log(
