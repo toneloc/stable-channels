@@ -339,7 +339,7 @@ final class PaymentRepository {
             """
             SELECT payment_id FROM payments
             WHERE payment_id IS NOT NULL AND payment_id != ''
-              AND payment_type IN ('lightning', 'bolt12')
+              AND payment_type IN ('lightning', 'bolt12', 'lnurl')
               AND direction = 'sent' AND status = 'pending'
             ORDER BY created_at ASC LIMIT ?
             """,
