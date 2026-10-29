@@ -102,12 +102,12 @@ final class PaymentRepository {
                 let updated: Int
                 if let fee = feeMsat {
                     updated = try rawSQL.executeReturningChanges(
-                        "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'",
+                        SharedPaymentSQL.resolvePendingPaymentWithFee,
                         params: [.text(status), .integer(Int64(fee)), .text(paymentId)]
                     )
                 } else {
                     updated = try rawSQL.executeReturningChanges(
-                        "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'",
+                        SharedPaymentSQL.resolvePendingPayment,
                         params: [.text(status), .text(paymentId)]
                     )
                 }
@@ -155,6 +155,31 @@ final class PaymentRepository {
             ])
             throw error
         }
+    }
+
+    /// Records our own outbound payment as pending, unless its event handler already settled or
+    /// failed it: then only the details are backfilled, never a downgrade back to pending.
+    func recordOutgoingPending(
+        paymentId: String,
+        paymentType: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        address: String?,
+        txid: String?
+    ) throws {
+        if let existing = payment(paymentId: paymentId), existing.isSettled || existing.isFailed {
+            try backfillPaymentDetails(
+                paymentId: paymentId, amountMsat: amountMsat, amountUSD: amountUSD, btcPrice: btcPrice,
+                counterparty: nil, address: address, txid: txid
+            )
+            return
+        }
+        _ = try recordPayment(
+            paymentId: paymentId, paymentType: paymentType, direction: "sent", amountMsat: amountMsat,
+            amountUSD: amountUSD, btcPrice: btcPrice, counterparty: nil, status: "pending",
+            txid: txid, address: address
+        )
     }
 
     func backfillPaymentDetails(
@@ -220,6 +245,44 @@ final class PaymentRepository {
         )
     }
 
+    /// Fails txid-less onchain rows still pending since before `cutoff`: nothing can ever
+    /// confirm them. Returns how many rows were failed.
+    @discardableResult
+    func failStaleTxidlessOnchain(createdBefore cutoff: Int64) throws -> Int {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE payment_type = 'onchain' AND status = 'pending'
+            AND (txid IS NULL OR txid = '') AND created_at < ?
+            """,
+            params: [.integer(cutoff)]
+        )
+    }
+
+    /// Fails one pending, unconfirmed onchain row. The caller decides it is stale first
+    /// (`ConfirmationPolicy.shouldFailUnfound`); the WHERE guard only keeps a row that was
+    /// confirmed in the meantime.
+    func failUnconfirmedOnchainRow(id: Int64) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE id = ? AND payment_type = 'onchain' AND status = 'pending' AND confirmations = 0
+            """,
+            params: [.integer(id)]
+        ) > 0
+    }
+
+    /// Detaches a txid that does not pay the row's address, back to an unresolved pending row.
+    func clearPaymentTxid(id: Int64) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET txid = NULL, confirmations = 0, tx_block_height = NULL, status = 'pending'
+            WHERE id = ?
+            """,
+            params: [.integer(id)]
+        ) > 0
+    }
+
     func latestReceivedPayment() -> PaymentRecord? {
         let sql = """
         SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
@@ -270,6 +333,50 @@ final class PaymentRepository {
         return !rows.isEmpty
     }
 
+    /// Outbound Lightning rows still pending, oldest first, for the foreground recovery sweep.
+    func pendingOutgoingLightningPaymentIds(limit: Int = LightningPaymentRecovery.reconcileLimit) throws -> [String] {
+        try rawSQL.query(
+            """
+            SELECT payment_id FROM payments
+            WHERE payment_id IS NOT NULL AND payment_id != ''
+              AND payment_type IN ('lightning', 'bolt12', 'lnurl')
+              AND direction = 'sent' AND status = 'pending'
+            ORDER BY created_at ASC LIMIT ?
+            """,
+            params: [.integer(Int64(limit))]
+        ).map { $0.string(0) }
+    }
+
+    static let pendingOnchainReceivesLimit = 25
+    static let pendingOnchainSendsLimit = 10
+
+    /// Onchain deposits still confirming: the newest `limit`, returned oldest first. Home shows one "+" row each.
+    func pendingOnchainReceives(limit: Int = pendingOnchainReceivesLimit) -> [PaymentRecord] {
+        pendingOnchainRows(direction: "received", limit: limit)
+    }
+
+    /// Onchain sends still confirming: the newest `limit`, returned oldest first. Home shows one "-" row each.
+    func pendingOnchainSends(limit: Int = pendingOnchainSendsLimit) -> [PaymentRecord] {
+        pendingOnchainRows(direction: "sent", limit: limit)
+    }
+
+    private func pendingOnchainRows(direction: String, limit: Int) -> [PaymentRecord] {
+        let sql = """
+        SELECT * FROM (
+            SELECT id, payment_id, payment_type, direction, amount_msat, amount_usd, btc_price,
+            counterparty, status, created_at, fee_msat, txid, address, confirmations, tx_block_height
+            FROM payments
+            WHERE payment_type = 'onchain'
+            AND direction = ?
+            AND status = 'pending'
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+        ) ORDER BY created_at ASC, id ASC
+        """
+        let rows = (try? rawSQL.query(sql, params: [.text(direction), .integer(Int64(limit))])) ?? []
+        return rows.map { paymentRecord(from: $0) }
+    }
+
     /// Rows the confirmation poller advances. Splices are deliberately NOT here.
     /// A splice row's completion triggers stable-books reconcile in AppState.completeConfirmedSplice().
     /// Excluding splices ensures the poller does not race the monitor and complete rows without deducting books.
@@ -301,6 +408,30 @@ final class PaymentRepository {
         let sql = "SELECT 1 FROM payments WHERE txid = ? LIMIT 1"
         let rows = try rawSQL.query(sql, params: [.text(txid)])
         return !rows.isEmpty
+    }
+
+    /// True if this address has ever received an on-chain deposit we recorded, i.e. it is one of
+    /// our own wallet's addresses rather than an external destination.
+    /// Whether the newest row carrying `txid` is still pending.
+    func hasPendingPayment(txid: String) -> Bool {
+        payment(txid: txid)?.status == "pending"
+    }
+
+    /// Whether `address` is one this wallet generated for receiving: the current receive address,
+    /// or an older one it has received to before. A failed lookup counts as not ours.
+    func isOwnReceiveAddress(_ address: String?, currentReceiveAddress: String?) -> Bool {
+        guard let address, !address.isEmpty else { return false }
+        if address == currentReceiveAddress { return true }
+        return (try? isKnownReceiveAddress(address)) == true
+    }
+
+    func isKnownReceiveAddress(_ address: String) throws -> Bool {
+        let sql = """
+        SELECT 1 FROM payments
+        WHERE payment_type = 'onchain' AND direction = 'received' AND address = ?
+        LIMIT 1
+        """
+        return try !rawSQL.query(sql, params: [.text(address)]).isEmpty
     }
 
     /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).
@@ -498,31 +629,13 @@ final class PaymentRepository {
                         guard let ucid = userChannelId, !ucid.isEmpty else {
                             throw DatabaseError.executeFailed("userChannelId required for backing update")
                         }
-                        let rows = try rawSQL.query(
-                            "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
-                            params: [.text(ucid)]
+                        let newBacking = try applyBacking(
+                            userChannelId: ucid,
+                            deltaSats: delta,
+                            paymentType: paymentType,
+                            direction: direction,
+                            btcPrice: btcPrice
                         )
-                        guard let current = rows.first?.int64(0) else {
-                            throw DatabaseError.missingChannelRow(ucid)
-                        }
-                        let newBacking = max(0, current + delta)
-                        if current + delta < 0 {
-                            AuditService.log("BACKING_CLAMPED", data: [
-                                "user_channel_id": ucid,
-                                "current_backing_sats": "\(current)",
-                                "delta_sats": "\(delta)"
-                            ])
-                        }
-                        try rawSQL.execute(
-                            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
-                            params: [.integer(newBacking), .text(ucid)]
-                        )
-                        let changedRows = rawSQL.changes
-                        if changedRows != 1 {
-                            throw DatabaseError.executeFailed(
-                                "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
-                            )
-                        }
                         try rawSQL.execute(
                             "UPDATE payments SET backing_applied = 1 WHERE payment_id = ?",
                             params: [.text(pid)]
@@ -574,31 +687,13 @@ final class PaymentRepository {
                 guard let ucid = userChannelId, !ucid.isEmpty else {
                     throw DatabaseError.executeFailed("userChannelId required for backing update")
                 }
-                let rows = try rawSQL.query(
-                    "SELECT stable_sats FROM channels WHERE user_channel_id = ?",
-                    params: [.text(ucid)]
+                let newBacking = try applyBacking(
+                    userChannelId: ucid,
+                    deltaSats: delta,
+                    paymentType: paymentType,
+                    direction: direction,
+                    btcPrice: btcPrice
                 )
-                guard let current = rows.first?.int64(0) else {
-                    throw DatabaseError.missingChannelRow(ucid)
-                }
-                let newBacking = max(0, current + delta)
-                if current + delta < 0 {
-                    AuditService.log("BACKING_CLAMPED", data: [
-                        "user_channel_id": ucid,
-                        "current_backing_sats": "\(current)",
-                        "delta_sats": "\(delta)"
-                    ])
-                }
-                try rawSQL.execute(
-                    "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
-                    params: [.integer(newBacking), .text(ucid)]
-                )
-                let changedRows = rawSQL.changes
-                if changedRows != 1 {
-                    throw DatabaseError.executeFailed(
-                        "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
-                    )
-                }
                 resultingBacking = UInt64(newBacking)
             }
             return PaymentPersistenceResult(
@@ -606,6 +701,54 @@ final class PaymentRepository {
                 backingSats: resultingBacking
             )
         }
+    }
+
+    /// Write the backing a payment row implies. Reads both books under the caller's write lock
+    /// so an incoming stability receipt credits only the local shortfall (#320). Must run inside
+    /// the caller's transaction.
+    private func applyBacking(
+        userChannelId ucid: String,
+        deltaSats delta: Int64,
+        paymentType: String,
+        direction: String,
+        btcPrice: Double?
+    ) throws -> Int64 {
+        let rows = try rawSQL.query(
+            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
+            params: [.text(ucid)]
+        )
+        guard let row = rows.first else {
+            throw DatabaseError.missingChannelRow(ucid)
+        }
+        let current = row.int64(0)
+        guard let newBacking = StabilityAllocation.backingAfterPayment(
+            currentBackingSats: current,
+            expectedUSD: row.double(1),
+            price: btcPrice,
+            deltaSats: delta,
+            paymentType: paymentType,
+            direction: direction
+        ) else {
+            throw DatabaseError.executeFailed("Incoming stability allocation unavailable")
+        }
+        if current + delta < 0 {
+            AuditService.log("BACKING_CLAMPED", data: [
+                "user_channel_id": ucid,
+                "current_backing_sats": "\(current)",
+                "delta_sats": "\(delta)"
+            ])
+        }
+        try rawSQL.execute(
+            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
+            params: [.integer(newBacking), .text(ucid)]
+        )
+        let changedRows = rawSQL.changes
+        if changedRows != 1 {
+            throw DatabaseError.executeFailed(
+                "backing UPDATE affected \(changedRows) rows for user_channel_id=\(ucid)"
+            )
+        }
+        return newBacking
     }
 
     private func authoritativeBacking(

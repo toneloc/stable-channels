@@ -6,6 +6,10 @@ final class MockTxConfirmationProvider: TxConfirmationProvider, BlockHeightProvi
     var heightMap: [String: UInt32] = [:]
     var mockCurrentHeight: UInt32 = 800_000
     var failingTxids: Set<String> = []
+    /// Txids every explorer answers 404 for.
+    var notFoundTxids: Set<String> = []
+    /// Txids whose transaction does not pay the row's address.
+    var mismatchedTxids: Set<String> = []
     var currentHeightFails = false
     var lookupDelayNanoseconds: UInt64 = 0
     /// When set, every tx lookup suspends until the stream finishes.
@@ -13,11 +17,20 @@ final class MockTxConfirmationProvider: TxConfirmationProvider, BlockHeightProvi
     private let lock = NSLock()
     private var _lookupCount = 0
     var lookupCount: Int { lock.withLock { _lookupCount } }
+    private var _receiveCheckCount = 0
+    var receiveCheckCount: Int { lock.withLock { _receiveCheckCount } }
 
-    func blockHeight(for txid: String) async throws -> UInt32? {
+    func receiveCheck(for txid: String, paysTo _: String) async throws -> EsploraLookup<ReceiveTxCheck> {
+        lock.withLock { _receiveCheckCount += 1 }
+        let paysToAddress = !mismatchedTxids.contains(txid)
+        return try await status(for: txid).map { ReceiveTxCheck(paysToAddress: paysToAddress, status: $0) }
+    }
+
+    func status(for txid: String) async throws -> EsploraLookup<TxStatus> {
         // Snapshot the answer before any gate so a blocked lookup returns the state it started with.
         let height = heightMap[txid]
         let fails = failingTxids.contains(txid)
+        let notFound = notFoundTxids.contains(txid)
         lock.withLock { _lookupCount += 1 }
         if let lookupGate {
             for await _ in lookupGate {}
@@ -27,9 +40,12 @@ final class MockTxConfirmationProvider: TxConfirmationProvider, BlockHeightProvi
             try await Task.sleep(nanoseconds: lookupDelayNanoseconds)
         }
         if fails {
-            throw URLError(.notConnectedToInternet)
+            return .unavailable
         }
-        return height
+        if notFound {
+            return .notFound
+        }
+        return .found(TxStatus(blockHeight: height))
     }
 
     func currentHeight() async throws -> UInt32 {
@@ -37,6 +53,16 @@ final class MockTxConfirmationProvider: TxConfirmationProvider, BlockHeightProvi
             throw URLError(.notConnectedToInternet)
         }
         return mockCurrentHeight
+    }
+}
+
+private extension EsploraLookup {
+    func map<T>(_ transform: (Value) -> T) -> EsploraLookup<T> {
+        switch self {
+        case .found(let value): .found(transform(value))
+        case .notFound: .notFound
+        case .unavailable: .unavailable
+        }
     }
 }
 
@@ -532,16 +558,22 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
     func testHistoryPreservesGoodRowsAndNetworkErrorAcrossReloads() throws {
         let id = try recordPendingPayment(txid: "history_preserve")
         var history = HistoryContent()
-        history.reload(database: db)
+        func reloadFromDatabase() {
+            history.reload(
+                loadTrades: { try db.channelRepo.getRecentTrades(limit: 50) },
+                loadPayments: { try db.paymentRepo.getRecentPayments(limit: 50) }
+            )
+        }
+        reloadFromDatabase()
         history.networkError = ConfirmationRefreshResult.timedOut.errorMessage
         let networkError = history.networkError
-        history.reload(database: nil)
+        history.reload(loadTrades: { throw DatabaseError.openFailed("none") }, loadPayments: { [] })
         XCTAssertEqual(history.payments.map(\.id), [id])
         XCTAssertNotNil(history.errorMessage)
         history.reload(loadTrades: { [] }, loadPayments: { throw URLError(.unknown) })
         XCTAssertEqual(history.payments.map(\.id), [id])
         XCTAssertNotNil(history.loadError)
-        history.reload(database: db)
+        reloadFromDatabase()
         XCTAssertNil(history.loadError)
         XCTAssertEqual(history.errorMessage, networkError)
         history.networkError = ConfirmationRefreshResult.completed(failedLookups: 0).errorMessage
@@ -602,6 +634,142 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         await pollingService.revalidateRecentPayments()
 
         XCTAssertEqual(results, [.chainTipUnavailable])
+    }
+
+    // MARK: - Stale pending onchain rows and receive address check
+
+    private static let fifteenDays: Int64 = 15 * 86400
+    private static let thirteenDays: Int64 = 13 * 86400
+
+    private func recordOnchain(
+        paymentId: String,
+        direction: String = "sent",
+        txid: String?,
+        address: String? = nil,
+        ageSeconds: Int64 = 0
+    ) throws -> Int64 {
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: "onchain",
+            direction: direction,
+            amountMsat: 100_000_000,
+            amountUSD: 50.0,
+            btcPrice: 50_000,
+            counterparty: nil,
+            status: "pending",
+            txid: txid,
+            address: address
+        )
+        let id = try XCTUnwrap(db.paymentRepo.payment(paymentId: paymentId)).id
+        try db.rawSQL.execute(
+            "UPDATE payments SET created_at = created_at - ? WHERE id = ?",
+            params: [.integer(ageSeconds), .integer(id)]
+        )
+        return id
+    }
+
+    func testPassFailsStaleTxidlessOnchainRowsEvenWithoutTip() async throws {
+        let stale = try recordOnchain(paymentId: "stale_no_txid", txid: nil, ageSeconds: Self.fifteenDays)
+        let young = try recordOnchain(paymentId: "young_no_txid", txid: nil, ageSeconds: Self.thirteenDays)
+
+        // No chain tip yet: the age-out still runs and is published.
+        await pollingService.pollOnce()
+
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: stale)?.status, "failed")
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: young)?.status, "pending")
+        XCTAssertEqual(updateCount, 1)
+        XCTAssertEqual(mockProvider.lookupCount, 0)
+    }
+
+    func testRefreshFailsStaleRowOnlyWhenEveryExplorerReturns404() async throws {
+        let id = try recordOnchain(paymentId: "gone", txid: "tx_gone", ageSeconds: Self.fifteenDays)
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.notFoundTxids = ["tx_gone"]
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "failed")
+        XCTAssertEqual(updateCount, 1)
+    }
+
+    func testOutageLeavesStaleRowPollable() async throws {
+        let id = try recordOnchain(paymentId: "outage", txid: "tx_outage", ageSeconds: Self.fifteenDays)
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.failingTxids = ["tx_outage"]
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 1))
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "pending")
+        XCTAssertEqual(updateCount, 0)
+    }
+
+    func testNotFoundYoungOrConfirmedRowStaysPending() async throws {
+        let young = try recordOnchain(paymentId: "young", txid: "tx_young", ageSeconds: Self.thirteenDays)
+        let confirmed = try recordOnchain(paymentId: "conf", txid: "tx_conf", ageSeconds: Self.fifteenDays)
+        try db.rawSQL.execute("UPDATE payments SET confirmations = 2 WHERE id = ?", params: [.integer(confirmed)])
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.notFoundTxids = ["tx_young", "tx_conf"]
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0), "not indexed yet is pending, not a failed lookup")
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: young)?.status, "pending")
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: confirmed)?.status, "pending")
+    }
+
+    func testReceiveAddressMismatchClearsTxid() async throws {
+        let id = try recordOnchain(
+            paymentId: "recv_mismatch", direction: "received", txid: "tx_other", address: "bc1qexpected"
+        )
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap["tx_other"] = 100
+        mockProvider.mismatchedTxids = ["tx_other"]
+        var mismatched: [String] = []
+        pollingService.onReceiveTxidMismatch = { mismatched.append($0) }
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        let row = try XCTUnwrap(db.paymentRepo.getPayment(byId: id))
+        XCTAssertNil(row.txid)
+        XCTAssertEqual(row.status, "pending")
+        XCTAssertEqual(row.confirmations, 0)
+        XCTAssertEqual(mismatched, ["tx_other"])
+        XCTAssertEqual(updateCount, 1)
+    }
+
+    func testReceiveCheckStatusIsReusedWithoutSecondLookup() async throws {
+        let id = try recordOnchain(
+            paymentId: "recv_ok", direction: "received", txid: "tx_recv", address: "bc1qexpected"
+        )
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap["tx_recv"] = 100
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.confirmations, 6)
+        XCTAssertEqual(mockProvider.receiveCheckCount, 1)
+        XCTAssertEqual(mockProvider.lookupCount, 1)
+    }
+
+    func testStaleReceiveNotFoundOnAddressCheckFailsRow() async throws {
+        let id = try recordOnchain(
+            paymentId: "recv_gone",
+            direction: "received",
+            txid: "tx_recv_gone",
+            address: "bc1qexpected",
+            ageSeconds: Self.fifteenDays
+        )
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.notFoundTxids = ["tx_recv_gone"]
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "failed")
     }
 
     private func makePollingService(timeout: Duration, manual: Bool = false) -> ConfirmationPollingService {

@@ -55,6 +55,13 @@ struct DeferredTradeResponse {
     let counterparty: String
 }
 
+/// The stored stable books after an outgoing reconcile, plus the repair when one was applied.
+struct StoredBooksReconcile: Equatable {
+    let repair: StabilityService.RepairResult?
+    let expectedUSD: Double
+    let backingSats: UInt64
+}
+
 final class ChannelRepository {
     private let rawSQL: RawSQL
     private let channelCloseChecker: ChannelCloseChecking
@@ -175,6 +182,56 @@ final class ChannelRepository {
             throw DatabaseError.executeFailed(
                 "channel metadata UPDATE affected \(changedRows) rows for user_channel_id=\(userChannelId)"
             )
+        }
+    }
+
+    /// Reconcile a confirmed outgoing move against the stored row, not an in-memory snapshot
+    /// that may predate a signed correction or a background settlement (#318). The backing
+    /// becomes `receiverSats`, so a retry removes no more once the row fits the channel balance.
+    /// Returns the committed books, read in the same transaction, for the caller to adopt.
+    func reconcileOutgoingBacking(
+        userChannelId: String,
+        receiverSats: UInt64,
+        price: Double
+    ) throws -> StoredBooksReconcile {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            let rows = try rawSQL.query(
+                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
+                params: [.text(userChannelId)]
+            )
+            guard let row = rows.first else { throw DatabaseError.missingChannelRow(userChannelId) }
+            let backingSigned = row.int64(1)
+            guard backingSigned >= 0 else {
+                throw DatabaseError.executeFailed("Negative backing for user_channel_id=\(userChannelId)")
+            }
+            guard let repair = StabilityService.overflowRepair(
+                expectedUSD: row.double(0),
+                backingSats: UInt64(backingSigned),
+                receiverSats: receiverSats,
+                price: price
+            ) else {
+                return StoredBooksReconcile(
+                    repair: nil, expectedUSD: row.double(0), backingSats: UInt64(backingSigned)
+                )
+            }
+            let changes = try rawSQL.executeReturningChanges(
+                """
+                UPDATE channels
+                SET expected_usd = ?, stable_sats = ?, receiver_sats = ?, native_sats = 0,
+                    updated_at = strftime('%s', 'now')
+                WHERE user_channel_id = ?
+                """,
+                params: [
+                    .real(repair.newExpectedUSD), .integer(Int64(receiverSats)),
+                    .integer(Int64(receiverSats)), .text(userChannelId)
+                ]
+            )
+            guard changes == 1 else {
+                throw DatabaseError.executeFailed(
+                    "outgoing reconcile UPDATE affected \(changes) rows for user_channel_id=\(userChannelId)"
+                )
+            }
+            return StoredBooksReconcile(repair: repair, expectedUSD: repair.newExpectedUSD, backingSats: receiverSats)
         }
     }
 
@@ -306,13 +363,7 @@ final class ChannelRepository {
     }
 
     func markTradeFeePaid(paymentId: String) throws -> Bool {
-        try rawSQL.executeReturningChanges(
-            """
-            UPDATE trades SET status = 'fee_paid'
-            WHERE trade_payment_id = ? AND status IN ('prepared','sent','uncertain')
-            """,
-            params: [.text(paymentId)]
-        ) == 1
+        try rawSQL.executeReturningChanges(SharedPaymentSQL.markTradeFeePaid, params: [.text(paymentId)]) == 1
     }
 
     func markKnownTradeFeePaid(tradeDbId: Int64, paymentId: String) throws -> Bool {
@@ -354,22 +405,13 @@ final class ChannelRepository {
             let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs)
                 - TradeProtocol.responseRetryWindowSecs)
             let rows = try rawSQL.query(
-                """
-                SELECT id, new_expected_usd, quote_price, action
-                FROM trades
-                WHERE trade_payment_id IS NULL AND status = 'prepared'
-                  AND fee_msat = ? AND created_at >= ?
-                ORDER BY id DESC LIMIT 2
-                """,
+                "SELECT id, new_expected_usd, quote_price, action \(SharedPaymentSQL.unattachedPreparedTradeMatch)",
                 params: [.integer(Int64(amountMsat)), .integer(cutoff)]
             )
             guard rows.count == 1, let row = rows.first else { return nil }
             let tradeDbId = row.int64(0)
             let changed = try rawSQL.executeReturningChanges(
-                """
-                UPDATE trades SET payment_id = ?, trade_payment_id = ?, status = 'fee_paid'
-                WHERE id = ? AND trade_payment_id IS NULL AND status = 'prepared'
-                """,
+                SharedPaymentSQL.adoptPaidPaymentForUnattachedTrade,
                 params: [.text(paymentId), .text(paymentId), .integer(tradeDbId)]
             )
             guard changed == 1 else {
@@ -388,6 +430,7 @@ final class ChannelRepository {
     func failUnattachedPreparedTrade(
         paymentId: String,
         amountMsat: UInt64,
+        reasonCode: String? = nil,
         now: UInt64 = UInt64(Date().timeIntervalSince1970)
     ) throws -> PendingTradePayment? {
         guard TradeProtocol.isCanonicalIdentifier(paymentId),
@@ -396,25 +439,17 @@ final class ChannelRepository {
             let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs)
                 - TradeProtocol.responseRetryWindowSecs)
             let rows = try rawSQL.query(
-                """
-                SELECT id, new_expected_usd, quote_price, action
-                FROM trades
-                WHERE trade_payment_id IS NULL AND status = 'prepared'
-                  AND fee_msat = ? AND created_at >= ?
-                ORDER BY id DESC LIMIT 2
-                """,
+                "SELECT id, new_expected_usd, quote_price, action \(SharedPaymentSQL.unattachedPreparedTradeMatch)",
                 params: [.integer(Int64(amountMsat)), .integer(cutoff)]
             )
             guard rows.count == 1, let row = rows.first else { return nil }
             let tradeDbId = row.int64(0)
             let changed = try rawSQL.executeReturningChanges(
-                """
-                UPDATE trades
-                SET payment_id = ?, trade_payment_id = ?, status = 'send_failed',
-                    outcome = 'send_failed', resolved_at = strftime('%s', 'now')
-                WHERE id = ? AND trade_payment_id IS NULL AND status = 'prepared'
-                """,
-                params: [.text(paymentId), .text(paymentId), .integer(tradeDbId)]
+                SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade,
+                params: [
+                    .text(paymentId), .text(paymentId), reasonCode.map { .text($0) } ?? .null,
+                    .integer(tradeDbId)
+                ]
             )
             guard changed == 1 else {
                 throw DatabaseError.executeFailed("Prepared trade failure adoption lost its race")
@@ -429,14 +464,10 @@ final class ChannelRepository {
         }
     }
 
-    func markTradeSendFailed(tradeDbId: Int64) throws -> Bool {
+    func markTradeSendFailed(tradeDbId: Int64, reasonCode: String? = nil) throws -> Bool {
         try rawSQL.executeReturningChanges(
-            """
-            UPDATE trades SET status = 'send_failed', outcome = 'send_failed',
-                resolved_at = strftime('%s', 'now')
-            WHERE id = ? AND status IN ('prepared','sent','uncertain')
-            """,
-            params: [.integer(tradeDbId)]
+            SharedPaymentSQL.markTradeSendFailedById,
+            params: [reasonCode.map { .text($0) } ?? .null, .integer(tradeDbId)]
         ) == 1
     }
 
@@ -747,21 +778,13 @@ final class ChannelRepository {
                 }
                 let currentBacking = UInt64(currentBackingSigned)
                 let receiver = UInt64(receiverSigned)
-                let localBacking: UInt64
-                if sync.expectedUSD == 0 {
-                    localBacking = 0
-                } else if currentBacking > 0, sync.expectedUSD == channel.double(1) {
-                    localBacking = min(currentBacking, receiver)
-                } else {
-                    guard let calculated = TradeProtocol.tradeBackingAfterDelta(
-                        receiverSats: receiver,
-                        currentBackingSats: currentBacking,
-                        currentExpectedUSD: channel.double(1),
-                        newExpectedUSD: sync.expectedUSD,
-                        price: trustedPrice
-                    ) else { return TradeControlApplyResult(status: .retry) }
-                    localBacking = calculated
-                }
+                guard let localBacking = TradeProtocol.uncorrelatedSyncBacking(
+                    receiverSats: receiver,
+                    currentBackingSats: currentBacking,
+                    currentExpectedUSD: channel.double(1),
+                    sync: sync,
+                    price: trustedPrice
+                ) else { return TradeControlApplyResult(status: .retry) }
                 let native = receiver - localBacking
                 let changes = try rawSQL.executeReturningChanges(
                     """

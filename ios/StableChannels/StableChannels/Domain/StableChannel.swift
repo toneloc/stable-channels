@@ -13,14 +13,14 @@ struct Bitcoin: Codable, Equatable {
 
     static func fromBTC(_ btc: Double) -> Bitcoin {
         guard btc > 0, btc.isFinite else { return Bitcoin(sats: 0) }
-        let sats = btc * Double(Constants.satsInBTC)
+        let sats = btc * BitcoinUnits.satsPerBTC
         guard !sats.isNaN, !sats.isInfinite, sats >= 0 else { return Bitcoin(sats: 0) }
         let clamped = min(sats.rounded(), Double(UInt64.max))
         return Bitcoin(sats: UInt64(clamped))
     }
 
     func toBTC() -> Double {
-        Double(sats) / Double(Constants.satsInBTC)
+        Double(sats) / BitcoinUnits.satsPerBTC
     }
 
     static func fromUSD(_ usd: USD, price: Double) -> Bitcoin {
@@ -50,7 +50,7 @@ struct USD: Codable, Equatable {
     func toMsats(price: Double) -> UInt64 {
         guard price > 0 else { return 0 }
         let btcValue = amount / price
-        let sats = btcValue * Double(Constants.satsInBTC)
+        let sats = btcValue * BitcoinUnits.satsPerBTC
         let millisats = sats * 1000.0
         guard !millisats.isNaN, !millisats.isInfinite, millisats >= 0 else { return 0 }
         let rounded = abs(millisats).rounded(.down)
@@ -117,6 +117,11 @@ struct StableChannel: Codable {
         nativeSats: 0,
         lastStabilityPayment: 0
     )
+
+    /// Receiver sats not backing the stable position.
+    var unbackedReceiverSats: UInt64 {
+        stableReceiverBTC.sats >= backingSats ? stableReceiverBTC.sats - backingSats : 0
+    }
 }
 
 // MARK: - Domain Errors
@@ -148,4 +153,15 @@ enum SpliceOperationError: LocalizedError, Equatable {
             return "Could not save pending splice — splice not started"
         }
     }
+}
+
+/// The parts of a live channel the stable books read, decoupled from the node SDK.
+struct ChannelSnapshot: Equatable {
+    let userChannelId: String
+    let channelId: String
+    let counterpartyNodeId: String
+    let isChannelReady: Bool
+    let outboundCapacityMsat: UInt64
+    let unspendablePunishmentReserve: UInt64?
+    let channelValueSats: UInt64
 }

@@ -43,7 +43,7 @@ enum SendAmountUnit: String, CaseIterable, Identifiable, Sendable {
     }
 
     func secondaryConversionText(sats: UInt64, btcPrice: Double) -> String {
-        let usd = (Double(sats) / Double(Constants.satsInBTC)) * btcPrice
+        let usd = BitcoinUnits.usd(sats: sats, price: btcPrice)
         switch self {
         case .usd:
             return "≈ \(sats.btcSpacedFormatted) BTC (\(sats) sats)"
@@ -57,8 +57,8 @@ enum SendAmountUnit: String, CaseIterable, Identifiable, Sendable {
     func allowedRangeText(params: LNURLPayParams, btcPrice: Double) -> String {
         switch self {
         case .usd:
-            let minUSD = (Double(params.minSats) / Double(Constants.satsInBTC)) * btcPrice
-            let maxUSD = (Double(params.maxSats) / Double(Constants.satsInBTC)) * btcPrice
+            let minUSD = BitcoinUnits.usd(sats: params.minSats, price: btcPrice)
+            let maxUSD = BitcoinUnits.usd(sats: params.maxSats, price: btcPrice)
             return "Allowed: \(minUSD.usdFormatted) – \(maxUSD.usdFormatted) (\(params.minSats)–\(params.maxSats) sats)"
         case .sats:
             return "Allowed range: \(params.minSats) – \(params.maxSats) sats"

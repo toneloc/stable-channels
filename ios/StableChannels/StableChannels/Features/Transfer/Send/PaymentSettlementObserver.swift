@@ -83,7 +83,7 @@ enum PaymentSettlementObserver {
         paymentId: String,
         appState: AppState?
     ) -> PaymentSettlementOutcome? {
-        guard let record = appState?.databaseService?.paymentRepo.payment(paymentId: paymentId) else {
+        guard let record = appState?.payment(paymentId: paymentId) else {
             return nil
         }
         if record.isSettled {

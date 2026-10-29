@@ -315,7 +315,7 @@ enum PaymentDestinationClassifier {
         let range = NSRange(location: 0, length: btcString.utf16.count)
         guard regex.firstMatch(in: btcString, options: [], range: range) != nil else { return nil }
         guard let decimal = Decimal(string: btcString), decimal > 0 else { return nil }
-        let satsDecimal = decimal * 100_000_000
+        let satsDecimal = decimal * Decimal(Constants.satsInBTC)
         let nsDecimal = satsDecimal as NSDecimalNumber
         guard nsDecimal.doubleValue <= 2_100_000_000_000_000 else { return nil }
         let sats = nsDecimal.uint64Value

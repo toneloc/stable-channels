@@ -29,6 +29,83 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Stale pending onchain policy
+
+    private func onchainRow(
+        type: String = "onchain",
+        direction: String = "sent",
+        status: String = "pending",
+        createdAt: Int64,
+        address: String? = nil,
+        confirmations: UInt32 = 0
+    ) -> PaymentRecord {
+        PaymentRecord(
+            id: 1,
+            paymentId: "p",
+            paymentType: type,
+            direction: direction,
+            amountMsat: 1_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: status,
+            createdAt: createdAt,
+            feeMsat: 0,
+            txid: "tx",
+            address: address,
+            confirmations: confirmations,
+            txBlockHeight: nil
+        )
+    }
+
+    func testStalePendingOnchainWindowIsFourteenDays() {
+        XCTAssertEqual(ConfirmationPolicy.stalePendingOnchainSeconds, 14 * 86400)
+        XCTAssertEqual(ConfirmationPolicy.staleCutoff(now: 2_000_000), 2_000_000 - 14 * 86400)
+    }
+
+    func testShouldFailUnfoundOnlyPastTheWindow() {
+        let now: Int64 = 10_000_000
+        let cutoff = ConfirmationPolicy.staleCutoff(now: now)
+        XCTAssertTrue(ConfirmationPolicy.shouldFailUnfound(onchainRow(createdAt: cutoff - 1), now: now))
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(onchainRow(createdAt: cutoff), now: now))
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(onchainRow(createdAt: now), now: now))
+    }
+
+    func testShouldFailUnfoundKeepsConfirmedNonPendingAndOtherTypes() {
+        let now: Int64 = 10_000_000
+        let old: Int64 = 0
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(onchainRow(createdAt: old, confirmations: 1), now: now))
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(onchainRow(status: "completed", createdAt: old), now: now))
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(onchainRow(status: "failed", createdAt: old), now: now))
+        XCTAssertFalse(ConfirmationPolicy.shouldFailUnfound(
+            onchainRow(type: "channel_close", createdAt: old),
+            now: now
+        ))
+        XCTAssertTrue(ConfirmationPolicy.shouldFailUnfound(
+            onchainRow(direction: "received", createdAt: old),
+            now: now
+        ))
+    }
+
+    func testExpectedReceiveAddressOnlyForReceivedOnchainWithAddress() {
+        XCTAssertEqual(
+            ConfirmationPolicy.expectedReceiveAddress(
+                for: onchainRow(direction: "received", createdAt: 0, address: "  bc1qabc \n")
+            ),
+            "bc1qabc"
+        )
+        XCTAssertNil(ConfirmationPolicy.expectedReceiveAddress(
+            for: onchainRow(direction: "received", createdAt: 0, address: "   ")
+        ))
+        XCTAssertNil(ConfirmationPolicy.expectedReceiveAddress(for: onchainRow(direction: "received", createdAt: 0)))
+        XCTAssertNil(ConfirmationPolicy.expectedReceiveAddress(
+            for: onchainRow(direction: "sent", createdAt: 0, address: "bc1qabc")
+        ))
+        XCTAssertNil(ConfirmationPolicy.expectedReceiveAddress(
+            for: onchainRow(type: "channel_close", direction: "received", createdAt: 0, address: "bc1qabc")
+        ))
+    }
+
     // MARK: - Confirmation Policy Tests
 
     func testConfirmationPolicyThresholds() {

@@ -103,7 +103,7 @@ struct HistoryView: View {
     }
 
     private var historyDisplayPrice: Double {
-        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
+        appState.spotOrBookedPrice
     }
 
     private var trades: [TradeRecord] { history.trades }
@@ -158,7 +158,10 @@ struct HistoryView: View {
     }
 
     private func loadHistory() {
-        history.reload(database: appState.databaseService)
+        history.reload(
+            loadTrades: { try appState.recentTrades(limit: 50) },
+            loadPayments: { try appState.recentPayments(limit: 50) }
+        )
     }
 }
 
@@ -178,17 +181,6 @@ struct HistoryContent {
     mutating func clearErrors() {
         networkError = nil
         loadError = nil
-    }
-
-    mutating func reload(database: DatabaseService?) {
-        guard let database else {
-            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
-            return
-        }
-        reload(
-            loadTrades: { try database.channelRepo.getRecentTrades(limit: 50) },
-            loadPayments: { try database.paymentRepo.getRecentPayments(limit: 50) }
-        )
     }
 
     mutating func reload(
@@ -354,7 +346,7 @@ private extension PaymentRecord {
         guard shouldPreferUSDDisplay else { return nil }
         let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
         guard price > 0 else { return nil }
-        return Double(amountSats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: amountSats, price: price)
     }
 }
 

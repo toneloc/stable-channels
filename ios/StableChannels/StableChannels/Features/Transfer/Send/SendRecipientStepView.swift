@@ -106,7 +106,7 @@ struct SendRecipientStepView: View {
                 .foregroundStyle(.primary)
             Spacer()
             if price > 0 {
-                let usd = Double(sats) / Double(Constants.satsInBTC) * price
+                let usd = BitcoinUnits.usd(sats: sats, price: price)
                 Text(verbatim: "≈ \(usd.usdFormatted)")
                     .foregroundStyle(.secondary)
             }

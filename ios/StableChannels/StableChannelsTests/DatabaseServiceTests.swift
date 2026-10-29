@@ -21,6 +21,83 @@ final class DatabaseServiceTests: XCTestCase {
         super.tearDown()
     }
 
+    // MARK: - Stale pending onchain rows
+
+    private func insertRow(
+        paymentId: String,
+        type: String = "onchain",
+        status: String = "pending",
+        txid: String?,
+        ageSeconds: Int64
+    ) throws -> Int64 {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: paymentId,
+            paymentType: type,
+            direction: "sent",
+            amountMsat: 1_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: status,
+            txid: txid,
+            address: "bc1qaddr"
+        )
+        let id = try XCTUnwrap(service.paymentRepo.payment(paymentId: paymentId)).id
+        try service.rawSQL.execute(
+            "UPDATE payments SET created_at = created_at - ? WHERE id = ?",
+            params: [.integer(ageSeconds), .integer(id)]
+        )
+        return id
+    }
+
+    func testFailStaleTxidlessOnchainOnlyFailsOldPendingOnchainWithoutTxid() throws {
+        let window = ConfirmationPolicy.stalePendingOnchainSeconds
+        let old = try insertRow(paymentId: "old", txid: nil, ageSeconds: window + 60)
+        let young = try insertRow(paymentId: "young", txid: nil, ageSeconds: window - 60)
+        let withTxid = try insertRow(paymentId: "txid", txid: "tx1", ageSeconds: window + 60)
+        let lightning = try insertRow(paymentId: "ln", type: "lightning", txid: nil, ageSeconds: window + 60)
+        let done = try insertRow(paymentId: "done", status: "completed", txid: nil, ageSeconds: window + 60)
+
+        let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
+        XCTAssertEqual(try service.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff), 1)
+        XCTAssertEqual(try service.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff), 0)
+
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: old)?.status, "failed")
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: young)?.status, "pending")
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: withTxid)?.status, "pending")
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: lightning)?.status, "pending")
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: done)?.status, "completed")
+    }
+
+    func testFailUnconfirmedOnchainRowKeepsConfirmedAndNonPendingRows() throws {
+        let pending = try insertRow(paymentId: "pending", txid: "tx1", ageSeconds: 0)
+        let confirmed = try insertRow(paymentId: "confirmed", txid: "tx2", ageSeconds: 0)
+        try service.rawSQL.execute("UPDATE payments SET confirmations = 1 WHERE id = ?", params: [.integer(confirmed)])
+        let completed = try insertRow(paymentId: "completed", status: "completed", txid: "tx3", ageSeconds: 0)
+
+        XCTAssertTrue(try service.paymentRepo.failUnconfirmedOnchainRow(id: pending))
+        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: pending))
+        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: confirmed))
+        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: completed))
+        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: 999_999))
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: pending)?.status, "failed")
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: confirmed)?.status, "pending")
+    }
+
+    func testClearPaymentTxidResetsRowToUnresolvedPending() throws {
+        let id = try insertRow(paymentId: "recv", status: "completed", txid: "tx1", ageSeconds: 0)
+        try service.paymentRepo.updateConfirmations(paymentId: id, txBlockHeight: 100, currentBlockHeight: 101)
+
+        XCTAssertTrue(try service.paymentRepo.clearPaymentTxid(id: id))
+        let row = try XCTUnwrap(service.paymentRepo.getPayment(byId: id))
+        XCTAssertNil(row.txid)
+        XCTAssertNil(row.txBlockHeight)
+        XCTAssertEqual(row.confirmations, 0)
+        XCTAssertEqual(row.status, "pending")
+        XCTAssertEqual(row.address, "bc1qaddr")
+        XCTAssertFalse(try service.paymentRepo.clearPaymentTxid(id: 999_999))
+    }
+
     // MARK: - Atomic backing updates
 
     func testBackingDeltaIsAtomicAndDuplicateReturnsStoredBacking() throws {
@@ -1018,6 +1095,54 @@ final class DatabaseServiceTests: XCTestCase {
             expectedCounterparty: "peer",
             verifySignature: { _, _, _ in true }
         ))
+    }
+
+    func testOversizeMalformedUtf8AndCoercedEnvelopesFailBeforeVerification() throws {
+        let identifier = String(repeating: "ab", count: 32)
+        let payload: [String: Any] = [
+            "type": "TRADE_REJECTED_V1", "channel_id": identifier, "trade_id": identifier,
+            "trade_payment_id": identifier, "request_hash": identifier,
+            "reason_code": "invalid_amount", "decided_at": 1_786_310_000
+        ]
+        let payloadString = try XCTUnwrap(String(
+            data: JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]),
+            encoding: .utf8
+        ))
+        let valid = try JSONSerialization.data(withJSONObject: ["payload": payloadString, "signature": "sig"])
+        XCTAssertNotNil(TradeProtocol.parseSignedControl(
+            data: valid, expectedCounterparty: "peer", verifySignature: { _, _, _ in true }
+        ))
+
+        var invalidFields = payload
+        invalidFields["reason_code"] = "future_code"
+        let invalidFieldsString = try XCTUnwrap(String(
+            data: JSONSerialization.data(withJSONObject: invalidFields),
+            encoding: .utf8
+        ))
+        // A valid envelope with one malformed UTF-8 byte sequence in an unrelated field.
+        var malformedEnvelope = Data("{\"x\":\"".utf8) + Data([0xC3, 0x28])
+        malformedEnvelope += Data("\",".utf8) + valid.dropFirst()
+        let invalid: [Data] = try [
+            malformedEnvelope,
+            Data(repeating: 32, count: TradeProtocol.maxControlTLVBytes + 1),
+            Data([0xC3, 0x28]),
+            Data("not JSON".utf8),
+            JSONSerialization.data(withJSONObject: ["payload": payload, "signature": "sig"]),
+            JSONSerialization.data(withJSONObject: ["payload": payloadString, "signature": 123]),
+            JSONSerialization.data(withJSONObject: ["payload": invalidFieldsString, "signature": "sig"])
+        ]
+        for data in invalid {
+            var verified = false
+            XCTAssertNil(TradeProtocol.parseSignedControl(
+                data: data,
+                expectedCounterparty: "peer",
+                verifySignature: { _, _, _ in
+                    verified = true
+                    return true
+                }
+            ))
+            XCTAssertFalse(verified, "Invalid input must be rejected before signature work")
+        }
     }
 
     func testTerminalTradeOutcomeReflectsResultsCommittedOutsideTheHandler() throws {
@@ -2337,5 +2462,114 @@ final class StabilizationPolicyTests: XCTestCase {
         XCTAssertNil(prepare(target: 99.495, amount: 0.5, action: "sell"))
         XCTAssertNotNil(prepare(target: 98, amount: 1, action: "buy"))
         XCTAssertNotNil(prepare(target: 0, amount: 99, action: "buy"))
+    }
+}
+
+// MARK: - Incoming stability allocation (#320)
+
+extension DatabaseServiceTests {
+    private func receiveStability(
+        _ paymentId: String,
+        sats: Int64,
+        price: Double?
+    ) throws -> PaymentPersistenceResult {
+        try service.paymentRepo.recordPaymentAndMaybeUpdateBacking(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: UInt64(sats) * 1000,
+            amountUSD: nil,
+            btcPrice: price,
+            status: "completed",
+            userChannelId: "user-channel-320",
+            backingDeltaSats: sats
+        )
+    }
+
+    private func saveIncomingBooks(backing: UInt64) throws {
+        try service.channelRepo.saveChannel(
+            channelId: "channel-320",
+            userChannelId: "user-channel-320",
+            expectedUSD: 10,
+            backingSats: backing,
+            note: nil,
+            receiverSats: 20_000,
+            latestPrice: 100_000
+        )
+    }
+
+    private func paymentRowCount(_ paymentId: String) throws -> Int64? {
+        try service.rawSQL.query(
+            "SELECT COUNT(*) FROM payments WHERE payment_id = ?",
+            params: [.text(paymentId)]
+        ).first?.int64(0)
+    }
+
+    func testIncomingStabilityCreditsOnlyTheShortfallAndRecordsTheFullPayment() throws {
+        try saveIncomingBooks(backing: 9_000)
+        let result = try receiveStability("incoming-320-1", sats: 5_000, price: 100_000)
+        XCTAssertTrue(result.isNewPayment)
+        XCTAssertEqual(result.backingSats, 10_000)
+        XCTAssertEqual(try service.channelRepo.loadChannel(userChannelId: "user-channel-320")?.backingSats, 10_000)
+        let amount = try service.rawSQL.query(
+            "SELECT amount_msat FROM payments WHERE payment_id = 'incoming-320-1'"
+        ).first?.int64(0)
+        XCTAssertEqual(amount, 5_000_000)
+    }
+
+    func testIncomingStabilityKeepsExistingSurplusAsBacking() throws {
+        try saveIncomingBooks(backing: 10_001)
+        let result = try receiveStability("incoming-320-2", sats: 1_000, price: 100_000)
+        XCTAssertEqual(result.backingSats, 10_001)
+    }
+
+    func testIncomingStabilityWithoutPriceRollsBackSoTheEventIsRetried() throws {
+        try saveIncomingBooks(backing: 9_000)
+        XCTAssertThrowsError(try receiveStability("incoming-320-3", sats: 1_000, price: nil))
+        XCTAssertEqual(try paymentRowCount("incoming-320-3"), 0)
+        XCTAssertEqual(try service.channelRepo.loadChannel(userChannelId: "user-channel-320")?.backingSats, 9_000)
+
+        let retried = try receiveStability("incoming-320-3", sats: 1_000, price: 100_000)
+        XCTAssertTrue(retried.isNewPayment)
+        XCTAssertEqual(retried.backingSats, 10_000)
+    }
+}
+
+extension DatabaseServiceTests {
+    func testRecordOutgoingPendingInsertsAPendingSentRow() throws {
+        try service.paymentRepo.recordOutgoingPending(
+            paymentId: "out-1", paymentType: "lightning", amountMsat: 5_000_000,
+            amountUSD: 3, btcPrice: 60000, address: nil, txid: nil
+        )
+        let row = try XCTUnwrap(service.paymentRepo.payment(paymentId: "out-1"))
+        XCTAssertEqual(row.status, "pending")
+        XCTAssertEqual(row.direction, "sent")
+    }
+
+    func testRecordOutgoingPendingNeverDowngradesASettledRow() throws {
+        try service.paymentRepo.recordOutgoingPending(
+            paymentId: "out-2", paymentType: "lightning", amountMsat: 5_000_000,
+            amountUSD: nil, btcPrice: nil, address: nil, txid: nil
+        )
+        try service.paymentRepo.updatePaymentStatus(paymentId: "out-2", status: "completed", feeMsat: 10)
+        try service.paymentRepo.recordOutgoingPending(
+            paymentId: "out-2", paymentType: "lightning", amountMsat: 5_000_000,
+            amountUSD: 3, btcPrice: 60000, address: nil, txid: nil
+        )
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: "out-2")?.status, "completed")
+    }
+
+    func testPendingRowAndOwnAddressQueries() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: nil, paymentType: "onchain", direction: "received", amountMsat: 1_000_000,
+            amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending",
+            txid: String(repeating: "d", count: 64), address: "bc1qold"
+        )
+        XCTAssertTrue(service.paymentRepo.hasPendingPayment(txid: String(repeating: "d", count: 64)))
+        XCTAssertFalse(service.paymentRepo.hasPendingPayment(txid: String(repeating: "e", count: 64)))
+        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qold", currentReceiveAddress: "bc1qnew"))
+        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qnew", currentReceiveAddress: "bc1qnew"))
+        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qexternal", currentReceiveAddress: "bc1qnew"))
+        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress(nil, currentReceiveAddress: "bc1qnew"))
     }
 }

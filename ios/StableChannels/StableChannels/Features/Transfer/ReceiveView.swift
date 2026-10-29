@@ -26,7 +26,7 @@ struct ReceiveView: View {
     private var enteredSats: UInt64 {
         let price = appState.btcPrice
         guard price > 0, enteredUSDValue > 0 else { return 0 }
-        return UInt64(enteredUSDValue / price * Double(Constants.satsInBTC))
+        return UInt64(BitcoinUnits.sats(usd: enteredUSDValue, price: price))
     }
 
     var body: some View {
@@ -166,7 +166,7 @@ struct ReceiveView: View {
                 VStack(spacing: 2) {
                     let price = appState.btcPrice
                     if price > 0 {
-                        let usd = Double(sats) / Double(Constants.satsInBTC) * price
+                        let usd = BitcoinUnits.usd(sats: sats, price: price)
                         Text(usd.usdFormatted)
                             .font(.title2.bold())
                     }

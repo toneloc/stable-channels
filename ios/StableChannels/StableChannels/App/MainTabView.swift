@@ -49,7 +49,7 @@ struct MainTabView: View {
     }
 
     private var historyDisplayPrice: Double {
-        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
+        appState.spotOrBookedPrice
     }
 }
 
