@@ -270,8 +270,6 @@ actor ToRemoteRecovery {
             guard let address,
                   let script = Bech32.segwitScriptPubKey(address, expectedHrp: "bc"),
                   let estimate = await feeRateSatVb() else { continue }
-            // 1 sat/vB is the floor the sweep pays.
-            let feeRate = max(estimate, 1)
             let key = keys.keys[output.keyIndex]
             func sweep(at rate: UInt64) throws -> ToRemoteSweep.Signed? {
                 try ToRemoteSweep.build(
@@ -283,21 +281,31 @@ actor ToRemoteRecovery {
                     feeRateSatVb: rate
                 )
             }
-            let tx: ToRemoteSweep.Signed?
-            let atMinimum: ToRemoteSweep.Signed?
+            let atFloor: ToRemoteSweep.Signed?
             do {
-                tx = try sweep(at: feeRate)
-                atMinimum = tx == nil ? try sweep(at: 1) : tx
+                atFloor = try sweep(at: 1)
             } catch {
                 continue
             }
-            guard let tx else {
-                // Waits for lower fees; dropped only when even 1 sat/vB would leave dust.
-                if atMinimum == nil {
-                    log("TO_REMOTE_DUST", ["outpoint": "\(output.txid):\(output.vout)", "sats": output.valueSats])
-                    done.append(output)
-                }
+            guard let atFloor else {
+                // Dropped only when even 1 sat/vB would leave dust.
+                log("TO_REMOTE_DUST", ["outpoint": "\(output.txid):\(output.vout)", "sats": output.valueSats])
+                done.append(output)
                 continue
+            }
+            // Waiting for lower fees costs nothing, as only our key can spend the output, so it waits while the
+            // fee is over a tenth of the output. When even 1 sat/vB is, waiting would never end, so it pays
+            // 1 sat/vB, the floor the sweep pays.
+            let maxFee = output.valueSats / 10
+            let feeRate = output.valueSats - atFloor.amountSats > maxFee ? 1 : max(estimate, 1)
+            let tx: ToRemoteSweep.Signed
+            if feeRate == 1 {
+                tx = atFloor
+            } else {
+                guard let atRate = try? sweep(at: feeRate), output.valueSats - atRate.amountSats <= maxFee else {
+                    continue
+                }
+                tx = atRate
             }
             guard state.generation == generation else { return }
             let result = await broadcast(tx.hex)

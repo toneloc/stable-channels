@@ -431,22 +431,41 @@ final class ToRemoteRecoveryTests: XCTestCase {
 
     // MARK: - Review fixes
 
-    func testAnOutputTooSmallForTheCurrentFeeWaits() async {
+    func testAFeeOverATenthOfTheOutputWaits() async {
         closePaysUs()
         ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
-            "{\(fundingInput),\"vout\":[\(lspOutput),\(lspOutput),\(lspOutput),{\"scriptpubkey\":\"\(ours)\",\"value\":800}]}"
+            "{\(fundingInput),\"vout\":[\(lspOutput),\(lspOutput),\(lspOutput),{\"scriptpubkey\":\"\(ours)\",\"value\":3000}]}"
         var recovery = recovery()
         await recovery.start(fundingTxid: funding, fundingVout: nil)
         await runNow(recovery)
         closeConfirmed()
+        // About 550 sats at 5 sat/vB.
         await runNow(recovery, feeRate: 5)
         XCTAssertTrue(ToRemoteMockURLProtocol.posted.isEmpty)
         let pending = await recovery.pendingSats
-        XCTAssertEqual(pending, 800)
+        XCTAssertEqual(pending, 3000)
 
         recovery = later(by: ToRemoteRecovery.settleIntervalSeconds)
         await runNow(recovery, feeRate: 2)
         XCTAssertEqual(ToRemoteMockURLProtocol.posted.count, 1)
+    }
+
+    /// Even 1 sat/vB costs over a tenth of 800 sats, so waiting for lower fees would never end.
+    func testAnOutputThatCannotWaitSweepsAt1SatVb() async throws {
+        closePaysUs()
+        ToRemoteMockURLProtocol.routes["/api/tx/\(close)"] =
+            "{\(fundingInput),\"vout\":[\(lspOutput),\(lspOutput),\(lspOutput),{\"scriptpubkey\":\"\(ours)\",\"value\":800}]}"
+        let recovery = recovery()
+        await recovery.start(fundingTxid: funding, fundingVout: nil)
+        await runNow(recovery)
+        closeConfirmed()
+        await runNow(recovery, feeRate: 5)
+        let key = try XCTUnwrap(Self.keys.match(try XCTUnwrap(Data(hex: ours))))
+        let destination = try XCTUnwrap(Data(hex: "0014da7489f432b25150a35ea33c457cb562d9e8572c"))
+        let atFloor = try XCTUnwrap(ToRemoteSweep.build(
+            key: key, txid: close, vout: 3, valueSats: 800, destinationScript: destination, feeRateSatVb: 1
+        ))
+        XCTAssertEqual(ToRemoteMockURLProtocol.posted, [atFloor.hex])
     }
 
     func testWithoutAVoutTheChannelOutputIsFoundByItsWitness() async {

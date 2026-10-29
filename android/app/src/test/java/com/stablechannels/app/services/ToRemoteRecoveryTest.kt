@@ -1,5 +1,6 @@
 package com.stablechannels.app.services
 
+import fr.acinq.bitcoin.ByteVector
 import fr.acinq.bitcoin.Transaction
 import java.util.Collections
 import java.util.concurrent.TimeUnit
@@ -107,10 +108,10 @@ class ToRemoteRecoveryTest {
         clock += ToRemoteRecovery.SETTLE_INTERVAL_MS
     }
 
-    private fun closePaysUs() {
+    private fun closePaysUs(sats: Long = 94_467) {
         routes["/tx/$funding/outspends"] = """[{"spent":true,"txid":"$close","vin":0}]"""
         routes["/tx/$close"] =
-            """{"vout":[$lspOutput,$lspOutput,$lspOutput,{"scriptpubkey":"$ours","value":94467}]}"""
+            """{"vout":[$lspOutput,$lspOutput,$lspOutput,{"scriptpubkey":"$ours","value":$sats}]}"""
         routes["/tx/$close/outspends"] =
             """[{"spent":false},{"spent":false},{"spent":false},{"spent":false}]"""
     }
@@ -363,25 +364,59 @@ class ToRemoteRecoveryTest {
     }
 
     @Test
-    fun anOutputTooSmallForTheCurrentFeeWaits() {
-        routes["/tx/$funding/outspends"] = """[{"spent":true,"txid":"$close","vin":0}]"""
-        routes["/tx/$close"] =
-            """{"vout":[$lspOutput,$lspOutput,$lspOutput,{"scriptpubkey":"$ours","value":800}]}"""
-        routes["/tx/$close/outspends"] =
-            """[{"spent":false},{"spent":false},{"spent":false},{"spent":false}]"""
+    fun aFeeOverATenthOfTheOutputWaits() {
+        closePaysUs(3_000)
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        recovery.runNow()
+        closeConfirmed()
+        // About 550 sats at 5 sat/vB.
+        feeRate = 5L
+        recovery.runNow()
+        assertTrue(posted.isEmpty())
+        assertEquals(3_000, recovery.pendingSats)
+
+        feeRate = 2L
+        afterSettleInterval()
+        recovery.runNow()
+        assertEquals(1, posted.size)
+    }
+
+    /** Even 1 sat/vB costs over a tenth of 800 sats, so waiting for lower fees would never end. */
+    @Test
+    fun anOutputThatCannotWaitSweepsAt1SatVb() {
+        closePaysUs(800)
         val recovery = recovery()
         recovery.start(funding, 0)
         recovery.runNow()
         closeConfirmed()
         feeRate = 5L
         recovery.runNow()
-        assertTrue(posted.isEmpty())
-        assertEquals(800, recovery.pendingSats)
+        val script = ByteVector("0014da7489f432b25150a35ea33c457cb562d9e8572c").toByteArray()
+        val atFloor = ToRemoteSweep.build(keys.keys[45], close, 3, 800, script, 1)!!
+        assertEquals(listOf(ByteVector(Transaction.write(atFloor)).toHex()), posted)
+    }
 
-        feeRate = 2L
+    @Test
+    fun theFeeRateIsCappedAtWhatAManualSendMayPay() {
+        closePaysUs(100_000_000)
+        val recovery = recovery()
+        recovery.start(funding, 0)
+        recovery.runNow()
+        closeConfirmed()
+        feeRate = 50_000L
+        recovery.runNow()
+        // Times the size, this would overflow.
+        feeRate = Long.MAX_VALUE
         afterSettleInterval()
         recovery.runNow()
-        assertEquals(1, posted.size)
+        assertEquals(2, posted.size)
+        for (hex in posted) {
+            val sweep = Transaction.read(hex)
+            val vsize = (sweep.weight() + 3) / 4
+            val fee = 100_000_000 - sweep.txOut.single().amount.sat
+            assertTrue("fee $fee", fee in vsize * 10_000L..(vsize + 2) * 10_000L)
+        }
     }
 
     @Test
