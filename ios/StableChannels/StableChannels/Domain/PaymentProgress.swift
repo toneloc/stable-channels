@@ -118,6 +118,30 @@ enum BalanceCalculator {
         return lightning + onchain
     }
 
+    /// The funds of closed channels that `calculateTotalBalance` leaves out, for the Home card, so no
+    /// amount shows twice. LDK's lightning balance includes them, and the total counts the sweeps LDK
+    /// has not broadcast when there is no channel.
+    static func closedChannelFundsLeftOut(
+        _ funds: ClosedChannelFunds?,
+        lightning: UInt64,
+        channelState: ChannelState
+    ) -> ClosedChannelFunds? {
+        guard let funds else { return nil }
+        if channelState.isChannelClosing {
+            return funds
+        }
+        if channelState.isOpeningChannel {
+            return lightning > 0 ? funds.sweepsOnly : funds
+        }
+        if channelState.isSweeping {
+            return funds.sweepsOnly
+        }
+        if !channelState.hasReadyChannel && !channelState.hasAnyChannel {
+            return funds.withoutSweeps
+        }
+        return funds.sweepsOnly
+    }
+
     /// A single pending broadcast entry pairing a transaction id with its sent amount.
     /// Enables per-transaction resolution so mixed succeeded/failed batches release
     /// only the resolved portion instead of blocking the entire aggregate.
