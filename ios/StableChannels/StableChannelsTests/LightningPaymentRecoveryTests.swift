@@ -151,6 +151,14 @@ final class LightningPaymentRecoveryTests: XCTestCase {
         XCTAssertEqual(try service.paymentRepo.pendingOutgoingLightningPaymentIds(limit: 0), [])
     }
 
+    func testPendingOutgoingLightningQueryIncludesLNURLSends() throws {
+        // LNURL and Lightning address sends are written as "lnurl" (SendPaymentExecutor.sendLNURL).
+        try recordPayment("pay", type: "lightning", createdAt: 10)
+        try recordPayment("lnurl", type: "lnurl", createdAt: 20)
+
+        XCTAssertEqual(try service.paymentRepo.pendingOutgoingLightningPaymentIds(), ["pay", "lnurl"])
+    }
+
     // MARK: - NSE success before ack
 
     func testBackgroundSuccessRepairsPendingHistoryAndSurvivesRelaunch() throws {
