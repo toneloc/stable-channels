@@ -360,6 +360,15 @@ const STABILITY_TOP_UP_ALARM_REPEAT_SECS: i64 = 86_400;
 /// How many times an event waits a second for the node to answer about a top-up before it is handled anyway.
 const TOP_UP_LOOKUP_ATTEMPTS: u32 = 3;
 
+/// A fresh keysend preimage and the id LDK Node gives the payment, which is the preimage's SHA-256. None if the system gives no randomness.
+fn new_keysend_preimage() -> Option<(String, String)> {
+    use bitcoin_hashes::{sha256, Hash};
+    use ring::rand::SecureRandom;
+    let mut preimage = [0u8; 32];
+    ring::rand::SystemRandom::new().fill(&mut preimage).ok()?;
+    Some((hex::encode(preimage), sha256::Hash::hash(&preimage).to_string()))
+}
+
 /// What a claim did with a payment: it was not a top-up on the way, it was booked, or its channel row was not found and it stays on the way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopUpSettlement {
@@ -3073,11 +3082,24 @@ impl StableChannelManager {
                             continue;
                         }
                     };
+                    let Some((preimage, payment_id)) = new_keysend_preimage() else {
+                        stable_channels::audit::audit_event(
+                            "STABILITY_PAYMENT_SERIALIZE_FAILED",
+                            serde_json::json!({
+                                "channel_id": c.channel_id,
+                                "user_channel_id": format!("{}", sc.user_channel_id),
+                                "settlement_id": settlement_id,
+                                "stage": "preimage",
+                            }),
+                        );
+                        continue;
+                    };
                     let send_req = SpontaneousSendRequest {
                         amount_msat,
                         node_id: sc.counterparty.to_string(),
                         route_parameters: None,
-                        preimage: None,
+                        // Fixes the payment id before the send, so the record can be written first and a send with an unknown outcome is looked up by it.
+                        preimage: Some(preimage),
                         // Keep the marker during the mobile rollout. Upgraded receivers must
                         // prefer and validate the signed record whenever both are present.
                         custom_tlvs: vec![
@@ -3091,12 +3113,40 @@ impl StableChannelManager {
                             },
                         ],
                     };
-                    let channel_id_clone = c.channel_id.clone();
-                    let user_channel_id_clone = c.user_channel_id.clone();
-                    let expected_usd_for_db = sc.expected_usd.0;
-                    let backing_sats_for_db = sc.backing_sats;
-                    let native_sats_for_db = sc.native_sats;
-                    let counterparty_for_db = sc.counterparty.to_string();
+                    // Recorded before it is sent: a top-up whose record fails is never paid, and one whose send fails keeps its channel from a second until the node or an operator says whether it left.
+                    match self.db.record_stability_top_up_in_flight(
+                        &payment_id,
+                        &c.user_channel_id,
+                        &c.channel_id,
+                        amount_sats,
+                        sc.expected_usd.0,
+                        sc.backing_sats,
+                        sc.native_sats,
+                        amount_msat,
+                        direction,
+                        &sc.counterparty.to_string(),
+                    ) {
+                        Ok(true) => {},
+                        Ok(false) => {
+                            stable_channels::audit::audit_event(
+                                "DB_WRITE_FAILED",
+                                serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": payment_id, "user_channel_id": c.user_channel_id.clone(), "channel_id": c.channel_id.clone(), "error": if amount_sats == 0 { "zero amount, nothing to record" } else { "payment id already recorded" } }),
+                            );
+                            continue;
+                        },
+                        Err(e) => {
+                            tracing::error!(
+                                "[stable] record_settlement (stability) failed: {}",
+                                e
+                            );
+                            stable_channels::audit::audit_event(
+                                "DB_WRITE_FAILED",
+                                serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": payment_id, "user_channel_id": c.user_channel_id.clone(), "channel_id": c.channel_id.clone(), "error": e.to_string() }),
+                            );
+                            self.stability_throttle.insert(sc.user_channel_id, ("payment_persist_failed".to_string(), stable_usd_value));
+                            continue;
+                        },
+                    }
                     match ldk.spontaneous_send(send_req).await {
                         Ok(resp) => {
                             stable_channels::audit::audit_event(
@@ -3104,56 +3154,23 @@ impl StableChannelManager {
                                 serde_json::json!({
                                     "payment_id": resp.payment_id,
                                     "settlement_id": settlement_id,
-                                    "channel_id": channel_id_clone,
-                                    "user_channel_id": user_channel_id_clone,
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": c.user_channel_id,
                                     "amount_msat": amount_msat,
                                     "direction": "lsp_to_user",
                                 }),
                             );
-                            let persisted = if resp.payment_id.is_empty() {
-                                false
-                            } else {
-                                match self.db.record_stability_top_up_in_flight(
-                                    &resp.payment_id,
-                                    &user_channel_id_clone,
-                                    &channel_id_clone,
-                                    amount_sats,
-                                    expected_usd_for_db,
-                                    backing_sats_for_db,
-                                    native_sats_for_db,
-                                    amount_msat,
-                                    direction,
-                                    &counterparty_for_db,
-                                ) {
-                                    Ok(true) => true,
-                                    Ok(false) => {
-                                        stable_channels::audit::audit_event(
-                                            "DB_WRITE_FAILED",
-                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": if amount_sats == 0 { "zero amount, nothing to record" } else { "payment id already recorded" } }),
-                                        );
-                                        false
-                                    },
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "[stable] record_settlement (stability) failed: {}",
-                                            e
-                                        );
-                                        stable_channels::audit::audit_event(
-                                            "DB_WRITE_FAILED",
-                                            serde_json::json!({ "op": "record_stability_top_up_in_flight", "kind": "stability", "payment_id": resp.payment_id.clone(), "user_channel_id": user_channel_id_clone.clone(), "channel_id": channel_id_clone.clone(), "error": e.to_string() }),
-                                        );
-                                        false
-                                    },
+                            if !resp.payment_id.is_empty() && resp.payment_id != payment_id {
+                                // LDK Node derives the id from the preimage, so only a node that ignores it gives another; its outcome events carry that one.
+                                tracing::warn!("[stable] node gave top-up {} the id {}", payment_id, resp.payment_id);
+                                if let Err(e) = self.db.rekey_stability_top_up(&payment_id, &resp.payment_id) {
+                                    stable_channels::audit::audit_event(
+                                        "DB_WRITE_FAILED",
+                                        serde_json::json!({ "op": "rekey_stability_top_up", "payment_id": payment_id, "node_payment_id": resp.payment_id, "user_channel_id": c.user_channel_id.clone(), "error": e.to_string() }),
+                                    );
                                 }
-                            };
-                            if !persisted {
-                                // With no record of the payment nothing else stops a resend, so the cooldown is the only brake left.
-                                sc.last_stability_payment = now;
                             }
-                            self.stability_throttle.insert(
-                                sc.user_channel_id,
-                                (if persisted { "payment_sent" } else { "payment_persist_failed" }.to_string(), stable_usd_value),
-                            );
+                            self.stability_throttle.insert(sc.user_channel_id, ("payment_sent".to_string(), stable_usd_value));
                         },
                         Err(e) => {
                             tracing::warn!(
@@ -3163,14 +3180,14 @@ impl StableChannelManager {
                             stable_channels::audit::audit_event(
                                 "STABILITY_PAYMENT_FAILED",
                                 serde_json::json!({
-                                    "channel_id": channel_id_clone,
-                                    "user_channel_id": user_channel_id_clone.clone(),
+                                    "channel_id": c.channel_id,
+                                    "user_channel_id": c.user_channel_id.clone(),
                                     "direction": direction,
                                     "error": e.to_string(),
                                 }),
                             );
                             self.stability_throttle.insert(sc.user_channel_id, ("payment_failed".to_string(), stable_usd_value));
-                            // Do not bump last_stability_payment so retry can fire.
+                            // An error can follow a send that went out, so it is never sent again: the node's record of its payment id, or an operator, decides.
                         },
                     }
                 } else {
@@ -4482,6 +4499,23 @@ mod tests {
         pub balances_fail: std::sync::atomic::AtomicBool,
         /// Whether the report leaves out a channel no entry was set for, which a real node never does to an open channel.
         pub balances_incomplete: std::sync::atomic::AtomicBool,
+        /// Every send asked of the node, including ones that fail.
+        pub send_calls: AtomicUsize,
+        /// Whether a send with a preimage acts as LDK Node's does: its id is the preimage's SHA-256 and the node records it.
+        pub like_ldk_node: bool,
+        /// How many more sends are lost before they reach the node: the call fails and the node has no record.
+        pub sends_lost: AtomicUsize,
+        /// How many more sends the node refuses, as LDK Node does when it finds no route: the call fails and the payment is recorded as failed.
+        pub sends_refused: AtomicUsize,
+        /// How many more sends go out but their answer is lost: the call fails with no answer from the node.
+        pub sends_unanswered: AtomicUsize,
+        /// How many more sends go out but the node fails to store their record, as LDK Node does when its store write fails after the dispatch.
+        pub sends_unrecorded: AtomicUsize,
+    }
+
+    /// Use up one of a counter's remaining failures; false once none are left.
+    fn take_one(counter: &AtomicUsize) -> bool {
+        counter.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| left.checked_sub(1)).is_ok()
     }
 
     impl FakeLdkServer {
@@ -4508,7 +4542,17 @@ mod tests {
                 lightning_balances: StdMutex::new(Vec::new()),
                 balances_fail: std::sync::atomic::AtomicBool::new(false),
                 balances_incomplete: std::sync::atomic::AtomicBool::new(false),
+                send_calls: AtomicUsize::new(0),
+                like_ldk_node: false,
+                sends_lost: AtomicUsize::new(0),
+                sends_refused: AtomicUsize::new(0),
+                sends_unanswered: AtomicUsize::new(0),
+                sends_unrecorded: AtomicUsize::new(0),
             }
+        }
+        pub fn like_ldk_node(mut self) -> Self {
+            self.like_ldk_node = true;
+            self
         }
         pub fn with_send_failure(mut self) -> Self {
             self.send_should_fail = true;
@@ -4550,11 +4594,43 @@ mod tests {
             &self,
             req: SpontaneousSendRequest,
         ) -> Result<SpontaneousSendResponse, LdkServerError> {
+            self.send_calls.fetch_add(1, Ordering::SeqCst);
             if self.send_should_fail {
                 return Err(LdkServerError::new(
                     LdkServerErrorCode::LightningError,
                     "fake send failure".to_string(),
                 ));
+            }
+            if take_one(&self.sends_lost) {
+                return Err(LdkServerError::new(LdkServerErrorCode::InternalError, "gRPC request failed: connection reset"));
+            }
+            if let Some(preimage) = req.preimage.clone().filter(|_| self.like_ldk_node) {
+                use bitcoin_hashes::{sha256, Hash};
+                let payment_id = sha256::Hash::hash(&hex::decode(preimage).unwrap()).to_string();
+                let refused = take_one(&self.sends_refused);
+                let unrecorded = !refused && take_one(&self.sends_unrecorded);
+                if !unrecorded {
+                    let mut payments = self.payments.lock().unwrap();
+                    payments.retain(|payment| payment.payment_id != payment_id);
+                    payments.push(GrpcPayment {
+                        payment_id: payment_id.clone(),
+                        amount_msat: Some(req.amount_msat),
+                        direction: 1,
+                        status: if refused { PaymentStatus::Failed } else { PaymentStatus::Pending } as i32,
+                        ..Default::default()
+                    });
+                }
+                if refused {
+                    return Err(LdkServerError::new(LdkServerErrorCode::LightningError, "Failed to send the given payment."));
+                }
+                self.sends.lock().unwrap().push(req);
+                if take_one(&self.sends_unanswered) {
+                    return Err(LdkServerError::new(LdkServerErrorCode::InternalError, "gRPC request failed: connection reset"));
+                }
+                if unrecorded {
+                    return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "Failed to persist data."));
+                }
+                return Ok(SpontaneousSendResponse { payment_id });
             }
             let mut sends = self.sends.lock().unwrap();
             sends.push(req);
@@ -5883,7 +5959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_tick_send_failure_keeps_cooldown_unset() {
+    async fn failed_send_keeps_the_top_up_on_the_way_without_a_cooldown() {
         let mut mgr = make_manager();
         let fake_initial = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_HEX, COUNTERPARTY_HEX,
@@ -5911,6 +5987,7 @@ mod tests {
             mgr.stable_channels[0].last_stability_payment, 0,
             "failed send must not start cooldown"
         );
+        assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1, "whether it left is asked of the node, so it is not paid again meanwhile");
     }
 
     #[tokio::test]
@@ -6565,29 +6642,130 @@ mod tests {
         assert_eq!(top_up_sats_sent(&ldk), [12_500]);
     }
 
-    #[tokio::test]
-    async fn top_up_that_cannot_be_recorded_is_held_back_by_the_cooldown() {
+    /// A $50 channel set at $100k, on a node that handles keysends as LDK Node does, before any tick at $80k.
+    async fn drift_on_ldk_node() -> TopUpFixture {
         let mut mgr = make_manager();
         let ldk = FakeLdkServer::new(vec![make_channel(
             CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 50_000_000, true,
-        )]);
+        )])
+        .like_ldk_node();
         mgr.edit_stable_channel(CHANNEL_ID_HEX, Some(50.0), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
         let push = std::sync::Arc::new(tokio::sync::Mutex::new(
             crate::push::PushService::new(&crate::config::PushConfig::default(), mgr.data_dir()),
         ));
-        save_test_connection(&mgr).execute_batch(
+        (mgr, ldk, push)
+    }
+
+    /// The id LDK Node gives a sent keysend: the SHA-256 of its preimage.
+    fn id_of_send(ldk: &FakeLdkServer, index: usize) -> String {
+        use bitcoin_hashes::{sha256, Hash};
+        let preimage = ldk.sends.lock().unwrap()[index].preimage.clone().expect("a top-up carries its own preimage");
+        sha256::Hash::hash(&hex::decode(preimage).unwrap()).to_string()
+    }
+
+    fn stability_outcome(mgr: &StableChannelManager, payment_id: &str) -> String {
+        save_test_connection(mgr)
+            .query_row("SELECT outcome FROM settlement_payments WHERE payment_id = ?1", [payment_id], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn top_up_that_cannot_be_recorded_is_not_sent() {
+        let (mut mgr, ldk, push) = drift_on_ldk_node().await;
+        let conn = save_test_connection(&mgr);
+        conn.execute_batch(
             "CREATE TRIGGER reject_top_up_record BEFORE INSERT ON settlement_payments
              BEGIN SELECT RAISE(ABORT, 'forced record failure'); END;",
         ).unwrap();
 
-        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
-        assert_eq!(top_up_sats_sent(&ldk), [12_500]);
-        assert!(mgr.db.stability_top_ups_in_flight().unwrap().is_empty());
-        assert!(mgr.stable_channels[0].last_stability_payment > 0, "with no record, only the cooldown holds back a resend");
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        assert_eq!(ldk.send_calls.load(Ordering::SeqCst), 0, "a top-up with no record could be paid again on every tick, so it is not paid at all");
 
-        mgr.run_tick(&ldk as &dyn LdkServerCalls, &push, 80_000.0).await;
+        conn.execute_batch("DROP TRIGGER reject_top_up_record").unwrap();
+        tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
         assert_eq!(top_up_sats_sent(&ldk), [12_500]);
+        assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap()[0].payment_id, id_of_send(&ldk, 0), "recorded under the id the node gives it");
         assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_whose_answer_is_lost_is_not_paid_twice() {
+        let (mut mgr, ldk, push) = drift_on_ldk_node().await;
+        ldk.sends_unanswered.store(1, Ordering::SeqCst);
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 4).await;
+        assert_eq!(ldk.send_calls.load(Ordering::SeqCst), 1, "the node has the payment, so it is neither sent again nor replaced");
+        let in_flight = mgr.db.stability_top_ups_in_flight().unwrap();
+        assert_eq!(in_flight.len(), 1);
+        assert_eq!(in_flight[0].payment_id, id_of_send(&ldk, 0));
+        assert_channel_books(&mgr, 50.0, 50_000);
+
+        set_receiver_sats(&ldk, 62_500);
+        dispatch_sync_outcome(&mut mgr, &ldk, &in_flight[0].payment_id, true).await;
+        assert_channel_books(&mgr, 50.0, 62_500);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+        assert_eq!(top_up_sats_sent(&ldk), [12_500]);
+    }
+
+    #[tokio::test]
+    async fn top_up_the_node_refused_is_followed_by_a_new_one() {
+        let (mut mgr, ldk, push) = drift_on_ldk_node().await;
+        ldk.sends_refused.store(1, Ordering::SeqCst);
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
+        assert!(top_up_sats_sent(&ldk).is_empty());
+        let refused = mgr.db.stability_top_ups_in_flight().unwrap()[0].payment_id.clone();
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
+        assert_eq!(stability_outcome(&mgr, &refused), "failed");
+        assert_eq!(top_up_sats_sent(&ldk), [12_500], "the node reports the first one failed, so the same tick pays a new one");
+        assert_ne!(id_of_send(&ldk, 0), refused, "a new payment, not the refused one again");
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_the_node_sent_but_could_not_store_is_never_paid_again() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = drift_on_ldk_node().await;
+        ldk.sends_unrecorded.store(1, Ordering::SeqCst);
+        stable_channels::audit::enable_test_capture();
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        age_stability_payments(&mgr, STABILITY_TOP_UP_STALE_SECS + 60);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 2).await;
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        assert_eq!(ldk.send_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(top_up_sats_sent(&ldk), [12_500], "it went out, so nothing is paid in its place");
+        assert_eq!(mgr.db.stability_top_ups_in_flight().unwrap().len(), 1);
+        assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 1, "with no record at the node, an operator decides");
+        assert_channel_books(&mgr, 50.0, 50_000);
+    }
+
+    #[tokio::test]
+    async fn top_up_lost_before_the_node_waits_for_an_operator() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (mut mgr, ldk, push) = drift_on_ldk_node().await;
+        ldk.sends_lost.store(1, Ordering::SeqCst);
+        stable_channels::audit::enable_test_capture();
+
+        tick_past_cooldown(&mut mgr, &ldk, &push, 3).await;
+        let lost = mgr.db.stability_top_ups_in_flight().unwrap();
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert_eq!(lost.len(), 1);
+        assert_eq!(ldk.send_calls.load(Ordering::SeqCst), 1, "no answer cannot show the send did not go out, so it is not sent again");
+        assert!(top_up_sats_sent(&ldk).is_empty());
+        assert_eq!(count_events(&events, "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN"), 1);
+
+        // Once it is too old to be in flight, the operator releases it as not arrived and the next tick pays what is owed.
+        age_stability_payments(&mgr, TOP_UP_MAX_IN_FLIGHT_SECS + 60);
+        let outcome = release(&mut mgr, &ldk, &lost[0].payment_id, false, true).await;
+        assert!(outcome.ok, "{}", outcome.status);
+        tick_past_cooldown(&mut mgr, &ldk, &push, 1).await;
+        assert_eq!(top_up_sats_sent(&ldk), [12_500]);
+        assert_ne!(id_of_send(&ldk, 0), lost[0].payment_id);
     }
 
     #[tokio::test]
