@@ -1066,4 +1066,359 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(receivedFees?.economyFee, 4)
         XCTAssertEqual(receivedFees?.minimumFee, 1)
     }
+
+    // MARK: - Untrusted Input Bounds
+
+    func testMembershipIndexListsTrackedAddressesForTxid() {
+        let txid = makeValidTxid()
+        let other = String(repeating: "b", count: 64)
+        let msg = MempoolWSMessage(
+            block: nil,
+            blocks: nil,
+            addressTransactions: nil,
+            blockTransactions: nil,
+            address: nil,
+            txid: nil,
+            multiAddressTransactions: [
+                "bc1qb": MempoolWSAddressTransactions(
+                    mempool: [MempoolWSTransaction(txid: txid, vout: nil, vin: nil)],
+                    confirmed: nil,
+                    removed: nil
+                ),
+                "bc1qa": MempoolWSAddressTransactions(
+                    mempool: nil,
+                    confirmed: [MempoolWSTransaction(txid: txid, vout: nil, vin: nil)],
+                    removed: nil
+                ),
+                "bc1quntracked": MempoolWSAddressTransactions(
+                    mempool: [MempoolWSTransaction(txid: txid, vout: nil, vin: nil)],
+                    confirmed: nil,
+                    removed: nil
+                )
+            ],
+            trackedTxs: nil
+        )
+
+        let membership = MultiAddressMembership(message: msg, trackedAddresses: ["bc1qa", "bc1qb"])
+
+        XCTAssertEqual(membership.addresses(listing: txid), ["bc1qa", "bc1qb"])
+        XCTAssertEqual(membership.addresses(listing: other), [])
+    }
+
+    func testBulkMultiAddressPayloadMatchesEveryTrackedAddress() {
+        let count = 2000
+        let addresses = (0 ..< count).map { "bc1qbulk\($0)" }
+        let entries = addresses.enumerated().map { index, addr in
+            let txid = String(format: "%064x", index)
+            return "\"\(addr)\": { \"mempool\": [{ \"txid\": \"\(txid)\", \"vout\": [{ \"scriptpubkey_address\": \"\(addr)\", \"value\": 1000 }] }] }"
+        }
+        let json = "{ \"multi-address-transactions\": { \(entries.joined(separator: ", ")) } }"
+        addresses.forEach { service.trackAddress($0) }
+
+        var received = 0
+        service.onTransactionDetected = { event in
+            if case .receive = event { received += 1 }
+        }
+        service.handleMessage(json)
+
+        XCTAssertEqual(received, count)
+    }
+
+    func testOverflowingOutputTotalIsRejectedWithoutBlockingLaterDeposit() {
+        let addr = "bc1qoverflow"
+        let txid = makeValidTxid()
+        let overflowJSON = """
+        { "address-transactions": [{ "txid": "\(txid)", "vout": [
+        { "scriptpubkey_address": "\(addr)", "value": \(Int64.max) },
+        { "scriptpubkey_address": "\(addr)", "value": 1 }
+        ] }] }
+        """
+        service.trackAddress(addr)
+
+        var amounts: [Int64] = []
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
+            amounts.append(amount)
+        }
+        service.handleMessage(overflowJSON)
+        XCTAssertEqual(amounts, [])
+
+        // The rejected message must not mark the txid as processed.
+        service.handleMessage(makeAddressTransactionJSON(txid: txid, voutAddress: addr, voutValue: 1000))
+        XCTAssertEqual(amounts, [1000])
+    }
+
+    func testNegativeOutputValueIsRejected() {
+        let addr = "bc1qnegative"
+        service.trackAddress(addr)
+
+        var fired = false
+        service.onTransactionDetected = { _ in fired = true }
+        service.handleMessage(makeAddressTransactionJSON(voutAddress: addr, voutValue: -5))
+
+        XCTAssertFalse(fired)
+    }
+
+    func testRemovedWithInvalidTxidIsIgnored() {
+        let addr = "bc1qremovedinvalid"
+        let hugeTxid = String(repeating: "f", count: 100_000)
+        let json = "{ \"multi-address-transactions\": { \"\(addr)\": { \"removed\": [{ \"txid\": \"\(hugeTxid)\" }] } } }"
+        service.trackAddress(addr)
+
+        var fired = false
+        service.onTransactionDetected = { _ in fired = true }
+        service.handleMessage(json)
+
+        XCTAssertFalse(fired)
+    }
+
+    func testOutspendWithInvalidSpendingTxidIsIgnored() {
+        let txid = makeValidTxid()
+        let json = "{ \"tracked-txs\": { \"\(txid)\": { \"txid\": \"\(txid)\", \"utxoSpent\": { \"0\": { \"txid\": \"not-a-txid\", \"vin\": 0 } } } } }"
+        service.trackTx(txid)
+
+        var fired = false
+        service.onTransactionDetected = { _ in fired = true }
+        service.handleMessage(json)
+
+        XCTAssertFalse(fired)
+    }
+
+    func testProcessedTxStoreIgnoresOversizedKeys() {
+        let store = ProcessedTxStore(maxKeyBytes: 16)
+        let oversized = String(repeating: "x", count: 17)
+
+        store.recordProcessedTx(oversized)
+        store.recordProcessedTx("short")
+
+        XCTAssertFalse(store.isRecentlyProcessed(oversized))
+        XCTAssertTrue(store.isRecentlyProcessed("short"))
+    }
+
+    func testOnchainAmountBounds() {
+        XCTAssertEqual(OnchainAmount.total(of: [1, 2, 3]), 6)
+        XCTAssertEqual(OnchainAmount.total(of: []), 0)
+        XCTAssertEqual(OnchainAmount.usd(sats: 50_000_000, price: 60_000), 30_000)
+        XCTAssertNil(OnchainAmount.usd(sats: 50_000_000, price: 0))
+        XCTAssertNil(OnchainAmount.total(of: [-1]))
+        XCTAssertNil(OnchainAmount.total(of: [Int64.max, 1]))
+        XCTAssertNil(OnchainAmount.total(of: [1, Int64.max]))
+        XCTAssertNil(OnchainAmount.total(of: [OnchainAmount.maxSats, 1]))
+
+        XCTAssertEqual(OnchainAmount.msats(fromSats: 1000), 1_000_000)
+        XCTAssertEqual(OnchainAmount.msats(fromSats: OnchainAmount.maxSats), UInt64(OnchainAmount.maxSats) * 1000)
+        XCTAssertNil(OnchainAmount.msats(fromSats: -1))
+        XCTAssertNil(OnchainAmount.msats(fromSats: Int64.max))
+    }
+
+    func testAuditLogRotatesWhenFull() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("audit_log.txt").path
+        let rotated = AuditService.rotatedPath(for: path)
+        let originalLimit = AuditService.maxFileBytes
+        defer { AuditService.maxFileBytes = originalLimit }
+        AuditService.maxFileBytes = 200
+        AuditService.setLogPath(path)
+
+        for index in 0 ..< 20 {
+            AuditService.log("ROTATION_TEST", data: ["index": index])
+        }
+
+        XCTAssertEqual(URL(fileURLWithPath: rotated).lastPathComponent, "audit_log.1.txt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: rotated))
+        let size = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: path)[.size] as? UInt64)
+        let rotatedSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: rotated)[.size] as? UInt64)
+        XCTAssertLessThan(size, 400)
+        XCTAssertLessThan(rotatedSize, 400)
+    }
+
+    func testClearResolversUntracksSubscribedAddresses() {
+        let socket = RecordingWebSocket()
+        let resolution = TxidResolutionService()
+        resolution.mempoolWebSocketService = socket
+
+        resolution.startOnchainTxidResolver(resolutionId: 1, address: "bc1qold1")
+        resolution.startOnchainTxidResolver(resolutionId: 2, address: "bc1qold2")
+        resolution.clearResolvers()
+
+        XCTAssertEqual(socket.tracked, ["bc1qold1", "bc1qold2"])
+        XCTAssertEqual(Set(socket.untracked), ["bc1qold1", "bc1qold2"])
+
+        // A second clear has nothing left to release.
+        resolution.clearResolvers()
+        XCTAssertEqual(socket.untracked.count, 2)
+    }
+
+    func testDepositAttributionCountsOnlyReceivesThatArrivedSinceTheBaseline() {
+        XCTAssertEqual(
+            DepositAttribution.arrivedTxids(wallet: ["a", "b", "c"], baseline: ["a"]),
+            ["b", "c"]
+        )
+        XCTAssertEqual(DepositAttribution.arrivedTxids(wallet: ["a"], baseline: ["a", "z"]), [])
+
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 80_000, recordedSats: [50_000, 30_000]), 0)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 100_000, recordedSats: [50_000]), 50_000)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 5000, recordedSats: []), 5000)
+        // Recorded receives larger than the increase leave nothing, never a negative remainder.
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 40_000, recordedSats: [50_000]), 0)
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 40_000, recordedSats: [.max, .max]), 0)
+    }
+
+    func testDepositAttributionPrefersTheNodeAmountOverTheFeed() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        // The feed recorded txA at 500k; the node says 50k. txB has no node amount yet.
+        let accounted = DepositAttribution.accountedSats(
+            recorded: [txA: 500_000, txB: 30_000],
+            walletSats: [txA: 50_000]
+        )
+        XCTAssertEqual(accounted.sorted(), [30_000, 50_000])
+        XCTAssertEqual(DepositAttribution.trustedSats(txid: txA, feedSats: 500_000, walletSats: [txA: 50_000]), 50_000)
+        XCTAssertEqual(DepositAttribution.trustedSats(txid: txB, feedSats: 30_000, walletSats: [txA: 50_000]), 30_000)
+        // Recorded amounts that overflow when summed cap the total instead of wrapping.
+        XCTAssertEqual(DepositAttribution.remainderSats(depositSats: 50_000, recordedSats: [.max, .max]), 0)
+        XCTAssertEqual(
+            DepositAttribution.attribute(
+                depositSats: 110_000,
+                arrived: [txA, txB],
+                recorded: [txA: 500_000],
+                walletSats: [txA: 50_000, txB: 60_000]
+            ),
+            DepositAttribution.Outcome(
+                remainderSats: 60_000,
+                amountCorrections: [txA: 50_000],
+                matchedRecordedReceive: true,
+                missedTxid: txB,
+                unrecordedTxids: [txB]
+            )
+        )
+        XCTAssertEqual(
+            DepositAttribution.amountCorrections(
+                recorded: [txA: 500_000, txB: 30_000],
+                walletSats: [txA: 50_000, txB: 30_000]
+            ),
+            [txA: 50_000]
+        )
+    }
+
+    func testMissedTxidIsNamedOnlyWhenOneUnrecordedArrivalIsTheWholeRemainder() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        XCTAssertEqual(
+            DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [txB: 60_000]),
+            txB
+        )
+        // Two unrecorded arrivals, a different amount, an unknown amount, or nothing left: no txid.
+        XCTAssertNil(DepositAttribution.missedTxid(
+            remainderSats: 60_000,
+            unrecorded: [txA, txB],
+            walletSats: [txA: 60_000, txB: 60_000]
+        ))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [txB: 50_000]))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [:]))
+        XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 0, unrecorded: [txB], walletSats: [txB: 0]))
+    }
+
+    func testRemovedReceiveLeavesTheBaselineOnceTheNodeSyncs() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        let txC = String(repeating: "c", count: 64)
+        var baseline = OnchainDepositBaseline(sats: 55000, txids: [txA])
+
+        // Not counted: nothing changes.
+        baseline.markRemoved(txid: txB, sats: 50000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txB]), balance: 55000)
+        XCTAssertEqual(baseline.sats, 55000)
+
+        // Counted: it stays while the node still shows the old wallet, then comes off once.
+        baseline.markRemoved(txid: txA, sats: 50000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txA]), balance: 55000)
+        XCTAssertEqual(baseline.sats, 55000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txB]), balance: 55000)
+        XCTAssertEqual(baseline.sats, 5000)
+        baseline.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txB]), balance: 55000)
+        XCTAssertEqual(baseline.sats, 5000)
+
+        // Still listed: a balance holding it plus the added deposit keeps it; one short of that left it.
+        var listed = OnchainDepositBaseline(sats: 55000, txids: [txA])
+        listed.markRemoved(txid: txA, sats: 50000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txB], sats: [txB: 60000]), balance: 115_000)
+        XCTAssertEqual(listed.sats, 55000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txC]), balance: 55000)
+        XCTAssertEqual(listed.sats, 55000)
+        listed.settleRemovals(wallet: WalletInboundOnchain(txids: [txA, txC], sats: [txC: 50000]), balance: 55000)
+        XCTAssertEqual(listed.sats, 5000)
+
+        // A balance that already fell below the baseline left it out; the poll advances to it.
+        var dropped = OnchainDepositBaseline(sats: 55000, txids: [txA])
+        dropped.markRemoved(txid: txA, sats: 50000)
+        dropped.settleRemovals(wallet: WalletInboundOnchain(txids: [txA]), balance: 5000)
+        XCTAssertEqual(dropped.sats, 55000)
+        XCTAssertEqual(dropped.removed, [:])
+
+        // An unknown txid list counts nothing; advancing records what the wallet lists.
+        var unknown = OnchainDepositBaseline(sats: 40000, txids: nil)
+        unknown.markRemoved(txid: txA, sats: 40000)
+        XCTAssertEqual(unknown.removed, [:])
+        unknown.advance(to: 90000, wallet: [txA, txB])
+        XCTAssertEqual(unknown.sats, 90000)
+        XCTAssertTrue(unknown.counts(txB))
+    }
+
+    func testUntrackAllDropsOldWalletAddresses() {
+        var received = false
+        service.onTransactionDetected = { event in
+            if case .receive = event { received = true }
+        }
+        service.trackAddress("bc1qoldwallet")
+
+        service.untrackAll()
+        service.handleMessage(makeAddressTransactionJSON(
+            txid: makeValidTxid(),
+            voutAddress: "bc1qoldwallet",
+            voutValue: 50_000
+        ))
+
+        XCTAssertFalse(received)
+    }
+
+    func testTransactionPayingTwoTrackedAddressesIsOneReceiveWithTotal() {
+        let json = """
+        { "address-transactions": [{ "txid": "\(makeValidTxid())", "vout": [
+        { "scriptpubkey_address": "bc1qfirst", "value": 10000 },
+        { "scriptpubkey_address": "bc1qsecond", "value": 5000 },
+        { "scriptpubkey_address": "bc1qother", "value": 999 }
+        ] }] }
+        """
+        service.trackAddress("bc1qfirst")
+        service.trackAddress("bc1qsecond")
+
+        var amounts: [Int64] = []
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
+            amounts.append(amount)
+        }
+        service.handleMessage(json)
+
+        XCTAssertEqual(amounts, [15000])
+    }
+}
+
+private final class RecordingWebSocket: MempoolWebSocketProtocol {
+    var isConnected = false
+    var onTransactionDetected: ((WebSocketEvent) -> Void)?
+    var onBlockHeader: ((MempoolWSBlock) -> Void)?
+    var onFeesUpdated: ((MempoolWSFees) -> Void)?
+    var latestFees: MempoolWSFees?
+    private(set) var tracked: [String] = []
+    private(set) var untracked: [String] = []
+
+    func connect() {}
+    func disconnect() {}
+    func trackAddress(_ address: String) { tracked.append(address) }
+    func untrackAddress(_ address: String) { untracked.append(address) }
+    func trackTx(_: String) {}
+    func untrackTx(_: String) {}
+    func untrackAll() {}
 }

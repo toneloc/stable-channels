@@ -161,14 +161,21 @@ struct ResilientEsploraClient {
     /// GET `path`. Returns the body on 200, nil on non-200, network
     /// error, body too large, or invalid URL.
     func fetchJSON(path: String) async -> Data? {
+        guard let response = await fetchResponse(path: path), response.statusCode == 200
+        else { return nil }
+        return response.data
+    }
+
+    /// GET `path`. Returns the status code and body, or nil on network
+    /// error, body too large, or invalid URL.
+    func fetchResponse(path: String) async -> (statusCode: Int, data: Data)? {
         guard let url = URL(string: path) else { return nil }
         var req = URLRequest(url: url, timeoutInterval: config.timeout)
         req.httpMethod = "GET"
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         do {
             let (data, response) = try await urlSession.data(for: req)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200
-            else { return nil }
+            guard let http = response as? HTTPURLResponse else { return nil }
             guard data.count <= Self.maxBodyBytes else {
                 Self.log("ESPLORA_BODY_TOO_LARGE", [
                     "path": path,
@@ -176,7 +183,7 @@ struct ResilientEsploraClient {
                 ])
                 return nil
             }
-            return data
+            return (http.statusCode, data)
         } catch {
             return nil
         }

@@ -17,6 +17,9 @@ final class TxidResolutionService {
     private var onchainTxidResolver: OnchainTxidResolver?
     private var closeLauncher = StaggeredTaskLauncher()
     private var onchainLauncher = StaggeredTaskLauncher()
+    /// Addresses this service subscribed on the shared WebSocket, released when the wallet's
+    /// resolvers are cleared so a restored wallet doesn't keep watching the old one's addresses.
+    private var subscribedAddresses: Set<String> = []
 
     var didResolveTxid: ((Event) -> Void)?
 
@@ -50,6 +53,10 @@ final class TxidResolutionService {
 
     func clearResolvers() {
         cancelAllLaunchers()
+        for address in subscribedAddresses {
+            mempoolWebSocketService?.untrackAddress(address)
+        }
+        subscribedAddresses.removeAll()
         closeTxidResolver = nil
         onchainTxidResolver = nil
     }
@@ -81,6 +88,7 @@ final class TxidResolutionService {
     }
 
     func startOnchainTxidResolver(resolutionId: Int64, address: String, delaySeconds: UInt64 = 0) {
+        subscribedAddresses.insert(address)
         mempoolWebSocketService?.trackAddress(address)
         guard onchainTxidResolver != nil else {
             AuditService.log("RESOLVER_NOT_CONFIGURED", data: ["type": "onchain", "resolutionId": "\(resolutionId)"])

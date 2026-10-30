@@ -2,10 +2,186 @@ import Foundation
 import SQLite3
 
 final class OnchainReceiveRepository {
+    enum WebSocketReceiveOutcome: Equatable {
+        case alreadyRecorded
+        /// The balance fallback had recorded exactly this deposit; its row now carries the txid.
+        case adoptedPlaceholder
+        /// The balance fallback had recorded this deposit inside a larger one; it is split out.
+        case splitFromPlaceholder
+        case inserted
+    }
+
+    /// The payment id of the receive row for [txid].
+    static func receivePaymentId(txid: String) -> String {
+        "onchain_receive_\(txid)"
+    }
+
     private let rawSQL: RawSQL
 
     init(rawSQL: RawSQL) {
         self.rawSQL = rawSQL
+    }
+
+    /// Records a receive seen on the WebSocket, at most once per txid.
+    ///
+    /// Once the wallet balance has counted the transaction ([balanceCounted]), the balance fallback
+    /// may have recorded it as a txid-less placeholder listing this txid as a candidate: one of
+    /// exactly this amount takes the txid, and a larger one (several deposits in one balance jump)
+    /// gives this amount up to a new row. Any other placeholder belongs to another deposit, so a new
+    /// row is written, as it is before the balance counts the transaction.
+    func recordWebSocketReceive(
+        txid: String,
+        address: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        balanceCounted: Bool
+    ) throws -> WebSocketReceiveOutcome {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            let existing = try rawSQL.query(
+                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
+                params: [.text(txid)]
+            )
+            if !existing.isEmpty { return .alreadyRecorded }
+
+            if balanceCounted,
+               let placeholder = try fallbackRow(for: txid, covering: amountMsat, address: address) {
+                let rowId = placeholder.int64(0)
+                if placeholder.int64(2) == Int64(amountMsat) {
+                    if let resolutionId = placeholder.optInt64(1) {
+                        // Stops the txid resolver: the deposit is identified.
+                        try rawSQL.execute(
+                            """
+                            UPDATE onchain_receive_txids
+                            SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
+                            WHERE id = ? AND status = 'pending'
+                            """,
+                            params: [.text(txid), .integer(resolutionId)]
+                        )
+                    }
+                    try rawSQL.execute(
+                        "UPDATE payments SET txid = ?, address = ? WHERE id = ?",
+                        params: [.text(txid), .text(address), .integer(rowId)]
+                    )
+                    return .adoptedPlaceholder
+                }
+                try rawSQL.execute(
+                    """
+                    UPDATE payments
+                    SET amount_usd = amount_usd * (amount_msat - ?) / amount_msat,
+                        amount_msat = amount_msat - ?
+                    WHERE id = ?
+                    """,
+                    params: [.integer(Int64(amountMsat)), .integer(Int64(amountMsat)), .integer(rowId)]
+                )
+                try insertReceive(
+                    txid: txid,
+                    address: address,
+                    amountMsat: amountMsat,
+                    amountUSD: amountUSD,
+                    btcPrice: btcPrice
+                )
+                return .splitFromPlaceholder
+            }
+
+            let inserted = try insertReceive(
+                txid: txid,
+                address: address,
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: btcPrice
+            )
+            return inserted ? .inserted : .alreadyRecorded
+        }
+    }
+
+    /// The oldest pending, txid-less fallback row for [address] that lists [txid] as a candidate and
+    /// is at least [amountMsat], preferring one of exactly that amount: (id, resolution_id, amount_msat).
+    private func fallbackRow(for txid: String, covering amountMsat: UInt64, address: String) throws -> [Any?]? {
+        try rawSQL.query(
+            """
+            SELECT p.id, p.resolution_id, p.amount_msat FROM payments p
+            LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
+            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+              AND p.txid IS NULL AND p.amount_msat >= ? AND (r.address IS NULL OR r.address = ?)
+              AND EXISTS (
+                  SELECT 1 FROM onchain_deposit_candidates c WHERE c.payment_id = p.payment_id AND c.txid = ?
+              )
+            ORDER BY p.amount_msat = ? DESC, p.id ASC LIMIT 1
+            """,
+            params: [.integer(Int64(amountMsat)), .text(address), .text(txid), .integer(Int64(amountMsat))]
+        ).first
+    }
+
+    @discardableResult
+    private func insertReceive(
+        txid: String,
+        address: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?
+    ) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            """
+            INSERT OR IGNORE INTO payments (
+                payment_id, payment_type, direction, amount_msat, amount_usd, btc_price, status, txid, address
+            )
+            VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', ?, ?)
+            """,
+            params: [
+                .text(Self.receivePaymentId(txid: txid)),
+                .integer(Int64(amountMsat)),
+                amountUSD.map { .real($0) } ?? .null,
+                btcPrice.map { .real($0) } ?? .null,
+                .text(txid),
+                .text(address)
+            ]
+        ) > 0
+    }
+
+    /// Sets the receive row for [txid] to the node's amount, scaling its USD value with it. The row's
+    /// amount came from the WebSocket feed.
+    func correctReceiveAmount(txid: String, sats: Int64) throws {
+        let msat = sats.multipliedReportingOverflow(by: 1000)
+        guard sats > 0, !msat.overflow else { return }
+        try rawSQL.execute(
+            """
+            UPDATE payments
+            SET amount_usd = amount_usd * ? / amount_msat, amount_msat = ?
+            WHERE payment_type = 'onchain' AND direction = 'received' AND txid = ? AND amount_msat > 0
+            """,
+            params: [.integer(msat.partialValue), .integer(msat.partialValue), .text(txid)]
+        )
+    }
+
+    /// Sats of the on-chain receives already recorded for [txids], by txid, failed ones excluded,
+    /// and only those recorded at or after [recordedSince] when given.
+    /// The partial unique index allows one receive row per txid.
+    func recordedReceiveSats(txids: Set<String>, recordedSince: Date? = nil) throws -> [String: Int64] {
+        guard !txids.isEmpty else { return [:] }
+        let marks = Array(repeating: "?", count: txids.count).joined(separator: ", ")
+        let since = Int64(recordedSince?.timeIntervalSince1970.rounded(.down) ?? 0)
+        return try rawSQL.query(
+            """
+            SELECT txid, amount_msat FROM payments
+            WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
+              AND created_at >= ? AND txid IN (\(marks))
+            """,
+            params: [.integer(since)] + txids.sorted().map { .text($0) }
+        ).reduce(into: [:]) { sats, row in
+            if let txid = row.optString(0) { sats[txid] = row.int64(1) / 1000 }
+        }
+    }
+
+    /// Records the txids that could be the balance-fallback deposit [paymentId]: the arrivals of its
+    /// balance jump no recorded receive explained. Only these may later take the row over.
+    func recordDepositCandidates(paymentId: String, txids: Set<String>) throws {
+        for txid in txids.sorted() {
+            try rawSQL.execute(
+                "INSERT OR IGNORE INTO onchain_deposit_candidates (payment_id, txid) VALUES (?, ?)",
+                params: [.text(paymentId), .text(txid)]
+            )
+        }
     }
 
     @discardableResult

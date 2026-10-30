@@ -5,6 +5,31 @@ struct MatchResult: Equatable, Hashable {
     let isTxid: Bool
 }
 
+/// Which tracked addresses list each txid in a bulk `multi-address-transactions` payload.
+/// Built once per message, so matching every transaction in it stays linear in the payload
+/// size instead of rescanning each address group for every transaction.
+struct MultiAddressMembership {
+    private let addressesByTxid: [String: Set<String>]
+
+    init(message: MempoolWSMessage, trackedAddresses: Set<String>) {
+        var index: [String: Set<String>] = [:]
+        for (address, group) in message.multiAddressTransactions ?? [:]
+            where trackedAddresses.contains(address) {
+            for groupTxs in [group.mempool, group.confirmed, group.removed] {
+                for tx in groupTxs ?? [] {
+                    index[tx.txid, default: []].insert(address)
+                }
+            }
+        }
+        addressesByTxid = index
+    }
+
+    /// Tracked addresses whose group lists `txid`, in a stable order.
+    func addresses(listing txid: String) -> [String] {
+        (addressesByTxid[txid] ?? []).sorted()
+    }
+}
+
 /// Pure matching logic — no actor isolation, no side effects.
 /// All state is passed in, so the matcher is a deterministic function
 /// of its inputs and trivially testable.
@@ -13,7 +38,8 @@ struct TransactionMatcher {
         trackedAddresses: Set<String>,
         trackedTxids: Set<String>,
         msg: MempoolWSMessage,
-        tx: MempoolWSTransaction
+        tx: MempoolWSTransaction,
+        membership: MultiAddressMembership? = nil
     ) -> [MatchResult] {
         var results = [MatchResult]()
         var seen = Set<MatchResult>()
@@ -52,16 +78,11 @@ struct TransactionMatcher {
             appendIfNew(MatchResult(target: respTxid, isTxid: true))
         }
 
-        // Match bulk multi-address-transactions dictionary keys
-        if let multi = msg.multiAddressTransactions {
-            for (addr, txGroup) in multi {
-                guard trackedAddresses.contains(addr) else { continue }
-                if (txGroup.mempool?.contains(where: { $0.txid == tx.txid }) == true) ||
-                    (txGroup.confirmed?.contains(where: { $0.txid == tx.txid }) == true) ||
-                    (txGroup.removed?.contains(where: { $0.txid == tx.txid }) == true) {
-                    appendIfNew(MatchResult(target: addr, isTxid: false))
-                }
-            }
+        // Match bulk multi-address-transactions dictionary keys. Callers matching many
+        // transactions from one message pass a membership index built once for it.
+        let membership = membership ?? MultiAddressMembership(message: msg, trackedAddresses: trackedAddresses)
+        for addr in membership.addresses(listing: tx.txid) {
+            appendIfNew(MatchResult(target: addr, isTxid: false))
         }
 
         return results
