@@ -45,14 +45,9 @@ jobs:
             exit 1
           fi
           echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          # Already booted is fine; bootstatus -b below boots it if needed.
-          xcrun simctl boot "$udid" || true
-
-      - name: Cache Swift packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/SourcePackages
-          key: spm-${{ runner.os }}-${{ hashFiles('ios/StableChannels/StableChannels.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          # Background it: simctl boot blocks until the device is up. A failure here
+          # (already booted) is fine; bootstatus -b before the tests waits or boots.
+          nohup xcrun simctl boot "$udid" >/dev/null 2>&1 &
 
       - name: Resolve Swift packages
         shell: bash
@@ -66,8 +61,7 @@ jobs:
             if xcodebuild \
               -resolvePackageDependencies \
               -project ios/StableChannels/StableChannels.xcodeproj \
-              -scheme StableChannels \
-              -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages"; then
+              -scheme StableChannels; then
               exit 0
             else
               last_status=$?
@@ -91,7 +85,6 @@ jobs:
             -project ios/StableChannels/StableChannels.xcodeproj \
             -scheme StableChannels \
             -destination "id=$SIMULATOR_UDID" \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
             COMPILER_INDEX_STORE_ENABLE=NO
           # The simulator has been booting since the start of the job; wait for
           # it only now that the build is done.
@@ -101,6 +94,5 @@ jobs:
             -scheme StableChannels \
             -destination "id=$SIMULATOR_UDID" \
             -destination-timeout 180 \
-            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
             -retry-tests-on-failure \
             -parallel-testing-enabled NO
