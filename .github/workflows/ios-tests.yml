@@ -31,24 +31,6 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version
 
-      # A cold simulator boot takes minutes; start it now so it overlaps package
-      # resolution and the build instead of running after them.
-      - name: Boot simulator
-        shell: bash
-        run: |
-          set -euo pipefail
-          udid=$(xcrun simctl list devices available -j \
-            | jq -r '.devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"][]? | select(.name == "iPhone 17") | .udid' \
-            | head -n 1)
-          if [ -z "$udid" ]; then
-            xcrun simctl list devices available
-            exit 1
-          fi
-          echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
-          # Background it: simctl boot blocks until the device is up. A failure here
-          # (already booted) is fine; bootstatus -b before the tests waits or boots.
-          nohup xcrun simctl boot "$udid" >/dev/null 2>&1 &
-
       - name: Resolve Swift packages
         shell: bash
         run: |
@@ -73,6 +55,24 @@ jobs:
 
           exit "$last_status"
 
+      # A cold simulator boot takes minutes; start it after package resolution (resolving
+      # during a boot took ~4 min instead of ~40 s) so it overlaps only the build.
+      - name: Boot simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid=$(xcrun simctl list devices available -j \
+            | jq -r '.devices["com.apple.CoreSimulator.SimRuntime.iOS-26-2"][]? | select(.name == "iPhone 17") | .udid' \
+            | head -n 1)
+          if [ -z "$udid" ]; then
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          # Background it: simctl boot blocks until the device is up. A failure here
+          # (already booted) is fine; bootstatus -b before the tests waits or boots.
+          nohup xcrun simctl boot "$udid" >/dev/null 2>&1 &
+
       - name: Run iOS unit tests
         shell: bash
         run: |
@@ -86,8 +86,8 @@ jobs:
             -scheme StableChannels \
             -destination "id=$SIMULATOR_UDID" \
             COMPILER_INDEX_STORE_ENABLE=NO
-          # The simulator has been booting since the start of the job; wait for
-          # it only now that the build is done.
+          # The simulator has been booting in the background during the build;
+          # wait for it only now that the build is done.
           xcrun simctl bootstatus "$SIMULATOR_UDID" -b
           xcodebuild test-without-building \
             -project ios/StableChannels/StableChannels.xcodeproj \
