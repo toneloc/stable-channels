@@ -645,6 +645,11 @@ class AppState {
         pollingService?.onReceiveTxidMismatch = { [weak self] txid in
             self?.transactionLinkService.clearReceiveTxid(ifMatching: txid)
         }
+        // Read live: the cached wallet list is empty until the first balance refresh.
+        pollingService?.walletReceiveTxids = { [weak self] () -> Set<String>? in
+            guard let payments = self?.nodeService.node?.listPayments() else { return nil }
+            return WalletInboundOnchain(payments).txids
+        }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
             self.notifyPaymentsChanged()

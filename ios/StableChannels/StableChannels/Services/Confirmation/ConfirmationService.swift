@@ -18,7 +18,8 @@ final class ConfirmationService {
     func resolve(
         payment: PaymentRecord,
         currentBlockHeight: UInt32,
-        forceRecheck: Bool = false
+        forceRecheck: Bool = false,
+        checksReceiveAddress: Bool = true
     ) async -> ConfirmationOutcome {
         guard let txid = payment.txid, !txid.isEmpty else {
             return .noTxid
@@ -37,7 +38,7 @@ final class ConfirmationService {
         }
         do {
             let lookup: EsploraLookup<TxStatus>
-            if let address = ConfirmationPolicy.expectedReceiveAddress(for: payment) {
+            if checksReceiveAddress, let address = ConfirmationPolicy.expectedReceiveAddress(for: payment) {
                 switch try await provider.receiveCheck(for: txid, paysTo: address) {
                 case .found(let check):
                     guard check.paysToAddress else { return .addressMismatch }

@@ -40,6 +40,21 @@ enum ConfirmationPolicy {
         let address = payment.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return address.isEmpty ? nil : address
     }
+
+    enum ReceiveAddressMismatch: Equatable {
+        case keepTxid
+        case detachTxid
+        /// The wallet could not be read; decide on a later poll.
+        case retryLater
+    }
+
+    /// What to do with a received row whose txid does not pay its stored address. The balance path
+    /// stores a deposit the node identified with the then-current receive address, which need not be
+    /// the one paid, so a txid the node's wallet lists as received stays: it is ours either way.
+    static func receiveAddressMismatch(txid: String, walletReceiveTxids: Set<String>?) -> ReceiveAddressMismatch {
+        guard let walletReceiveTxids else { return .retryLater }
+        return walletReceiveTxids.contains(txid) ? .keepTxid : .detachTxid
+    }
 }
 
 struct ConfirmationProgress: Equatable {

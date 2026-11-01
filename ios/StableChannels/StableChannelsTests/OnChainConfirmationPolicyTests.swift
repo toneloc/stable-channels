@@ -106,6 +106,16 @@ final class OnChainConfirmationPolicyTests: XCTestCase {
         ))
     }
 
+    func testMismatchedReceiveTxidStaysOnlyWhenTheWalletListsIt() {
+        XCTAssertEqual(ConfirmationPolicy.receiveAddressMismatch(txid: "a", walletReceiveTxids: ["a", "b"]), .keepTxid)
+        XCTAssertEqual(
+            ConfirmationPolicy.receiveAddressMismatch(txid: "c", walletReceiveTxids: ["a", "b"]),
+            .detachTxid
+        )
+        XCTAssertEqual(ConfirmationPolicy.receiveAddressMismatch(txid: "a", walletReceiveTxids: []), .detachTxid)
+        XCTAssertEqual(ConfirmationPolicy.receiveAddressMismatch(txid: "a", walletReceiveTxids: nil), .retryLater)
+    }
+
     // MARK: - Confirmation Policy Tests
 
     func testConfirmationPolicyThresholds() {

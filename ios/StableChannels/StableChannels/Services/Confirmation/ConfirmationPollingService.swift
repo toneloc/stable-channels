@@ -72,6 +72,8 @@ final class ConfirmationPollingService {
     var onReceiveDropped: (@MainActor (_ txid: String, _ sats: Int64) -> Void)?
     /// Fires with a received row's txid after it was detached for not paying the row's address.
     var onReceiveTxidMismatch: (@MainActor (String) -> Void)?
+    /// The txids the node's wallet lists as received, or nil when the wallet cannot be read.
+    var walletReceiveTxids: @MainActor () -> Set<String>? = { [] }
 
     init(
         databaseService: DatabaseService,
@@ -430,11 +432,13 @@ final class ConfirmationPollingService {
     private func resolve(
         payment: PaymentRecord,
         currentHeight: UInt32,
-        using service: ConfirmationService? = nil
+        using service: ConfirmationService? = nil,
+        checksReceiveAddress: Bool = true
     ) async -> ResolveResult {
         let outcome = await (service ?? confirmationService).resolve(
             payment: payment,
-            currentBlockHeight: currentHeight
+            currentBlockHeight: currentHeight,
+            checksReceiveAddress: checksReceiveAddress
         )
         guard !Task.isCancelled else { return .unchanged }
         switch outcome {
@@ -479,7 +483,20 @@ final class ConfirmationPollingService {
                 return .failed
             }
         case .addressMismatch:
-            return clearMismatchedReceiveTxid(payment)
+            let txid = payment.txid ?? ""
+            switch ConfirmationPolicy.receiveAddressMismatch(txid: txid, walletReceiveTxids: walletReceiveTxids()) {
+            case .keepTxid:
+                return await resolve(
+                    payment: payment,
+                    currentHeight: currentHeight,
+                    using: service,
+                    checksReceiveAddress: false
+                )
+            case .detachTxid:
+                return clearMismatchedReceiveTxid(payment)
+            case .retryLater:
+                return .unchanged
+            }
         case .error(let message):
             AuditService.log("CONFIRMATION_RESOLVE_FAILED", data: [
                 "payment_id": "\(payment.id)",

@@ -841,6 +841,63 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(updateCount, 1)
     }
 
+    /// The balance path records a deposit the node identified with the then-current receive address,
+    /// not the earlier one the payer used. The wallet proves the txid is ours, so it is kept.
+    func testWalletIdentifiedDepositToAnEarlierAddressKeepsItsTxidAndConfirms() async throws {
+        let txid = String(repeating: "7e", count: 32)
+        let currentAddress = "bc1qcurrentreceiveaddress"
+        let row = try recordIdentifiedDeposit(txid: txid, address: currentAddress)
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap[txid] = 100
+        mockProvider.mismatchedTxids = [txid]
+        pollingService.walletReceiveTxids = { [txid] }
+        var mismatched: [String] = []
+        pollingService.onReceiveTxidMismatch = { mismatched.append($0) }
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        let updated = try XCTUnwrap(db.paymentRepo.getPayment(byId: row))
+        XCTAssertEqual(updated.txid, txid, "the deposit lost its txid")
+        XCTAssertEqual(updated.confirmations, 6)
+        XCTAssertEqual(mismatched, [])
+        // A later splice-out to it, after the receive address rotated, is still a self-send.
+        XCTAssertTrue(db.paymentRepo.isOwnReceiveAddress(
+            currentAddress,
+            currentReceiveAddress: "bc1qnewerreceiveaddress"
+        ))
+    }
+
+    func testMismatchedReceiveTxidIsKeptWhileTheWalletIsUnreadable() async throws {
+        let txid = String(repeating: "7f", count: 32)
+        let row = try recordIdentifiedDeposit(txid: txid, address: "bc1qcurrentreceiveaddress")
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.heightMap[txid] = 100
+        mockProvider.mismatchedTxids = [txid]
+        pollingService.walletReceiveTxids = { nil }
+
+        let result = try await pollingService.refresh()
+
+        XCTAssertEqual(result, .completed(failedLookups: 0))
+        let updated = try XCTUnwrap(db.paymentRepo.getPayment(byId: row))
+        XCTAssertEqual(updated.txid, txid)
+        XCTAssertEqual(updated.confirmations, 0)
+    }
+
+    private func recordIdentifiedDeposit(txid: String, address: String) throws -> Int64 {
+        let recorder = IdentifiedDepositRecorder(
+            txid: txid,
+            databaseService: db,
+            fallback: UnknownAddressDepositRecorder(databaseService: db)
+        )
+        let deposit = DepositRecordInput(
+            depositId: "onchain_deposit_\(txid)", depositSats: 50000, amountUSD: 25, btcPrice: 50000
+        )
+        XCTAssertTrue(recorder.record(deposit: deposit, address: address))
+        let paymentId = OnchainReceiveRepository.receivePaymentId(txid: txid)
+        return try XCTUnwrap(db.paymentRepo.payment(paymentId: paymentId)).id
+    }
+
     func testReceiveCheckStatusIsReusedWithoutSecondLookup() async throws {
         let id = try recordOnchain(
             paymentId: "recv_ok", direction: "received", txid: "tx_recv", address: "bc1qexpected"
