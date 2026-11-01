@@ -159,8 +159,8 @@ struct HistoryView: View {
 
     private func loadHistory() {
         history.reload(
-            loadTrades: { try appState.recentTrades(limit: 50) },
-            loadPayments: { try appState.recentPayments(limit: 50) }
+            loadTrades: { try appState.paymentQueries.recentTrades(limit: 50) },
+            loadPayments: { try appState.paymentQueries.recentPayments(limit: 50) }
         )
     }
 }
@@ -287,8 +287,14 @@ struct PaymentRowView: View {
         switch payment.paymentType {
         case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
         case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
+        case SplicePaymentType.spliceIn.rawValue: return String(
+                localized: "payment_type_splice_in",
+                defaultValue: "Splice In"
+            )
+        case SplicePaymentType.spliceOut.rawValue: return String(
+                localized: "payment_type_splice_out",
+                defaultValue: "Splice Out"
+            )
         case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
@@ -332,7 +338,7 @@ struct PaymentRowView: View {
 private extension PaymentRecord {
     var shouldPreferUSDDisplay: Bool {
         switch paymentType {
-        case "splice_in", "splice_out", "onchain", "channel_close":
+        case SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue, "onchain", "channel_close":
             return true
         default:
             return false

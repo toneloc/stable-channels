@@ -1,8 +1,8 @@
 import Foundation
 
 /// Finds deposits to our receive address that the websocket and balance-delta paths both
-/// missed (socket down, or detection deferred across an app restart). Parsing and filtering
-/// are pure; AppState fetches and the repository records.
+/// missed (socket down, or detection deferred across an app restart). Pure rules: the explorer
+/// body is read by `EsploraTransaction`, the recovery service fetches and the repository records.
 enum MissedReceiveRecovery {
     static let windowSeconds: Int64 = 24 * 60 * 60
     static let checkIntervalSeconds: Int64 = 300
@@ -17,45 +17,13 @@ enum MissedReceiveRecovery {
         nowSecs - lastCheckSecs >= checkIntervalSeconds
     }
 
-    /// Esplora `/address/{addr}/txs`: sum of outputs paying `address` per tx, within the
-    /// window. Unconfirmed txs count as received now. Nil when the body is not a tx list.
-    static func recentReceives(json: Data, address: String, nowSecs: Int64) -> [Receive]? {
-        guard let txs = try? JSONSerialization.jsonObject(with: json) as? [[String: Any]] else {
-            return nil
-        }
-        return txs.compactMap { tx in
-            guard let txid = tx["txid"] as? String, TradeProtocol.isCanonicalIdentifier(txid) else {
-                return nil
-            }
-            let sats = satsPaidTo(tx, address: address)
-            let status = tx["status"] as? [String: Any]
-            let blockTime = status?["block_time"] as? Int64 ?? 0
-            let receivedAt = blockTime > 0 ? blockTime : nowSecs
-            guard sats >= DepositAttribution.minDepositSats, nowSecs - receivedAt <= windowSeconds else { return nil }
-            return Receive(txid: txid, sats: sats, timeSecs: receivedAt)
-        }
-    }
-
-    /// The outputs of an Esplora transaction that pay `address`, compared in normalized form
-    /// (bech32 case and surrounding whitespace never change the match). Nil when the body has no
-    /// output list. The one address-matching rule for recovery, txid resolution and the
-    /// confirmation address check.
-    static func outputsPaying(_ tx: [String: Any], address: String) -> [[String: Any]]? {
-        guard let outputs = tx["vout"] as? [[String: Any]] else { return nil }
-        let target = PaymentDestinationClassifier.normalizeAddress(address)
-        guard !target.isEmpty else { return [] }
-        return outputs.filter {
-            ($0["scriptpubkey_address"] as? String).map(PaymentDestinationClassifier.normalizeAddress) == target
-        }
-    }
-
-    /// Sum of the outputs of an Esplora transaction that pay `address`. Zero when none do, or
-    /// when a value is missing, not positive, or the total is more than can exist (a hostile
-    /// server must not trap the app).
-    static func satsPaidTo(_ tx: [String: Any], address: String) -> Int64 {
-        let values = (outputsPaying(tx, address: address) ?? []).map { $0["value"] as? Int64 ?? 0 }
-        guard !values.contains(where: { $0 <= 0 }) else { return 0 }
-        return OnchainAmount.total(of: values) ?? 0
+    /// A deposit of [sats] in [txid] when it counts as one: a canonical txid, at least the minimum
+    /// deposit, and received within the window. An unconfirmed one ([blockTime] 0) counts as now.
+    static func receive(txid: String, sats: Int64, blockTime: Int64, nowSecs: Int64) -> Receive? {
+        guard TradeProtocol.isCanonicalIdentifier(txid) else { return nil }
+        let receivedAt = blockTime > 0 ? blockTime : nowSecs
+        guard sats >= DepositAttribution.minDepositSats, nowSecs - receivedAt <= windowSeconds else { return nil }
+        return Receive(txid: txid, sats: sats, timeSecs: receivedAt)
     }
 }
 

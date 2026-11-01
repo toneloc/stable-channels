@@ -8,7 +8,7 @@ enum ConfirmationPolicy {
 
     static func requiredConfirmations(for paymentType: String) -> Int {
         switch paymentType {
-        case "splice_in", "splice_out":
+        case SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue:
             return spliceRequiredConfirmations
         default:
             return defaultRequiredConfirmations
@@ -102,7 +102,12 @@ struct ConfirmationCalculator: ConfirmationCalculating {
     }
 }
 
-private let onchainPaymentTypes: Set<String> = ["onchain", "splice_in", "splice_out", "channel_close"]
+private let onchainPaymentTypes: Set<String> = [
+    "onchain",
+    SplicePaymentType.spliceIn.rawValue,
+    SplicePaymentType.spliceOut.rawValue,
+    "channel_close"
+]
 
 extension PaymentRecord {
     var shouldShowConfirmationProgress: Bool {

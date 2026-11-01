@@ -107,38 +107,8 @@ class AppState {
 
     // MARK: - Payment queries (read-only, for views)
 
-    func pendingOnchainActivity() -> (receives: [PaymentRecord], sends: [PaymentRecord]) {
-        guard let repo = databaseService?.paymentRepo else { return ([], []) }
-        return (repo.pendingOnchainReceives(), repo.pendingOnchainSends())
-    }
-
-    func latestReceivedPayment() -> PaymentRecord? {
-        databaseService?.paymentRepo.latestReceivedPayment()
-    }
-
-    /// nil when there is no database yet; throws when the lookup fails.
-    func payment(byId id: Int64) throws -> PaymentRecord? {
-        try databaseService?.paymentRepo.getPayment(byId: id)
-    }
-
-    func payment(paymentId: String) -> PaymentRecord? {
-        databaseService?.paymentRepo.payment(paymentId: paymentId)
-    }
-
-    func payment(txid: String) -> PaymentRecord? {
-        databaseService?.paymentRepo.payment(txid: txid)
-    }
-
-    /// Throws when there is no database yet or the lookup fails.
-    func recentTrades(limit: Int) throws -> [TradeRecord] {
-        guard let databaseService else { throw DatabaseError.openFailed("Database unavailable") }
-        return try databaseService.channelRepo.getRecentTrades(limit: limit)
-    }
-
-    /// Throws when there is no database yet or the lookup fails.
-    func recentPayments(limit: Int) throws -> [PaymentRecord] {
-        guard let databaseService else { throw DatabaseError.openFailed("Database unavailable") }
-        return try databaseService.paymentRepo.getRecentPayments(limit: limit)
+    var paymentQueries: PaymentQueries {
+        PaymentQueries(databaseService: databaseService)
     }
 
     /// Records a send the user just started as pending history; best effort.
@@ -1865,7 +1835,7 @@ class AppState {
             ])
             statusMessage = SpliceCompletionPolicy.channelReadyStatus(
                 isSweeping: isSweeping, hasSpliceTxid: spliceTxid != nil
-            )
+            ).message
 
         case .paymentReceived(let paymentId, let paymentHash, let amountMsat, let customRecords):
             handlePaymentReceived(
@@ -2340,7 +2310,7 @@ class AppState {
         }
     }
 
-    // MARK: - Payment Successful
+    // MARK: - Payment Failed
 
     /// Resolves the durable row a failed outbound payment's [target] names. The in-flight stability
     /// send comes first: no sats moved, so its marker clears and the next send is unblocked.
@@ -2415,6 +2385,8 @@ class AppState {
         ])
         statusMessage = WalletErrorMessages.paymentFailure(reason)
     }
+
+    // MARK: - Payment Successful
 
     private func handlePaymentSuccessful(
         paymentId: PaymentId?,
@@ -3250,10 +3222,8 @@ class AppState {
         txid: String,
         expectedGeneration: UInt64
     ) -> Bool {
-        // A captured event whose txid assignment collided (e.g. with a self-send deposit row) left
-        // the row's txid NULL, and completeSplice(txid:) needs an exact match. Retry from captured
-        // events only; a no-op once a splice row carries the txid.
-        try? databaseService?.spliceRepo.recoverAssignments()
+        let completion = databaseService.map { SpliceCompletionService(databaseService: $0) }
+        completion?.recoverAssignments()
         let price = accountingBTCPrice
         guard price > 0.0 else {
             // Defer: without a trusted price, don't finalize or clear state. Retry on next tick.
@@ -3264,20 +3234,11 @@ class AppState {
         refreshBalances()
         updateStableBalances()
 
-        // Reconcile stable books FIRST, before marking row completed, against the stored row so
-        // a signed correction or background settlement is never overwritten by a stale snapshot.
-        guard let databaseService else { return false }
+        // Reconcile stable books FIRST, before marking row completed.
+        guard let completion else { return false }
         let repair: StabilityService.RepairResult?
         do {
-            let books = try databaseService.channelRepo.reconcileOutgoingBacking(
-                userChannelId: stableChannel.userChannelId,
-                receiverSats: stableChannel.stableReceiverBTC.sats,
-                price: price
-            )
-            StabilityService.adoptStoredBooks(
-                &stableChannel, expectedUSD: books.expectedUSD, backingSats: books.backingSats
-            )
-            repair = books.repair
+            repair = try completion.reconcileBooks(&stableChannel, price: price)
         } catch {
             if case DatabaseError.missingChannelRow = error {
                 // Recreate the row from in-memory state; the next tick reconciles against it.
@@ -3303,25 +3264,17 @@ class AppState {
         // A self-send splice-out raises the on-chain balance by its own amount; advance the frozen
         // deposit-detector baseline (persisted) before the row completes and the lock clears, so
         // neither the next tick nor a relaunch after a crash in between records that rise as a
-        // phantom deposit. Absorbed once per txid, so a retry does not add it again. Read from the
-        // splice's row, not in-memory splice state that may belong to a newer operation.
-        if spliceGeneration == expectedGeneration, !depositBaseline.counts(txid),
-           let row = databaseService.paymentRepo.payment(txid: txid),
-           let baseline = SpliceCompletionPolicy.advancedOnchainBaseline(
-               baselineSats: depositBaseline.sats,
-               currentOnchainSats: onchainBalanceSats,
-               completedRow: row,
-               // The flag saved at the start wins: by now a receive recorded on the splice's own
-               // output can make the destination look like one of ours.
-               destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid))
-                   ?? databaseService.paymentRepo.isOwnReceiveAddress(
-                       row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
-                   )
-           ) {
+        // phantom deposit. Absorbed once per txid, so a retry does not add it again.
+        if spliceGeneration == expectedGeneration, let baseline = completion.selfSendBaseline(
+            txid: txid,
+            baseline: depositBaseline,
+            onchainSats: onchainBalanceSats,
+            currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+        ) {
             depositBaseline.absorbSelfSend(txid: txid, sats: baseline)
         }
 
-        let completed = databaseService.spliceRepo.completeSplice(txid: txid)
+        let completed = completion.completeRow(txid: txid)
         guard completed else {
             AuditService.log("SPLICE_COMPLETE_DEFERRED", data: [
                 "txid": txid,

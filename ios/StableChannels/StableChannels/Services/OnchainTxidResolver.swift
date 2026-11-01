@@ -52,7 +52,7 @@ struct OnchainTxidResolver {
                    ResilientEsploraClient.isValidTxid(txid), !context.0.contains(txid),
                    // Bind to an incoming output, not merely an address-history entry (which
                    // also includes spends). Non-matching aggregate deposits remain pending.
-                   context.1 > 0, MissedReceiveRecovery.satsPaidTo(transaction, address: address) == context.1 {
+                   context.1 > 0, EsploraTransaction.satsPaidTo(transaction, address: address) == context.1 {
                     return txid
                 }
             }

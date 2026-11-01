@@ -832,7 +832,7 @@ final class StabilityServiceTests: XCTestCase {
         appState.transactionLinkService.onchainReceiveAddress = "bc1qown"
         _ = try db.paymentRepo.recordPayment(
             paymentId: "splice-self-send",
-            paymentType: SpliceCompletionPolicy.spliceOutPaymentType,
+            paymentType: SplicePaymentType.spliceOut.rawValue,
             direction: SpliceCompletionPolicy.sentDirection,
             amountMsat: 50_000_000,
             amountUSD: nil,

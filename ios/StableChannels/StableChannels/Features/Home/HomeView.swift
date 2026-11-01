@@ -202,8 +202,8 @@ struct HomeView: View {
     }
 
     private func loadPendingOnchain() {
-        (pendingOnchainReceives, pendingOnchainSends) = appState.pendingOnchainActivity()
-        pendingSpliceRow = appState.spliceTxid.flatMap(appState.payment(txid:))
+        (pendingOnchainReceives, pendingOnchainSends) = appState.paymentQueries.pendingOnchainActivity()
+        pendingSpliceRow = appState.spliceTxid.flatMap(appState.paymentQueries.payment(txid:))
     }
 
     private var onchainCard: HomeOnchainCard? {
@@ -246,7 +246,7 @@ struct HomeView: View {
     }
 
     private func openPaymentDetail() {
-        guard let payment = appState.latestReceivedPayment() else { return }
+        guard let payment = appState.paymentQueries.latestReceivedPayment() else { return }
         paymentCoordinator.open(payment)
     }
 }

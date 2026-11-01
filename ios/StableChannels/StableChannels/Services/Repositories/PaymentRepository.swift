@@ -299,10 +299,10 @@ final class PaymentRepository {
         )
     }
 
-    /// Fails txid-less onchain rows still pending since before `cutoff`: nothing can ever
+    /// Fails placeholders (onchain rows without a txid) still pending since before `cutoff`: nothing can ever
     /// confirm them. Returns how many rows were failed.
     @discardableResult
-    func failStaleTxidlessOnchain(createdBefore cutoff: Int64) throws -> Int {
+    func failStalePlaceholders(createdBefore cutoff: Int64) throws -> Int {
         try rawSQL.executeReturningChanges(
             """
             UPDATE payments SET status = 'failed'
@@ -484,11 +484,6 @@ final class PaymentRepository {
         }
     }
 
-    /// Whether the newest row carrying `txid` is still pending.
-    func hasPendingPayment(txid: String) -> Bool {
-        payment(txid: txid)?.status == "pending"
-    }
-
     /// Whether `address` is one this wallet generated for receiving: the current receive address,
     /// or an older one it has received to before. A failed lookup counts as not ours.
     func isOwnReceiveAddress(_ address: String?, currentReceiveAddress: String?) -> Bool {
@@ -500,7 +495,7 @@ final class PaymentRepository {
     /// True if this address has ever received an on-chain deposit we recorded, i.e. it is one of
     /// our own wallet's addresses rather than an external destination. A placeholder's address
     /// lives on its resolution row.
-    func isKnownReceiveAddress(_ address: String) throws -> Bool {
+    private func isKnownReceiveAddress(_ address: String) throws -> Bool {
         let sql = """
         SELECT 1 FROM payments p
         LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id

@@ -47,7 +47,7 @@ final class OnchainReceiveRepository {
     /// has no txid yet ([hasSpliceWithoutTxid]: a payment to our address could be that splice's
     /// self-send; retried on a later check), for an amount no transaction can have, and when a row
     /// with this amount since [sinceSecs] already covers it: one carrying this txid, or an older
-    /// txid-less one that is not a pending placeholder (the txid check alone would duplicate those).
+    /// one without a txid that is not a pending placeholder (the txid check alone would duplicate those).
     /// Placeholders are handled by ``recordReceive``. Returns true when a row took the deposit.
     func recordMissedReceive(
         txid: String,
@@ -282,7 +282,7 @@ final class OnchainReceiveRepository {
         }
     }
 
-    /// Records the txids that could be the balance-fallback deposit [paymentId]: the arrivals of its
+    /// Records the txids that could be the placeholder deposit [paymentId]: the arrivals of its
     /// balance jump no recorded receive explained. Only these may later take the row over.
     func recordDepositCandidates(paymentId: String, txids: Set<String>) throws {
         for txid in txids.sorted() {
@@ -293,11 +293,11 @@ final class OnchainReceiveRepository {
         }
     }
 
-    /// Completes txid-less pending receives created before [cutoff] that list a candidate txid in
+    /// Completes pending placeholders created before [cutoff] that list a candidate txid in
     /// [walletTxids]: the wallet still holds a transaction the deposit can be, so it arrived. Returns
     /// how many rows were completed.
     @discardableResult
-    func completeStaleTxidlessReceives(createdBefore cutoff: Int64, walletTxids: Set<String>) throws -> Int {
+    func completeStalePlaceholders(createdBefore cutoff: Int64, walletTxids: Set<String>) throws -> Int {
         guard !walletTxids.isEmpty else { return 0 }
         let marks = Array(repeating: "?", count: walletTxids.count).joined(separator: ", ")
         return try rawSQL.executeReturningChanges(

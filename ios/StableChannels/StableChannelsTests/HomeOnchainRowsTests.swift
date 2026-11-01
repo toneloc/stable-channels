@@ -113,7 +113,7 @@ final class HomeOnchainRowsTests: XCTestCase {
         let outCard = try XCTUnwrap(HomeOnchainRows.card(.init(
             isSweeping: true,
             spliceTxid: "splice",
-            spliceRow: payment(type: SpliceCompletionPolicy.spliceOutPaymentType, direction: "sent", sats: 700)
+            spliceRow: payment(type: SplicePaymentType.spliceOut.rawValue, direction: "sent", sats: 700)
         )))
         XCTAssertEqual(outCard.rows.first?.kind, .splice(isOutgoing: true))
         XCTAssertEqual(outCard.rows.first?.amountSats, 700)

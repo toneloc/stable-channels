@@ -67,14 +67,12 @@ final class SpliceRepository {
         selfSend: Bool = false,
         channel: SpliceChannelIdentity
     ) throws -> Int64 {
-        guard paymentType == SpliceCompletionPolicy.spliceInPaymentType
-            || paymentType == SpliceCompletionPolicy.spliceOutPaymentType,
-            !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
+        guard let type = SplicePaymentType(rawValue: paymentType),
+              !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
             throw DatabaseError.executeFailed("Splice operation identity is incomplete")
         }
-        let direction = paymentType == SpliceCompletionPolicy.spliceOutPaymentType
-            ? SpliceCompletionPolicy.sentDirection
-            : "received"
+        let direction = type == .spliceOut ? SpliceCompletionPolicy.sentDirection : SpliceCompletionPolicy
+            .receivedDirection
         return try rawSQL.inTransaction {
             try rawSQL.execute(
                 """

@@ -43,7 +43,7 @@ final class OnchainReceiveRecoveryService {
         Task { @MainActor [weak self] in
             let receives = await client.fetch(
                 endpointBuilder: { ["\(ResilientEsploraClient.trimSlash($0))/address/\(address)/txs"] },
-                resultParser: { MissedReceiveRecovery.recentReceives(json: $0, address: address, nowSecs: now) }
+                resultParser: { EsploraTransaction.recentReceives(json: $0, address: address, nowSecs: now) }
             )
             guard let self, let receives, self.databaseService === databaseService else { return }
             for receive in receives {

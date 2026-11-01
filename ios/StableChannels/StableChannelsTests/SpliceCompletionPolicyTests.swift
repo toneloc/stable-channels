@@ -146,15 +146,20 @@ final class SpliceReadyStatusTests: XCTestCase {
     func testReadyStatusNamesAMoveOnlyWhileItsLockAndTxidAreHeld() {
         XCTAssertEqual(
             SpliceCompletionPolicy.channelReadyStatus(isSweeping: true, hasSpliceTxid: true),
-            "Move pending confirmation"
+            .movePendingConfirmation
         )
         XCTAssertEqual(
             SpliceCompletionPolicy.channelReadyStatus(isSweeping: true, hasSpliceTxid: false),
-            "Channel is ready"
+            .channelReady
         )
         XCTAssertEqual(
             SpliceCompletionPolicy.channelReadyStatus(isSweeping: false, hasSpliceTxid: true),
-            "Channel is ready"
+            .channelReady
         )
+        XCTAssertEqual(
+            SpliceCompletionPolicy.ChannelReadyStatus.movePendingConfirmation.message,
+            "Move pending confirmation"
+        )
+        XCTAssertEqual(SpliceCompletionPolicy.ChannelReadyStatus.channelReady.message, "Channel is ready")
     }
 }

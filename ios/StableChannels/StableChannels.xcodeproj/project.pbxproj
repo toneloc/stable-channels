@@ -149,7 +149,12 @@
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
+		49B22AA030983AF200447D17 /* EsploraTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9C30983AF200447D17 /* EsploraTransaction.swift */; };
+		49B22AA130983AF200447D17 /* SpliceCompletionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9E30983AF200447D17 /* SpliceCompletionService.swift */; };
 		49B22AA230983AF200447D17 /* SpliceStartService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9F30983AF200447D17 /* SpliceStartService.swift */; };
+		49B22AA330983AF200447D17 /* PaymentQueries.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9D30983AF200447D17 /* PaymentQueries.swift */; };
+		49B22AA530983B0400447D17 /* TradeFormModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22AA430983B0400447D17 /* TradeFormModel.swift */; };
+		49B22AA730983B1700447D17 /* TradeFormModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22AA630983B1700447D17 /* TradeFormModelTests.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
 		49C46D3F3080D63C005A2FF5 /* SendPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
@@ -454,7 +459,12 @@
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
+		49B22A9C30983AF200447D17 /* EsploraTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraTransaction.swift; sourceTree = "<group>"; };
+		49B22A9D30983AF200447D17 /* PaymentQueries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentQueries.swift; sourceTree = "<group>"; };
+		49B22A9E30983AF200447D17 /* SpliceCompletionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceCompletionService.swift; sourceTree = "<group>"; };
 		49B22A9F30983AF200447D17 /* SpliceStartService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceStartService.swift; sourceTree = "<group>"; };
+		49B22AA430983B0400447D17 /* TradeFormModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeFormModel.swift; sourceTree = "<group>"; };
+		49B22AA630983B1700447D17 /* TradeFormModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradeFormModelTests.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
 		49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPreflight.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
@@ -850,6 +860,16 @@
 			path = Components;
 			sourceTree = "<group>";
 		};
+		49B22AB030983C0000447D17 /* Splice */ = {
+			isa = PBXGroup;
+			children = (
+				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
+				49B22A9E30983AF200447D17 /* SpliceCompletionService.swift */,
+				49B22A9F30983AF200447D17 /* SpliceStartService.swift */,
+			);
+			path = Splice;
+			sourceTree = "<group>";
+		};
 		49BB000030E900144C6D1943 /* BalanceBar */ = {
 			isa = PBXGroup;
 			children = (
@@ -881,15 +901,6 @@
 				49D997553074F6E40024B3A7 /* NWPathNetworkMonitor.swift */,
 			);
 			path = Network;
-			sourceTree = "<group>";
-		};
-		49B22AB030983C0000447D17 /* Splice */ = {
-			isa = PBXGroup;
-			children = (
-				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
-				49B22A9F30983AF200447D17 /* SpliceStartService.swift */,
-			);
-			path = Splice;
 			sourceTree = "<group>";
 		};
 		49DDB0002FF0000000000001 /* Repositories */ = {
@@ -985,12 +996,14 @@
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
 				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
 				492B54AB300CC81D003EC383 /* EsploraError.swift */,
+				49B22A9C30983AF200447D17 /* EsploraTransaction.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
 				5AFFF3730F0DCCB9662892DE /* KeychainService.swift */,
 				5E0D4B3FBC893E4863B95AB9 /* LSPService.swift */,
 				61BB0D1D623E0794FC1ED6ED /* NodeService.swift */,
 				98EC8E4FB3EBA286AE3941A7 /* OnchainReceiveRecoveryService.swift */,
 				499DBE6D2FD2DACF003E89F9 /* OnchainTxidResolver.swift */,
+				49B22A9D30983AF200447D17 /* PaymentQueries.swift */,
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
@@ -1006,9 +1019,9 @@
 				495CB4023017AD1800560837 /* Confirmation */,
 				D20000000000000000000002 /* LNURL */,
 				49D997543074F6820024B3A7 /* Network */,
-				49B22AB030983C0000447D17 /* Splice */,
 				4944457E3053E42800B5A146 /* Price */,
 				49DDB0002FF0000000000001 /* Repositories */,
+				49B22AB030983C0000447D17 /* Splice */,
 				495CB4013017917400560837 /* WebSocket */,
 			);
 			path = Services;
@@ -1019,6 +1032,7 @@
 			children = (
 				E2CB01DD108B12E75FFEAB11 /* BuyView.swift */,
 				955C6E8D6DB076A3B20A6F46 /* SellView.swift */,
+				49B22AA430983B0400447D17 /* TradeFormModel.swift */,
 				78F04EE52CCB772DE7DDAEBD /* TradeView.swift */,
 			);
 			path = Trade;
@@ -1199,6 +1213,7 @@
 				5C279A032FEA00030074ACD2 /* StabilitySettlementTests.swift */,
 				49DDD01B3054000100B5A146 /* StabilityStatusAdaptersTests.swift */,
 				499DBE752FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift */,
+				49B22AA630983B1700447D17 /* TradeFormModelTests.swift */,
 				490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */,
 				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
 			);
@@ -1379,6 +1394,7 @@
 				49DDD01C3054000100B5A146 /* StabilityStatusAdaptersTests.swift in Sources */,
 				E7E67B65EAD4FF5732460856 /* ChannelSweepTests.swift in Sources */,
 				8D10E7E7E6F21C55D39E437D /* HomeOnchainRowsTests.swift in Sources */,
+				49B22AA730983B1700447D17 /* TradeFormModelTests.swift in Sources */,
 				AE9E9268FFA689973CAFC3DC /* LightningPaymentRecoveryTests.swift in Sources */,
 				5CFBB7A262010DA451BFC768 /* MissedReceiveRecoveryTests.swift in Sources */,
 				1EE2FB13550F4FC24229A920 /* PaymentResultControlsTests.swift in Sources */,
@@ -1534,7 +1550,10 @@
 				49206E153073C27600217838 /* SendAmountStepView.swift in Sources */,
 				49206E163073C27600217838 /* SendDestinationBadgeView.swift in Sources */,
 				49206E173073C27600217838 /* SendConfirmCards.swift in Sources */,
+				49B22AA030983AF200447D17 /* EsploraTransaction.swift in Sources */,
+				49B22AA130983AF200447D17 /* SpliceCompletionService.swift in Sources */,
 				49B22AA230983AF200447D17 /* SpliceStartService.swift in Sources */,
+				49B22AA330983AF200447D17 /* PaymentQueries.swift in Sources */,
 				49206E183073C27600217838 /* SendLoadingView.swift in Sources */,
 				49206E193073C27600217838 /* SendSuccessStepView.swift in Sources */,
 				49206E1A3073C27600217838 /* NetworkFeeSelectorView.swift in Sources */,
@@ -1576,6 +1595,7 @@
 				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
 				49D8450E308CF99000882583 /* OnchainAmount.swift in Sources */,
 				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
+				49B22AA530983B0400447D17 /* TradeFormModel.swift in Sources */,
 				498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */,
 				498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */,
 				7015C73934B1CDBCEF48751A /* LSPService.swift in Sources */,

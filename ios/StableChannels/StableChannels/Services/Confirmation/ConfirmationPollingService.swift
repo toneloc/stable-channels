@@ -168,7 +168,7 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
-        var anyUpdated = failStaleTxidlessRows()
+        var anyUpdated = completeOrFailStalePlaceholders()
         let currentHeight = blockHeightService.currentHeight
         guard currentHeight > 0 else {
             if anyUpdated { onUpdate?() }
@@ -257,7 +257,7 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
-        var anyUpdated = failStaleTxidlessRows()
+        var anyUpdated = completeOrFailStalePlaceholders()
         defer {
             if anyUpdated { onUpdate?() }
         }
@@ -321,7 +321,7 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
-        var anyUpdated = failStaleTxidlessRows()
+        var anyUpdated = completeOrFailStalePlaceholders()
         // Refresh authoritative chain tip from Esplora first.
         guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
             if anyUpdated { onUpdate?() }
@@ -420,27 +420,27 @@ final class ConfirmationPollingService {
         case failed
     }
 
-    /// Ages out txid-less onchain rows; returns whether any row changed. A balance-fallback receive
+    /// Ages out placeholders (onchain rows without a txid); returns whether any row changed. A placeholder
     /// whose candidate transaction the wallet still lists did arrive, so it completes instead of
     /// failing. Waits for a readable wallet, which tells the two apart.
-    private func failStaleTxidlessRows() -> Bool {
+    private func completeOrFailStalePlaceholders() -> Bool {
         let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
         guard let walletTxids = walletReceiveTxids() else { return false }
         do {
-            let completed = try databaseService.onchainRepo.completeStaleTxidlessReceives(
+            let completed = try databaseService.onchainRepo.completeStalePlaceholders(
                 createdBefore: cutoff,
                 walletTxids: walletTxids
             )
             if completed > 0 {
                 AuditService.log("STALE_TXIDLESS_RECEIVE_COMPLETED", data: ["txidless_rows": "\(completed)"])
             }
-            let failed = try databaseService.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff)
+            let failed = try databaseService.paymentRepo.failStalePlaceholders(createdBefore: cutoff)
             if failed > 0 {
                 AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: ["txidless_rows": "\(failed)"])
             }
             return completed + failed > 0
         } catch {
-            logger.error("Failed to age out txid-less onchain rows: \(error.localizedDescription)")
+            logger.error("Failed to age out placeholders: \(error.localizedDescription)")
             return false
         }
     }

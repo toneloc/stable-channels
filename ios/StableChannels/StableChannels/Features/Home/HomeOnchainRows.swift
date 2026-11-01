@@ -197,19 +197,19 @@ enum HomeOnchainRows {
     /// The in-memory splice decides while it exists; after negotiation or a relaunch only the row knows.
     private static func isOutgoingSplice(_ inputs: Inputs) -> Bool {
         if let pendingSplice = inputs.pendingSplice { return pendingSplice.paymentType == .spliceOut }
-        return spliceRow(inputs)?.paymentType == SpliceCompletionPolicy.spliceOutPaymentType
+        return spliceRow(inputs)?.paymentType == SplicePaymentType.spliceOut.rawValue
     }
 
     /// The splice row, ignoring any other row that shares its txid.
     private static func spliceRow(_ inputs: Inputs) -> PaymentRecord? {
-        let spliceTypes = [SpliceCompletionPolicy.spliceInPaymentType, SpliceCompletionPolicy.spliceOutPaymentType]
+        let spliceTypes = [SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue]
         return inputs.spliceRow.flatMap { spliceTypes.contains($0.paymentType) ? $0 : nil }
     }
 
     private static func spliceRow(_ inputs: Inputs, isOutgoing: Bool) -> HomeOnchainRow {
         let paymentType = isOutgoing
-            ? SpliceCompletionPolicy.spliceOutPaymentType
-            : SpliceCompletionPolicy.spliceInPaymentType
+            ? SplicePaymentType.spliceOut.rawValue
+            : SplicePaymentType.spliceIn.rawValue
         return HomeOnchainRow(
             kind: .splice(isOutgoing: isOutgoing),
             txid: nonEmpty(inputs.spliceTxid),

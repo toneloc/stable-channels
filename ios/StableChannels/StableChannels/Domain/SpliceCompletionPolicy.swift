@@ -2,9 +2,14 @@ import Foundation
 
 /// Pure decisions taken around a splice's in-memory lock and its completion.
 enum SpliceCompletionPolicy {
-    static let spliceInPaymentType = "splice_in"
-    static let spliceOutPaymentType = "splice_out"
     static let sentDirection = "sent"
+    static let receivedDirection = "received"
+
+    /// What the status line says once a channel reports ready.
+    enum ChannelReadyStatus: Equatable {
+        case movePendingConfirmation
+        case channelReady
+    }
 
     /// New baseline for the balance-delta deposit detector once a splice row completes, or nil to
     /// leave it unchanged. A splice-out paying one of our own addresses (a self-send) raises the
@@ -18,7 +23,7 @@ enum SpliceCompletionPolicy {
         completedRow: PaymentRecord,
         destinationIsOwnAddress: Bool
     ) -> UInt64? {
-        guard completedRow.paymentType == spliceOutPaymentType,
+        guard completedRow.paymentType == SplicePaymentType.spliceOut.rawValue,
               completedRow.direction == sentDirection,
               destinationIsOwnAddress else { return nil }
         let (sum, overflow) = baselineSats.addingReportingOverflow(completedRow.amountSats)
@@ -27,8 +32,8 @@ enum SpliceCompletionPolicy {
 
     /// Status line once a channel reports ready: a move is still confirming while its lock and
     /// negotiated txid are both held.
-    static func channelReadyStatus(isSweeping: Bool, hasSpliceTxid: Bool) -> String {
-        isSweeping && hasSpliceTxid ? "Move pending confirmation" : "Channel is ready"
+    static func channelReadyStatus(isSweeping: Bool, hasSpliceTxid: Bool) -> ChannelReadyStatus {
+        isSweeping && hasSpliceTxid ? .movePendingConfirmation : .channelReady
     }
 
     /// A lock restored for a pre-negotiation row outlives that row's expiry only in memory; drop

@@ -78,7 +78,7 @@ struct OnchainDepositReconciler {
             ])
         }
         var candidates = attribution.unrecordedTxids
-        // Without one, a fallback row still "Receiving" after the age-out window is failed.
+        // Without one, a placeholder still "Receiving" after the age-out window is failed.
         if baseline.txids == nil, let claimed = try? repository.recordedReceiveTxids(),
            let txid = DepositAttribution.unknownBaselineCandidate(
                remainderSats: attribution.remainderSats,
@@ -105,7 +105,7 @@ struct DepositRecordInput {
     var candidateTxids: Set<String> = []
 }
 
-/// Stores a fallback row's candidate txids after the row. A crash or failure in between leaves a row
+/// Stores a placeholder's candidate txids after the row. A crash or failure in between leaves a row
 /// without candidates, which a WebSocket receive never takes over: it records its own row instead.
 @MainActor
 private func recordCandidates(_ deposit: DepositRecordInput, databaseService: DatabaseService) {

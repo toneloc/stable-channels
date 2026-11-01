@@ -26,68 +26,38 @@ struct TradeView: View {
         case done
     }
 
-    private var maxTradeUSD: Double {
-        switch action {
-        case .buyBTC:
-            return BuyAmountPolicy.maximumUsd(appState.stableChannel.expectedUSD.amount)
-        case .sellBTC:
-            return Double(appState.tradeService?.maxSellCents(sc: appState.stableChannel, price: tradePrice) ?? 0) / 100
-        }
+    private var form: TradeFormModel {
+        TradeFormModel(
+            action: action,
+            amountText: amountStr,
+            maxTradeUSD: TradeFormModel.maxTradeUSD(
+                action: action,
+                expectedUSD: appState.stableChannel.expectedUSD.amount,
+                maxSellCents: appState.tradeService?.maxSellCents(sc: appState.stableChannel, price: tradePrice) ?? 0
+            ),
+            price: tradePrice
+        )
     }
 
-    private var maxTradeCents: UInt64 {
-        UInt64(maxTradeUSD * 100 + 1e-7)
-    }
-
-    private var acceptsAmount: Bool {
-        switch action {
-        case .buyBTC: return BuyAmountPolicy.accepts(amountUsd: amountUSD, balanceUsd: maxTradeUSD)
-        case .sellBTC: return amountUSD > 0 && amountUSD <= maxTradeUSD
-        }
-    }
+    private var maxTradeUSD: Double { form.maxTradeUSD }
+    private var amountUSD: Double { form.amountUSD }
+    private var feeUSD: Double { form.feeUSD }
 
     /// What the trade credits: BTC for a buy, the post-fee USD for a sell.
     private var receiveText: String {
-        action == .buyBTC ? btcAmountFinalText : String(format: "$%.2f USD", netAmountUSD)
-    }
-
-    /// The USD side of the trade as shown in the result copy.
-    private var tradedUSD: Double {
-        action == .buyBTC ? amountUSD : netAmountUSD
+        action == .buyBTC ? btcAmountFinalText : String(format: "$%.2f USD", form.netAmountUSD)
     }
 
     private var tradePrice: Double {
         appState.effectiveTradePrice
     }
 
-    private var amountUSD: Double {
-        Double(amountStr) ?? 0
-    }
-
-    private var feeUSD: Double {
-        amountUSD * Constants.stableChannelTradeFeeRate
-    }
-
-    private var netAmountUSD: Double {
-        amountUSD - feeUSD
-    }
-
     private var feeLabel: String {
         String(format: "Fee (%.0f%%)", Constants.stableChannelTradeFeeRate * 100)
     }
 
-    private var btcAmount: Double {
-        guard tradePrice > 0 else { return 0 }
-        return amountUSD / tradePrice
-    }
-
     private var btcAmountFinalText: String {
-        Bitcoin.fromBTC(btcAmountFinal).formatted
-    }
-
-    private var btcAmountFinal: Double {
-        guard tradePrice > 0 else { return 0 }
-        return netAmountUSD / tradePrice
+        Bitcoin.fromBTC(form.btcAmountFinal).formatted
     }
 
     var body: some View {
@@ -146,7 +116,7 @@ struct TradeView: View {
                 }
 
             if amountUSD > 0 {
-                Text("≈ \(Bitcoin.fromBTC(btcAmount).formatted)")
+                Text("≈ \(Bitcoin.fromBTC(form.btcAmount).formatted)")
                     .foregroundStyle(.secondary)
             }
 
@@ -158,7 +128,7 @@ struct TradeView: View {
                     Text(String(localized: "available_balance", defaultValue: "Available: ") + maxTradeUSD.usdFormatted)
                         .foregroundStyle(.secondary)
                 case .sellBTC:
-                    Text(StabilizationPolicy.maximumMessage(maxTradeCents))
+                    Text(StabilizationPolicy.maximumMessage(form.maxTradeCents))
                         .foregroundStyle(.secondary)
                     Button(String(localized: "button_max", defaultValue: "Max")) {
                         amountStr = String(format: "%.2f", maxTradeUSD)
@@ -166,10 +136,10 @@ struct TradeView: View {
                 }
             }
 
-            if amountUSD > maxTradeUSD && amountUSD > 0 {
+            if form.exceedsLimit {
                 Text(action == .buyBTC
                     ? String(localized: "error_exceeds_balance", defaultValue: "Exceeds available stable balance")
-                    : StabilizationPolicy.limitExceededMessage(maxTradeCents))
+                    : StabilizationPolicy.limitExceededMessage(form.maxTradeCents))
                     .font(.caption)
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.red)
@@ -186,7 +156,7 @@ struct TradeView: View {
             Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-                .disabled(!acceptsAmount || tradePrice <= 0 || !appState.isOnline)
+                .disabled(!form.acceptsAmount || tradePrice <= 0 || !appState.isOnline)
         }
     }
 
@@ -285,7 +255,7 @@ struct TradeView: View {
                 Text((action == .buyBTC
                         ? String(localized: "trade_bought_btc_for", defaultValue: "Converted ")
                         : String(localized: "trade_sold_btc_for", defaultValue: "Converted "))
-                    + btcAmountFinalText + " for " + tradedUSD.usdFormatted)
+                    + btcAmountFinalText + " for " + form.tradedUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
@@ -298,7 +268,7 @@ struct TradeView: View {
                 Text((action == .buyBTC
                         ? String(localized: "trade_buying_btc_for", defaultValue: "Converting ")
                         : String(localized: "trade_selling_btc_for", defaultValue: "Converting "))
-                    + btcAmountFinalText + " for " + tradedUSD.usdFormatted)
+                    + btcAmountFinalText + " for " + form.tradedUSD.usdFormatted)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
@@ -321,15 +291,12 @@ struct TradeView: View {
                     .controlSize(.large)
             }
         }
-        // The NSE commits results straight to SQLite without touching the in-memory
-        // outcome map, so poll the database while the result is unknown — otherwise a
-        // trade resolved while backgrounded stays "Order Pending".
         .task(id: pendingPaymentId) {
             guard let pid = pendingPaymentId else { return }
-            while !Task.isCancelled, appState.tradeOutcomes[pid] == nil {
-                appState.refreshTradeOutcome(paymentId: pid)
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
+            await TradeFormModel.awaitOutcome(
+                isKnown: { appState.tradeOutcomes[pid] != nil },
+                refresh: { appState.refreshTradeOutcome(paymentId: pid) }
+            )
         }
     }
 

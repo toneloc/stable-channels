@@ -31,6 +31,18 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Move %@ to Lightning" } }
       }
     },
+    "status_channel_is_ready" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Channel is ready" } }
+      }
+    },
+    "status_move_pending_confirmation" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Move pending confirmation" } }
+      }
+    },
     "status_onchain_sending" : {
       "extractionState" : "manual",
       "localizations" : {

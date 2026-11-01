@@ -63,7 +63,7 @@ struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
             resultParser: { (data: Data) -> ReceiveTxCheck? in
                 // A body without an output list cannot answer the address question.
                 guard let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let paying = MissedReceiveRecovery.outputsPaying(body, address: address) else { return nil }
+                      let paying = EsploraTransaction.outputsPaying(body, address: address) else { return nil }
                 // The same `status` object `/tx/:txid/status` returns; a malformed one is unreadable.
                 var status: TxStatus?
                 if let raw = body["status"], !(raw is NSNull) {

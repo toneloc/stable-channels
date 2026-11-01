@@ -32,7 +32,7 @@ final class MissedReceiveRecoveryTests: XCTestCase {
             blockTime: now
         )])
 
-        let receives = MissedReceiveRecovery.recentReceives(json: data, address: address, nowSecs: now)
+        let receives = EsploraTransaction.recentReceives(json: data, address: address, nowSecs: now)
 
         XCTAssertEqual(receives, [.init(txid: txA, sats: 7_000, timeSecs: now)])
     }
@@ -40,7 +40,7 @@ final class MissedReceiveRecoveryTests: XCTestCase {
     func testUnconfirmedCountsAsNow() throws {
         let data = try json([tx(txA, outputs: [(address, 5_000)])])
 
-        let receives = MissedReceiveRecovery.recentReceives(json: data, address: address, nowSecs: now)
+        let receives = EsploraTransaction.recentReceives(json: data, address: address, nowSecs: now)
 
         XCTAssertEqual(receives?.first?.timeSecs, now)
     }
@@ -59,31 +59,31 @@ final class MissedReceiveRecoveryTests: XCTestCase {
             )
         ])
 
-        let receives = MissedReceiveRecovery.recentReceives(json: data, address: address, nowSecs: now)
+        let receives = EsploraTransaction.recentReceives(json: data, address: address, nowSecs: now)
 
         XCTAssertEqual(receives?.map(\.txid), [String(repeating: "d", count: 64)])
     }
 
     func testNonListBodyIsNil() {
-        XCTAssertNil(MissedReceiveRecovery.recentReceives(json: Data("{}".utf8), address: address, nowSecs: now))
-        XCTAssertEqual(MissedReceiveRecovery.recentReceives(json: Data("[]".utf8), address: address, nowSecs: now), [])
+        XCTAssertNil(EsploraTransaction.recentReceives(json: Data("{}".utf8), address: address, nowSecs: now))
+        XCTAssertEqual(EsploraTransaction.recentReceives(json: Data("[]".utf8), address: address, nowSecs: now), [])
     }
 
     func testSatsPaidToRejectsOverflowAndNonPositiveValues() {
         XCTAssertEqual(
-            MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, .max), (address, 1)]), address: address),
+            EsploraTransaction.satsPaidTo(tx(txA, outputs: [(address, .max), (address, 1)]), address: address),
             0
         )
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, -5)]), address: address), 0)
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(["txid": txA], address: address), 0)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx(txA, outputs: [(address, -5)]), address: address), 0)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(["txid": txA], address: address), 0)
     }
 
     func testSatsPaidToRejectsTotalsAboveTheSupply() {
         let cap = OnchainAmount.maxSats
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap)]), address: address), cap)
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap + 1)]), address: address), 0)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx(txA, outputs: [(address, cap)]), address: address), cap)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx(txA, outputs: [(address, cap + 1)]), address: address), 0)
         XCTAssertEqual(
-            MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap), (address, 1)]), address: address),
+            EsploraTransaction.satsPaidTo(tx(txA, outputs: [(address, cap), (address, 1)]), address: address),
             0
         )
     }
@@ -403,7 +403,7 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
         XCTAssertTrue(try missed("txA", 50_000))
 
         XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 30_000), Pending(txid: "txA", sats: 50_000)])
-        XCTAssertEqual(try repo.completeStaleTxidlessReceives(createdBefore: .max, walletTxids: ["txA", "txB"]), 1)
+        XCTAssertEqual(try repo.completeStalePlaceholders(createdBefore: .max, walletTxids: ["txA", "txB"]), 1)
         XCTAssertEqual(try receivedSats(), 80_000, "history counts deposit A once")
     }
 
@@ -472,9 +472,9 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
 final class AddressOutputMatchingTests: XCTestCase {
     func testAddressCaseAndWhitespaceDoNotChangeTheMatch() {
         let tx: [String: Any] = ["vout": [["scriptpubkey_address": "BC1QADDR", "value": Int64(5000)]]]
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx, address: "bc1qaddr"), 5000)
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx, address: " BC1QADDR "), 5000)
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx, address: ""), 0)
-        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx, address: "bc1qother"), 0)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx, address: "bc1qaddr"), 5000)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx, address: " BC1QADDR "), 5000)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx, address: ""), 0)
+        XCTAssertEqual(EsploraTransaction.satsPaidTo(tx, address: "bc1qother"), 0)
     }
 }

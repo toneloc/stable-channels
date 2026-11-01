@@ -59,8 +59,8 @@ final class DatabaseServiceTests: XCTestCase {
         let done = try insertRow(paymentId: "done", status: "completed", txid: nil, ageSeconds: window + 60)
 
         let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
-        XCTAssertEqual(try service.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff), 1)
-        XCTAssertEqual(try service.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff), 0)
+        XCTAssertEqual(try service.paymentRepo.failStalePlaceholders(createdBefore: cutoff), 1)
+        XCTAssertEqual(try service.paymentRepo.failStalePlaceholders(createdBefore: cutoff), 0)
 
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: old)?.status, "failed")
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: young)?.status, "pending")
@@ -2956,14 +2956,12 @@ extension DatabaseServiceTests {
         XCTAssertEqual(service.paymentRepo.payment(paymentId: "out-2")?.status, "completed")
     }
 
-    func testPendingRowAndOwnAddressQueries() throws {
+    func testOwnAddressQueries() throws {
         _ = try service.paymentRepo.recordPayment(
             paymentId: nil, paymentType: "onchain", direction: "received", amountMsat: 1_000_000,
             amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending",
             txid: String(repeating: "d", count: 64), address: "bc1qold"
         )
-        XCTAssertTrue(service.paymentRepo.hasPendingPayment(txid: String(repeating: "d", count: 64)))
-        XCTAssertFalse(service.paymentRepo.hasPendingPayment(txid: String(repeating: "e", count: 64)))
         XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qold", currentReceiveAddress: "bc1qnew"))
         XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qnew", currentReceiveAddress: "bc1qnew"))
         XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qexternal", currentReceiveAddress: "bc1qnew"))

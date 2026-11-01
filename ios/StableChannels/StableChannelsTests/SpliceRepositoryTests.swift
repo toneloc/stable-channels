@@ -332,18 +332,31 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(try rowCount(txid: "txid-once"), 2, "neither owner is deleted")
     }
 
-    func testIsKnownReceiveAddressIsTrueOnceWeHaveReceivedThere() throws {
+    func testAnAddressWeHaveReceivedToIsOurs() throws {
         try recordWebSocketReceive(txid: "older-tx", address: "bc1qourownaddress")
 
-        XCTAssertTrue(try service.paymentRepo.isKnownReceiveAddress("bc1qourownaddress"))
+        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qourownaddress", currentReceiveAddress: nil))
     }
 
-    func testIsKnownReceiveAddressIsFalseForAnAddressWeHaveNeverReceivedTo() throws {
+    func testAPlaceholderAddressOnItsResolutionRowIsOurs() throws {
+        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qplaceholder"))
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "onchain_deposit_1",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            resolutionId: resolutionId
+        ))
+
+        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qplaceholder", currentReceiveAddress: nil))
+    }
+
+    func testAnAddressWeHaveNeverReceivedToIsNotOurs() throws {
         // A splice-out destination is recorded on the splice row, which must not count.
         try recordPendingSplice()
 
-        XCTAssertFalse(try service.paymentRepo.isKnownReceiveAddress("bc1qtestaddress"))
-        XCTAssertFalse(try service.paymentRepo.isKnownReceiveAddress("bc1qsomeoneelsesaddress"))
+        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qtestaddress", currentReceiveAddress: nil))
+        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qsomeoneelsesaddress", currentReceiveAddress: nil))
     }
 }
 
