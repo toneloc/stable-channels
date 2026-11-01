@@ -67,10 +67,14 @@ final class SpliceRepository {
         selfSend: Bool = false,
         channel: SpliceChannelIdentity
     ) throws -> Int64 {
-        guard paymentType == "splice_in" || paymentType == "splice_out",
-              !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
+        guard paymentType == SpliceCompletionPolicy.spliceInPaymentType
+            || paymentType == SpliceCompletionPolicy.spliceOutPaymentType,
+            !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
             throw DatabaseError.executeFailed("Splice operation identity is incomplete")
         }
+        let direction = paymentType == SpliceCompletionPolicy.spliceOutPaymentType
+            ? SpliceCompletionPolicy.sentDirection
+            : "received"
         return try rawSQL.inTransaction {
             try rawSQL.execute(
                 """
@@ -78,7 +82,7 @@ final class SpliceRepository {
                 VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 params: [
-                    .text(paymentType), .text(paymentType == "splice_out" ? "sent" : "received"),
+                    .text(paymentType), .text(direction),
                     .integer(Int64(amountMsat)), amountUSD.map { .real($0) } ?? .null,
                     btcPrice.map { .real($0) } ?? .null, address.map { .text($0) } ?? .null
                 ]

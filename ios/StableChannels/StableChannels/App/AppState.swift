@@ -3049,7 +3049,7 @@ class AppState {
         let rowId: Int64
         do {
             rowId = try db.spliceRepo.recordPendingSplice(
-                paymentType: "splice_out",
+                paymentType: SpliceCompletionPolicy.spliceOutPaymentType,
                 amountMsat: amountSats * 1000,
                 amountUSD: amountUSD,
                 btcPrice: price > 0 ? price : nil,
@@ -4092,7 +4092,7 @@ class AppState {
         // row to stamp with the txid, even if the event is delivered before
         // spliceInWithAll returns (and so the operation survives a restart).
         let rowId = try? databaseService?.spliceRepo.recordPendingSplice(
-            paymentType: "splice_in",
+            paymentType: SpliceCompletionPolicy.spliceInPaymentType,
             amountMsat: sweepAmount * 1000,
             amountUSD: amountUSD,
             btcPrice: price > 0 ? price : nil,

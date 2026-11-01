@@ -193,14 +193,16 @@ enum HomeOnchainRows {
     }
 
     private static func spliceRow(_ inputs: Inputs, isOutgoing: Bool) -> HomeOnchainRow {
-        HomeOnchainRow(
+        let paymentType = isOutgoing
+            ? SpliceCompletionPolicy.spliceOutPaymentType
+            : SpliceCompletionPolicy.spliceInPaymentType
+        return HomeOnchainRow(
             kind: .splice(isOutgoing: isOutgoing),
             txid: nonEmpty(inputs.spliceTxid),
             amountSats: inputs.pendingSplice?.amountSats,
             sign: isOutgoing ? .outgoing : .neutral,
             confirmations: 0,
-            requiredConfirmations: ConfirmationPolicy
-                .requiredConfirmations(for: isOutgoing ? "splice_out" : "splice_in")
+            requiredConfirmations: ConfirmationPolicy.requiredConfirmations(for: paymentType)
         )
     }
 

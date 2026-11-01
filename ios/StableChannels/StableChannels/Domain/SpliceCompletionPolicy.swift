@@ -2,6 +2,7 @@ import Foundation
 
 /// Pure decisions taken around a splice's in-memory lock and its completion.
 enum SpliceCompletionPolicy {
+    static let spliceInPaymentType = "splice_in"
     static let spliceOutPaymentType = "splice_out"
     static let sentDirection = "sent"
 
