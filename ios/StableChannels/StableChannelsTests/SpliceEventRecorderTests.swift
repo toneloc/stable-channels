@@ -255,6 +255,9 @@ final class SpliceEventRecorderTests: XCTestCase {
         let id = try begin()
         try service.spliceRepo.recordEvent(ready(eventFunding: oldFunding))
         XCTAssertNil(try row(id).txid)
+        let captured = try service.rawSQL.query("SELECT payment_row_id FROM splice_events WHERE event_type = 'ready'")
+        XCTAssertEqual(captured.count, 1)
+        XCTAssertNil(captured[0].optInt64(0), "the initial ready event must not capture the operation")
     }
 
     func testReadyWithoutKnownPreviousFundingCannotClaim() throws {
