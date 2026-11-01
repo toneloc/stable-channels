@@ -3260,6 +3260,25 @@ class AppState {
         }
         saveChannelToDB(preserveBacking: true)
 
+        // A self-send splice-out raises the on-chain balance by its own amount; advance the frozen
+        // deposit-detector baseline (persisted) before the row completes and the lock clears, so
+        // neither the next tick nor a relaunch after a crash in between records that rise as a
+        // phantom deposit. Absorbed once per txid, so a retry does not add it again. Read from the
+        // splice's row, not in-memory splice state that may belong to a newer operation.
+        if spliceGeneration == expectedGeneration, !depositBaseline.counts(txid),
+           let row = databaseService.paymentRepo.payment(txid: txid),
+           let baseline = SpliceCompletionPolicy.advancedOnchainBaseline(
+               baselineSats: depositBaseline.sats,
+               currentOnchainSats: onchainBalanceSats,
+               completedRow: row,
+               destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid)) == true
+                   || databaseService.paymentRepo.isOwnReceiveAddress(
+                       row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+                   )
+           ) {
+            depositBaseline.absorbSelfSend(txid: txid, sats: baseline)
+        }
+
         let completed = databaseService.spliceRepo.completeSplice(txid: txid)
         guard completed else {
             AuditService.log("SPLICE_COMPLETE_DEFERRED", data: [
@@ -3274,22 +3293,6 @@ class AppState {
         updateStableBalances()
 
         if spliceGeneration == expectedGeneration {
-            // A self-send splice-out raises the on-chain balance by its own amount; advance the
-            // frozen deposit-detector baseline before clearing the lock below, so the next tick
-            // does not record that rise as a phantom deposit. Read from the completed row, not
-            // in-memory splice state that may belong to a newer operation.
-            if let row = databaseService.paymentRepo.payment(txid: txid),
-               let baseline = SpliceCompletionPolicy.advancedOnchainBaseline(
-                   baselineSats: depositBaseline.sats,
-                   currentOnchainSats: onchainBalanceSats,
-                   completedRow: row,
-                   destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid)) == true
-                       || databaseService.paymentRepo.isOwnReceiveAddress(
-                           row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
-                       )
-               ) {
-                depositBaseline.sats = baseline
-            }
             isSweeping = false
             pendingSplice = nil
             sweepOnchainStart = 0

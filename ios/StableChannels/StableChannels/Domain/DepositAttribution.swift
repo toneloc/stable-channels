@@ -123,6 +123,14 @@ struct OnchainDepositBaseline: Equatable {
         txids = wallet
     }
 
+    /// Moves the baseline to [sats] for a self-send splice's own rise and counts [txid], so a retry
+    /// (after a crash before the splice row completed) sees it absorbed. Unknown txids stay unknown:
+    /// marking them would change how the reconciler reads the baseline.
+    mutating func absorbSelfSend(txid: String, sats: UInt64) {
+        self.sats = sats
+        txids?.insert(txid)
+    }
+
     /// Whether the baseline already counts [txid].
     func counts(_ txid: String) -> Bool {
         txids?.contains(txid) ?? false

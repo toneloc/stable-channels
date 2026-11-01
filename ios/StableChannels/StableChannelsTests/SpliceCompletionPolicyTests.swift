@@ -120,6 +120,26 @@ final class SpliceCompletionPolicyTests: XCTestCase {
     func testFailedCheckReadsAsStillPending() {
         XCTAssertFalse(release(pendingRow: nil))
     }
+
+    func testSelfSendIsAbsorbedIntoTheBaselineOnce() {
+        var baseline = OnchainDepositBaseline(sats: 5000, txids: ["old"])
+        XCTAssertFalse(baseline.counts("splice"))
+
+        baseline.absorbSelfSend(txid: "splice", sats: 55000)
+
+        XCTAssertEqual(baseline.sats, 55000)
+        XCTAssertTrue(baseline.counts("splice"), "a retry after a crash must not absorb it again")
+        XCTAssertTrue(baseline.counts("old"))
+    }
+
+    func testSelfSendAbsorbLeavesUnknownTxidsUnknown() {
+        var baseline = OnchainDepositBaseline(sats: 5000, txids: nil)
+
+        baseline.absorbSelfSend(txid: "splice", sats: 55000)
+
+        XCTAssertEqual(baseline.sats, 55000)
+        XCTAssertNil(baseline.txids)
+    }
 }
 
 final class SpliceReadyStatusTests: XCTestCase {
