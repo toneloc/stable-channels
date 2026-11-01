@@ -9,22 +9,25 @@ struct RevealQuizQuestionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header indicator
-            Text("Question \(question.questionNumber) of \(question.totalQuestions)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 24)
-                .padding(.top, 16)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Header indicator
+                    Text("Question \(question.questionNumber) of \(question.totalQuestions)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 16)
 
-            // Question prompt
-            Text(question.prompt)
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(.primary)
+                    // Question prompt
+                    Text(question.prompt)
+                        .font(.title.bold())
+                        .foregroundStyle(.primary)
+                        .padding(.top, 12)
+                        .lineSpacing(2)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .lineSpacing(2)
-
-            Spacer()
+            }
+            .scrollBounceBehavior(.basedOnSize)
 
             // Option selection pills
             VStack(spacing: 12) {
@@ -35,8 +38,10 @@ struct RevealQuizQuestionView: View {
                         Text(option)
                             .font(.body.weight(.medium))
                             .foregroundStyle(.primary)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 54)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .frame(maxWidth: .infinity, minHeight: 54)
                             .background(Color(uiColor: .secondarySystemGroupedBackground))
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                             .overlay(
@@ -57,6 +62,7 @@ struct RevealQuizQuestionView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 20)
+            .layoutPriority(1)
         }
     }
 }

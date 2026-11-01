@@ -24,7 +24,7 @@ struct RevealQuizLearnMoreSheet: View {
                                     localized: "guidelines_hero_title",
                                     defaultValue: "Self-Custody Guidelines"
                                 ))
-                                .font(.system(size: 28, weight: .bold))
+                                .font(.title.bold())
                                 .foregroundStyle(.white)
 
                                 Text(
@@ -33,7 +33,7 @@ struct RevealQuizLearnMoreSheet: View {
                                         defaultValue: "Your Secret Recovery Phrase gives complete ownership of your Bitcoin and Lightning funds. Follow these core principles to stay secure."
                                     )
                                 )
-                                .font(.system(size: 15))
+                                .font(.subheadline)
                                 .foregroundStyle(Color(uiColor: .lightGray))
                                 .lineSpacing(4)
                             }
@@ -49,11 +49,11 @@ struct RevealQuizLearnMoreSheet: View {
                                 ForEach(guidelines) { item in
                                     VStack(alignment: .leading, spacing: 8) {
                                         Text(item.title)
-                                            .font(.system(size: 17, weight: .semibold))
+                                            .font(.headline)
                                             .foregroundStyle(.white)
 
                                         Text(item.description)
-                                            .font(.system(size: 15))
+                                            .font(.subheadline)
                                             .foregroundStyle(Color(white: 0.72))
                                             .lineSpacing(4.5)
                                     }
@@ -69,10 +69,9 @@ struct RevealQuizLearnMoreSheet: View {
                         dismiss()
                     } label: {
                         Text(String(localized: "button_done", defaultValue: "Done"))
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.headline)
                             .foregroundStyle(.black)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 50)
+                            .frame(maxWidth: .infinity, minHeight: 50)
                             .background(Color.white)
                             .clipShape(Capsule())
                     }
@@ -87,7 +86,7 @@ struct RevealQuizLearnMoreSheet: View {
                         dismiss()
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 20))
+                            .font(.title3)
                             .foregroundStyle(.secondary)
                     }
                 }

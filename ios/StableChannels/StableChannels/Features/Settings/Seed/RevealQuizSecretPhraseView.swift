@@ -8,6 +8,7 @@ struct RevealQuizSecretPhraseView: View {
     let onDone: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var isRevealed: Bool = false
     @State private var copiedSeed = false
     @State private var showCopyWarning = false
@@ -17,11 +18,11 @@ struct RevealQuizSecretPhraseView: View {
         mnemonic.split(separator: " ").map(String.init)
     }
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 8),
-        GridItem(.flexible(), spacing: 8),
-        GridItem(.flexible(), spacing: 8)
-    ]
+    /// Fewer columns as text grows, so the longest (8-letter) words never truncate.
+    private var columns: [GridItem] {
+        let count = dynamicTypeSize.isAccessibilitySize ? 1 : (dynamicTypeSize > .large ? 2 : 3)
+        return Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
+    }
 
     private func copySeedToClipboard() {
         clipboardFadeTask?.cancel()
@@ -78,18 +79,19 @@ struct RevealQuizSecretPhraseView: View {
                             ForEach(Array(wordList.enumerated()), id: \.offset) { index, word in
                                 HStack(spacing: 4) {
                                     Text("\(index + 1).")
-                                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                        .font(.system(.caption, design: .monospaced).bold())
                                         .foregroundStyle(Color(white: 0.5))
                                         .fixedSize()
 
                                     Text(isRevealed ? word : "•••••")
-                                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                        .font(.system(.footnote, design: .monospaced).weight(.medium))
                                         .foregroundStyle(.white)
                                         .lineLimit(1)
                                         .minimumScaleFactor(0.8)
                                 }
                                 .padding(.horizontal, 8)
-                                .frame(height: 38)
+                                .padding(.vertical, 4)
+                                .frame(minHeight: 38)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.black)
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -114,7 +116,7 @@ struct RevealQuizSecretPhraseView: View {
                             } label: {
                                 VStack(spacing: 12) {
                                     Image(systemName: "eye.slash")
-                                        .font(.system(size: 32, weight: .medium))
+                                        .font(.largeTitle.weight(.medium))
                                         .foregroundStyle(.white)
 
                                     Text("Tap to reveal")
@@ -146,7 +148,7 @@ struct RevealQuizSecretPhraseView: View {
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
-                                        .font(.system(size: 15, weight: .semibold))
+                                        .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(copiedSeed ? Color.green : Color.white)
                                         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: copiedSeed)
 
@@ -154,8 +156,7 @@ struct RevealQuizSecretPhraseView: View {
                                         .font(.subheadline.weight(.semibold))
                                         .foregroundStyle(.white)
                                 }
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 48)
+                                .frame(maxWidth: .infinity, minHeight: 48)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                                 .clipShape(Capsule())
                                 .overlay(
@@ -173,13 +174,12 @@ struct RevealQuizSecretPhraseView: View {
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "eye.slash.fill")
-                                        .font(.system(size: 15, weight: .semibold))
+                                        .font(.subheadline.weight(.semibold))
                                     Text("Hide")
                                         .font(.subheadline.weight(.semibold))
                                 }
                                 .foregroundStyle(.white)
-                                .frame(maxWidth: .infinity)
-                                .frame(height: 48)
+                                .frame(maxWidth: .infinity, minHeight: 48)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                                 .clipShape(Capsule())
                                 .overlay(
@@ -200,8 +200,7 @@ struct RevealQuizSecretPhraseView: View {
                 Text(String(localized: "button_done", defaultValue: "Done"))
                     .font(.headline)
                     .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
+                    .frame(maxWidth: .infinity, minHeight: 52)
                     .background(Color.white)
                     .clipShape(Capsule())
             }

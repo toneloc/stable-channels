@@ -10,41 +10,42 @@ struct RevealQuizFeedbackView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header indicator
-            Text("Question \(question.questionNumber) of \(question.totalQuestions)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 24)
-                .padding(.top, 16)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    // Header indicator
+                    Text("Question \(question.questionNumber) of \(question.totalQuestions)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 16)
 
-            // Result status badge
-            HStack(spacing: 8) {
-                Image(systemName: isCorrect ? "checkmark.circle.fill" : "xmark.circle.fill")
-                    .font(.title3.bold())
-                Text(isCorrect ? "Correct!" : "Incorrect!")
-                    .font(.title3.bold())
+                    // Result status badge
+                    HStack(spacing: 8) {
+                        Image(systemName: isCorrect ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .font(.title3.bold())
+                        Text(isCorrect ? "Correct!" : "Incorrect!")
+                            .font(.title3.bold())
+                    }
+                    .foregroundStyle(isCorrect ? Color.green : Color.red)
+                    .padding(.top, 16)
+
+                    // Result heading
+                    Text(isCorrect ? question.correctHeading : question.incorrectHeading)
+                        .font(.title2.bold())
+                        .foregroundStyle(.primary)
+                        .padding(.top, 12)
+                        .lineSpacing(2)
+
+                    // Result detailed explanation
+                    Text(isCorrect ? question.correctExplanation : question.incorrectExplanation)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 16)
+                        .lineSpacing(4)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
             }
-            .foregroundStyle(isCorrect ? Color.green : Color.red)
-            .padding(.horizontal, 24)
-            .padding(.top, 16)
-
-            // Result heading
-            Text(isCorrect ? question.correctHeading : question.incorrectHeading)
-                .font(.system(size: 24, weight: .bold))
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 24)
-                .padding(.top, 12)
-                .lineSpacing(2)
-
-            // Result detailed explanation
-            Text(isCorrect ? question.correctExplanation : question.incorrectExplanation)
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 24)
-                .padding(.top, 16)
-                .lineSpacing(4)
-
-            Spacer()
+            .scrollBounceBehavior(.basedOnSize)
 
             // Bottom action button
             VStack(spacing: 16) {
@@ -59,8 +60,7 @@ struct RevealQuizFeedbackView: View {
                     )
                     .font(.headline)
                     .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
+                    .frame(maxWidth: .infinity, minHeight: 52)
                     .background(Color.white)
                     .clipShape(Capsule())
                 }
@@ -74,6 +74,7 @@ struct RevealQuizFeedbackView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 20)
+            .layoutPriority(1)
         }
     }
 }
