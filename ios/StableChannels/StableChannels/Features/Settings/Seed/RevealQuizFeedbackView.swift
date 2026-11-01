@@ -4,6 +4,7 @@ import SwiftUI
 
 struct RevealQuizFeedbackView: View {
     let question: RevealQuizQuestion
+    let progress: String
     let isCorrect: Bool
     let onContinue: () -> Void
     let onLearnMore: () -> Void
@@ -13,7 +14,7 @@ struct RevealQuizFeedbackView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     // Header indicator
-                    Text("Question \(question.questionNumber) of \(question.totalQuestions)")
+                    Text(progress)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .padding(.top, 16)

@@ -7,14 +7,8 @@ struct RevealRecoveryPhraseSheet: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel: RevealRecoveryQuizViewModel
 
-    init(
-        mnemonic: String,
-        questionsProvider: any RevealQuizQuestionsProviderProtocol = DefaultRevealQuizQuestionsProvider()
-    ) {
-        _viewModel = State(initialValue: RevealRecoveryQuizViewModel(
-            mnemonic: mnemonic,
-            questionsProvider: questionsProvider
-        ))
+    init(mnemonic: String) {
+        _viewModel = State(initialValue: RevealRecoveryQuizViewModel(mnemonic: mnemonic))
     }
 
     var body: some View {
@@ -42,6 +36,7 @@ struct RevealRecoveryPhraseSheet: View {
                         if index < viewModel.questions.count {
                             RevealQuizQuestionView(
                                 question: viewModel.questions[index],
+                                progress: viewModel.progressText(forQuestionAt: index),
                                 onSelectOption: { optionIndex in
                                     withAnimation(Self.stepAnimation) {
                                         viewModel.selectOption(optionIndex)
@@ -54,10 +49,11 @@ struct RevealRecoveryPhraseSheet: View {
                             .transition(stepTransition)
                         }
 
-                    case let .feedback(questionIndex, isCorrect, _):
+                    case let .feedback(questionIndex, isCorrect):
                         if questionIndex < viewModel.questions.count {
                             RevealQuizFeedbackView(
                                 question: viewModel.questions[questionIndex],
+                                progress: viewModel.progressText(forQuestionAt: questionIndex),
                                 isCorrect: isCorrect,
                                 onContinue: {
                                     withAnimation(Self.stepAnimation) {
@@ -111,7 +107,7 @@ struct RevealRecoveryPhraseSheet: View {
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled(true)
         .onChange(of: scenePhase) { _, phase in
-            if RevealRecoveryQuizViewModel.shouldDismiss(for: phase) { dismiss() }
+            if RevealRecoveryQuizViewModel.shouldDismiss(for: RevealAppPhase(phase)) { dismiss() }
         }
     }
 
@@ -125,5 +121,15 @@ struct RevealRecoveryPhraseSheet: View {
             insertion: .opacity.combined(with: .move(edge: insertionEdge)),
             removal: .opacity
         )
+    }
+}
+
+private extension RevealAppPhase {
+    init(_ phase: ScenePhase) {
+        switch phase {
+        case .background: self = .background
+        case .inactive: self = .inactive
+        default: self = .active
+        }
     }
 }

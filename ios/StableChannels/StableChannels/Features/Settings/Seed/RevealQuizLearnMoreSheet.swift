@@ -4,11 +4,7 @@ import SwiftUI
 
 struct RevealQuizLearnMoreSheet: View {
     @Environment(\.dismiss) private var dismiss
-    private let guidelines: [SelfCustodyGuidelineItem]
-
-    init(guidelinesProvider: any SelfCustodyGuidelinesProviderProtocol = DefaultSelfCustodyGuidelinesProvider()) {
-        self.guidelines = guidelinesProvider.getGuidelines()
-    }
+    private let guidelines = SelfCustodyGuidelineItem.all
 
     var body: some View {
         NavigationStack {

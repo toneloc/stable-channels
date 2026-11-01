@@ -167,7 +167,7 @@ struct BackupSettingsView: View {
                     Image(systemName: "eye.fill")
                         .foregroundStyle(Color.stablePrimary)
                     Text(String(
-                        localized: "button_reveal_recovery_phrase",
+                        localized: "button_view_seed",
                         defaultValue: "Reveal Secret Recovery Phrase"
                     ))
                     Spacer()

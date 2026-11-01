@@ -1,6 +1,12 @@
 import Foundation
 import Observation
-import SwiftUI
+
+/// The app lifecycle states the reveal reacts to, kept free of SwiftUI so the rule stays testable.
+enum RevealAppPhase {
+    case active
+    case inactive
+    case background
+}
 
 enum QuizNavigationDirection: Equatable {
     case forward
@@ -17,12 +23,9 @@ final class RevealRecoveryQuizViewModel {
     let mnemonic: String
     let questions: [RevealQuizQuestion]
 
-    init(
-        mnemonic: String,
-        questionsProvider: any RevealQuizQuestionsProviderProtocol = DefaultRevealQuizQuestionsProvider()
-    ) {
+    init(mnemonic: String) {
         self.mnemonic = mnemonic
-        self.questions = questionsProvider.getQuestions()
+        self.questions = RevealQuizQuestion.all
     }
 
     // MARK: - Navigation State Queries
@@ -40,9 +43,14 @@ final class RevealRecoveryQuizViewModel {
         String(localized: "reveal_phrase_nav_title", defaultValue: "Reveal Secret Recovery Phrase")
     }
 
+    /// "Question N of M" for the question at `index`, counted from the question list.
+    func progressText(forQuestionAt index: Int) -> String {
+        String(localized: "reveal_quiz_progress", defaultValue: "Question \(index + 1) of \(questions.count)")
+    }
+
     /// Leaving the app closes the reveal, because the cover sits above the app lock overlay.
     /// Not `.inactive`: the Face ID prompt raises it, and the phrase view re-blurs there already.
-    static func shouldDismiss(for phase: ScenePhase) -> Bool {
+    static func shouldDismiss(for phase: RevealAppPhase) -> Bool {
         phase == .background
     }
 
@@ -50,10 +58,6 @@ final class RevealRecoveryQuizViewModel {
 
     func startQuiz() {
         navigationDirection = .forward
-        guard !questions.isEmpty else {
-            currentStep = .revealed
-            return
-        }
         currentStep = .question(index: 0)
     }
 
@@ -64,12 +68,12 @@ final class RevealRecoveryQuizViewModel {
         }
         navigationDirection = .forward
         let isCorrect = questions[questionIndex].isCorrect(optionIndex: optionIndex)
-        currentStep = .feedback(questionIndex: questionIndex, isCorrect: isCorrect, selectedOption: optionIndex)
+        currentStep = .feedback(questionIndex: questionIndex, isCorrect: isCorrect)
     }
 
     /// Advances from feedback: next question or reveal when correct, retry when wrong.
     func continueFromFeedback() {
-        guard case let .feedback(questionIndex, isCorrect, _) = currentStep else { return }
+        guard case let .feedback(questionIndex, isCorrect) = currentStep else { return }
         navigationDirection = .forward
         guard isCorrect else {
             currentStep = .question(index: questionIndex)
@@ -90,7 +94,7 @@ final class RevealRecoveryQuizViewModel {
             } else {
                 currentStep = .intro
             }
-        case let .feedback(questionIndex, _, _):
+        case let .feedback(questionIndex, _):
             currentStep = .question(index: questionIndex)
         case .revealed:
             break

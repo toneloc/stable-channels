@@ -3,8 +3,6 @@ import Foundation
 /// Domain model representing a single security verification question in the reveal phrase quiz.
 struct RevealQuizQuestion: Identifiable, Equatable {
     let id: Int
-    let questionNumber: Int
-    let totalQuestions: Int
     let prompt: String
     let options: [String]
     let correctOptionIndex: Int
@@ -22,23 +20,16 @@ struct RevealQuizQuestion: Identifiable, Equatable {
 enum RevealQuizStep: Equatable {
     case intro
     case question(index: Int)
-    case feedback(questionIndex: Int, isCorrect: Bool, selectedOption: Int)
+    case feedback(questionIndex: Int, isCorrect: Bool)
     case revealed
 }
 
-/// Provider protocol for quiz questions to support dependency injection and testability.
-protocol RevealQuizQuestionsProviderProtocol {
-    func getQuestions() -> [RevealQuizQuestion]
-}
-
-/// Default questions provider aligned with self-custody principles and phishing education.
-struct DefaultRevealQuizQuestionsProvider: RevealQuizQuestionsProviderProtocol {
-    func getQuestions() -> [RevealQuizQuestion] {
+extension RevealQuizQuestion {
+    /// The questions asked, in order, aligned with self-custody principles and phishing education.
+    static var all: [RevealQuizQuestion] {
         [
             RevealQuizQuestion(
                 id: 1,
-                questionNumber: 1,
-                totalQuestions: 2,
                 prompt: String(
                     localized: "quiz_q1_prompt",
                     defaultValue: "If you lose your Secret Recovery Phrase, Stable Channels..."
@@ -67,8 +58,6 @@ struct DefaultRevealQuizQuestionsProvider: RevealQuizQuestionsProviderProtocol {
             ),
             RevealQuizQuestion(
                 id: 2,
-                questionNumber: 2,
-                totalQuestions: 2,
                 prompt: String(
                     localized: "quiz_q2_prompt",
                     defaultValue: "If anyone, even a support agent, asks for your Secret Recovery Phrase..."
@@ -102,23 +91,16 @@ struct DefaultRevealQuizQuestionsProvider: RevealQuizQuestionsProviderProtocol {
 /// Model representing a single self-custody educational guideline in the Learn More sheet.
 struct SelfCustodyGuidelineItem: Identifiable, Equatable {
     let id: String
-    let icon: String
     let title: String
     let description: String
 }
 
-/// Protocol providing guidelines for self-custody education.
-protocol SelfCustodyGuidelinesProviderProtocol {
-    func getGuidelines() -> [SelfCustodyGuidelineItem]
-}
-
-/// Default provider for self-custody guidelines.
-struct DefaultSelfCustodyGuidelinesProvider: SelfCustodyGuidelinesProviderProtocol {
-    func getGuidelines() -> [SelfCustodyGuidelineItem] {
+extension SelfCustodyGuidelineItem {
+    /// The guidelines shown in the Learn More sheet, in order.
+    static var all: [SelfCustodyGuidelineItem] {
         [
             SelfCustodyGuidelineItem(
                 id: "master_key",
-                icon: "key.horizontal.fill",
                 title: String(localized: "guideline_master_key_title", defaultValue: "Your Words Are Your Master Key"),
                 description: String(
                     localized: "guideline_master_key_desc",
@@ -126,17 +108,15 @@ struct DefaultSelfCustodyGuidelinesProvider: SelfCustodyGuidelinesProviderProtoc
                 )
             ),
             SelfCustodyGuidelineItem(
-                id: "no_server_backups",
-                icon: "icloud.slash",
-                title: String(localized: "guideline_no_backups_title", defaultValue: "No Server Backups"),
+                id: "never_stored",
+                title: String(localized: "guideline_never_stored_title", defaultValue: "We never have it"),
                 description: String(
-                    localized: "guideline_no_backups_desc",
-                    defaultValue: "Stable Channels is non-custodial. We never store or transmit your keys. If you lose your phrase, no one can recover your wallet."
+                    localized: "guideline_never_stored_desc",
+                    defaultValue: "Stable Channels never stores your Secret Recovery Phrase and will never ask for it. If you turn on iCloud backup, an encrypted copy is kept in your own iCloud. Without that or your written copy, no one can recover your wallet."
                 )
             ),
             SelfCustodyGuidelineItem(
                 id: "beware_impersonators",
-                icon: "exclamationmark.shield.fill",
                 title: String(localized: "guideline_impersonators_title", defaultValue: "Beware of Impersonators"),
                 description: String(
                     localized: "guideline_impersonators_desc",
@@ -145,7 +125,6 @@ struct DefaultSelfCustodyGuidelinesProvider: SelfCustodyGuidelinesProviderProtoc
             ),
             SelfCustodyGuidelineItem(
                 id: "store_offline",
-                icon: "lock.shield.fill",
                 title: String(
                     localized: "guideline_store_offline_title",
                     defaultValue: "Store Offline on Physical Media"

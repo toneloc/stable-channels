@@ -1,11 +1,33 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// Copies the recovery phrase so it stays on this device and expires on its own.
+protocol SecureClipboard {
+    func copy(_ text: String)
+}
+
+struct SystemSecureClipboard: SecureClipboard {
+    var now: () -> Date = Date.init
+
+    /// Local-only keeps the phrase off Universal Clipboard; the system clears it at expiry.
+    func options() -> [UIPasteboard.OptionsKey: Any] {
+        [
+            .expirationDate: now().addingTimeInterval(SeedConstants.clipboardClearSeconds),
+            .localOnly: true
+        ]
+    }
+
+    func copy(_ text: String) {
+        UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: options())
+    }
+}
+
 // MARK: - Secret Phrase Revealed View (with In-Place Blur & Tap-to-Reveal)
 
 struct RevealQuizSecretPhraseView: View {
     let mnemonic: String
     let onDone: () -> Void
+    var clipboard: SecureClipboard = SystemSecureClipboard()
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -27,14 +49,7 @@ struct RevealQuizSecretPhraseView: View {
     private func copySeedToClipboard() {
         clipboardFadeTask?.cancel()
 
-        // The system clears the item at expiry; local-only keeps it off Universal Clipboard.
-        UIPasteboard.general.setItems(
-            [[UTType.utf8PlainText.identifier: mnemonic]],
-            options: [
-                .expirationDate: Date().addingTimeInterval(SeedConstants.clipboardClearSeconds),
-                .localOnly: true
-            ]
-        )
+        clipboard.copy(mnemonic)
 
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
@@ -56,13 +71,16 @@ struct RevealQuizSecretPhraseView: View {
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 16) {
                     // Header Subtitle
-                    Text("Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                        .padding(.top, 12)
-                        .lineSpacing(3)
+                    Text(String(
+                        localized: "reveal_phrase_header",
+                        defaultValue: "Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone."
+                    ))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+                    .lineSpacing(3)
 
                     // Seed Grid Area with In-Place Blur & Tap to Reveal Overlay
                     ZStack {
@@ -121,15 +139,21 @@ struct RevealQuizSecretPhraseView: View {
                                         .font(.largeTitle.weight(.medium))
                                         .foregroundStyle(.white)
 
-                                    Text("Tap to reveal")
-                                        .font(.headline.weight(.bold))
-                                        .foregroundStyle(.white)
+                                    Text(String(
+                                        localized: "reveal_phrase_tap_to_reveal",
+                                        defaultValue: "Tap to reveal"
+                                    ))
+                                    .font(.headline.weight(.bold))
+                                    .foregroundStyle(.white)
 
-                                    Text("Make sure no one is watching your screen.")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                        .multilineTextAlignment(.center)
-                                        .padding(.horizontal, 24)
+                                    Text(String(
+                                        localized: "reveal_phrase_tap_to_reveal_hint",
+                                        defaultValue: "Make sure no one is watching your screen."
+                                    ))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
                                 }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                                 .background(Color.black.opacity(0.55))
@@ -177,7 +201,7 @@ struct RevealQuizSecretPhraseView: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: "eye.slash.fill")
                                         .font(.subheadline.weight(.semibold))
-                                    Text("Hide")
+                                    Text(String(localized: "button_hide_seed", defaultValue: "Hide Seed"))
                                         .font(.subheadline.weight(.semibold))
                                 }
                                 .foregroundStyle(.white)
@@ -210,13 +234,13 @@ struct RevealQuizSecretPhraseView: View {
             .padding(.bottom, 20)
         }
         .alert(
-            "Copy Secret Recovery Phrase?",
+            String(localized: "reveal_phrase_copy_title", defaultValue: "Copy Secret Recovery Phrase?"),
             isPresented: $showCopyWarning
         ) {
-            Button("Copy to Clipboard") {
+            Button(String(localized: "reveal_phrase_copy_confirm", defaultValue: "Copy to Clipboard")) {
                 copySeedToClipboard()
             }
-            Button("Cancel", role: .cancel) {}
+            Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
         } message: {
             Text(String(
                 localized: "reveal_phrase_copy_warning",

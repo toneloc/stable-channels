@@ -2234,6 +2234,17 @@
         }
       }
     },
+    "button_back" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Back"
+          }
+        }
+      }
+    },
     "button_backup_seed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -4703,6 +4714,17 @@
         }
       }
     },
+    "button_try_again" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Try again"
+          }
+        }
+      }
+    },
     "button_view_seed" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -4727,7 +4749,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "View Seed Words"
+            "value" : "Reveal Secret Recovery Phrase"
           }
         },
         "es" : {
@@ -9081,6 +9103,116 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "以获取疑问或帮助。"
+          }
+        }
+      }
+    },
+    "guideline_impersonators_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Support staff, developers, or bots will never ask for your recovery phrase. Never share it with anyone under any circumstance."
+          }
+        }
+      }
+    },
+    "guideline_impersonators_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Beware of Impersonators"
+          }
+        }
+      }
+    },
+    "guideline_master_key_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The 12 words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
+          }
+        }
+      }
+    },
+    "guideline_master_key_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Words Are Your Master Key"
+          }
+        }
+      }
+    },
+    "guideline_never_stored_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels never stores your Secret Recovery Phrase and will never ask for it. If you turn on iCloud backup, an encrypted copy is kept in your own iCloud. Without that or your written copy, no one can recover your wallet."
+          }
+        }
+      }
+    },
+    "guideline_never_stored_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "We never have it"
+          }
+        }
+      }
+    },
+    "guideline_store_offline_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Write your words on paper or stamp them on metal kept in a private, secure location. Never take screenshots or save digital copies in cloud notes."
+          }
+        }
+      }
+    },
+    "guideline_store_offline_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Store Offline on Physical Media"
+          }
+        }
+      }
+    },
+    "guidelines_hero_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Secret Recovery Phrase gives complete ownership of your Bitcoin and Lightning funds. Follow these core principles to stay secure."
+          }
+        }
+      }
+    },
+    "guidelines_hero_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Self-Custody Guidelines"
           }
         }
       }
@@ -21377,6 +21509,160 @@
         }
       }
     },
+    "quiz_q1_correct_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Write it down, engrave it on metal, or keep it in multiple secret spots so you never lose it. If you lose it, it's gone forever."
+          }
+        }
+      }
+    },
+    "quiz_q1_correct_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Right! No one can help get your Secret Recovery Phrase back"
+          }
+        }
+      }
+    },
+    "quiz_q1_incorrect_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If you lose your Secret Recovery Phrase, it's gone forever. No one can help you get it back, no matter what they might say."
+          }
+        }
+      }
+    },
+    "quiz_q1_incorrect_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong! No one can help get your Secret Recovery Phrase back"
+          }
+        }
+      }
+    },
+    "quiz_q1_opt1" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can get it back for you"
+          }
+        }
+      }
+    },
+    "quiz_q1_opt2" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't help you"
+          }
+        }
+      }
+    },
+    "quiz_q1_prompt" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If you lose your Secret Recovery Phrase, Stable Channels..."
+          }
+        }
+      }
+    },
+    "quiz_q2_correct_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels support will never ask for your recovery phrase. Anyone asking for it is trying to steal your funds."
+          }
+        }
+      }
+    },
+    "quiz_q2_correct_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Right! Never share your Secret Recovery Phrase with anyone"
+          }
+        }
+      }
+    },
+    "quiz_q2_incorrect_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No legitimate agent, developer, or service will ever ask for your recovery phrase. If they do, it is always a scam."
+          }
+        }
+      }
+    },
+    "quiz_q2_incorrect_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong! Never share your Secret Recovery Phrase with anyone"
+          }
+        }
+      }
+    },
+    "quiz_q2_opt1" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "You're being scammed"
+          }
+        }
+      }
+    },
+    "quiz_q2_opt2" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "You should give it to them"
+          }
+        }
+      }
+    },
+    "quiz_q2_prompt" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If anyone, even a support agent, asks for your Secret Recovery Phrase..."
+          }
+        }
+      }
+    },
     "recovery_banner_text_prefix" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -22005,6 +22291,149 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "从 iCloud 恢复将擦除您现有的钱包和所有资金。请在继续操作前提取所有比特币。"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_confirm" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy to Clipboard"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy Secret Recovery Phrase?"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_warning" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in %lld seconds."
+          }
+        }
+      }
+    },
+    "reveal_phrase_header" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone."
+          }
+        }
+      }
+    },
+    "reveal_phrase_nav_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reveal Secret Recovery Phrase"
+          }
+        }
+      }
+    },
+    "reveal_phrase_tap_to_reveal" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Tap to reveal"
+          }
+        }
+      }
+    },
+    "reveal_phrase_tap_to_reveal_hint" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Make sure no one is watching your screen."
+          }
+        }
+      }
+    },
+    "reveal_quiz_correct" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Correct!"
+          }
+        }
+      }
+    },
+    "reveal_quiz_get_started" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Get started"
+          }
+        }
+      }
+    },
+    "reveal_quiz_incorrect" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Incorrect!"
+          }
+        }
+      }
+    },
+    "reveal_quiz_intro_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To reveal your Secret Recovery Phrase, you need to correctly answer two questions"
+          }
+        }
+      }
+    },
+    "reveal_quiz_learn_more" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Learn more"
+          }
+        }
+      }
+    },
+    "reveal_quiz_progress" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Question %1$lld of %2$lld"
           }
         }
       }

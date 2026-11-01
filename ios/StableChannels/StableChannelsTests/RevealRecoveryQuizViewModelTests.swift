@@ -1,3 +1,4 @@
+import UIKit
 import XCTest
 @testable import StableChannels
 
@@ -36,7 +37,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
 
         // Question 1: correct answer is index 1 ("Can't help you")
         vm.selectOption(1)
-        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: true, selectedOption: 1))
+        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: true))
 
         vm.continueFromFeedback()
         XCTAssertEqual(vm.currentStep, .question(index: 1))
@@ -48,7 +49,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
 
         // Question 1: incorrect answer is index 0 ("Can get it back for you")
         vm.selectOption(0)
-        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: false, selectedOption: 0))
+        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: false))
 
         vm.continueFromFeedback()
         XCTAssertEqual(vm.currentStep, .question(index: 0))
@@ -75,7 +76,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
 
         // Q2: correct (option 0 - "You're being scammed")
         vm.selectOption(0)
-        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 1, isCorrect: true, selectedOption: 0))
+        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 1, isCorrect: true))
 
         vm.continueFromFeedback()
         XCTAssertEqual(vm.currentStep, .revealed)
@@ -90,7 +91,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         vm.startQuiz()
         vm.selectOption(0)
         vm.selectOption(1)
-        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: false, selectedOption: 0))
+        XCTAssertEqual(vm.currentStep, .feedback(questionIndex: 0, isCorrect: false))
     }
 
     func testContinueOutsideFeedbackStepIsNoOp() {
@@ -150,17 +151,10 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertEqual(vm.currentStep, .revealed)
     }
 
-    func testCustomEmptyQuestionsProviderDirectlyReveals() {
-        struct EmptyProvider: RevealQuizQuestionsProviderProtocol {
-            func getQuestions() -> [RevealQuizQuestion] { [] }
-        }
-
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic, questionsProvider: EmptyProvider())
-        XCTAssertEqual(vm.questions.count, 0)
-
-        vm.startQuiz()
-        XCTAssertEqual(vm.currentStep, .revealed)
-        XCTAssertFalse(vm.canGoBack)
+    func testProgressTextCountsFromTheQuestionList() {
+        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        XCTAssertEqual(vm.progressText(forQuestionAt: 0), "Question 1 of 2")
+        XCTAssertEqual(vm.progressText(forQuestionAt: 1), "Question 2 of 2")
     }
 
     func testOnlyBackgroundDismissesTheReveal() {
@@ -169,19 +163,35 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertFalse(RevealRecoveryQuizViewModel.shouldDismiss(for: .active))
     }
 
+    func testEntryButtonStaysTranslated() throws {
+        let dePath = try XCTUnwrap(Bundle.main.path(forResource: "de", ofType: "lproj"))
+        let de = try XCTUnwrap(Bundle(path: dePath))
+        XCTAssertEqual(de.localizedString(forKey: "button_view_seed", value: nil, table: nil), "Seed-Wörter anzeigen")
+    }
+
     func testGoBackFromIntroIsNoOp() {
         let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
         vm.goBack()
         XCTAssertEqual(vm.currentStep, .intro)
     }
 
-    func testDefaultGuidelinesProvider() {
-        let provider = DefaultSelfCustodyGuidelinesProvider()
-        let guidelines = provider.getGuidelines()
+    func testGuidelines() {
+        let guidelines = SelfCustodyGuidelineItem.all
         XCTAssertEqual(guidelines.count, 4)
         XCTAssertEqual(guidelines[0].id, "master_key")
-        XCTAssertEqual(guidelines[1].id, "no_server_backups")
+        XCTAssertEqual(guidelines[1].id, "never_stored")
+        XCTAssertTrue(
+            guidelines[1].description.contains("iCloud"),
+            "Must not contradict the iCloud backup offered on the same screen"
+        )
         XCTAssertEqual(guidelines[2].id, "beware_impersonators")
         XCTAssertEqual(guidelines[3].id, "store_offline")
+    }
+
+    func testClipboardCopyIsLocalOnlyAndExpires() {
+        let now = Date(timeIntervalSince1970: 1000)
+        let options = SystemSecureClipboard(now: { now }).options()
+        XCTAssertEqual(options[.localOnly] as? Bool, true)
+        XCTAssertEqual(options[.expirationDate] as? Date, now.addingTimeInterval(SeedConstants.clipboardClearSeconds))
     }
 }
