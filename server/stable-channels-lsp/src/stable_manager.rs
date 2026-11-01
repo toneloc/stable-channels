@@ -429,6 +429,8 @@ pub struct StableChannelManager {
     data_dir: PathBuf,
     /// Splice events still awaiting a usable snapshot or a committed correction.
     pending_splices: std::collections::HashMap<u128, Option<String>>,
+    /// Daily counts of records of channels that never became usable, and of connection changes.
+    pub(crate) record_limits: crate::record_limits::RecordLimits,
     pending_book_updates: std::collections::HashMap<u128, PendingBookUpdate>,
     /// Per-channel last logged stability outcome + value, so run_tick only audits on state-change.
     stability_throttle: std::collections::HashMap<u128, (String, f64)>,
@@ -1165,6 +1167,7 @@ impl StableChannelManager {
             db,
             data_dir,
             pending_splices: std::collections::HashMap::new(),
+            record_limits: crate::record_limits::RecordLimits::default(),
             pending_book_updates: std::collections::HashMap::new(),
             stability_throttle: std::collections::HashMap::new(),
             spend_debounce: std::collections::HashMap::new(),
@@ -1561,6 +1564,7 @@ impl StableChannelManager {
         reason: Option<ChannelStateChangeReason>,
     ) {
         let target = parse_user_channel_id(&user_channel_id);
+        let tracked_before = self.stable_channels.len();
         self.stable_channels.retain(|sc| {
             if let Some(t) = target {
                 sc.user_channel_id != t
@@ -1568,6 +1572,8 @@ impl StableChannelManager {
                 format!("{}", sc.user_channel_id) != user_channel_id
             }
         });
+        // A channel is tracked once it becomes usable, so an untracked one is taken as never usable.
+        let was_usable = self.stable_channels.len() < tracked_before;
         if let Some(t) = target {
             self.pending_splices.remove(&t);
             self.pending_book_updates.remove(&t);
@@ -1584,6 +1590,10 @@ impl StableChannelManager {
                 serde_json::json!({ "op": "mark_channel_closed", "user_channel_id": user_channel_id, "channel_id": channel_id, "error": e.to_string() }),
             );
         }
+        let peer = counterparty_node_id.as_deref().unwrap_or_default();
+        if !was_usable && !self.record_limits.allow(peer, crate::record_limits::RecordKind::NeverUsable, crate::revenue::now_secs()) {
+            return;
+        }
         stable_channels::audit::audit_event(
             "CHANNEL_CLOSED",
             crate::channel_close::close_audit_data(
@@ -1595,6 +1605,13 @@ impl StableChannelManager {
                 reason.as_ref(),
             ),
         );
+    }
+
+    /// Counterparties and user_channel_ids of the channels that became usable.
+    pub(crate) fn usable_channels(&self) -> (std::collections::HashSet<String>, std::collections::HashSet<String>) {
+        let peers = self.stable_channels.iter().map(|sc| sc.counterparty.to_string()).collect();
+        let channels = self.stable_channels.iter().map(|sc| sc.user_channel_id.to_string()).collect();
+        (peers, channels)
     }
 
     /// Rebuild the in-memory stable-channel list at startup from sqlite joined with the live snapshot, dropping vanished channels.
@@ -4593,7 +4610,7 @@ fn parse_pubkey_hex(s: &str) -> ldk_node::bitcoin::secp256k1::PublicKey {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ldk_server_client::error::LdkServerErrorCode;
     use ldk_server_client::ldk_server_grpc::api::{
@@ -4610,7 +4627,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use tempfile::tempdir;
 
-    static AUDIT_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static AUDIT_TEST_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     pub struct FakeLdkServer {
         pub channels: StdMutex<Vec<GrpcChannel>>,
@@ -5093,6 +5110,52 @@ mod tests {
 
         let tracked = events.iter().find(|(name, _)| name == "CHANNEL_READY_TRACKED").expect("the registration is recorded");
         assert_eq!(tracked.1["funding_txo"], format!("{}:1", "ab".repeat(32)), "revenue takes a channel's first funding txid from it");
+    }
+
+    #[tokio::test]
+    async fn closes_of_channels_never_in_use_are_recorded_within_the_peers_daily_limit() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
+        const OTHER_PEER: &str = "0380ba01cf1f8232298198ce1c6da12a7bd159656e79cbc22a5dfbea62ab1aef4b";
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let ldk = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true)]);
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        assert_eq!(mgr.stable_channels.len(), 1);
+        stable_channels::audit::enable_test_capture();
+        for n in 0..NEVER_USABLE_RECORDS_PER_PEER + 2 {
+            let uid = (u128::from(n) * 1_000_003 + 274_877_906_944).to_string();
+            mgr.handle_channel_closed(format!("{n:064x}"), uid, Some(COUNTERPARTY_HEX.into()), None, 0, None);
+        }
+        mgr.handle_channel_closed(format!("{:064x}", 99), OTHER_USER_CHANNEL_ID_DECIMAL.into(), Some(OTHER_PEER.into()), None, 0, None);
+        // The channel that was in use is recorded past the limit.
+        mgr.handle_channel_closed(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), Some(COUNTERPARTY_HEX.into()), None, 0, None);
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+
+        let closes = |peer: &str| events.iter().filter(|(name, data)| name == "CHANNEL_CLOSED" && data["counterparty_node_id"] == peer).count();
+        assert_eq!(closes(COUNTERPARTY_HEX), NEVER_USABLE_RECORDS_PER_PEER as usize + 1);
+        assert_eq!(closes(OTHER_PEER), 1, "another peer has its own limit");
+        assert!(events.iter().any(|(name, data)| name == "CHANNEL_CLOSED" && data["user_channel_id"] == USER_CHANNEL_ID_DECIMAL));
+        assert!(mgr.stable_channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_tracked_channels_stages_and_connections_are_kept_past_the_all_peers_limit() {
+        use crate::record_limits::{RecordKind, NEVER_USABLE_RECORDS_PER_DAY};
+        use ldk_server_client::ldk_server_grpc::types::ChannelShutdownState;
+        const NOON: i64 = 1_761_652_800;
+        let mut mgr = make_manager();
+        let channel = make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true);
+        let ldk = FakeLdkServer::new(vec![channel.clone()]);
+        mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk as &dyn LdkServerCalls, 100_000.0).await;
+        for n in 0..NEVER_USABLE_RECORDS_PER_DAY {
+            assert!(mgr.record_limits.allow(&format!("02{n:064x}"), RecordKind::NeverUsable, NOON));
+        }
+        // Ids as LDK Server reports them in the channel and peer lists.
+        let closing = GrpcChannel { channel_shutdown_state: Some(ChannelShutdownState::ShutdownInitiated as i32), ..channel };
+        let (shutdowns, _) = crate::observability::shutdown_audit_data(&std::collections::HashMap::new(), &[closing]);
+        let kept = crate::observability::keep_observed_records(&mut mgr, vec![(COUNTERPARTY_HEX.to_string(), false)], shutdowns, NOON);
+        assert_eq!((kept.shutdowns.len(), kept.connections.len()), (1, 1));
     }
 
     #[tokio::test]
@@ -12766,14 +12829,20 @@ mod tests {
             channel_shutdown_state: Some(ChannelShutdownState::ShutdownInitiated as i32),
             ..make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 40_000_000, false)
         };
-        let seen = crate::observability::record_shutdown_stages(&std::collections::HashMap::new(), &[closing.clone()]);
+        let record = |prev: &std::collections::HashMap<String, String>, channel: GrpcChannel| {
+            let (shutdowns, next) = crate::observability::shutdown_audit_data(prev, &[channel]);
+            let records = crate::observability::ObservedRecords { shutdowns, ..Default::default() };
+            crate::observability::write_observed_records(records, &std::collections::HashMap::new());
+            next
+        };
+        let seen = record(&std::collections::HashMap::new(), closing.clone());
         // A daemon restart forgets the in-memory baseline and sees the same stage again.
-        crate::observability::record_shutdown_stages(&std::collections::HashMap::new(), &[closing.clone()]);
+        record(&std::collections::HashMap::new(), closing.clone());
         let resolving = GrpcChannel {
             channel_shutdown_state: Some(ChannelShutdownState::ResolvingHtlcs as i32),
             ..closing
         };
-        crate::observability::record_shutdown_stages(&seen, &[resolving]);
+        record(&seen, resolving);
         let rows: Vec<_> = ledger_for(&db, USER_CHANNEL_ID_DECIMAL)
             .into_iter()
             .filter(|e| e.event_type == "CHANNEL_SHUTDOWN_STATE_CHANGED")

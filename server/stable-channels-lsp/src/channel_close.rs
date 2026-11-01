@@ -6,6 +6,17 @@ use ldk_server_client::ldk_server_grpc::events::{
 };
 use serde_json::{json, Value};
 
+/// Longest close-reason text kept in a record, in characters.
+pub(crate) const MAX_REASON_CHARS: usize = 256;
+
+/// Close-reason text cut to MAX_REASON_CHARS, noting the original length in bytes when cut.
+fn bounded(text: &str) -> String {
+    match text.char_indices().nth(MAX_REASON_CHARS) {
+        Some((end, _)) => format!("{}… [{} bytes]", &text[..end], text.len()),
+        None => text.to_string(),
+    }
+}
+
 /// Strip a prost enum's screaming prefix for readability.
 pub(crate) fn short(name: &str, prefix: &str) -> String {
     name.strip_prefix(prefix).unwrap_or(name).to_string()
@@ -41,7 +52,7 @@ pub fn close_audit_data(
             .unwrap_or_else(|| format!("UNKNOWN({})", r.kind));
         data["reason_kind"] = json!(kind);
         if !r.message.is_empty() {
-            data["reason_message"] = json!(r.message);
+            data["reason_message"] = json!(bounded(&r.message));
         }
         if let Some(d) = &r.details {
             data["details"] = details_value(d);
@@ -74,12 +85,12 @@ pub fn unknown_state_audit_data(
 // Serialize the variant-specific closure details into JSON.
 fn details_value(d: &Details) -> Value {
     match d {
-        Details::CounterpartyForceClosed(x) => json!({ "peer_msg": x.peer_msg }),
+        Details::CounterpartyForceClosed(x) => json!({ "peer_msg": bounded(&x.peer_msg) }),
         Details::HolderForceClosed(x) => json!({
             "broadcasted_latest_txn": x.broadcasted_latest_txn,
-            "message": x.message,
+            "message": bounded(&x.message),
         }),
-        Details::ProcessingError(x) => json!({ "err": x.err }),
+        Details::ProcessingError(x) => json!({ "err": bounded(&x.err) }),
         Details::HtlcsTimedOut(x) => json!({ "payment_hash": x.payment_hash }),
         Details::PeerFeerateTooLow(x) => json!({
             "peer_feerate_sat_per_kw": x.peer_feerate_sat_per_kw,
@@ -91,7 +102,38 @@ fn details_value(d: &Details) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ldk_server_client::ldk_server_grpc::events::CounterpartyForceClosedDetails;
+    use ldk_server_client::ldk_server_grpc::events::{
+        CounterpartyForceClosedDetails, HolderForceClosedDetails, ProcessingErrorDetails,
+    };
+
+    fn reason(message: &str, details: Details) -> ChannelStateChangeReason {
+        ChannelStateChangeReason {
+            kind: ChannelStateChangeReasonKind::CounterpartyForceClosed as i32,
+            message: message.to_string(),
+            details: Some(details),
+        }
+    }
+
+    #[test]
+    fn long_reason_text_is_cut_to_a_bounded_length() {
+        let long = "é".repeat(MAX_REASON_CHARS + 1);
+        let cut = format!("{}… [{} bytes]", "é".repeat(MAX_REASON_CHARS), long.len());
+        let peer = Details::CounterpartyForceClosed(CounterpartyForceClosedDetails { peer_msg: long.clone() });
+        let v = close_audit_data("abcd", "1842", None, None, 0, Some(&reason(&long, peer)));
+        assert_eq!((&v["reason_message"], &v["details"]["peer_msg"]), (&json!(cut), &json!(cut)));
+        let holder = Details::HolderForceClosed(HolderForceClosedDetails { broadcasted_latest_txn: Some(true), message: long.clone() });
+        assert_eq!(close_audit_data("abcd", "1842", None, None, 0, Some(&reason("", holder)))["details"]["message"], cut);
+        let error = Details::ProcessingError(ProcessingErrorDetails { err: long.clone() });
+        assert_eq!(close_audit_data("abcd", "1842", None, None, 0, Some(&reason("", error)))["details"]["err"], cut);
+    }
+
+    #[test]
+    fn reason_text_up_to_the_limit_is_kept_whole() {
+        let whole = "é".repeat(MAX_REASON_CHARS);
+        let peer = Details::CounterpartyForceClosed(CounterpartyForceClosedDetails { peer_msg: whole.clone() });
+        let v = close_audit_data("abcd", "1842", None, None, 0, Some(&reason(&whole, peer)));
+        assert_eq!((&v["reason_message"], &v["details"]["peer_msg"]), (&json!(whole), &json!(whole)));
+    }
 
     #[test]
     fn force_close_maps_full_reason() {
