@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Secret Phrase Revealed View (with In-Place Blur & Tap-to-Reveal)
 
@@ -9,7 +10,6 @@ struct RevealQuizSecretPhraseView: View {
     @State private var isRevealed: Bool = false
     @State private var copiedSeed = false
     @State private var showCopyWarning = false
-    @State private var clipboardClearTask: Task<Void, Never>?
     @State private var clipboardFadeTask: Task<Void, Never>?
 
     private var wordList: [String] {
@@ -23,26 +23,16 @@ struct RevealQuizSecretPhraseView: View {
     ]
 
     private func copySeedToClipboard() {
-        clipboardClearTask?.cancel()
         clipboardFadeTask?.cancel()
 
-        // Apple Native Clipboard Security: Expiration Date & Local-Only (prevents iCloud Universal Clipboard leakage)
-        let expirationDate = Date().addingTimeInterval(Double(SeedConstants.clipboardClearSeconds))
+        // The system clears the item at expiry; local-only keeps it off Universal Clipboard.
         UIPasteboard.general.setItems(
-            [["public.utf8-plain-text": mnemonic]],
+            [[UTType.utf8PlainText.identifier: mnemonic]],
             options: [
-                .expirationDate: expirationDate,
+                .expirationDate: Date().addingTimeInterval(SeedConstants.clipboardClearSeconds),
                 .localOnly: true
             ]
         )
-
-        // In-App Fallback Timer to wipe pasteboard string
-        clipboardClearTask = Task {
-            try? await Task.sleep(for: .seconds(SeedConstants.clipboardClearSeconds))
-            if UIPasteboard.general.string == mnemonic {
-                UIPasteboard.general.string = ""
-            }
-        }
 
         let generator = UINotificationFeedbackGenerator()
         generator.notificationOccurred(.success)
@@ -57,11 +47,6 @@ struct RevealQuizSecretPhraseView: View {
                 self.copiedSeed = false
             }
         }
-    }
-
-    private func cancelClipboardTasks() {
-        clipboardClearTask?.cancel()
-        clipboardFadeTask?.cancel()
     }
 
     var body: some View {
@@ -231,12 +216,13 @@ struct RevealQuizSecretPhraseView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(
-                "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in 60 seconds."
-            )
+            Text(String(
+                localized: "reveal_phrase_copy_warning",
+                defaultValue: "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in \(Int(SeedConstants.clipboardClearSeconds)) seconds."
+            ))
         }
         .onDisappear {
-            cancelClipboardTasks()
+            clipboardFadeTask?.cancel()
         }
     }
 }
