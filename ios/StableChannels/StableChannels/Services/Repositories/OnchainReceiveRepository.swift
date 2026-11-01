@@ -184,6 +184,27 @@ final class OnchainReceiveRepository {
         }
     }
 
+    /// Completes txid-less pending receives created before [cutoff] that list a candidate txid in
+    /// [walletTxids]: the wallet still holds a transaction the deposit can be, so it arrived. Returns
+    /// how many rows were completed.
+    @discardableResult
+    func completeStaleTxidlessReceives(createdBefore cutoff: Int64, walletTxids: Set<String>) throws -> Int {
+        guard !walletTxids.isEmpty else { return 0 }
+        let marks = Array(repeating: "?", count: walletTxids.count).joined(separator: ", ")
+        return try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET status = 'completed'
+            WHERE payment_type = 'onchain' AND direction = 'received' AND status = 'pending'
+              AND (txid IS NULL OR txid = '') AND created_at < ?
+              AND EXISTS (
+                  SELECT 1 FROM onchain_deposit_candidates c
+                  WHERE c.payment_id = payments.payment_id AND c.txid IN (\(marks))
+              )
+            """,
+            params: [.integer(cutoff)] + walletTxids.sorted().map { .text($0) }
+        )
+    }
+
     @discardableResult
     func insertOnchainReceiveResolution(address: String) -> Int64? {
         do {

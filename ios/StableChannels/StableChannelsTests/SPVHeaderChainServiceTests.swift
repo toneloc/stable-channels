@@ -782,6 +782,41 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(mockProvider.lookupCount, 0)
     }
 
+    func testStaleFallbackReceiveCompletesWhileTheWalletListsItsCandidate() async throws {
+        let arrived = try recordFallbackDeposit(id: "arrived", candidates: ["tx_kept", "tx_other"])
+        let dropped = try recordFallbackDeposit(id: "dropped", candidates: ["tx_gone"])
+        let unknown = try recordFallbackDeposit(id: "unknown", candidates: [])
+        pollingService.walletReceiveTxids = { ["tx_kept"] }
+
+        await pollingService.pollOnce()
+
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: arrived)?.status, "completed")
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: dropped)?.status, "failed")
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: unknown)?.status, "failed")
+    }
+
+    func testStaleTxidlessRowsWaitForAReadableWallet() async throws {
+        let id = try recordFallbackDeposit(id: "waiting", candidates: ["tx_kept"])
+        pollingService.walletReceiveTxids = { nil }
+
+        await pollingService.pollOnce()
+
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "pending")
+    }
+
+    private func recordFallbackDeposit(id: String, candidates: Set<String>) throws -> Int64 {
+        let deposit = DepositRecordInput(
+            depositId: id, depositSats: 50000, amountUSD: 25, btcPrice: 50000, candidateTxids: candidates
+        )
+        XCTAssertTrue(UnknownAddressDepositRecorder(databaseService: db).record(deposit: deposit, address: nil))
+        let row = try XCTUnwrap(db.paymentRepo.payment(paymentId: id)).id
+        try db.rawSQL.execute(
+            "UPDATE payments SET created_at = created_at - ? WHERE id = ?",
+            params: [.integer(Self.fifteenDays), .integer(row)]
+        )
+        return row
+    }
+
     func testRefreshFailsStaleRowOnlyWhenEveryExplorerReturns404() async throws {
         let id = try recordOnchain(paymentId: "gone", txid: "tx_gone", ageSeconds: Self.fifteenDays)
         mockProvider.mockCurrentHeight = 105

@@ -414,15 +414,25 @@ final class ConfirmationPollingService {
         case failed
     }
 
-    /// Ages out txid-less onchain rows; returns whether any row changed.
+    /// Ages out txid-less onchain rows; returns whether any row changed. A balance-fallback receive
+    /// whose candidate transaction the wallet still lists did arrive, so it completes instead of
+    /// failing. Waits for a readable wallet, which tells the two apart.
     private func failStaleTxidlessRows() -> Bool {
         let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
+        guard let walletTxids = walletReceiveTxids() else { return false }
         do {
+            let completed = try databaseService.onchainRepo.completeStaleTxidlessReceives(
+                createdBefore: cutoff,
+                walletTxids: walletTxids
+            )
+            if completed > 0 {
+                AuditService.log("STALE_TXIDLESS_RECEIVE_COMPLETED", data: ["txidless_rows": "\(completed)"])
+            }
             let failed = try databaseService.paymentRepo.failStaleTxidlessOnchain(createdBefore: cutoff)
             if failed > 0 {
                 AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: ["txidless_rows": "\(failed)"])
             }
-            return failed > 0
+            return completed + failed > 0
         } catch {
             logger.error("Failed to age out txid-less onchain rows: \(error.localizedDescription)")
             return false
