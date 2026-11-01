@@ -10,8 +10,7 @@ import android.content.Context
  * - Payment Confirmation: requires biometric auth before sends (on-chain or Lightning)
  *
  * Auth gate rules (matches iOS parity: a single toggle governs both send types):
- * - Viewing the seed phrase or restoring from one requires auth whenever the device can
- *   authenticate, and always when either toggle is on
+ * - Viewing the seed phrase or restoring from one requires auth when either toggle is on
  * - On-chain and Lightning sends both require auth only when Payment Confirmation is enabled
  * - Disabling either toggle requires auth; enabling does not
  */
@@ -92,20 +91,14 @@ object AppAccessPreferencesManager {
 
     /** Whether auth is required to view the seed phrase or restore from one. */
     fun shouldRequireAuthForSeedPhrase(context: Context): Boolean {
-        return seedPhraseRequiresAuth(
-            getPreferences(context),
-            BiometricService.isAuthenticationAvailable(context),
-        )
+        return seedPhraseRequiresAuth(getPreferences(context))
     }
 
     /**
-     * Seed access needs auth whenever the device can authenticate. A device without a screen lock
-     * can still view its seed, unless a toggle is on (then auth fails closed, as before).
+     * Seed access asks for auth when either toggle is on, so the user's App Access choice decides.
+     * Payment Confirmation counts too: a copied seed could otherwise be spent from another device.
      */
-    fun seedPhraseRequiresAuth(
-        prefs: AppAccessPreferences,
-        deviceCanAuthenticate: Boolean,
-    ): Boolean {
-        return deviceCanAuthenticate || prefs.appUnlockEnabled || prefs.paymentConfirmationEnabled
+    fun seedPhraseRequiresAuth(prefs: AppAccessPreferences): Boolean {
+        return prefs.appUnlockEnabled || prefs.paymentConfirmationEnabled
     }
 }

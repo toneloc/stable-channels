@@ -1,6 +1,7 @@
 package com.stablechannels.app.ui.settings
 
 import android.content.Context
+import androidx.biometric.BiometricManager
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -32,7 +33,12 @@ fun AppAccessView() {
     }
     var isAuthenticating by remember { mutableStateOf(false) }
 
-    val biometricsAvailable = BiometricService.isAuthenticationAvailable(context)
+    val biometricManager = BiometricManager.from(context)
+    val biometricsAvailable =
+        biometricManager.canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        ) == BiometricManager.BIOMETRIC_SUCCESS
 
     // Turning a toggle off needs auth first, so someone holding the unlocked phone can't
     // remove the protection. Turning one on does not.

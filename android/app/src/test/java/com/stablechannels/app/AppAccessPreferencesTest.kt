@@ -90,27 +90,12 @@ class AppAccessPreferencesTest {
     // ---------------------------------------------------------------------------
 
     @Test
-    fun `seed access requires auth with default toggles when the device can authenticate`() {
-        assertTrue(
-            AppAccessPreferencesManager.seedPhraseRequiresAuth(
-                AppAccessPreferences(),
-                deviceCanAuthenticate = true,
-            )
-        )
+    fun `seed access needs no auth when both toggles are off`() {
+        assertFalse(AppAccessPreferencesManager.seedPhraseRequiresAuth(AppAccessPreferences()))
     }
 
     @Test
-    fun `seed access needs no auth without a screen lock and with toggles off`() {
-        assertFalse(
-            AppAccessPreferencesManager.seedPhraseRequiresAuth(
-                AppAccessPreferences(),
-                deviceCanAuthenticate = false,
-            )
-        )
-    }
-
-    @Test
-    fun `seed access requires auth whenever a toggle is on`() {
+    fun `seed access requires auth when either toggle is on`() {
         val toggledOn =
             listOf(
                 AppAccessPreferences(appUnlockEnabled = true),
@@ -118,11 +103,7 @@ class AppAccessPreferencesTest {
                 AppAccessPreferences(appUnlockEnabled = true, paymentConfirmationEnabled = true),
             )
         for (prefs in toggledOn) {
-            for (deviceCanAuthenticate in listOf(true, false)) {
-                assertTrue(
-                    AppAccessPreferencesManager.seedPhraseRequiresAuth(prefs, deviceCanAuthenticate)
-                )
-            }
+            assertTrue(AppAccessPreferencesManager.seedPhraseRequiresAuth(prefs))
         }
     }
 
