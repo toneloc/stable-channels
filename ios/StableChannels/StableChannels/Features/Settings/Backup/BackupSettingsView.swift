@@ -174,7 +174,7 @@ struct BackupSettingsView: View {
                 }
             }
             .foregroundStyle(.primary)
-            .disabled(appState.nodeService.savedMnemonic == nil)
+            .disabled(appState.nodeService.savedMnemonic?.isEmpty ?? true)
         } header: {
             Text(String(localized: "section_backup_seed", defaultValue: "Backup"))
         } footer: {
