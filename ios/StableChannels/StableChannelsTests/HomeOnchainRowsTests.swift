@@ -108,6 +108,29 @@ final class HomeOnchainRowsTests: XCTestCase {
         XCTAssertNil(inCard.collapsedSummary)
     }
 
+    func testNegotiatedSpliceTakesItsDirectionFromItsRow() throws {
+        // Negotiation and a relaunch clear the in-memory splice; its row still says which way it goes.
+        let outCard = try XCTUnwrap(HomeOnchainRows.card(.init(
+            isSweeping: true,
+            spliceTxid: "splice",
+            spliceRow: payment(type: SpliceCompletionPolicy.spliceOutPaymentType, direction: "sent", sats: 700)
+        )))
+        XCTAssertEqual(outCard.rows.first?.kind, .splice(isOutgoing: true))
+        XCTAssertEqual(outCard.rows.first?.amountSats, 700)
+
+        let depositCard = try XCTUnwrap(HomeOnchainRows.card(.init(
+            isSweeping: true,
+            spliceTxid: "splice",
+            spliceRow: payment(sats: 700)
+        )))
+        XCTAssertEqual(
+            depositCard.rows.first?.kind,
+            .splice(isOutgoing: false),
+            "a deposit sharing the txid is no splice"
+        )
+        XCTAssertNil(depositCard.rows.first?.amountSats)
+    }
+
     func testSpliceRequiredConfirmationsComeFromPolicy() throws {
         let card = try XCTUnwrap(HomeOnchainRows.card(.init(isSweeping: true, spliceTxid: "splice")))
         XCTAssertEqual(card.rows.first?.requiredConfirmations, ConfirmationPolicy.spliceRequiredConfirmations)

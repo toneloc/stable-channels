@@ -824,6 +824,37 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testConfirmedSelfSendSpliceAdvancesTheBaselineSoNoDepositIsRecorded() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.priceService.setPriceForTesting(100_000.0)
+        appState.stableChannel.userChannelId = "self-send-chan"
+        appState.saveChannelToDB()
+        appState.transactionLinkService.onchainReceiveAddress = "bc1qown"
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "splice-self-send",
+            paymentType: SpliceCompletionPolicy.spliceOutPaymentType,
+            direction: SpliceCompletionPolicy.sentDirection,
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txA,
+            address: "bc1qown"
+        )
+        appState.walletInbound = WalletInboundOnchain(txids: [txA])
+        appState.onchainBalanceSats = 55000
+
+        XCTAssertTrue(appState.completeConfirmedSplice(txid: txA, expectedGeneration: 0))
+
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+        XCTAssertTrue(appState.depositBaseline.counts(txA))
+        XCTAssertEqual(db.paymentRepo.payment(txid: txA)?.status, "completed")
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [], "the splice's own output is not a deposit")
+    }
+
+    @MainActor
     func testWebSocketThenBalanceRecordsTheDepositOnce() throws {
         let (appState, db) = try makeDepositAppState()
 

@@ -125,6 +125,10 @@ class AppState {
         databaseService?.paymentRepo.payment(paymentId: paymentId)
     }
 
+    func payment(txid: String) -> PaymentRecord? {
+        databaseService?.paymentRepo.payment(txid: txid)
+    }
+
     /// Throws when there is no database yet or the lookup fails.
     func recentTrades(limit: Int) throws -> [TradeRecord] {
         guard let databaseService else { throw DatabaseError.openFailed("Database unavailable") }
@@ -3206,7 +3210,7 @@ class AppState {
     }
 
     @discardableResult
-    private func completeConfirmedSplice(
+    func completeConfirmedSplice(
         txid: String,
         expectedGeneration: UInt64
     ) -> Bool {

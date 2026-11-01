@@ -18,6 +18,7 @@ struct HomeView: View {
     @State private var notificationsEnabled = true
     @State private var pendingOnchainReceives: [PaymentRecord] = []
     @State private var pendingOnchainSends: [PaymentRecord] = []
+    @State private var pendingSpliceRow: PaymentRecord?
 
     var body: some View {
         NavigationStack {
@@ -187,6 +188,7 @@ struct HomeView: View {
         let paymentFlash: Bool
         let onchainSats: UInt64
         let spendableSats: UInt64
+        let spliceTxid: String?
     }
 
     private var pendingOnchainReloadKey: PendingOnchainReloadKey {
@@ -194,12 +196,14 @@ struct HomeView: View {
             confirmationEpoch: appState.confirmationUpdateEpoch,
             paymentFlash: appState.paymentFlash,
             onchainSats: appState.onchainBalanceSats,
-            spendableSats: appState.spendableOnchainSats
+            spendableSats: appState.spendableOnchainSats,
+            spliceTxid: appState.spliceTxid
         )
     }
 
     private func loadPendingOnchain() {
         (pendingOnchainReceives, pendingOnchainSends) = appState.pendingOnchainActivity()
+        pendingSpliceRow = appState.spliceTxid.flatMap(appState.payment(txid:))
     }
 
     private var onchainCard: HomeOnchainCard? {
@@ -210,6 +214,7 @@ struct HomeView: View {
             isSweeping: appState.isSweeping,
             spliceTxid: appState.spliceTxid,
             pendingSplice: appState.pendingSplice,
+            spliceRow: pendingSpliceRow,
             isChannelClosing: appState.isChannelClosing,
             lastCloseTxid: appState.transactionLinkService.lastCloseTxid,
             isOpeningChannel: appState.isOpeningChannel,

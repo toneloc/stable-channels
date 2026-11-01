@@ -98,6 +98,8 @@ enum HomeOnchainRows {
         var isSweeping = false
         var spliceTxid: String?
         var pendingSplice: PendingSplice?
+        /// The splice's history row: its direction once `pendingSplice` is cleared (negotiated, relaunched).
+        var spliceRow: PaymentRecord?
         var isChannelClosing = false
         var lastCloseTxid: String?
         var isOpeningChannel = false
@@ -115,7 +117,7 @@ enum HomeOnchainRows {
         var card = HomeOnchainCard(sendRows: inputs.pendingSends.map(sendRow))
 
         if inputs.isSweeping {
-            let isOutgoing = inputs.pendingSplice?.direction == "out"
+            let isOutgoing = isOutgoingSplice(inputs)
             card.rows = [spliceRow(inputs, isOutgoing: isOutgoing)]
             if !receives.isEmpty {
                 // Splice and a new deposit both in flight: show both rather than hide the deposit.
@@ -192,6 +194,18 @@ enum HomeOnchainRows {
         )
     }
 
+    /// The in-memory splice decides while it exists; after negotiation or a relaunch only the row knows.
+    private static func isOutgoingSplice(_ inputs: Inputs) -> Bool {
+        if let pendingSplice = inputs.pendingSplice { return pendingSplice.direction == "out" }
+        return spliceRow(inputs)?.paymentType == SpliceCompletionPolicy.spliceOutPaymentType
+    }
+
+    /// The splice row, ignoring any other row that shares its txid.
+    private static func spliceRow(_ inputs: Inputs) -> PaymentRecord? {
+        let spliceTypes = [SpliceCompletionPolicy.spliceInPaymentType, SpliceCompletionPolicy.spliceOutPaymentType]
+        return inputs.spliceRow.flatMap { spliceTypes.contains($0.paymentType) ? $0 : nil }
+    }
+
     private static func spliceRow(_ inputs: Inputs, isOutgoing: Bool) -> HomeOnchainRow {
         let paymentType = isOutgoing
             ? SpliceCompletionPolicy.spliceOutPaymentType
@@ -199,7 +213,7 @@ enum HomeOnchainRows {
         return HomeOnchainRow(
             kind: .splice(isOutgoing: isOutgoing),
             txid: nonEmpty(inputs.spliceTxid),
-            amountSats: inputs.pendingSplice?.amountSats,
+            amountSats: inputs.pendingSplice?.amountSats ?? spliceRow(inputs)?.amountSats,
             sign: isOutgoing ? .outgoing : .neutral,
             confirmations: 0,
             requiredConfirmations: ConfirmationPolicy.requiredConfirmations(for: paymentType)
