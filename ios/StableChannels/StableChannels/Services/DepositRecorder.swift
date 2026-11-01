@@ -77,10 +77,20 @@ struct OnchainDepositReconciler {
                 "remainder_sats": "\(attribution.remainderSats)"
             ])
         }
+        var candidates = attribution.unrecordedTxids
+        // Without one, a fallback row still "Receiving" after the age-out window is failed.
+        if baseline.txids == nil, let claimed = try? repository.recordedReceiveTxids(),
+           let txid = DepositAttribution.unknownBaselineCandidate(
+               remainderSats: attribution.remainderSats,
+               walletSats: wallet.sats,
+               claimed: claimed
+           ) {
+            candidates.insert(txid)
+        }
         return MissedDeposit(
             sats: attribution.remainderSats,
             txid: attribution.missedTxid,
-            candidateTxids: attribution.unrecordedTxids
+            candidateTxids: candidates
         )
     }
 }

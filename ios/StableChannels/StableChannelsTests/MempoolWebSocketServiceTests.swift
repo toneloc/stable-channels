@@ -1320,6 +1320,30 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 0, unrecorded: [txB], walletSats: [txB: 0]))
     }
 
+    func testUnknownBaselineCandidateIsTheOneUnclaimedReceiveOfTheRemainder() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        XCTAssertEqual(
+            DepositAttribution.unknownBaselineCandidate(
+                remainderSats: 60000, walletSats: [txA: 60000, txB: 20000], claimed: []
+            ),
+            txA
+        )
+        // A claimed receive, two of that amount, another amount, or nothing left: no candidate.
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 60000], claimed: [txA]
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 60000, txB: 60000], claimed: []
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 50000], claimed: []
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 0, walletSats: [txA: 0], claimed: []
+        ))
+    }
+
     func testRemovedReceiveLeavesTheBaselineOnceTheNodeSyncs() {
         let txA = String(repeating: "a", count: 64)
         let txB = String(repeating: "b", count: 64)

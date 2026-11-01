@@ -772,6 +772,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
     func testPassFailsStaleTxidlessOnchainRowsEvenWithoutTip() async throws {
         let stale = try recordOnchain(paymentId: "stale_no_txid", txid: nil, ageSeconds: Self.fifteenDays)
         let young = try recordOnchain(paymentId: "young_no_txid", txid: nil, ageSeconds: Self.thirteenDays)
+        pollingService.walletReceiveTxids = { [] }
 
         // No chain tip yet: the age-out still runs and is published.
         await pollingService.pollOnce()
@@ -796,8 +797,8 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
     }
 
     func testStaleTxidlessRowsWaitForAReadableWallet() async throws {
+        // The default wallet reader is unreadable until AppState wires the node in.
         let id = try recordFallbackDeposit(id: "waiting", candidates: ["tx_kept"])
-        pollingService.walletReceiveTxids = { nil }
 
         await pollingService.pollOnce()
 
@@ -862,6 +863,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         mockProvider.mockCurrentHeight = 105
         mockProvider.heightMap["tx_other"] = 100
         mockProvider.mismatchedTxids = ["tx_other"]
+        pollingService.walletReceiveTxids = { [] }
         var mismatched: [String] = []
         pollingService.onReceiveTxidMismatch = { mismatched.append($0) }
 

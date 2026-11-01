@@ -73,7 +73,7 @@ final class ConfirmationPollingService {
     /// Fires with a received row's txid after it was detached for not paying the row's address.
     var onReceiveTxidMismatch: (@MainActor (String) -> Void)?
     /// The txids the node's wallet lists as received, or nil when the wallet cannot be read.
-    var walletReceiveTxids: @MainActor () -> Set<String>? = { [] }
+    var walletReceiveTxids: @MainActor () -> Set<String>? = { nil }
 
     init(
         databaseService: DatabaseService,

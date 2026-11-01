@@ -65,15 +65,7 @@ final class OnchainReceiveRepository {
                     )
                     return .adoptedPlaceholder
                 }
-                try rawSQL.execute(
-                    """
-                    UPDATE payments
-                    SET amount_usd = amount_usd * (amount_msat - ?) / amount_msat,
-                        amount_msat = amount_msat - ?
-                    WHERE id = ?
-                    """,
-                    params: [.integer(Int64(amountMsat)), .integer(Int64(amountMsat)), .integer(rowId)]
-                )
+                try shrinkPlaceholder(rowId: rowId, byMsat: Int64(amountMsat))
                 try insertReceive(
                     txid: txid,
                     address: address,
@@ -111,6 +103,19 @@ final class OnchainReceiveRepository {
             """,
             params: [.integer(Int64(amountMsat)), .text(address), .text(txid), .integer(Int64(amountMsat))]
         ).first
+    }
+
+    /// Gives [amountMsat] of a merged placeholder up to the deposit that is split out of it.
+    private func shrinkPlaceholder(rowId: Int64, byMsat amountMsat: Int64) throws {
+        try rawSQL.execute(
+            """
+            UPDATE payments
+            SET amount_usd = amount_usd * (amount_msat - ?) / amount_msat,
+                amount_msat = amount_msat - ?
+            WHERE id = ?
+            """,
+            params: [.integer(amountMsat), .integer(amountMsat), .integer(rowId)]
+        )
     }
 
     @discardableResult
@@ -438,8 +443,9 @@ final class OnchainReceiveRepository {
     /// double-insert. A txid-less placeholder for this address with exactly this amount is
     /// adopted instead of inserting a second row: for a single deposit the balance delta
     /// equals the vout sum, so a placeholder with another amount is a different deposit, or
-    /// several merged into one (dropped here once their own rows add up to it). Returns true
-    /// when a row was adopted or inserted.
+    /// several merged into one. A merged placeholder that lists this txid as a candidate gives
+    /// its amount up to the new row, as on the WebSocket path; one that does not is dropped here
+    /// once its own rows add up to it. Returns true when a row was adopted or inserted.
     func recordReceive(
         txid: String,
         amountSats: Int64,
@@ -459,8 +465,10 @@ final class OnchainReceiveRepository {
                 """,
                 params: [.integer(amountMsat), .text(address)]
             ).first
-            if let placeholder {
-                let rowId = placeholder.int64(0)
+            // Amount alone is no evidence for a split: the placeholder must list this txid.
+            let merged = try fallbackRow(for: txid, covering: UInt64(clamping: amountMsat), address: address)
+            let exactId = placeholder?.int64(0) ?? merged.flatMap { $0.int64(2) == amountMsat ? $0.int64(0) : nil }
+            if let rowId = exactId {
                 try attach(txid: txid, toRowId: rowId, address: address)
                 try rawSQL.execute(
                     "UPDATE payments SET amount_usd = ?, btc_price = ? WHERE id = ?",
@@ -472,6 +480,7 @@ final class OnchainReceiveRepository {
                 )
                 return true
             }
+            if let merged { try shrinkPlaceholder(rowId: merged.int64(0), byMsat: amountMsat) }
             try rawSQL.execute(
                 """
                 INSERT INTO payments (

@@ -55,6 +55,19 @@ enum DepositAttribution {
         return txid
     }
 
+    /// The transaction a deposit can be when the baseline's txids are unknown, so arrivals cannot be
+    /// told from older receives: the one wallet receive no row [claimed] whose node amount is the whole
+    /// remainder. Several such receives, or none, leave the deposit without a candidate.
+    static func unknownBaselineCandidate(
+        remainderSats: Int64,
+        walletSats: [String: Int64],
+        claimed: Set<String>
+    ) -> String? {
+        guard remainderSats > 0 else { return nil }
+        let matches = walletSats.filter { txid, sats in sats == remainderSats && !claimed.contains(txid) }
+        return matches.count == 1 ? matches.first?.key : nil
+    }
+
     /// Txids whose deposits are inside the increase: the wallet lists them now but did not when
     /// the baseline was taken.
     static func arrivedTxids(wallet: Set<String>, baseline: Set<String>) -> Set<String> {

@@ -244,10 +244,12 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
 
     /// A balance-delta placeholder as KnownAddressDepositRecorder writes it.
     @discardableResult
-    private func placeholder(_ sats: Int64, address: String = "addr") throws -> Int64 {
+    private func placeholder(_ sats: Int64, address: String = "addr", candidates: Set<String> = []) throws -> Int64 {
         let resolutionId = try XCTUnwrap(repo.insertOnchainReceiveResolution(address: address))
+        let paymentId = "onchain_deposit_\(UUID().uuidString)"
+        try repo.recordDepositCandidates(paymentId: paymentId, txids: candidates)
         XCTAssertTrue(repo.recordOnchainPaymentWithResolution(
-            paymentId: "onchain_deposit_\(UUID().uuidString)",
+            paymentId: paymentId,
             amountMsat: sats * 1000,
             amountUSD: nil,
             btcPrice: nil,
@@ -414,6 +416,37 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
             Pending(txid: "txB", sats: 14_332),
             Pending(txid: "txC", sats: 10_000)
         ])
+    }
+
+    private func receivedSats() throws -> Int64 {
+        let rows = try service.rawSQL.query(
+            """
+            SELECT COALESCE(SUM(amount_msat), 0) FROM payments
+            WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
+            """
+        )
+        return try XCTUnwrap(rows.first?.int64(0)) / 1000
+    }
+
+    func testRecoveredDepositSplitsTheMergedPlaceholderThatListsIt() throws {
+        // A paid this address and B an older one, both inside one balance jump.
+        try placeholder(80_000, candidates: ["txA", "txB"])
+
+        XCTAssertTrue(try missed("txA", 50_000))
+
+        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 30_000), Pending(txid: "txA", sats: 50_000)])
+        XCTAssertEqual(try repo.completeStaleTxidlessReceives(createdBefore: .max, walletTxids: ["txA", "txB"]), 1)
+        XCTAssertEqual(try receivedSats(), 80_000, "history counts deposit A once")
+    }
+
+    func testRecoveredDepositDoesNotShrinkAPlaceholderThatDoesNotListIt() throws {
+        try placeholder(80_000, candidates: ["txB"])
+        try placeholder(80_000, address: "other", candidates: ["txA"])
+
+        XCTAssertTrue(try missed("txA", 50_000))
+
+        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 80_000), Pending(txid: "txA", sats: 50_000)])
+        XCTAssertEqual(try receivedSats(), 210_000, "both placeholders keep their full amount")
     }
 
     func testFailedRowsDoNotCountTowardMergedPlaceholder() throws {

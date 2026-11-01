@@ -2463,6 +2463,24 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.amountMsat, 40_000_000)
     }
 
+    func testUnknownBaselineGivesTheDepositItsOnlyMatchingWalletReceiveAsCandidate() throws {
+        let other = String(repeating: "d", count: 64)
+        let reconciler = OnchainDepositReconciler(repository: service.onchainRepo)
+        let unknown = OnchainDepositBaseline(sats: 0, txids: nil)
+        let wallet = WalletInboundOnchain(txids: [receiveTxid, other], sats: [receiveTxid: 50000, other: 20000])
+
+        let missed = try XCTUnwrap(reconciler.missedDeposit(depositSats: 50000, wallet: wallet, baseline: unknown))
+
+        XCTAssertEqual(missed.candidateTxids, [receiveTxid])
+        XCTAssertNil(missed.txid, "an older receive could have the same amount, so the txid stays unproven")
+        // A known baseline already names its arrivals.
+        XCTAssertEqual(
+            reconciler.missedDeposit(depositSats: 50000, wallet: wallet, baseline: .init(sats: 0, txids: [other]))?
+                .candidateTxids,
+            [receiveTxid]
+        )
+    }
+
     func testUnknownBaselineSubtractsOnlyReceivesRecordedSinceLaunch() throws {
         XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
         let wallet = WalletInboundOnchain(txids: [receiveTxid], sats: [receiveTxid: 50_000])
