@@ -99,11 +99,13 @@ struct RevealQuizSecretPhraseView: View {
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                                         .stroke(Color.white.opacity(0.12), lineWidth: 1)
                                 )
+                                .accessibilityElement(children: .combine)
                             }
                         }
                         .padding(14)
                         .blur(radius: isRevealed ? 0 : 16)
                         .allowsHitTesting(isRevealed)
+                        .accessibilityHidden(!isRevealed)
 
                         // Tap to Reveal Privacy Shield Overlay
                         if !isRevealed {

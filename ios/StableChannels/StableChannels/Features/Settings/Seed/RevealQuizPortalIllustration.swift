@@ -3,6 +3,7 @@ import SwiftUI
 // MARK: - Editorial Vault Monolith Illustration
 
 struct RevealQuizPortalIllustration: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isPulsing = false
 
     var body: some View {
@@ -166,8 +167,9 @@ struct RevealQuizPortalIllustration: View {
                 .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 4)
         }
         .frame(height: 200)
+        .accessibilityHidden(true)
         .onAppear {
-            isPulsing = true
+            isPulsing = !reduceMotion
         }
     }
 }

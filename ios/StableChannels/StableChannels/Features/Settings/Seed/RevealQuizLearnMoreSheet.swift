@@ -89,6 +89,7 @@ struct RevealQuizLearnMoreSheet: View {
                             .font(.title3)
                             .foregroundStyle(.secondary)
                     }
+                    .accessibilityLabel(String(localized: "button_close", defaultValue: "Close"))
                 }
             }
         }

@@ -33,6 +33,8 @@ struct RevealQuizIntroView: View {
                     Text(String(localized: "reveal_quiz_learn_more", defaultValue: "Learn more"))
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(Color.stablePrimary)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
                 }
                 .padding(.bottom, 8)
             }
