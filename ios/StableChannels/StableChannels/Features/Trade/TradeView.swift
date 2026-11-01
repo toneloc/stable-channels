@@ -292,7 +292,7 @@ struct TradeView: View {
                 CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
                     .padding(.bottom, 4)
 
-                Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
+                Text(String(localized: "status_order_pending", defaultValue: "Order Pending"))
                     .font(.title2.bold())
 
                 Text((action == .buyBTC
