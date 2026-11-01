@@ -148,7 +148,6 @@
 		49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */; };
 		49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */; };
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
-		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
 		49B22AA030983AF200447D17 /* EsploraTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9C30983AF200447D17 /* EsploraTransaction.swift */; };
 		49B22AA130983AF200447D17 /* SpliceCompletionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9E30983AF200447D17 /* SpliceCompletionService.swift */; };
@@ -469,7 +468,6 @@
 		49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSheetHelpers.swift; sourceTree = "<group>"; };
 		49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSheet.swift; sourceTree = "<group>"; };
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
-		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
 		49B22A9C30983AF200447D17 /* EsploraTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EsploraTransaction.swift; sourceTree = "<group>"; };
 		49B22A9D30983AF200447D17 /* PaymentQueries.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaymentQueries.swift; sourceTree = "<group>"; };
@@ -859,7 +857,6 @@
 				49AD1B542FEE82000015A7D0 /* RevealRecoveryPhraseSheet.swift */,
 				49AD1B512FEE82000015A7D0 /* RevealRecoveryQuizModels.swift */,
 				49AD1B522FEE82000015A7D0 /* RevealRecoveryQuizViewModel.swift */,
-				49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */,
 				88F8D724F5E6F0624E67D488 /* SeedWordGridView.swift */,
 			);
 			path = Seed;
@@ -1488,7 +1485,6 @@
 				499F1E513009F02300936944 /* BlockHeightService.swift in Sources */,
 				499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */,
 				499F1E553009F02300936944 /* ConfirmationService.swift in Sources */,
-				49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */,
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				49AD1B512FEE82000015A7D1 /* RevealRecoveryQuizModels.swift in Sources */,
 				49AD1B522FEE82000015A7D1 /* RevealRecoveryQuizViewModel.swift in Sources */,

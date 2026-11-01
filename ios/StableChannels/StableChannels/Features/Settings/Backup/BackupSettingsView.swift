@@ -6,7 +6,6 @@ struct BackupSettingsView: View {
 
     // MARK: - UI State
 
-    @State private var showSeedWords = false
     @State private var showRestore = false
     @State private var restoreMnemonic = ""
     @State private var restoreSourceIsCloud = false

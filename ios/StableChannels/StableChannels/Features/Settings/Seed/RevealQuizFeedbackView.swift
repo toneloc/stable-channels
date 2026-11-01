@@ -53,19 +53,14 @@ struct RevealQuizFeedbackView: View {
             // Bottom action button
             VStack(spacing: 16) {
                 Button(action: onContinue) {
-                    Text(
-                        isCorrect
-                            ? (question.isLastQuestion ? String(
-                                localized: "button_reveal_phrase",
-                                defaultValue: "Continue"
-                            ) : String(localized: "button_continue", defaultValue: "Continue"))
-                            : String(localized: "button_try_again", defaultValue: "Try again")
-                    )
-                    .font(.headline)
-                    .foregroundStyle(.black)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(Color.white)
-                    .clipShape(Capsule())
+                    Text(isCorrect
+                        ? String(localized: "button_continue", defaultValue: "Continue")
+                        : String(localized: "button_try_again", defaultValue: "Try again"))
+                        .font(.headline)
+                        .foregroundStyle(.black)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Color.white)
+                        .clipShape(Capsule())
                 }
 
                 Button(action: onLearnMore) {

@@ -13,10 +13,6 @@ struct RevealQuizQuestion: Identifiable, Equatable {
     let incorrectHeading: String
     let incorrectExplanation: String
 
-    var isLastQuestion: Bool {
-        questionNumber == totalQuestions
-    }
-
     func isCorrect(optionIndex: Int) -> Bool {
         optionIndex == correctOptionIndex
     }
