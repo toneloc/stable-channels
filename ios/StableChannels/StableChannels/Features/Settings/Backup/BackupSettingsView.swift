@@ -138,6 +138,9 @@ struct BackupSettingsView: View {
         .fullScreenCover(isPresented: $showingRevealPhraseSheet) {
             if let words = appState.nodeService.savedMnemonic, !words.isEmpty {
                 RevealRecoveryPhraseSheet(mnemonic: words)
+            } else {
+                // No saved phrase: close at once rather than leave an empty cover with no way out.
+                Color.clear.onAppear { showingRevealPhraseSheet = false }
             }
         }
         .alert("Delete Backup?", isPresented: $showingDeleteConfirmation) {

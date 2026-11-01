@@ -163,6 +163,12 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertFalse(vm.canGoBack)
     }
 
+    func testOnlyBackgroundDismissesTheReveal() {
+        XCTAssertTrue(RevealRecoveryQuizViewModel.shouldDismiss(for: .background))
+        XCTAssertFalse(RevealRecoveryQuizViewModel.shouldDismiss(for: .inactive))
+        XCTAssertFalse(RevealRecoveryQuizViewModel.shouldDismiss(for: .active))
+    }
+
     func testGoBackFromIntroIsNoOp() {
         let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
         vm.goBack()

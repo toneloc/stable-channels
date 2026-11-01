@@ -4,6 +4,7 @@ import SwiftUI
 struct RevealRecoveryPhraseSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewModel: RevealRecoveryQuizViewModel
 
     init(
@@ -109,6 +110,9 @@ struct RevealRecoveryPhraseSheet: View {
         }
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled(true)
+        .onChange(of: scenePhase) { _, phase in
+            if RevealRecoveryQuizViewModel.shouldDismiss(for: phase) { dismiss() }
+        }
     }
 
     private static let stepAnimation = Animation.easeInOut(duration: 0.25)

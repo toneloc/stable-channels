@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 enum QuizNavigationDirection: Equatable {
     case forward
@@ -37,6 +38,12 @@ final class RevealRecoveryQuizViewModel {
 
     var navigationTitle: String {
         String(localized: "reveal_phrase_nav_title", defaultValue: "Reveal Secret Recovery Phrase")
+    }
+
+    /// Leaving the app closes the reveal, because the cover sits above the app lock overlay.
+    /// Not `.inactive`: the Face ID prompt raises it, and the phrase view re-blurs there already.
+    static func shouldDismiss(for phase: ScenePhase) -> Bool {
+        phase == .background
     }
 
     // MARK: - Actions
