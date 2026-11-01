@@ -3160,10 +3160,12 @@ class AppState {
         guard let spliceRepo = databaseService?.spliceRepo else { return }
         do {
             let channels = nodeService.channels
-            try spliceRepo.recoverReadyEvents { userChannelId, channelId in
+            let liveFunding: (String, String) -> (txid: String, vout: UInt32)? = { userChannelId, channelId in
                 SpliceEventReceipt.liveFunding(in: channels, userChannelId: userChannelId, channelId: channelId)
                     .map { (txid: $0.txid, vout: $0.vout) }
             }
+            try spliceRepo.recoverReadyEvents(liveFunding: liveFunding)
+            try spliceRepo.recoverUnboundNegotiations(liveFunding: liveFunding)
         } catch {
             AuditService.log("SPLICE_READY_RECOVERY_FAILED", data: ["error": error.localizedDescription])
         }

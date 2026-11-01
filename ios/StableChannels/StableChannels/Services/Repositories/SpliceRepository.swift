@@ -174,6 +174,51 @@ final class SpliceRepository {
         }
     }
 
+    /// Binds a negotiated event that matched no single operation when it arrived (it was still
+    /// acknowledged, since LDK's event queue must keep moving). The node proves the splice once the
+    /// channel's live funding is the event's txid; it is then bound only when exactly one operation
+    /// on that channel still waits for a txid. One started after the lock saved that txid as its
+    /// previous funding, so it never qualifies.
+    func recoverUnboundNegotiations(
+        liveFunding: (_ userChannelId: String, _ channelId: String) -> (txid: String, vout: UInt32)?
+    ) throws {
+        try rawSQL.inTransaction {
+            let events = try rawSQL.query(
+                """
+                SELECT e.event_key, e.user_channel_id, e.channel_id, e.txid FROM splice_events e
+                WHERE e.event_type = 'negotiated' AND e.payment_row_id IS NULL AND e.txid IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM payments p
+                      WHERE p.txid = e.txid AND p.payment_type IN ('splice_in', 'splice_out')
+                  )
+                ORDER BY e.rowid LIMIT ?
+                """,
+                params: [.integer(Int64(Self.readyEventRecoveryBatchSize))]
+            )
+            for event in events where liveFunding(event.string(1), event.string(2))?.txid == event.string(3) {
+                try rawSQL.execute(
+                    """
+                    UPDATE splice_events SET payment_row_id = (
+                        SELECT CASE WHEN COUNT(*) = 1 THEN MAX(p.id) END
+                        FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+                        WHERE p.status IN ('pending', 'expired') AND p.txid IS NULL
+                          AND s.user_channel_id = ?2 AND s.channel_id = ?3
+                          AND (s.previous_funding_txid IS NULL OR s.previous_funding_txid != ?4)
+                    )
+                    WHERE event_key = ?1 AND payment_row_id IS NULL
+                    """,
+                    params: [
+                        .text(event.string(0)),
+                        .text(event.string(1)),
+                        .text(event.string(2)),
+                        .text(event.string(3))
+                    ]
+                )
+            }
+            try recoverAssignments()
+        }
+    }
+
     /// Retries txid assignment for captured operations (after a restart or a txid collision).
     func recoverAssignments() throws {
         try rawSQL.inTransaction {

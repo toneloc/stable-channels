@@ -171,6 +171,38 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertNil(try row(first).txid)
     }
 
+    func testUnboundNegotiationBindsOnceTheLockedFundingProvesItAndOneOperationRemains() throws {
+        let first = try begin()
+        let second = try begin()
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+        XCTAssertNil(try row(first).txid, "ambiguous at receipt")
+        // The node refuses the second attempt and it is failed: the first is the only candidate left.
+        XCTAssertTrue(service.spliceRepo.failLatestPendingSplice())
+        XCTAssertEqual(try row(second).status, "failed")
+
+        let unlocked = oldFunding
+        try service.spliceRepo.recoverUnboundNegotiations { _, _ in (txid: unlocked, vout: 0) }
+        XCTAssertNil(try row(first).txid, "unproven until the channel's funding is the event's txid")
+
+        // Started after the lock, so its previous funding is the event's txid: never a candidate.
+        let later = try begin(previousFunding: newFunding)
+        let locked = newFunding
+        try service.spliceRepo.recoverUnboundNegotiations { _, _ in (txid: locked, vout: 1) }
+        XCTAssertEqual(try row(first).txid, newFunding)
+        XCTAssertEqual(try row(first).status, "pending")
+        XCTAssertNil(try row(later).txid)
+    }
+
+    func testUnboundNegotiationStaysUnboundWhileTwoOperationsCouldOwnIt() throws {
+        let first = try begin()
+        let second = try begin()
+        try service.spliceRepo.recordEvent(negotiated(newFunding))
+        let locked = newFunding
+        try service.spliceRepo.recoverUnboundNegotiations { _, _ in (txid: locked, vout: 1) }
+        XCTAssertNil(try row(first).txid)
+        XCTAssertNil(try row(second).txid)
+    }
+
     func testTwoExpiredAttemptsStayAmbiguous() throws {
         let first = try begin()
         let second = try begin()
