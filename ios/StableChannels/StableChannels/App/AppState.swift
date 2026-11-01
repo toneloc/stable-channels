@@ -4056,74 +4056,73 @@ class AppState {
         isSweeping = true
         statusMessage = "Starting move..."
 
-        Task { @MainActor in
-            guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
-                statusMessage = "No ready channel"
-                isSweeping = false
-                return
-            }
-            guard let balances = nodeService.balances() else {
-                statusMessage = "Could not read balances"
-                isSweeping = false
-                return
-            }
+        // No suspension before the row is saved: the stale-lock release frees a lock without one.
+        guard let channel = nodeService.channels.first(where: { $0.isChannelReady }) else {
+            statusMessage = "No ready channel"
+            isSweeping = false
+            return
+        }
+        guard let balances = nodeService.balances() else {
+            statusMessage = "Could not read balances"
+            isSweeping = false
+            return
+        }
 
-            let spendable = balances.spendableOnchainBalanceSats
-            guard spendable > 0 else {
-                statusMessage = "Insufficient onchain balance"
-                isSweeping = false
-                return
-            }
-            let sweepAmount = spendable
-            let price = spotOrBookedPrice
-            let amountUSD: Double? = price > 0
-                ? BitcoinUnits.usd(sats: sweepAmount, price: price)
-                : nil
+        let spendable = balances.spendableOnchainBalanceSats
+        guard spendable > 0 else {
+            statusMessage = "Insufficient onchain balance"
+            isSweeping = false
+            return
+        }
+        let sweepAmount = spendable
+        let price = spotOrBookedPrice
+        let amountUSD: Double? = price > 0
+            ? BitcoinUnits.usd(sats: sweepAmount, price: price)
+            : nil
 
-            // Persist before the native call so spliceNegotiated always has a
-            // row to stamp with the txid, even if the event is delivered before
-            // spliceInWithAll returns (and so the operation survives a restart).
-            let rowId = try? databaseService?.spliceRepo.recordPendingSplice(
-                paymentType: "splice_in",
-                amountMsat: sweepAmount * 1000,
-                amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil,
-                channel: SpliceChannelIdentity(
-                    userChannelId: channel.userChannelId,
-                    channelId: channel.channelId,
-                    previousFundingTxid: channel.fundingTxo?.txid
-                )
+        // Persist before the native call so spliceNegotiated always has a
+        // row to stamp with the txid, even if the event is delivered before
+        // spliceInWithAll returns (and so the operation survives a restart).
+        let rowId = try? databaseService?.spliceRepo.recordPendingSplice(
+            paymentType: "splice_in",
+            amountMsat: sweepAmount * 1000,
+            amountUSD: amountUSD,
+            btcPrice: price > 0 ? price : nil,
+            channel: SpliceChannelIdentity(
+                userChannelId: channel.userChannelId,
+                channelId: channel.channelId,
+                previousFundingTxid: channel.fundingTxo?.txid
             )
-            guard let rowId else {
-                statusMessage = "Could not save pending move — move not started"
-                isSweeping = false
-                return
-            }
-            pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil, rowId: rowId)
+        )
+        guard let rowId else {
+            statusMessage = "Could not save pending move — move not started"
+            isSweeping = false
+            return
+        }
+        pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil, rowId: rowId)
 
-            do {
-                try nodeService.spliceInWithAll(
-                    userChannelId: channel.userChannelId,
-                    counterpartyNodeId: channel.counterpartyNodeId
-                )
-                spliceStartAccepted()
-                sweepOnchainStart = balances.totalOnchainBalanceSats
-                spliceGeneration &+= 1
-                statusMessage = "Moving all onchain funds to channel..."
+        do {
+            try nodeService.spliceInWithAll(
+                userChannelId: channel.userChannelId,
+                counterpartyNodeId: channel.counterpartyNodeId
+            )
+            spliceStartAccepted()
+            sweepOnchainStart = balances.totalOnchainBalanceSats
+            spliceGeneration &+= 1
+            statusMessage = "Moving all onchain funds to channel..."
 
-                AuditService.log("SWEEP_TO_CHANNEL", data: [
-                    "amount_sats": "\(sweepAmount)",
-                    "mode": "splice_in_with_all"
-                ])
-            } catch {
-                statusMessage = "Sweep failed: \(error.localizedDescription)"
-                AuditService.log("SWEEP_FAILED", data: [
-                    "error": error.localizedDescription
-                ])
-                isSweeping = false
-                pendingSplice = nil
-                databaseService?.spliceRepo.failLatestPendingSplice()
-            }
+            AuditService.log("SWEEP_TO_CHANNEL", data: [
+                "amount_sats": "\(sweepAmount)",
+                "mode": "splice_in_with_all"
+            ])
+        } catch {
+            statusMessage = "Sweep failed: \(error.localizedDescription)"
+            AuditService.log("SWEEP_FAILED", data: [
+                "error": error.localizedDescription
+            ])
+            isSweeping = false
+            pendingSplice = nil
+            databaseService?.spliceRepo.failLatestPendingSplice()
         }
     }
 

@@ -885,6 +885,19 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(try receivedSats(db), [50000, 60000])
     }
 
+    /// The stale-lock release frees a lock with no pending splice row, so the sweep must never return
+    /// holding its lock before the row is written: it either saves the row or drops the lock first.
+    @MainActor
+    func testSweepNeverReturnsHoldingTheLockWithoutItsRow() {
+        let appState = AppState()
+
+        appState.sweepToChannel()
+
+        XCTAssertFalse(appState.isSweeping)
+        XCTAssertNil(appState.pendingSplice)
+        XCTAssertEqual(appState.statusMessage, "No ready channel")
+    }
+
     @MainActor
     func testLaunchLoadsTheBaselineTxidsCachedWithTheBalance() {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
