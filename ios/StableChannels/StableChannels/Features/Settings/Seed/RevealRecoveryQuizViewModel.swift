@@ -8,9 +8,8 @@ enum QuizNavigationDirection: Equatable {
 
 /// State machine and view model for the recovery phrase reveal quiz.
 @Observable
+@MainActor
 final class RevealRecoveryQuizViewModel {
-    private let questionsProvider: any RevealQuizQuestionsProviderProtocol
-
     var currentStep: RevealQuizStep = .intro
     var navigationDirection: QuizNavigationDirection = .forward
     var isShowingLearnMore: Bool = false
@@ -22,7 +21,6 @@ final class RevealRecoveryQuizViewModel {
         questionsProvider: any RevealQuizQuestionsProviderProtocol = DefaultRevealQuizQuestionsProvider()
     ) {
         self.mnemonic = mnemonic
-        self.questionsProvider = questionsProvider
         self.questions = questionsProvider.getQuestions()
     }
 
@@ -52,27 +50,26 @@ final class RevealRecoveryQuizViewModel {
         currentStep = .question(index: 0)
     }
 
-    func answerQuestion(questionIndex: Int, optionIndex: Int) {
+    /// Answers the question currently on screen; ignored outside a question step.
+    func selectOption(_ optionIndex: Int) {
+        guard case let .question(questionIndex) = currentStep, questions.indices.contains(questionIndex) else {
+            return
+        }
         navigationDirection = .forward
-        guard questionIndex >= 0, questionIndex < questions.count else { return }
-        let question = questions[questionIndex]
-        let isCorrect = question.isCorrect(optionIndex: optionIndex)
+        let isCorrect = questions[questionIndex].isCorrect(optionIndex: optionIndex)
         currentStep = .feedback(questionIndex: questionIndex, isCorrect: isCorrect, selectedOption: optionIndex)
     }
 
-    func continueFromFeedback(questionIndex: Int, isCorrect: Bool) {
+    /// Advances from feedback: next question or reveal when correct, retry when wrong.
+    func continueFromFeedback() {
+        guard case let .feedback(questionIndex, isCorrect, _) = currentStep else { return }
         navigationDirection = .forward
-        if isCorrect {
-            let nextIndex = questionIndex + 1
-            if nextIndex < questions.count {
-                currentStep = .question(index: nextIndex)
-            } else {
-                currentStep = .revealed
-            }
-        } else {
-            // Retry the current question
+        guard isCorrect else {
             currentStep = .question(index: questionIndex)
+            return
         }
+        let nextIndex = questionIndex + 1
+        currentStep = questions.indices.contains(nextIndex) ? .question(index: nextIndex) : .revealed
     }
 
     func goBack() {

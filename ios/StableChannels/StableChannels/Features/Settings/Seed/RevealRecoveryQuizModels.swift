@@ -28,21 +28,6 @@ enum RevealQuizStep: Equatable {
     case question(index: Int)
     case feedback(questionIndex: Int, isCorrect: Bool, selectedOption: Int)
     case revealed
-
-    static func == (lhs: RevealQuizStep, rhs: RevealQuizStep) -> Bool {
-        switch (lhs, rhs) {
-        case (.intro, .intro):
-            return true
-        case let (.question(lIdx), .question(rIdx)):
-            return lIdx == rIdx
-        case let (.feedback(lQ, lC, lO), .feedback(rQ, rC, rO)):
-            return lQ == rQ && lC == rC && lO == rO
-        case (.revealed, .revealed):
-            return true
-        default:
-            return false
-        }
-    }
 }
 
 /// Provider protocol for quiz questions to support dependency injection and testability.

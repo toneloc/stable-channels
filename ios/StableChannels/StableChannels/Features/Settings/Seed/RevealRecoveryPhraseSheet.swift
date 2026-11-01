@@ -42,7 +42,7 @@ struct RevealRecoveryPhraseSheet: View {
                                 question: viewModel.questions[index],
                                 onSelectOption: { optionIndex in
                                     withAnimation(.easeInOut(duration: 0.25)) {
-                                        viewModel.answerQuestion(questionIndex: index, optionIndex: optionIndex)
+                                        viewModel.selectOption(optionIndex)
                                     }
                                 },
                                 onLearnMore: {
@@ -59,10 +59,7 @@ struct RevealRecoveryPhraseSheet: View {
                                 isCorrect: isCorrect,
                                 onContinue: {
                                     withAnimation(.easeInOut(duration: 0.25)) {
-                                        viewModel.continueFromFeedback(
-                                            questionIndex: questionIndex,
-                                            isCorrect: isCorrect
-                                        )
+                                        viewModel.continueFromFeedback()
                                     }
                                 },
                                 onLearnMore: {
