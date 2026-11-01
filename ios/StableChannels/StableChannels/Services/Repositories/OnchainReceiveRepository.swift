@@ -22,13 +22,7 @@ final class OnchainReceiveRepository {
         self.rawSQL = rawSQL
     }
 
-    /// Records a receive seen on the WebSocket, at most once per txid.
-    ///
-    /// Once the wallet balance has counted the transaction ([balanceCounted]), the balance fallback
-    /// may have recorded it as a txid-less placeholder listing this txid as a candidate: one of
-    /// exactly this amount takes the txid, and a larger one (several deposits in one balance jump)
-    /// gives this amount up to a new row. Any other placeholder belongs to another deposit, so a new
-    /// row is written, as it is before the balance counts the transaction.
+    /// Records a receive seen on the WebSocket, at most once per txid. See ``recordReceive``.
     func recordWebSocketReceive(
         txid: String,
         address: String,
@@ -38,71 +32,181 @@ final class OnchainReceiveRepository {
         balanceCounted: Bool
     ) throws -> WebSocketReceiveOutcome {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            let existing = try rawSQL.query(
-                "SELECT 1 FROM payments WHERE txid = ? LIMIT 1",
-                params: [.text(txid)]
+            try recordReceive(
+                txid: txid,
+                address: address,
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: btcPrice,
+                balanceCounted: balanceCounted
             )
-            if !existing.isEmpty { return .alreadyRecorded }
+        }
+    }
 
-            if balanceCounted,
-               let placeholder = try fallbackRow(for: txid, covering: amountMsat, address: address) {
-                let rowId = placeholder.int64(0)
-                if placeholder.int64(2) == Int64(amountMsat) {
-                    if let resolutionId = placeholder.optInt64(1) {
-                        // Stops the txid resolver: the deposit is identified.
-                        try rawSQL.execute(
-                            """
-                            UPDATE onchain_receive_txids
-                            SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
-                            WHERE id = ? AND status = 'pending'
-                            """,
-                            params: [.text(txid), .integer(resolutionId)]
-                        )
-                    }
-                    try rawSQL.execute(
-                        "UPDATE payments SET txid = ?, address = ? WHERE id = ?",
-                        params: [.text(txid), .text(address), .integer(rowId)]
-                    )
-                    return .adoptedPlaceholder
-                }
-                try shrinkPlaceholder(rowId: rowId, byMsat: Int64(amountMsat))
-                try insertReceive(
-                    txid: txid,
-                    address: address,
-                    amountMsat: amountMsat,
-                    amountUSD: amountUSD,
-                    btcPrice: btcPrice
-                )
-                return .splitFromPlaceholder
+    /// Records a deposit found by an address lookup, at most once per txid. Skipped while a splice
+    /// has no txid yet ([hasSpliceWithoutTxid]: a payment to our address could be that splice's
+    /// self-send; retried on a later check), for an amount no transaction can have, and when a row
+    /// with this amount since [sinceSecs] already covers it: one carrying this txid, or an older
+    /// txid-less one that is not a pending placeholder (the txid check alone would duplicate those).
+    /// Placeholders are handled by ``recordReceive``. Returns true when a row took the deposit.
+    func recordMissedReceive(
+        txid: String,
+        amountSats: Int64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        address: String,
+        sinceSecs: Int64,
+        balanceCounted: Bool,
+        hasSpliceWithoutTxid: Bool
+    ) throws -> Bool {
+        guard !hasSpliceWithoutTxid, let amountMsat = OnchainAmount.msats(fromSats: amountSats) else { return false }
+        return try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            let duplicate = try rawSQL.query(
+                """
+                SELECT 1 FROM payments
+                WHERE payment_type = 'onchain' AND direction = 'received'
+                  AND amount_msat = ? AND created_at >= ?
+                  AND status != 'failed'
+                  AND (\(Self.lacksTxid) OR txid = ?)
+                  AND NOT (status = 'pending' AND \(Self.lacksTxid))
+                LIMIT 1
+                """,
+                params: [.integer(Int64(amountMsat)), .integer(sinceSecs), .text(txid)]
+            )
+            if !duplicate.isEmpty { return false }
+            return try recordReceive(
+                txid: txid,
+                address: address,
+                amountMsat: amountMsat,
+                amountUSD: amountUSD,
+                btcPrice: btcPrice,
+                balanceCounted: balanceCounted
+            ) != .alreadyRecorded
+        }
+    }
+
+    /// The one deposit recorder, for the WebSocket and the address-lookup recovery: at most one row
+    /// per txid. Must run inside the caller's transaction.
+    ///
+    /// Once the wallet balance has counted the transaction ([balanceCounted]), the balance fallback
+    /// may have recorded it as a placeholder listing this txid as a candidate: one of exactly this
+    /// amount takes the txid, and a larger one (several deposits in one balance jump) gives this
+    /// amount up to a new row. Any other placeholder belongs to another deposit, so a new row is
+    /// written, as it is before the balance counts the transaction. An equal amount alone is never
+    /// evidence.
+    private func recordReceive(
+        txid: String,
+        address: String,
+        amountMsat: UInt64,
+        amountUSD: Double?,
+        btcPrice: Double?,
+        balanceCounted: Bool
+    ) throws -> WebSocketReceiveOutcome {
+        if try isRecorded(txid: txid) { return .alreadyRecorded }
+        if balanceCounted, let placeholder = try candidatePlaceholder(
+            for: txid,
+            covering: amountMsat,
+            address: address
+        ) {
+            if placeholder.amountMsat == Int64(amountMsat) {
+                try attach(txid: txid, toRowId: placeholder.id, address: address)
+                return .adoptedPlaceholder
             }
-
-            let inserted = try insertReceive(
+            try shrinkPlaceholder(rowId: placeholder.id, byMsat: Int64(amountMsat))
+            try insertReceive(
                 txid: txid,
                 address: address,
                 amountMsat: amountMsat,
                 amountUSD: amountUSD,
                 btcPrice: btcPrice
             )
-            return inserted ? .inserted : .alreadyRecorded
+            return .splitFromPlaceholder
+        }
+        let inserted = try insertReceive(
+            txid: txid,
+            address: address,
+            amountMsat: amountMsat,
+            amountUSD: amountUSD,
+            btcPrice: btcPrice
+        )
+        return inserted ? .inserted : .alreadyRecorded
+    }
+
+    /// Gives the placeholder [rowId] the txid of a deposit the wallet list or the address resolver
+    /// identified, by the same rule as ``recordReceive``: the placeholder lists [txid] as a
+    /// candidate, is on [address] and is of exactly [amountMsat], and no row carries [txid] yet.
+    /// Returns true when the placeholder took the txid.
+    func attachTxid(rowId: Int64, txid: String, address: String, amountMsat: Int64) throws -> Bool {
+        guard amountMsat > 0 else { return false }
+        return try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            guard try !isRecorded(txid: txid),
+                  let placeholder = try candidatePlaceholder(
+                      for: txid,
+                      covering: UInt64(amountMsat),
+                      address: address,
+                      rowId: rowId
+                  ),
+                  placeholder.amountMsat == amountMsat else { return false }
+            try attach(txid: txid, toRowId: rowId, address: address)
+            return true
         }
     }
 
-    /// The oldest pending, txid-less fallback row for [address] that lists [txid] as a candidate and
-    /// is at least [amountMsat], preferring one of exactly that amount: (id, resolution_id, amount_msat).
-    private func fallbackRow(for txid: String, covering amountMsat: UInt64, address: String) throws -> [Any?]? {
-        try rawSQL.query(
+    /// Whether a payment row already carries [txid].
+    private func isRecorded(txid: String) throws -> Bool {
+        try !rawSQL.query("SELECT 1 FROM payments WHERE txid = ? LIMIT 1", params: [.text(txid)]).isEmpty
+    }
+
+    /// A row without a txid, as SQL.
+    static let lacksTxid = SharedPaymentSQL.lacksTxid()
+    /// A receive row's address, as SQL over `payments p LEFT JOIN onchain_receive_txids r`: a
+    /// placeholder's address lives on its resolution row, a txid row's on the payment.
+    static let receiveRowAddress = "COALESCE(NULLIF(p.address, ''), r.address)"
+
+    /// The oldest pending placeholder for [address] (or [rowId] alone) that lists [txid] as a
+    /// candidate and is at least [amountMsat], preferring one of exactly that amount.
+    private func candidatePlaceholder(
+        for txid: String,
+        covering amountMsat: UInt64,
+        address: String,
+        rowId: Int64? = nil
+    ) throws -> (id: Int64, amountMsat: Int64)? {
+        guard let msat = Int64(exactly: amountMsat) else { return nil }
+        return try rawSQL.query(
             """
-            SELECT p.id, p.resolution_id, p.amount_msat FROM payments p
+            SELECT p.id, p.amount_msat FROM payments p
             LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
             WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
-              AND p.txid IS NULL AND p.amount_msat >= ? AND (r.address IS NULL OR r.address = ?)
+              AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND p.amount_msat >= ?
+              AND (r.address IS NULL OR r.address = ?) AND (? IS NULL OR p.id = ?)
               AND EXISTS (
                   SELECT 1 FROM onchain_deposit_candidates c WHERE c.payment_id = p.payment_id AND c.txid = ?
               )
             ORDER BY p.amount_msat = ? DESC, p.id ASC LIMIT 1
             """,
-            params: [.integer(Int64(amountMsat)), .text(address), .text(txid), .integer(Int64(amountMsat))]
-        ).first
+            params: [
+                .integer(msat), .text(address), rowId.map { .integer($0) } ?? .null,
+                rowId.map { .integer($0) } ?? .null, .text(txid), .integer(msat)
+            ]
+        ).first.map { (id: $0.int64(0), amountMsat: $0.int64(1)) }
+    }
+
+    /// Writes [txid] on the placeholder [rowId] and resolves its resolution row, so the address
+    /// resolver stops. The row stays pending under its own payment id: the confirmation poller
+    /// completes it, and its candidates stay linked.
+    private func attach(txid: String, toRowId rowId: Int64, address: String) throws {
+        try rawSQL.execute(
+            """
+            UPDATE onchain_receive_txids
+            SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
+            WHERE status = 'pending' AND id = (SELECT resolution_id FROM payments WHERE id = ?)
+            """,
+            params: [.text(txid), .integer(rowId)]
+        )
+        try rawSQL.execute(
+            "UPDATE payments SET txid = ?, address = ? WHERE id = ?",
+            params: [.text(txid), .text(address), .integer(rowId)]
+        )
     }
 
     /// Gives [amountMsat] of a merged placeholder up to the deposit that is split out of it.
@@ -200,7 +304,7 @@ final class OnchainReceiveRepository {
             """
             UPDATE payments SET status = 'completed'
             WHERE payment_type = 'onchain' AND direction = 'received' AND status = 'pending'
-              AND (txid IS NULL OR txid = '') AND created_at < ?
+              AND \(Self.lacksTxid) AND created_at < ?
               AND EXISTS (
                   SELECT 1 FROM onchain_deposit_candidates c
                   WHERE c.payment_id = payments.payment_id AND c.txid IN (\(marks))
@@ -380,6 +484,21 @@ final class OnchainReceiveRepository {
         }
     }
 
+    /// The pending placeholder the address resolver [resolutionId] works for, with its address.
+    func pendingPlaceholder(resolutionId: Int64) -> ReceiveTxidAdoption.Placeholder? {
+        guard let row = try? rawSQL.query(
+            """
+            SELECT p.id, r.address, p.amount_msat FROM payments p
+            JOIN onchain_receive_txids r ON r.id = p.resolution_id
+            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+              AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND p.resolution_id = ?
+            ORDER BY p.created_at ASC LIMIT 1
+            """,
+            params: [.integer(resolutionId)]
+        ).first else { return nil }
+        return ReceiveTxidAdoption.Placeholder(id: row.int64(0), address: row.string(1), amountMsat: row.int64(2))
+    }
+
     func fetchLatestResolvedOnchainTxid() -> String? {
         do {
             let rows = try rawSQL.query(
@@ -409,227 +528,36 @@ final class OnchainReceiveRepository {
         }
     }
 
-    // MARK: - Receive recording (websocket, recovery, wallet-list adoption)
+    // MARK: - Wallet-list adoption
 
-    /// Receive rows joined to their resolution row, so a balance-delta placeholder (whose
-    /// address lives on `onchain_receive_txids`) and a txid row (address on the payment)
-    /// expose one address.
-    private static let receiveRowsFrom = """
-    FROM payments p
-    LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
-    WHERE p.payment_type = 'onchain' AND p.direction = 'received'
-    """
-    private static let rowAddress = "COALESCE(NULLIF(p.address, ''), r.address)"
-    private static let isTxidless = "(p.txid IS NULL OR p.txid = '')"
-    /// Bounds the placeholder scans; a wallet never has this many deposits pending at once.
-    private static let maxPendingPlaceholders = 64
+    /// Bounds the candidate scan; a wallet never has this many deposits pending at once.
+    private static let maxPlaceholderCandidates = 256
 
-    /// Whether `txid` is already accounted for by a payment row, a resolution row, or the
-    /// receive row id it would get.
-    private func isTracked(txid: String) throws -> Bool {
-        let rows = try rawSQL.query(
-            """
-            SELECT 1 FROM payments WHERE txid = ? OR payment_id = ?
-            UNION ALL SELECT 1 FROM onchain_receive_txids WHERE txid = ?
-            LIMIT 1
-            """,
-            params: [.text(txid), .text(Self.receivePaymentId(txid: txid)), .text(txid)]
-        )
-        return !rows.isEmpty
-    }
-
-    /// Records a websocket-detected or recovered receive unless its txid is already tracked.
-    /// Check and write run in one transaction so a concurrent balance-delta detection can't
-    /// double-insert. A txid-less placeholder for this address with exactly this amount is
-    /// adopted instead of inserting a second row: for a single deposit the balance delta
-    /// equals the vout sum, so a placeholder with another amount is a different deposit, or
-    /// several merged into one. A merged placeholder that lists this txid as a candidate gives
-    /// its amount up to the new row, as on the WebSocket path; one that does not is dropped here
-    /// once its own rows add up to it. Returns true when a row was adopted or inserted.
-    func recordReceive(
-        txid: String,
-        amountSats: Int64,
-        amountUSD: Double?,
-        btcPrice: Double?,
-        address: String
-    ) throws -> Bool {
-        try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            if try isTracked(txid: txid) { return false }
-            let amountMsat = amountSats * 1000
-            let placeholder = try rawSQL.query(
-                """
-                SELECT p.id \(Self.receiveRowsFrom)
-                  AND p.status = 'pending' AND \(Self.isTxidless)
-                  AND p.amount_msat = ? AND \(Self.rowAddress) = ?
-                ORDER BY p.created_at DESC, p.id DESC LIMIT 1
-                """,
-                params: [.integer(amountMsat), .text(address)]
-            ).first
-            // Amount alone is no evidence for a split: the placeholder must list this txid.
-            let merged = try fallbackRow(for: txid, covering: UInt64(clamping: amountMsat), address: address)
-            let exactId = placeholder?.int64(0) ?? merged.flatMap { $0.int64(2) == amountMsat ? $0.int64(0) : nil }
-            if let rowId = exactId {
-                try attach(txid: txid, toRowId: rowId, address: address)
-                try rawSQL.execute(
-                    "UPDATE payments SET amount_usd = ?, btc_price = ? WHERE id = ?",
-                    params: [
-                        amountUSD.map { .real($0) } ?? .null,
-                        btcPrice.map { .real($0) } ?? .null,
-                        .integer(rowId)
-                    ]
-                )
-                return true
-            }
-            if let merged { try shrinkPlaceholder(rowId: merged.int64(0), byMsat: amountMsat) }
-            try rawSQL.execute(
-                """
-                INSERT INTO payments (
-                    payment_id, payment_type, direction, amount_msat,
-                    amount_usd, btc_price, status, txid, address
-                )
-                VALUES (?, 'onchain', 'received', ?, ?, ?, 'pending', ?, ?)
-                """,
-                params: [
-                    .text(Self.receivePaymentId(txid: txid)),
-                    .integer(amountMsat),
-                    amountUSD.map { .real($0) } ?? .null,
-                    btcPrice.map { .real($0) } ?? .null,
-                    .text(txid),
-                    .text(address)
-                ]
-            )
-            try dropMergedPlaceholders(address: address)
-            return true
-        }
-    }
-
-    /// Records a deposit found by an address lookup. Skipped while a splice has no txid yet
-    /// (a payment to our address could be that splice's self-send; retried on a later check),
-    /// and when a row with this amount since `sinceSecs` already covers it: one carrying this
-    /// txid, or an older txid-less one that is not a pending placeholder (the txid check alone
-    /// would duplicate those). Pending placeholders are adopted by `recordReceive`.
-    func recordMissedReceive(
-        txid: String,
-        amountSats: Int64,
-        amountUSD: Double?,
-        btcPrice: Double?,
-        address: String,
-        sinceSecs: Int64
-    ) throws -> Bool {
-        try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            let spliceWithoutTxid = try rawSQL.query(SpliceEventRecorder.hasPendingSpliceWithoutTxidSQL)
-            if !spliceWithoutTxid.isEmpty { return false }
-            let duplicate = try rawSQL.query(
-                """
-                SELECT 1 FROM payments
-                WHERE payment_type = 'onchain' AND direction = 'received'
-                  AND amount_msat = ? AND created_at >= ?
-                  AND status != 'failed'
-                  AND (txid IS NULL OR txid = '' OR txid = ?)
-                  AND NOT (status = 'pending' AND (txid IS NULL OR txid = ''))
-                LIMIT 1
-                """,
-                params: [.integer(amountSats * 1000), .integer(sinceSecs), .text(txid)]
-            )
-            if !duplicate.isEmpty { return false }
-            return try recordReceive(
-                txid: txid,
-                amountSats: amountSats,
-                amountUSD: amountUSD,
-                btcPrice: btcPrice,
-                address: address
-            )
-        }
-    }
-
-    /// Attaches `txid` to a txid-less pending row and resolves its resolution row, so an
-    /// in-flight address resolver can no longer attach another transaction to it.
-    private func attach(txid: String, toRowId rowId: Int64, address: String) throws {
-        try rawSQL.execute(
-            """
-            UPDATE onchain_receive_txids
-            SET txid = ?, status = 'resolved', resolved_at = strftime('%s', 'now')
-            WHERE status = 'pending' AND id = (SELECT resolution_id FROM payments WHERE id = ?)
-            """,
-            params: [.text(txid), .integer(rowId)]
-        )
-        try rawSQL.execute(
-            """
-            UPDATE payments SET payment_id = ?, txid = ?, address = ?
-            WHERE id = ? AND status = 'pending' AND (txid IS NULL OR txid = '')
-            """,
-            params: [.text(Self.receivePaymentId(txid: txid)), .text(txid), .text(address), .integer(rowId)]
-        )
-    }
-
-    /// Deletes txid-less pending placeholders on `address` that two or more txid rows recorded
-    /// soon after them add up to (see `MergedReceivePolicy`), with their pending resolution rows.
-    private func dropMergedPlaceholders(address: String) throws {
-        let placeholders = try rawSQL.query(
-            """
-            SELECT p.id, p.amount_msat, p.created_at \(Self.receiveRowsFrom)
-              AND p.status = 'pending' AND \(Self.isTxidless) AND \(Self.rowAddress) = ?
-            ORDER BY p.created_at ASC LIMIT \(Self.maxPendingPlaceholders)
-            """,
-            params: [.text(address)]
-        ).map { MergedReceivePolicy.Row(id: $0.int64(0), amountMsat: $0.int64(1), createdAt: $0.int64(2)) }
-        guard let earliest = placeholders.first?.createdAt,
-              let latest = placeholders.map(\.createdAt).max() else { return }
-        let receives = try rawSQL.query(
-            """
-            SELECT p.id, p.amount_msat, p.created_at \(Self.receiveRowsFrom)
-              AND NOT \(Self.isTxidless) AND p.status != 'failed' AND \(Self.rowAddress) = ?
-              AND p.created_at >= ? AND p.created_at <= ?
-            ORDER BY p.created_at ASC, p.id ASC LIMIT ?
-            """,
-            params: [
-                .text(address),
-                .integer(earliest),
-                .integer(latest + MergedReceivePolicy.windowSeconds),
-                .integer(Int64(placeholders.count * MergedReceivePolicy.maxRowsPerPlaceholder))
-            ]
-        ).map { MergedReceivePolicy.Row(id: $0.int64(0), amountMsat: $0.int64(1), createdAt: $0.int64(2)) }
-        for id in MergedReceivePolicy.mergedPlaceholderIds(placeholders: placeholders, receives: receives) {
-            try rawSQL.execute(
-                """
-                DELETE FROM onchain_receive_txids WHERE status = 'pending'
-                  AND id = (SELECT resolution_id FROM payments WHERE id = ?)
-                """,
-                params: [.integer(id)]
-            )
-            try rawSQL.execute("DELETE FROM payments WHERE id = ?", params: [.integer(id)])
-        }
-    }
-
-    /// Txid-less pending receives that have an address, oldest first, for wallet-list txid
-    /// adoption. Rows without an address are never candidates.
-    func txidlessPendingReceivesWithAddress() -> [ReceiveTxidAdoption.Placeholder] {
+    /// Pending placeholders that have an address, with the candidate txids recorded for them,
+    /// oldest first. Rows without an address or candidates are never adopted.
+    func placeholdersWithCandidates() -> [ReceiveTxidAdoption.Placeholder] {
         let rows = (try? rawSQL.query(
             """
-            SELECT p.id, \(Self.rowAddress), p.amount_msat, p.created_at \(Self.receiveRowsFrom)
-              AND p.status = 'pending' AND \(Self.isTxidless)
-              AND \(Self.rowAddress) IS NOT NULL AND \(Self.rowAddress) != ''
-            ORDER BY p.created_at ASC LIMIT \(Self.maxPendingPlaceholders)
+            SELECT p.id, \(Self.receiveRowAddress) AS row_address, p.amount_msat, c.txid
+            FROM payments p
+            LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
+            JOIN onchain_deposit_candidates c ON c.payment_id = p.payment_id
+            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+              AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND row_address IS NOT NULL AND row_address != ''
+            ORDER BY p.created_at ASC, p.id ASC LIMIT \(Self.maxPlaceholderCandidates)
             """,
             params: []
         )) ?? []
-        return rows.map {
-            ReceiveTxidAdoption.Placeholder(
-                id: $0.int64(0),
-                address: $0.string(1),
-                amountMsat: $0.int64(2),
-                createdAt: $0.int64(3)
-            )
+        var placeholders: [ReceiveTxidAdoption.Placeholder] = []
+        for row in rows {
+            let id = row.int64(0)
+            if placeholders.last?.id != id {
+                placeholders.append(
+                    ReceiveTxidAdoption.Placeholder(id: id, address: row.string(1), amountMsat: row.int64(2))
+                )
+            }
+            placeholders[placeholders.count - 1].candidateTxids.insert(row.string(3))
         }
-    }
-
-    /// Attaches `txid` to the txid-less pending receive `rowId`. Does nothing if the row got a
-    /// txid meanwhile or `txid` is already tracked. Returns true when the row was updated.
-    func adoptTxid(rowId: Int64, txid: String, address: String) -> Bool {
-        (try? rawSQL.inTransaction(mode: "IMMEDIATE") {
-            if try isTracked(txid: txid) { return false }
-            try attach(txid: txid, toRowId: rowId, address: address)
-            return rawSQL.changes > 0
-        }) ?? false
+        return placeholders
     }
 }

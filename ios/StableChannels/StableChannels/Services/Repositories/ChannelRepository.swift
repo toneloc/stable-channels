@@ -372,7 +372,7 @@ final class ChannelRepository {
             """
             UPDATE trades
             SET payment_id = ?, trade_payment_id = ?, status = 'fee_paid'
-            WHERE id = ? AND status IN ('prepared','sent','uncertain')
+            WHERE id = ? AND status IN \(SharedPaymentSQL.unresolvedTradeStatuses)
               AND (trade_payment_id IS NULL OR trade_payment_id = ?)
             """,
             params: [
@@ -382,16 +382,11 @@ final class ChannelRepository {
     }
 
     func tradePaymentExists(paymentId: String) throws -> Bool {
-        try !rawSQL.query(
-            "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1",
-            params: [.text(paymentId)]
-        ).isEmpty
+        try !rawSQL.query(SharedPaymentSQL.tradeWithPaymentId, params: [.text(paymentId)]).isEmpty
     }
 
     func hasUnattachedPreparedTrade() throws -> Bool {
-        try !rawSQL.query(
-            "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1"
-        ).isEmpty
+        try !rawSQL.query(SharedPaymentSQL.anyUnattachedPreparedTrade).isEmpty
     }
 
     func adoptUnattachedPreparedTrade(
@@ -399,32 +394,14 @@ final class ChannelRepository {
         amountMsat: UInt64,
         now: UInt64 = UInt64(Date().timeIntervalSince1970)
     ) throws -> PendingTradePayment? {
-        guard TradeProtocol.isCanonicalIdentifier(paymentId),
-              amountMsat <= UInt64(Int64.max), now <= UInt64(Int64.max) else { return nil }
-        return try rawSQL.inTransaction {
-            let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs)
-                - TradeProtocol.responseRetryWindowSecs)
-            let rows = try rawSQL.query(
-                "SELECT id, new_expected_usd, quote_price, action \(SharedPaymentSQL.unattachedPreparedTradeMatch)",
-                params: [.integer(Int64(amountMsat)), .integer(cutoff)]
-            )
-            guard rows.count == 1, let row = rows.first else { return nil }
-            let tradeDbId = row.int64(0)
-            let changed = try rawSQL.executeReturningChanges(
-                SharedPaymentSQL.adoptPaidPaymentForUnattachedTrade,
-                params: [.text(paymentId), .text(paymentId), .integer(tradeDbId)]
-            )
-            guard changed == 1 else {
-                throw DatabaseError.executeFailed("Prepared trade payment adoption lost its race")
-            }
-            return PendingTradePayment(
-                newExpectedUSD: row.double(1),
-                price: row.double(2),
-                tradeDbId: tradeDbId,
-                action: row.string(3),
-                status: "fee_paid"
-            )
-        }
+        try attachToUnattachedPreparedTrade(
+            paymentId: paymentId,
+            amountMsat: amountMsat,
+            now: now,
+            sql: SharedPaymentSQL.adoptPaidPaymentForUnattachedTrade,
+            params: [.text(paymentId), .text(paymentId)],
+            resultingStatus: "fee_paid"
+        )
     }
 
     func failUnattachedPreparedTrade(
@@ -433,35 +410,54 @@ final class ChannelRepository {
         reasonCode: String? = nil,
         now: UInt64 = UInt64(Date().timeIntervalSince1970)
     ) throws -> PendingTradePayment? {
-        guard TradeProtocol.isCanonicalIdentifier(paymentId),
-              amountMsat <= UInt64(Int64.max), now <= UInt64(Int64.max) else { return nil }
+        try attachToUnattachedPreparedTrade(
+            paymentId: paymentId,
+            amountMsat: amountMsat,
+            now: now,
+            sql: SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade,
+            params: [.text(paymentId), .text(paymentId), reasonCode.map { .text($0) } ?? .null],
+            resultingStatus: "send_failed"
+        )
+    }
+
+    /// The one rule (shared with the notification extension) for a fee payment whose id was never
+    /// attached: exactly one recent prepared trade with this fee amount takes it through `sql`,
+    /// bound with `params` and then the trade row id.
+    private func attachToUnattachedPreparedTrade(
+        paymentId: String,
+        amountMsat: UInt64,
+        now: UInt64,
+        sql: String,
+        params: [SQLValue],
+        resultingStatus: String
+    ) throws -> PendingTradePayment? {
+        guard TradeProtocol.isCanonicalIdentifier(paymentId), let amount = Int64(exactly: amountMsat),
+              let cutoff = TradeProtocol.unattachedTradeCutoff(now: now) else { return nil }
         return try rawSQL.inTransaction {
-            let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs)
-                - TradeProtocol.responseRetryWindowSecs)
             let rows = try rawSQL.query(
                 "SELECT id, new_expected_usd, quote_price, action \(SharedPaymentSQL.unattachedPreparedTradeMatch)",
-                params: [.integer(Int64(amountMsat)), .integer(cutoff)]
+                params: [.integer(amount), .integer(cutoff)]
             )
             guard rows.count == 1, let row = rows.first else { return nil }
             let tradeDbId = row.int64(0)
-            let changed = try rawSQL.executeReturningChanges(
-                SharedPaymentSQL.adoptFailedPaymentForUnattachedTrade,
-                params: [
-                    .text(paymentId), .text(paymentId), reasonCode.map { .text($0) } ?? .null,
-                    .integer(tradeDbId)
-                ]
-            )
-            guard changed == 1 else {
-                throw DatabaseError.executeFailed("Prepared trade failure adoption lost its race")
+            guard try rawSQL.executeReturningChanges(sql, params: params + [.integer(tradeDbId)]) == 1 else {
+                throw DatabaseError.executeFailed("Prepared trade payment adoption lost its race")
             }
             return PendingTradePayment(
                 newExpectedUSD: row.double(1),
                 price: row.double(2),
                 tradeDbId: tradeDbId,
                 action: row.string(3),
-                status: "send_failed"
+                status: resultingStatus
             )
         }
+    }
+
+    func markTradeSendFailed(paymentId: String, reasonCode: String? = nil) throws -> Bool {
+        try rawSQL.executeReturningChanges(
+            SharedPaymentSQL.markTradeSendFailedByPaymentId,
+            params: [reasonCode.map { .text($0) } ?? .null, .text(paymentId)]
+        ) == 1
     }
 
     func markTradeSendFailed(tradeDbId: Int64, reasonCode: String? = nil) throws -> Bool {

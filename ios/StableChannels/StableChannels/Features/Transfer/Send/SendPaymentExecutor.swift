@@ -185,18 +185,14 @@ struct SendPaymentExecutor {
                     previousFundingTxid: channel.fundingTxo?.txid
                 )
             )
-            do {
+            try appState.startLockedSplice {
                 try appState.nodeService.spliceOut(
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId,
                     address: address,
                     amountSats: effectiveSats
                 )
-            } catch {
-                appState.cancelPendingSpliceStart()
-                throw error
             }
-            appState.spliceStartAccepted()
             return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .spliceOut)
         } else {
             let txid = try appState.nodeService.sendOnchain(

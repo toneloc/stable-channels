@@ -1,28 +1,19 @@
 import Foundation
 
-private struct TxStatusResponse: Decodable {
-    let confirmed: Bool
-    let blockHeight: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case confirmed
-        case blockHeight = "block_height"
-    }
-
-    var txStatus: TxStatus {
-        guard confirmed, let blockHeight, blockHeight > 0 else { return TxStatus(blockHeight: nil) }
-        return TxStatus(blockHeight: UInt32(blockHeight))
-    }
-}
-
-/// `/tx/:txid` body: the same `status` object `/tx/:txid/status` returns. Outputs are read by
-/// `MissedReceiveRecovery.outputsPaying`, the one address-matching rule.
-private struct TxResponse: Decodable {
-    let status: TxStatusResponse?
-}
-
 struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
     private let client: ResilientEsploraClient
+
+    /// One quick pass over the explorers, for checks the next tick retries anyway.
+    static func singlePass(chainURLs: [String]) -> TxConfirmationResolver {
+        TxConfirmationResolver(client: ResilientEsploraClient(config: .singlePass(
+            chainURLs: chainURLs,
+            maxBodyBytes: ResilientEsploraClient.Config.fullTransactionMaxBodyBytes
+        )))
+    }
+
+    private init(client: ResilientEsploraClient) {
+        self.client = client
+    }
 
     init(
         chainURLs: [String] = Constants.esploraChainURLs,
@@ -53,7 +44,7 @@ struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
                 ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"]
             },
             resultParser: { (data: Data) -> TxStatus? in
-                try JSONDecoder().decode(TxStatusResponse.self, from: data).txStatus
+                try (JSONSerialization.jsonObject(with: data) as? [String: Any]).flatMap(Self.txStatus)
             }
         )
         try Task.checkCancellation()
@@ -70,14 +61,16 @@ struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
                 ["\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)"]
             },
             resultParser: { (data: Data) -> ReceiveTxCheck? in
-                let tx = try JSONDecoder().decode(TxResponse.self, from: data)
-                let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
                 // A body without an output list cannot answer the address question.
-                guard let paying = MissedReceiveRecovery.outputsPaying(body, address: address) else { return nil }
-                return ReceiveTxCheck(
-                    paysToAddress: !paying.isEmpty,
-                    status: tx.status?.txStatus
-                )
+                guard let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let paying = MissedReceiveRecovery.outputsPaying(body, address: address) else { return nil }
+                // The same `status` object `/tx/:txid/status` returns; a malformed one is unreadable.
+                var status: TxStatus?
+                if let raw = body["status"], !(raw is NSNull) {
+                    guard let parsed = (raw as? [String: Any]).flatMap(Self.txStatus) else { return nil }
+                    status = parsed
+                }
+                return ReceiveTxCheck(paysToAddress: !paying.isEmpty, status: status)
             }
         )
         try Task.checkCancellation()
@@ -87,15 +80,25 @@ struct TxConfirmationResolver: TxConfirmationProvider, TxPresenceProviding {
     /// One request per explorer, no retries. Esplora answers 404 for a txid it does not know; the
     /// transaction is gone only when every explorer answered that, since one may lag the others.
     func isKnown(txid: String) async -> Bool? {
-        var allNotFound = !client.config.chainURLs.isEmpty
-        for base in client.config.chainURLs {
-            let path = "\(ResilientEsploraClient.trimSlash(base))/tx/\(txid)/status"
-            switch await client.fetchResponse(path: path) {
-            case .ok: return true
-            case .notFound: break
-            case .failed: allNotFound = false
-            }
+        let singlePass = ResilientEsploraClient(
+            urlSession: client.urlSession,
+            config: .singlePass(chainURLs: client.config.chainURLs)
+        )
+        let lookup = await singlePass.lookup(
+            endpointBuilder: { ["\(ResilientEsploraClient.trimSlash($0))/tx/\(txid)/status"] },
+            resultParser: { _ in true }
+        )
+        switch lookup {
+        case .found: return true
+        case .notFound: return false
+        case .unavailable: return nil
         }
-        return allNotFound ? false : nil
+    }
+
+    /// An Esplora `status` object; nil when `confirmed` is missing.
+    private static func txStatus(_ json: [String: Any]) -> TxStatus? {
+        guard let confirmed = json["confirmed"] as? Bool else { return nil }
+        let height = (json["block_height"] as? Int).flatMap(UInt32.init(exactly:)) ?? 0
+        return TxStatus(blockHeight: confirmed && height > 0 ? height : nil)
     }
 }

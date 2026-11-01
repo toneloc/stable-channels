@@ -370,6 +370,11 @@ class NodeService: NodeServiceProtocol {
         channels = node.listChannels()
     }
 
+    /// The wallet's inbound on-chain payments, read live; nil while the node is not running.
+    func inboundOnchain() -> WalletInboundOnchain? {
+        node.map { WalletInboundOnchain($0.listPayments()) }
+    }
+
     func connectAndOpenChannel(
         pubkey: String,
         address: String,
@@ -789,7 +794,10 @@ extension WalletInboundOnchain {
             guard case let .onchain(txid, _) = payment.kind else { continue }
             if case .failed = payment.status { continue }
             txids.insert(txid)
-            if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000) { sats[txid] = amount }
+            if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000),
+               amount <= OnchainAmount.maxSats {
+                sats[txid] = amount
+            }
         }
         self.init(txids: txids, sats: sats)
     }
@@ -826,15 +834,6 @@ extension LightningPaymentResolution {
         case .failed: self = .failed(reasonCode: nil)
         case .pending: return nil
         }
-    }
-}
-
-extension ReceiveTxidAdoption.WalletReceive {
-    /// nil for anything but an inbound on-chain payment with a known amount.
-    init?(_ payment: PaymentDetails) {
-        guard payment.direction == .inbound, case let .onchain(txid, _) = payment.kind,
-              let amountMsat = payment.amountMsat else { return nil }
-        self.init(txid: "\(txid)", amountMsat: Int64(amountMsat), seenAtSecs: Int64(payment.latestUpdateTimestamp))
     }
 }
 

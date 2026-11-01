@@ -42,7 +42,7 @@ final class SpliceRepository {
             let changed = try rawSQL.executeReturningChanges(
                 """
                 UPDATE payments SET status = 'failed'
-                WHERE payment_type IN ('splice_in', 'splice_out') AND txid = ? AND status = 'pending'
+                WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL) AND txid = ? AND status = 'pending'
                 """,
                 params: [.text(txid)]
             )
@@ -119,15 +119,21 @@ final class SpliceRepository {
         )
     }
 
-    /// Whether the splice row carrying `txid` was recorded as paying our own address.
-    func isSelfSendSplice(txid: String) throws -> Bool {
-        try !rawSQL.query(
+    /// Whether the splice row carrying `txid` was recorded as paying our own address; nil for a row
+    /// saved without its operation (before the flag existed).
+    func isSelfSendSplice(txid: String) throws -> Bool? {
+        try rawSQL.query(
             """
-            SELECT 1 FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
-            WHERE p.txid = ? AND s.self_send = 1 LIMIT 1
+            SELECT MAX(s.self_send) FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+            WHERE p.txid = ? AND p.payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
             """,
             params: [.text(txid)]
-        ).isEmpty
+        ).first?.optInt64(0).map { $0 != 0 }
+    }
+
+    /// Whether a pending splice is still waiting for its negotiated txid.
+    func hasPendingSpliceWithoutTxid() throws -> Bool {
+        try !rawSQL.query(SpliceEventRecorder.hasPendingSpliceWithoutTxidSQL).isEmpty
     }
 
     /// Commits the event receipt and any txid it lets an operation claim; once this returns the
@@ -193,7 +199,7 @@ final class SpliceRepository {
                 WHERE e.event_type = 'negotiated' AND e.payment_row_id IS NULL AND e.txid IS NOT NULL
                   AND NOT EXISTS (
                       SELECT 1 FROM payments p
-                      WHERE p.txid = e.txid AND p.payment_type IN ('splice_in', 'splice_out')
+                      WHERE p.txid = e.txid AND p.payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
                   )
                 ORDER BY e.rowid LIMIT ?
                 """,
@@ -235,7 +241,7 @@ final class SpliceRepository {
     /// Whether exactly one splice row carries this txid and it is still pending.
     func isPendingSplice(txid: String) throws -> Bool {
         let rows = try rawSQL.query(
-            "SELECT status FROM payments WHERE payment_type IN ('splice_in', 'splice_out') AND txid = ? LIMIT 2",
+            "SELECT status FROM payments WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL) AND txid = ? LIMIT 2",
             params: [.text(txid)]
         )
         return rows.count == 1 && rows[0].string(0) == "pending"
@@ -243,7 +249,7 @@ final class SpliceRepository {
 
     func getPendingSpliceTxid() throws -> String? {
         let rows = try rawSQL.query(
-            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NOT NULL ORDER BY id DESC LIMIT 1"
+            "SELECT txid FROM payments WHERE status = 'pending' AND payment_type IN \(SpliceEventRecorder.spliceTypesSQL) AND txid IS NOT NULL ORDER BY id DESC LIMIT 1"
         )
         return rows.first?.optString(0)
     }
@@ -262,7 +268,7 @@ final class SpliceRepository {
             UPDATE payments
             SET status = 'expired'
             WHERE status = 'pending'
-              AND payment_type IN ('splice_in', 'splice_out')
+              AND payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
               AND txid IS NULL
               AND created_at < ?
             """,
@@ -279,7 +285,7 @@ final class SpliceRepository {
                 """
                 UPDATE payments
                 SET status = 'completed', confirmations = 1
-                WHERE payment_type IN ('splice_in', 'splice_out')
+                WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
                   AND txid = ?
                   AND status IN ('pending', 'failed')
                 """,
@@ -291,15 +297,15 @@ final class SpliceRepository {
         }
     }
 
-    /// Marks the latest pre-negotiation (NULL-txid) splice row failed. This is
-    /// an explicit failure signal (native call threw, or spliceNegotiationFailed
-    /// arrived), so it also finalizes an `expired` row: once the failure is
-    /// known the row must become terminal instead of staying recoverable.
-    /// Rows that already carry a txid are left alone: their tx may be on-chain
-    /// and the confirmation monitor still owns them, so a failed native call or
-    /// a stale negotiation-failure replay must not tear them down.
+    /// Marks the pre-negotiation (NULL-txid) splice row [rowId] failed, or the latest one when
+    /// the row is not known (a negotiation failure after a relaunch). This is an explicit failure
+    /// signal (native call threw, or spliceNegotiationFailed arrived), so it also finalizes an
+    /// `expired` row: once the failure is known the row must become terminal instead of staying
+    /// recoverable. Rows that already carry a txid are left alone: their tx may be on-chain and the
+    /// confirmation monitor still owns them, so a failed native call or a stale negotiation-failure
+    /// replay must not tear them down.
     @discardableResult
-    func failLatestPendingSplice() -> Bool {
+    func failPendingSplice(rowId: Int64? = nil) -> Bool {
         do {
             try rawSQL.execute(
                 """
@@ -307,12 +313,14 @@ final class SpliceRepository {
                 SET status = 'failed'
                 WHERE id = (
                     SELECT id FROM payments
-                    WHERE payment_type IN ('splice_in', 'splice_out')
+                    WHERE payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
                       AND status IN ('pending', 'expired')
                       AND txid IS NULL
+                      AND (?1 IS NULL OR id = ?1)
                     ORDER BY id DESC LIMIT 1
                 )
-                """
+                """,
+                params: [rowId.map { .integer($0) } ?? .null]
             )
             return true
         } catch {

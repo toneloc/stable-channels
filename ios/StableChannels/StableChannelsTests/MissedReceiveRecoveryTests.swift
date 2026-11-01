@@ -49,12 +49,12 @@ final class MissedReceiveRecoveryTests: XCTestCase {
         let window = MissedReceiveRecovery.windowSeconds
         let data = try json([
             tx(txA, outputs: [(address, 5_000)], blockTime: now - window - 1),
-            tx(txB, outputs: [(address, MissedReceiveRecovery.minSats - 1)], blockTime: now),
+            tx(txB, outputs: [(address, DepositAttribution.minDepositSats - 1)], blockTime: now),
             tx(txC, outputs: [("bc1qother", 50_000)], blockTime: now),
             tx("not-a-txid", outputs: [(address, 50_000)], blockTime: now),
             tx(
                 String(repeating: "d", count: 64),
-                outputs: [(address, MissedReceiveRecovery.minSats)],
+                outputs: [(address, DepositAttribution.minDepositSats)],
                 blockTime: now - window
             )
         ])
@@ -78,6 +78,16 @@ final class MissedReceiveRecoveryTests: XCTestCase {
         XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(["txid": txA], address: address), 0)
     }
 
+    func testSatsPaidToRejectsTotalsAboveTheSupply() {
+        let cap = OnchainAmount.maxSats
+        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap)]), address: address), cap)
+        XCTAssertEqual(MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap + 1)]), address: address), 0)
+        XCTAssertEqual(
+            MissedReceiveRecovery.satsPaidTo(tx(txA, outputs: [(address, cap), (address, 1)]), address: address),
+            0
+        )
+    }
+
     func testCheckIsThrottled() {
         let interval = MissedReceiveRecovery.checkIntervalSeconds
         XCTAssertTrue(MissedReceiveRecovery.isCheckDue(lastCheckSecs: 0, nowSecs: now))
@@ -85,84 +95,29 @@ final class MissedReceiveRecoveryTests: XCTestCase {
         XCTAssertTrue(MissedReceiveRecovery.isCheckDue(lastCheckSecs: now - interval, nowSecs: now))
     }
 
-    // MARK: - Merged placeholders
-
-    func testTwoOrMoreSumTo() {
-        XCTAssertTrue(MergedReceivePolicy.twoOrMoreSumTo([15_635, 14_332], target: 29_967))
-        XCTAssertTrue(MergedReceivePolicy.twoOrMoreSumTo([1, 99, 2, 3], target: 6))
-        XCTAssertTrue(MergedReceivePolicy.twoOrMoreSumTo([10, 10], target: 20))
-        XCTAssertFalse(MergedReceivePolicy.twoOrMoreSumTo([20], target: 20))
-        XCTAssertFalse(MergedReceivePolicy.twoOrMoreSumTo([20, 5], target: 20))
-        XCTAssertFalse(MergedReceivePolicy.twoOrMoreSumTo([], target: 20))
-        XCTAssertFalse(MergedReceivePolicy.twoOrMoreSumTo([0, 0], target: 0))
-    }
-
-    func testMergedPlaceholderOnlyCountsRowsWithinWindowAfterIt() {
-        let window = MergedReceivePolicy.windowSeconds
-        let placeholder = MergedReceivePolicy.Row(id: 1, amountMsat: 30, createdAt: 1_000)
-        func merged(_ receives: [MergedReceivePolicy.Row]) -> [Int64] {
-            MergedReceivePolicy.mergedPlaceholderIds(placeholders: [placeholder], receives: receives)
-        }
-        XCTAssertEqual(
-            merged([
-                .init(id: 2, amountMsat: 10, createdAt: 1_000),
-                .init(id: 3, amountMsat: 20, createdAt: 1_000 + window)
-            ]),
-            [1]
-        )
-        XCTAssertEqual(
-            merged([
-                .init(id: 2, amountMsat: 10, createdAt: 1_000),
-                .init(id: 3, amountMsat: 20, createdAt: 1_001 + window)
-            ]),
-            []
-        )
-        XCTAssertEqual(
-            merged([.init(id: 2, amountMsat: 10, createdAt: 999), .init(id: 3, amountMsat: 20, createdAt: 1_000)]),
-            []
-        )
-    }
-
-    func testMergedPlaceholderOnlySearchesEarliestRows() {
-        let cap = MergedReceivePolicy.maxRowsPerPlaceholder
-        let placeholder = MergedReceivePolicy.Row(id: 1, amountMsat: 300, createdAt: 0)
-        let filler = (0..<(cap - 1))
-            .map { MergedReceivePolicy.Row(id: Int64(10 + $0), amountMsat: 1_000, createdAt: 1) }
-        let first = MergedReceivePolicy.Row(id: 2, amountMsat: 100, createdAt: 0)
-        let late = MergedReceivePolicy.Row(id: 3, amountMsat: 200, createdAt: 2)
-
-        XCTAssertEqual(
-            MergedReceivePolicy.mergedPlaceholderIds(placeholders: [placeholder], receives: filler + [late, first]),
-            []
-        )
-        XCTAssertEqual(
-            MergedReceivePolicy.mergedPlaceholderIds(
-                placeholders: [placeholder],
-                receives: Array(filler.dropLast()) + [late, first]
-            ),
-            [1]
-        )
-    }
-
     // MARK: - Wallet-list adoption
 
-    func testCandidatesNeedExactAmountUnrecordedTxidAndRecentWalletSighting() {
-        let slack = ReceiveTxidAdoption.slackSeconds
-        let row = ReceiveTxidAdoption.Placeholder(id: 1, address: address, amountMsat: 2_323_000, createdAt: now)
-        let receives = [
-            ReceiveTxidAdoption.WalletReceive(txid: txA, amountMsat: 2_323_000, seenAtSecs: now - slack),
-            ReceiveTxidAdoption.WalletReceive(txid: txB, amountMsat: 2_323_000, seenAtSecs: now - slack - 1),
-            ReceiveTxidAdoption.WalletReceive(txid: txC, amountMsat: 5_000_000, seenAtSecs: now)
-        ]
+    func testCandidatesNeedARecordedCandidateTheWalletListsAtTheExactAmount() {
+        let row = ReceiveTxidAdoption.Placeholder(
+            id: 1,
+            address: address,
+            amountMsat: 2_323_000,
+            candidateTxids: [txA, txB]
+        )
+        // txC pays the same amount but is not a candidate; txB is one, at another amount.
+        let wallet = WalletInboundOnchain(txids: [txA, txB, txC], sats: [txA: 2_323, txB: 5_000, txC: 2_323])
 
         XCTAssertEqual(
-            ReceiveTxidAdoption.candidates(placeholders: [row], walletReceives: receives, recordedTxids: []),
+            ReceiveTxidAdoption.candidates(placeholders: [row], wallet: wallet, recordedTxids: []),
             [.init(rowId: 1, txid: txA)]
         )
         XCTAssertEqual(
-            ReceiveTxidAdoption.candidates(placeholders: [row], walletReceives: receives, recordedTxids: [txA]),
+            ReceiveTxidAdoption.candidates(placeholders: [row], wallet: wallet, recordedTxids: [txA]),
             []
         )
+        // A placeholder without candidates (written before they were recorded) is never adopted.
+        let legacy = ReceiveTxidAdoption.Placeholder(id: 2, address: address, amountMsat: 2_323_000)
+        XCTAssertEqual(ReceiveTxidAdoption.candidates(placeholders: [legacy], wallet: wallet, recordedTxids: []), [])
     }
 
     func testAdoptsOnlyRowsPaidByOneDistinctTxid() {
@@ -238,7 +193,9 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
             amountUSD: nil,
             btcPrice: nil,
             address: address,
-            sinceSecs: since
+            sinceSecs: since,
+            balanceCounted: true,
+            hasSpliceWithoutTxid: try service.spliceRepo.hasPendingSpliceWithoutTxid()
         )
     }
 
@@ -302,21 +259,39 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
         XCTAssertFalse(try missed("tx1", 11_732))
     }
 
-    func testSkipsTxidAlreadyOnAResolutionRow() throws {
+    func testRecordsTxidOnlyAResolutionRowNamed() throws {
+        // The resolver named it, but no placeholder took it: like the WebSocket path, only a
+        // payment row carrying the txid counts as recorded.
         let id = try XCTUnwrap(repo.insertOnchainReceiveResolution(address: "addr"))
         XCTAssertTrue(repo.updateOnchainReceiveResolution(id: id, txid: "tx1"))
 
+        XCTAssertTrue(try missed("tx1", 11_732))
         XCTAssertFalse(try missed("tx1", 11_732))
     }
 
-    func testAdoptsPendingPlaceholderInsteadOfDuplicating() throws {
-        try placeholder(11_732)
+    func testAdoptsPendingPlaceholderThatListsTheTxidInsteadOfDuplicating() throws {
+        let id = try placeholder(11_732, candidates: ["tx1"])
 
         XCTAssertTrue(try missed("tx1", 11_732))
 
         XCTAssertEqual(try pending(), [Pending(txid: "tx1", sats: 11_732)])
         XCTAssertTrue(repo.fetchPendingOnchainReceives().isEmpty, "adoption resolves the resolution row")
-        XCTAssertNotNil(service.paymentRepo.payment(paymentId: "onchain_receive_tx1"))
+        XCTAssertEqual(try service.paymentRepo.getPayment(byId: id)?.txid, "tx1")
+    }
+
+    func testDoesNotAdoptPlaceholderByAmountAlone() throws {
+        // Written before candidates were recorded: an equal amount is no evidence.
+        try placeholder(11_732)
+
+        XCTAssertTrue(try missed("tx1", 11_732))
+
+        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 11_732), Pending(txid: "tx1", sats: 11_732)])
+    }
+
+    func testRefusesAnAmountNoTransactionCanHave() throws {
+        XCTAssertFalse(try missed("tx1", Int64.max))
+        XCTAssertFalse(try missed("tx2", OnchainAmount.maxSats + 1))
+        XCTAssertEqual(try pending(), [])
     }
 
     func testDoesNotAdoptPlaceholderOnAnotherAddressOrAmount() throws {
@@ -371,41 +346,34 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
 
     // MARK: - Merged placeholders (#317)
 
-    func testMergedPlaceholderIsReplacedByOneRowPerTxid() throws {
-        try placeholder(29_967)
+    func testMergedPlaceholderIsSplitByItsCandidateTxids() throws {
+        try placeholder(29_967, candidates: ["txA", "txB"])
 
         try missed("txA", 15_635)
-        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 29_967), Pending(txid: "txA", sats: 15_635)])
+        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 14_332), Pending(txid: "txA", sats: 15_635)])
 
-        XCTAssertTrue(try repo.recordReceive(
-            txid: "txB",
-            amountSats: 14_332,
-            amountUSD: nil,
-            btcPrice: nil,
-            address: "addr"
-        ))
+        XCTAssertTrue(try missed("txB", 14_332))
         XCTAssertEqual(try pending(), [Pending(txid: "txA", sats: 15_635), Pending(txid: "txB", sats: 14_332)])
-        XCTAssertTrue(repo.fetchPendingOnchainReceives().isEmpty, "merged placeholder's resolution row is dropped too")
+        XCTAssertTrue(repo.fetchPendingOnchainReceives().isEmpty, "the placeholder took the last txid")
     }
 
-    func testKeepsPlaceholderWhenLaterRowsDoNotAddUpToIt() throws {
+    func testPlaceholderWithoutCandidatesKeepsItsAmount() throws {
+        // Rows that add up to it are not evidence either: it ages out by the stale-row rules.
         try placeholder(50_000)
 
         try missed("tx1", 20_000)
-        try missed("tx2", 20_000)
-        try missed("tx3", 50_000, address: "other")
+        try missed("tx2", 30_000)
 
         XCTAssertEqual(try pending(), [
             Pending(txid: nil, sats: 50_000),
             Pending(txid: "tx1", sats: 20_000),
-            Pending(txid: "tx2", sats: 20_000),
-            Pending(txid: "tx3", sats: 50_000)
+            Pending(txid: "tx2", sats: 30_000)
         ])
     }
 
-    func testMergedPlaceholderIsReplacedWhenALaterDepositIsRecordedToo() throws {
-        try placeholder(29_967)
-        try placeholder(10_000)
+    func testEachPlaceholderTakesOnlyItsOwnCandidates() throws {
+        try placeholder(29_967, candidates: ["txA", "txB"])
+        try placeholder(10_000, candidates: ["txC"])
 
         try missed("txC", 10_000)
         try missed("txB", 14_332)
@@ -449,106 +417,52 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
         XCTAssertEqual(try receivedSats(), 210_000, "both placeholders keep their full amount")
     }
 
-    func testFailedRowsDoNotCountTowardMergedPlaceholder() throws {
-        try placeholder(29_967)
-
-        try missed("txA", 15_635)
-        try service.paymentRepo.failPaymentByTxid(txid: "txA")
-        try missed("txB", 14_332)
-
-        XCTAssertEqual(try pending(), [Pending(txid: nil, sats: 29_967), Pending(txid: "txB", sats: 14_332)])
-    }
-
-    func testDepositsRecordedLongAfterPlaceholderDoNotCountTowardIt() throws {
-        try placeholder(30_000)
-        try service.rawSQL.execute(
-            "UPDATE payments SET created_at = created_at - ?",
-            params: [.integer(MergedReceivePolicy.windowSeconds + 60)]
-        )
-
-        try missed("tx1", 10_000)
-        try missed("tx2", 20_000)
-
-        XCTAssertEqual(try pending(), [
-            Pending(txid: nil, sats: 30_000),
-            Pending(txid: "tx1", sats: 10_000),
-            Pending(txid: "tx2", sats: 20_000)
-        ])
-    }
-
-    func testSingleLaterRowWithSameAmountDoesNotDropPlaceholder() throws {
-        try placeholder(10_000)
-        _ = try service.paymentRepo.recordPayment(
-            paymentId: "onchain_receive_txS",
-            paymentType: "onchain",
-            direction: "received",
-            amountMsat: 10_000_000,
-            amountUSD: nil,
-            btcPrice: nil,
-            counterparty: nil,
-            status: "pending",
-            txid: "txS",
-            address: "addr"
-        )
-
-        try missed("tx2", 3_000)
-
-        XCTAssertEqual(try pending(), [
-            Pending(txid: nil, sats: 10_000),
-            Pending(txid: "txS", sats: 10_000),
-            Pending(txid: "tx2", sats: 3_000)
-        ])
-    }
-
-    func testRowsRecordedBeforePlaceholderDoNotCountTowardIt() throws {
-        try missed("tx1", 10_000)
-        try service.rawSQL.execute("UPDATE payments SET created_at = created_at - 60")
-        try placeholder(30_000)
-
-        try missed("tx2", 20_000)
-
-        XCTAssertEqual(try pending(), [
-            Pending(txid: "tx1", sats: 10_000),
-            Pending(txid: nil, sats: 30_000),
-            Pending(txid: "tx2", sats: 20_000)
-        ])
-    }
-
     // MARK: - Wallet-list adoption
 
     func testAddresslessPlaceholderIsNeverACandidate() throws {
         try record("onchain_deposit_x", "onchain", sats: 2_323, status: "pending")
+        try repo.recordDepositCandidates(paymentId: "onchain_deposit_x", txids: ["tx1"])
 
-        XCTAssertTrue(repo.txidlessPendingReceivesWithAddress().isEmpty)
+        XCTAssertTrue(repo.placeholdersWithCandidates().isEmpty)
     }
 
-    func testListsAddressedPlaceholdersWithTheirAddress() throws {
-        let id = try placeholder(2_323, address: "addrA")
+    func testListsAddressedPlaceholdersWithTheirCandidates() throws {
+        let id = try placeholder(2_323, address: "addrA", candidates: ["tx1", "tx2"])
+        try placeholder(4_000, address: "addrA")
         try missed("tx9", 5_000, address: "addrA")
 
-        let rows = repo.txidlessPendingReceivesWithAddress()
-
-        XCTAssertEqual(rows.map(\.id), [id])
-        XCTAssertEqual(rows.first?.address, "addrA")
-        XCTAssertEqual(rows.first?.amountMsat, 2_323_000)
+        XCTAssertEqual(repo.placeholdersWithCandidates(), [
+            ReceiveTxidAdoption.Placeholder(
+                id: id,
+                address: "addrA",
+                amountMsat: 2_323_000,
+                candidateTxids: ["tx1", "tx2"]
+            )
+        ])
     }
 
-    func testAdoptTxidAttachesOnceAndNeverOverwrites() throws {
-        let id = try placeholder(2_323)
+    func testAttachTxidTakesOnlyACandidateOfTheExactAmountOnce() throws {
+        let id = try placeholder(2_323, candidates: ["tx1", "tx2"])
 
-        XCTAssertTrue(repo.adoptTxid(rowId: id, txid: "tx1", address: "addr"))
-        XCTAssertFalse(repo.adoptTxid(rowId: id, txid: "tx2", address: "addr"))
+        XCTAssertFalse(try repo.attachTxid(rowId: id, txid: "tx3", address: "addr", amountMsat: 2_323_000))
+        XCTAssertFalse(try repo.attachTxid(rowId: id, txid: "tx1", address: "other", amountMsat: 2_323_000))
+        XCTAssertFalse(try repo.attachTxid(rowId: id, txid: "tx1", address: "addr", amountMsat: 2_000_000))
+        XCTAssertTrue(try repo.attachTxid(rowId: id, txid: "tx1", address: "addr", amountMsat: 2_323_000))
+        XCTAssertFalse(try repo.attachTxid(rowId: id, txid: "tx2", address: "addr", amountMsat: 2_323_000))
 
         XCTAssertEqual(try pending(), [Pending(txid: "tx1", sats: 2_323)])
-        XCTAssertTrue(repo.txidlessPendingReceivesWithAddress().isEmpty)
+        let row = try XCTUnwrap(service.paymentRepo.getPayment(byId: id))
+        XCTAssertEqual(row.status, "pending", "the confirmation poller completes it")
+        XCTAssertTrue(row.paymentId?.hasPrefix("onchain_deposit_") == true, "the row keeps its id and candidates")
+        XCTAssertTrue(repo.placeholdersWithCandidates().isEmpty)
         XCTAssertTrue(repo.fetchPendingOnchainReceives().isEmpty)
     }
 
-    func testAdoptTxidSkipsTxidAlreadyOnARow() throws {
+    func testAttachTxidSkipsTxidAlreadyOnARow() throws {
         try missed("tx1", 2_323)
-        let id = try placeholder(2_323)
+        let id = try placeholder(2_323, candidates: ["tx1"])
 
-        XCTAssertFalse(repo.adoptTxid(rowId: id, txid: "tx1", address: "addr"))
+        XCTAssertFalse(try repo.attachTxid(rowId: id, txid: "tx1", address: "addr", amountMsat: 2_323_000))
         XCTAssertEqual(try pending(), [Pending(txid: "tx1", sats: 2_323), Pending(txid: nil, sats: 2_323)])
     }
 }

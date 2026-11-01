@@ -196,7 +196,7 @@ enum HomeOnchainRows {
 
     /// The in-memory splice decides while it exists; after negotiation or a relaunch only the row knows.
     private static func isOutgoingSplice(_ inputs: Inputs) -> Bool {
-        if let pendingSplice = inputs.pendingSplice { return pendingSplice.direction == "out" }
+        if let pendingSplice = inputs.pendingSplice { return pendingSplice.paymentType == .spliceOut }
         return spliceRow(inputs)?.paymentType == SpliceCompletionPolicy.spliceOutPaymentType
     }
 

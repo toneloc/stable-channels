@@ -107,7 +107,7 @@ final class SpliceRepositoryTests: XCTestCase {
         // pending initiation row. The stamp must land on the pending row and
         // must never resurrect the failed one.
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         try recordPendingSplice()
 
         try negotiate("txid-def")
@@ -122,7 +122,7 @@ final class SpliceRepositoryTests: XCTestCase {
 
     func testNegotiationOnlyFailedRowsIsNoOp() throws {
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
         try negotiate("txid-ghi")
 
@@ -191,7 +191,7 @@ final class SpliceRepositoryTests: XCTestCase {
         // terminal, unlike the passive expiry sweep: aging the row changes
         // nothing, and a late stamp must not resurrect it.
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         try ageOutPendingSplices()
         XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
 
@@ -210,7 +210,7 @@ final class SpliceRepositoryTests: XCTestCase {
         try ageOutPendingSplices()
         XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
 
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         try negotiate("txid-after-fail")
 
         let rows = try spliceRows()
@@ -229,7 +229,7 @@ final class SpliceRepositoryTests: XCTestCase {
         try negotiate("txid-live")
         try recordPendingSplice()
 
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 2)
@@ -241,7 +241,7 @@ final class SpliceRepositoryTests: XCTestCase {
 
     func testCompleteSpliceDoesNotFindFailedNullTxidRow() throws {
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
         XCTAssertFalse(service.spliceRepo.completeSplice(txid: "txid-jkl"))
 

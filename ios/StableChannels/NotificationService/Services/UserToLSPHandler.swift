@@ -74,7 +74,7 @@ final class UserToLSPHandler: PaymentHandler {
         let backingSats = channelState.backingSats
         // A sub-cent target with backing is an unsettled LSP surplus (#322), not "no position":
         // fall through so the surplus settles as a normal above-par payment.
-        guard channelState.expectedUSD >= Constants.minimumStableUSD || backingSats > 0 else {
+        guard channelState.expectedUSD >= StabilizationPolicy.minimumStableUSD || backingSats > 0 else {
             completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
@@ -99,10 +99,11 @@ final class UserToLSPHandler: PaymentHandler {
         let dollarsFromPar = stableUSDValue - targetUSD
         // Clamp the denominator: at a zero/tiny target an unclamped ratio would pin the residue
         // inside the deadband and block its settlement.
-        let percentFromPar = abs(dollarsFromPar / max(targetUSD, Constants.minimumStableUSD)) * 100.0
+        let percentFromPar = abs(dollarsFromPar / max(targetUSD, StabilizationPolicy.minimumStableUSD)) * 100.0
 
         // Within threshold - no payment needed
-        guard percentFromPar >= Constants.stabilityThresholdPercent && abs(dollarsFromPar) >= 0.25 else {
+        guard percentFromPar >= StabilizationPolicy.thresholdPercent
+            && abs(dollarsFromPar) >= StabilizationPolicy.thresholdUSD else {
             completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }

@@ -29,4 +29,9 @@ enum OnchainAmount {
     static func usd(sats: Int64, price: Double) -> Double? {
         price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil
     }
+
+    /// USD value of `msats` at `price`, or nil when no price is known.
+    static func usd(msats: UInt64, price: Double) -> Double? {
+        price > 0 ? BitcoinUnits.usd(msats: msats, price: price) : nil
+    }
 }

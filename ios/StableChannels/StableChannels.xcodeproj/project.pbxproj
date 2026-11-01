@@ -149,6 +149,7 @@
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
 		49AD1B4B2FEE77F40015A7D9 /* SeedDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */; };
 		49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */; };
+		49B22AA230983AF200447D17 /* SpliceStartService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22A9F30983AF200447D17 /* SpliceStartService.swift */; };
 		49BB390B0000000000000002 /* CurveProgressIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49BB390B0000000000000001 /* CurveProgressIndicator.swift */; };
 		49C46D3F3080D63C005A2FF5 /* SendPreflight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */; };
 		49D113F42257E24445B49506 /* HomeActionButtonsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */; };
@@ -453,6 +454,7 @@
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
 		49AD1B4A2FEE77F40015A7D9 /* SeedDisplayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedDisplayView.swift; sourceTree = "<group>"; };
 		49AD1B502FEE812E0015A7D9 /* NativeTimerAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeTimerAlert.swift; sourceTree = "<group>"; };
+		49B22A9F30983AF200447D17 /* SpliceStartService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceStartService.swift; sourceTree = "<group>"; };
 		49BB390B0000000000000001 /* CurveProgressIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CurveProgressIndicator.swift; sourceTree = "<group>"; };
 		49C46D3E3080D63C005A2FF5 /* SendPreflight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SendPreflight.swift; sourceTree = "<group>"; };
 		49D213CA84EA308A42C9AB71 /* HomeSavingsSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeSavingsSectionView.swift; sourceTree = "<group>"; };
@@ -881,6 +883,15 @@
 			path = Network;
 			sourceTree = "<group>";
 		};
+		49B22AB030983C0000447D17 /* Splice */ = {
+			isa = PBXGroup;
+			children = (
+				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
+				49B22A9F30983AF200447D17 /* SpliceStartService.swift */,
+			);
+			path = Splice;
+			sourceTree = "<group>";
+		};
 		49DDB0002FF0000000000001 /* Repositories */ = {
 			isa = PBXGroup;
 			children = (
@@ -983,7 +994,6 @@
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
-				490A1332304F1467005CDA39 /* SpliceBroadcastChecker.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				49DDD0153054000100B5A146 /* StabilityStatusAdapters.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
@@ -996,6 +1006,7 @@
 				495CB4023017AD1800560837 /* Confirmation */,
 				D20000000000000000000002 /* LNURL */,
 				49D997543074F6820024B3A7 /* Network */,
+				49B22AB030983C0000447D17 /* Splice */,
 				4944457E3053E42800B5A146 /* Price */,
 				49DDB0002FF0000000000001 /* Repositories */,
 				495CB4013017917400560837 /* WebSocket */,
@@ -1523,6 +1534,7 @@
 				49206E153073C27600217838 /* SendAmountStepView.swift in Sources */,
 				49206E163073C27600217838 /* SendDestinationBadgeView.swift in Sources */,
 				49206E173073C27600217838 /* SendConfirmCards.swift in Sources */,
+				49B22AA230983AF200447D17 /* SpliceStartService.swift in Sources */,
 				49206E183073C27600217838 /* SendLoadingView.swift in Sources */,
 				49206E193073C27600217838 /* SendSuccessStepView.swift in Sources */,
 				49206E1A3073C27600217838 /* NetworkFeeSelectorView.swift in Sources */,

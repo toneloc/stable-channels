@@ -625,6 +625,25 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(capturedAmount, 150_000, "Amount should sum all matching vouts")
     }
 
+    func testAmountMatchesOutputsByNormalizedAddress() {
+        let json = """
+        { "address-transactions": [{ "txid": "\(makeValidTxid())", "vout": [
+        { "scriptpubkey_address": "bc1qmultivout", "value": 100000 },
+        { "scriptpubkey_address": "BC1QMULTIVOUT", "value": 50000 }
+        ] }] }
+        """
+        service.trackAddress("bc1qmultivout")
+        var capturedAmount: Int64?
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
+            capturedAmount = amount
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(capturedAmount, 150_000, "bech32 case never changes the match, as in recovery")
+    }
+
     // MARK: - Edge Cases
 
     func testHandleMessageWithEmptyString() {

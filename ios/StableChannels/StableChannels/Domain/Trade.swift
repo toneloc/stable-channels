@@ -66,7 +66,7 @@ struct TradeControlApplyResult {
 
 /// Outgoing splice awaiting confirmation.
 struct PendingSplice {
-    let direction: String // "in" or "out"
+    let paymentType: SplicePaymentType
     let amountSats: UInt64
     let address: String? // For splice_out
     var rowId: Int64? // Persisted history row, once recorded

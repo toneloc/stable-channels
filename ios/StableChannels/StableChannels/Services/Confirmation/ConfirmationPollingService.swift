@@ -140,19 +140,25 @@ final class ConfirmationPollingService {
                 ])
                 return
             }
-            let failedSends = try repo.failDroppedSend(txid: txid)
-            let failedReceiveSats = try repo.failPaymentByTxid(txid: txid)
+            let dropped = try failDropped(txid: txid)
             try repo.clearRemovalCheck(txid: txid)
             AuditService.log("WEBSOCKET_DROPPED_TX_FAILED", data: [
                 "txid": txid,
-                "sends": "\(failedSends)",
-                "receive_sats": failedReceiveSats.map { "\($0)" } ?? "none"
+                "sends": "\(dropped.failedSends)",
+                "receive_sats": dropped.failedReceiveSats.map { "\($0)" } ?? "none"
             ])
-            if let failedReceiveSats { onReceiveDropped?(txid, failedReceiveSats) }
             onUpdate?()
         } catch {
             AuditService.log("WEBSOCKET_DROPPED_TX_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
         }
+    }
+
+    /// Fails the rows of a transaction the explorers no longer know and reports a failed receive's
+    /// sats: the one place a dropped transaction is failed.
+    private func failDropped(txid: String) throws -> PaymentRepository.DroppedOnchainTx {
+        let dropped = try databaseService.paymentRepo.failDroppedOnchainTx(txid: txid)
+        if let sats = dropped.failedReceiveSats { onReceiveDropped?(txid, sats) }
+        return dropped
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.
@@ -478,11 +484,11 @@ final class ConfirmationPollingService {
             // pollable so a later recovery can still confirm it.
             let now = Int64(Date().timeIntervalSince1970)
             // A fresh row the explorers have not indexed yet is still pending, not a failed lookup.
-            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now) else { return .unchanged }
+            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now), let txid = payment.txid else {
+                return .unchanged
+            }
             do {
-                guard try databaseService.paymentRepo.failUnconfirmedOnchainRow(id: payment.id) else {
-                    return .unchanged
-                }
+                guard try failDropped(txid: txid).failedAny else { return .unchanged }
                 AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: [
                     "payment_id": "\(payment.id)",
                     "txid": payment.txid ?? ""

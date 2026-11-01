@@ -92,7 +92,7 @@ final class HomeOnchainRowsTests: XCTestCase {
     func testOutgoingSpliceReadsAsSendAndIncomingAsMove() throws {
         let outCard = try XCTUnwrap(HomeOnchainRows.card(.init(
             isSweeping: true,
-            pendingSplice: PendingSplice(direction: "out", amountSats: 700, address: "bc1q")
+            pendingSplice: PendingSplice(paymentType: .spliceOut, amountSats: 700, address: "bc1q")
         )))
         XCTAssertEqual(outCard.rows.first?.kind, .splice(isOutgoing: true))
         XCTAssertEqual(outCard.rows.first?.sign, .outgoing)
@@ -101,7 +101,7 @@ final class HomeOnchainRowsTests: XCTestCase {
         let inCard = try XCTUnwrap(HomeOnchainRows.card(.init(
             onchainBalanceSats: 700,
             isSweeping: true,
-            pendingSplice: PendingSplice(direction: "in", amountSats: 700, address: nil)
+            pendingSplice: PendingSplice(paymentType: .spliceIn, amountSats: 700, address: nil)
         )))
         XCTAssertEqual(inCard.rows.first?.kind, .splice(isOutgoing: false))
         XCTAssertEqual(inCard.rows.first?.sign, .neutral)
@@ -141,7 +141,7 @@ final class HomeOnchainRowsTests: XCTestCase {
         let card = try XCTUnwrap(HomeOnchainRows.card(.init(
             onchainBalanceSats: 900,
             isSweeping: true,
-            pendingSplice: PendingSplice(direction: "out", amountSats: 500, address: nil),
+            pendingSplice: PendingSplice(paymentType: .spliceOut, amountSats: 500, address: nil),
             pendingReceives: [payment(confirmations: 2)]
         )))
         XCTAssertEqual(

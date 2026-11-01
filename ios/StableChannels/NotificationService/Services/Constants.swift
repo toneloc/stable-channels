@@ -8,9 +8,6 @@ enum Constants {
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let syncMessageType = "SYNC_V1"
     static let satsInBTC = BitcoinUnits.satsPerBTC
-    static let stabilityThresholdPercent: Double = 0.1
-    /// Below this the position counts as zero-target; a zero target with no backing is closed.
-    static let minimumStableUSD: Double = 0.01
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
 }

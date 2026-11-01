@@ -36,6 +36,11 @@ enum BitcoinUnits {
 enum StabilizationPolicy {
     static let maxStableAllocationPercent: UInt64 = 99
     static let clientSafetyMarginSats: UInt64 = 50
+    /// Below this the position counts as zero-target; a zero target with no backing is closed.
+    static let minimumStableUSD = 0.01
+    /// Drift from par, in dollars and in percent, that a stability payment settles; less is noise.
+    static let thresholdUSD = 0.25
+    static let thresholdPercent = 0.1
 
     static func backingCap(_ postFeeSpendable: UInt64) -> UInt64? {
         return (postFeeSpendable / 100) * maxStableAllocationPercent
@@ -76,8 +81,8 @@ enum StabilityAllocation {
         amountSats: Int64
     ) -> Int64? {
         guard currentBackingSats >= 0, expectedUSD.isFinite, expectedUSD >= 0,
-              price.isFinite, price > 0, amountSats > 0 else { return nil }
-        guard let equilibrium = BitcoinUnits.floorTargetSats(usd: expectedUSD, price: price),
+              price.isFinite, price > 0, amountSats > 0,
+              let equilibrium = BitcoinUnits.floorTargetSats(usd: expectedUSD, price: price),
               equilibrium <= UInt64(Int64.max) else { return nil }
         let targetSats = Int64(equilibrium)
         if currentBackingSats >= targetSats { return currentBackingSats }
@@ -185,7 +190,7 @@ struct StabilizationSnapshot {
                usd: expectedUSD,
                price: price
            ))
-           .rounded(.down) { return true }
+               .rounded(.down) { return true }
         guard let backing = TradeProtocol.tradeBackingAfterDelta(
             receiverSats: receiverSats - fee,
             currentBackingSats: backingSats,
@@ -264,9 +269,15 @@ enum TradeProtocol {
     static let resultControlAmountMsat: UInt64 = 1
     static let resultTimeoutSecs: UInt64 = 15 * 60
     static let responseRetryWindowSecs: UInt64 = 14 * 24 * 60 * 60
+
+    /// Oldest `created_at` of a prepared trade a fee payment without an attached id can still
+    /// belong to; nil when [now] is out of range.
+    static func unattachedTradeCutoff(now: UInt64) -> Int64? {
+        guard now <= UInt64(Int64.max) else { return nil }
+        return Int64(max(now, responseRetryWindowSecs) - responseRetryWindowSecs)
+    }
+
     static let feeRate = 0.01
-    private static let stabilityThresholdUSD = 0.25
-    private static let stabilityThresholdPercent = 0.1
     private static let rejectionReasons: Set<String> = [
         "invalid_amount", "stale_request", "invalid_fee", "invalid_quote",
         "quote_deviation", "insufficient_capacity", "settlement_required",
@@ -670,9 +681,9 @@ enum TradeProtocol {
     ) -> Bool {
         let currentValue = BitcoinUnits.usd(sats: backingSats, price: price)
         let driftUSD = abs(currentValue - expectedUSD)
-        if expectedUSD < 0.01 { return driftUSD >= stabilityThresholdUSD }
+        if expectedUSD < StabilizationPolicy.minimumStableUSD { return driftUSD >= StabilizationPolicy.thresholdUSD }
         let driftPercent = driftUSD / expectedUSD * 100
-        return driftUSD >= stabilityThresholdUSD && driftPercent >= stabilityThresholdPercent
+        return driftUSD >= StabilizationPolicy.thresholdUSD && driftPercent >= StabilizationPolicy.thresholdPercent
     }
 
     private static func randomIdentifier() -> String {

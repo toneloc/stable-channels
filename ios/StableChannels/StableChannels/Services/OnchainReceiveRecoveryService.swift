@@ -11,24 +11,29 @@ final class OnchainReceiveRecoveryService {
 
     private let transactionLinkService: TransactionLinkService
     private let makeClient: () -> ResilientEsploraClient
+    private let makeReceiveChecker: () -> any TxConfirmationProvider
     private let nowSecs: () -> Int64
     private var lastMissedReceiveCheckSecs: Int64 = 0
     private var rejectedTxidAdoptions = Set<ReceiveTxidAdoption.Candidate>()
-    private var isResolvingTxidlessReceives = false
+    private var isResolvingPlaceholderTxids = false
 
     init(
         transactionLinkService: TransactionLinkService,
         makeClient: @escaping () -> ResilientEsploraClient,
+        makeReceiveChecker: @escaping () -> any TxConfirmationProvider,
         nowSecs: @escaping () -> Int64 = { Int64(Date().timeIntervalSince1970) }
     ) {
         self.transactionLinkService = transactionLinkService
         self.makeClient = makeClient
+        self.makeReceiveChecker = makeReceiveChecker
         self.nowSecs = nowSecs
     }
 
     /// Throttled explorer pass over the receive address. Records by txid, so it is safe during a
-    /// splice: the repository skips the splice's own txid and refuses while a splice has no txid.
-    func recoverMissedReceive(address: String?, price: Double) {
+    /// splice: the repository skips the splice's own txid, and nothing is recorded while a splice
+    /// has no txid. [balanceCounts] tells whether the wallet balance already counts a txid, which a
+    /// placeholder listing it needs before it can take it.
+    func recoverMissedReceive(address: String?, price: Double, balanceCounts: @escaping (String) -> Bool) {
         guard let address, !address.isEmpty, let databaseService else { return }
         let now = nowSecs()
         guard MissedReceiveRecovery.isCheckDue(lastCheckSecs: lastMissedReceiveCheckSecs, nowSecs: now)
@@ -46,10 +51,12 @@ final class OnchainReceiveRecoveryService {
                     let recorded = try databaseService.onchainRepo.recordMissedReceive(
                         txid: receive.txid,
                         amountSats: receive.sats,
-                        amountUSD: price > 0 ? BitcoinUnits.usd(sats: receive.sats, price: price) : nil,
+                        amountUSD: OnchainAmount.usd(sats: receive.sats, price: price),
                         btcPrice: price > 0 ? price : nil,
                         address: address,
-                        sinceSecs: now - MissedReceiveRecovery.windowSeconds
+                        sinceSecs: now - MissedReceiveRecovery.windowSeconds,
+                        balanceCounted: balanceCounts(receive.txid),
+                        hasSpliceWithoutTxid: try databaseService.spliceRepo.hasPendingSpliceWithoutTxid()
                     )
                     guard recorded else { continue }
                     // This receive now owns its row, so the pending deposit link points at it.
@@ -65,30 +72,30 @@ final class OnchainReceiveRecoveryService {
         }
     }
 
-    /// Adopts a wallet-seen txid for a pending placeholder, only once that txid is proven to pay
-    /// the placeholder's address. One pass runs at a time; disproven pairs are never retried.
-    func resolveTxidlessReceives(walletReceives: () -> [ReceiveTxidAdoption.WalletReceive]) {
-        guard !isResolvingTxidlessReceives, let databaseService else { return }
-        let placeholders = databaseService.onchainRepo.txidlessPendingReceivesWithAddress()
-        guard !placeholders.isEmpty,
+    /// Adopts a wallet-listed candidate txid for a pending placeholder, only once that txid is
+    /// proven to pay the placeholder's address. One pass runs at a time; disproven pairs are never
+    /// retried. [wallet] is nil while the wallet cannot be read.
+    func resolvePlaceholderTxids(wallet: () -> WalletInboundOnchain?) {
+        guard !isResolvingPlaceholderTxids, let databaseService else { return }
+        let placeholders = databaseService.onchainRepo.placeholdersWithCandidates()
+        guard !placeholders.isEmpty, let wallet = wallet(),
               let recorded = try? databaseService.onchainRepo.recordedReceiveTxids() else { return }
         let candidates = ReceiveTxidAdoption.candidates(
             placeholders: placeholders,
-            walletReceives: walletReceives(),
+            wallet: wallet,
             recordedTxids: recorded
         ).filter { !rejectedTxidAdoptions.contains($0) }
         guard !candidates.isEmpty else { return }
-        let addresses = Dictionary(uniqueKeysWithValues: placeholders.map { ($0.id, $0.address) })
-        let client = makeClient()
-        isResolvingTxidlessReceives = true
+        let rows = Dictionary(uniqueKeysWithValues: placeholders.map { ($0.id, $0) })
+        let checker = makeReceiveChecker()
+        isResolvingPlaceholderTxids = true
         Task { @MainActor [weak self] in
-            defer { self?.isResolvingTxidlessReceives = false }
+            defer { self?.isResolvingPlaceholderTxids = false }
             var paying: [ReceiveTxidAdoption.Candidate] = []
             for candidate in candidates {
-                guard let address = addresses[candidate.rowId] else { continue }
-                // Amount alone is ambiguous (the wallet history can hold old transactions of
-                // the same size), so only a txid that pays the row's address qualifies.
-                switch await Self.paysToAddress(txid: candidate.txid, address: address, client: client) {
+                guard let row = rows[candidate.rowId] else { continue }
+                // nil when no explorer answered, so the pair is retried rather than rejected.
+                switch try? await checker.receiveCheck(for: candidate.txid, paysTo: row.address).value?.paysToAddress {
                 case true?: paying.append(candidate)
                 case false?: self?.rejectedTxidAdoptions.insert(candidate)
                 case nil: break
@@ -96,26 +103,16 @@ final class OnchainReceiveRecoveryService {
             }
             guard let self, self.databaseService === databaseService else { return }
             for (rowId, txid) in ReceiveTxidAdoption.adoptions(paying: paying) {
-                guard let address = addresses[rowId],
-                      databaseService.onchainRepo.adoptTxid(rowId: rowId, txid: txid, address: address)
+                guard let row = rows[rowId],
+                      (try? databaseService.onchainRepo.attachTxid(
+                          rowId: rowId,
+                          txid: txid,
+                          address: row.address,
+                          amountMsat: row.amountMsat
+                      )) == true
                 else { continue }
                 AuditService.log("ONCHAIN_RECEIVE_TXID_RESOLVED", data: ["txid": txid, "row": "\(rowId)"])
             }
         }
-    }
-
-    /// nil when no explorer answered, so the pair is retried rather than rejected.
-    private nonisolated static func paysToAddress(
-        txid: String,
-        address: String,
-        client: ResilientEsploraClient
-    ) async -> Bool? {
-        await client.fetch(
-            endpointBuilder: { ["\(ResilientEsploraClient.trimSlash($0))/tx/\(txid)"] },
-            resultParser: { data in
-                guard let tx = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-                return MissedReceiveRecovery.satsPaidTo(tx, address: address) > 0
-            }
-        )
     }
 }

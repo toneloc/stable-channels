@@ -556,10 +556,14 @@ final class MempoolWebSocketService: NSObject, URLSessionWebSocketDelegate, Memp
     }
 
     /// Sats `tx` pays to `addresses`, or nil when an output value is negative or the total is
-    /// more than can exist.
+    /// more than can exist. Addresses match in normalized form, as in `MissedReceiveRecovery`.
     private func receivedSats(in tx: MempoolWSTransaction, to addresses: Set<String>) -> Int64? {
+        let targets = Set(addresses.map(PaymentDestinationClassifier.normalizeAddress))
         let values = (tx.vout ?? []).lazy
-            .filter { $0.scriptpubkeyAddress.map(addresses.contains) ?? false }
+            .filter {
+                $0.scriptpubkeyAddress
+                    .map { targets.contains(PaymentDestinationClassifier.normalizeAddress($0)) } ?? false
+            }
             .compactMap(\.value)
         return OnchainAmount.total(of: values)
     }

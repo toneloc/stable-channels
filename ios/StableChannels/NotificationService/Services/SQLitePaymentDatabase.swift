@@ -36,10 +36,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
             return nil
         }
         sqlite3_busy_timeout(db, 2000)
-        if write && !Self.didEnsureColumns {
-            if ensureColumns(db: db) {
-                Self.didEnsureColumns = true
-            }
+        if write && !Self.didEnsureColumns, ensureColumns(db: db) {
+            Self.didEnsureColumns = true
         }
         return db
     }
@@ -433,13 +431,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         btcPrice: Double
     ) -> Bool {
         var selectStmt: OpaquePointer?
-        guard sqlite3_prepare_v2(
-            db,
-            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
-            -1,
-            &selectStmt,
-            nil
-        ) == SQLITE_OK else {
+        guard sqlite3_prepare_v2(db, SharedPaymentSQL.selectChannelBooks, -1, &selectStmt, nil) == SQLITE_OK else {
             return false
         }
         sqlite3_bind_text(
@@ -468,8 +460,9 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         ) else { return false }
 
         var updateStmt: OpaquePointer?
-        let sql = "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?"
-        guard sqlite3_prepare_v2(db, sql, -1, &updateStmt, nil) == SQLITE_OK else { return false }
+        guard sqlite3_prepare_v2(db, SharedPaymentSQL.updateChannelBacking, -1, &updateStmt, nil) == SQLITE_OK else {
+            return false
+        }
         defer { sqlite3_finalize(updateStmt) }
 
         sqlite3_bind_int64(updateStmt, 1, newBacking)
@@ -1161,12 +1154,8 @@ final class SQLitePaymentDatabase: PaymentDatabase {
     /// one; nil when either lookup could not run.
     private func tradeCorrelation(_ db: OpaquePointer?,
                                   paymentId: String) -> (tradeExists: Bool, hasUnattached: Bool)? {
-        guard let tradeExists = exists(db, "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1", paymentId),
-              let hasUnattached = exists(
-                  db,
-                  "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1",
-                  nil
-              ) else { return nil }
+        guard let tradeExists = exists(db, SharedPaymentSQL.tradeWithPaymentId, paymentId),
+              let hasUnattached = exists(db, SharedPaymentSQL.anyUnattachedPreparedTrade, nil) else { return nil }
         return (tradeExists, hasUnattached)
     }
 
@@ -1186,10 +1175,9 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         sql: String,
         bind: (OpaquePointer?, Int64) -> Void
     ) -> Bool {
-        let now = UInt64(Date().timeIntervalSince1970)
         guard TradeProtocol.isCanonicalIdentifier(paymentId), amountMsat <= UInt64(Int64.max),
+              let cutoff = TradeProtocol.unattachedTradeCutoff(now: UInt64(Date().timeIntervalSince1970)),
               sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else { return false }
-        let cutoff = Int64(max(now, TradeProtocol.responseRetryWindowSecs) - TradeProtocol.responseRetryWindowSecs)
         var select: OpaquePointer?
         let selectSQL = "SELECT id \(SharedPaymentSQL.unattachedPreparedTradeMatch)"
         guard sqlite3_prepare_v2(db, selectSQL, -1, &select, nil) == SQLITE_OK else {

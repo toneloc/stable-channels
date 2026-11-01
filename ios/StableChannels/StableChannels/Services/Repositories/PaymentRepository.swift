@@ -307,35 +307,62 @@ final class PaymentRepository {
             """
             UPDATE payments SET status = 'failed'
             WHERE payment_type = 'onchain' AND status = 'pending'
-            AND (txid IS NULL OR txid = '') AND created_at < ?
+            AND \(SharedPaymentSQL.lacksTxid()) AND created_at < ?
             """,
             params: [.integer(cutoff)]
         )
     }
 
-    /// Fails one pending, unconfirmed onchain row. The caller decides it is stale first
-    /// (`ConfirmationPolicy.shouldFailUnfound`); the WHERE guard only keeps a row that was
-    /// confirmed in the meantime.
-    func failUnconfirmedOnchainRow(id: Int64) throws -> Bool {
-        try rawSQL.executeReturningChanges(
-            """
-            UPDATE payments SET status = 'failed'
-            WHERE id = ? AND payment_type = 'onchain' AND status = 'pending' AND confirmations = 0
-            """,
-            params: [.integer(id)]
-        ) > 0
+    /// What failing a dropped transaction's rows changed.
+    struct DroppedOnchainTx: Equatable {
+        let failedSends: Int
+        /// Sats of the receive it failed, if any.
+        let failedReceiveSats: Int64?
+
+        var failedAny: Bool { failedSends > 0 || failedReceiveSats != nil }
     }
 
-    /// Detaches a txid that does not pay the row's address, back to an unresolved pending row.
-    func clearPaymentTxid(id: Int64) throws -> Bool {
-        try rawSQL.executeReturningChanges(
-            """
-            UPDATE payments SET txid = NULL, confirmations = 0, tx_block_height = NULL, status = 'pending'
-            WHERE id = ?
-            """,
-            params: [.integer(id)]
-        ) > 0
+    /// Fails the pending, unconfirmed on-chain sends and receive of a transaction the explorers no
+    /// longer know. The one fail path for a dropped transaction, whether the WebSocket reported it
+    /// removed or the confirmation poller found it gone; the caller has made that call first.
+    func failDroppedOnchainTx(txid: String) throws -> DroppedOnchainTx {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            let failedSends = try failDroppedSend(txid: txid)
+            return DroppedOnchainTx(failedSends: failedSends, failedReceiveSats: try failPaymentByTxid(txid: txid))
+        }
     }
+
+    /// Detaches a txid that does not pay the row's address, back to an unresolved pending row. A
+    /// row named after that txid is renamed and its resolution forgets the txid, so the transaction
+    /// can still be recorded for the address it does pay.
+    func clearPaymentTxid(id: Int64) throws -> Bool {
+        try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            try rawSQL.execute(
+                """
+                UPDATE onchain_receive_txids SET txid = NULL
+                WHERE id = (SELECT resolution_id FROM payments WHERE id = ?1)
+                  AND txid = (SELECT txid FROM payments WHERE id = ?1)
+                """,
+                params: [.integer(id)]
+            )
+            return try rawSQL.executeReturningChanges(
+                """
+                UPDATE payments
+                SET txid = NULL, confirmations = 0, tx_block_height = NULL, status = 'pending',
+                    payment_id = CASE WHEN payment_id = ?2 || txid THEN ?3 || id ELSE payment_id END
+                WHERE id = ?1
+                """,
+                params: [
+                    .integer(id),
+                    .text(OnchainReceiveRepository.receivePaymentId(txid: "")),
+                    .text(Self.detachedReceivePaymentIdPrefix)
+                ]
+            ) > 0
+        }
+    }
+
+    /// Payment id prefix of a receive row whose txid was detached, followed by the row id.
+    static let detachedReceivePaymentIdPrefix = "onchain_detached_"
 
     func latestReceivedPayment() -> PaymentRecord? {
         let sql = """
@@ -471,11 +498,14 @@ final class PaymentRepository {
     }
 
     /// True if this address has ever received an on-chain deposit we recorded, i.e. it is one of
-    /// our own wallet's addresses rather than an external destination.
+    /// our own wallet's addresses rather than an external destination. A placeholder's address
+    /// lives on its resolution row.
     func isKnownReceiveAddress(_ address: String) throws -> Bool {
         let sql = """
-        SELECT 1 FROM payments
-        WHERE payment_type = 'onchain' AND direction = 'received' AND address = ?
+        SELECT 1 FROM payments p
+        LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
+        WHERE p.payment_type = 'onchain' AND p.direction = 'received'
+          AND \(OnchainReceiveRepository.receiveRowAddress) = ?
         LIMIT 1
         """
         return try !rawSQL.query(sql, params: [.text(address)]).isEmpty
@@ -760,10 +790,7 @@ final class PaymentRepository {
         direction: String,
         btcPrice: Double?
     ) throws -> Int64 {
-        let rows = try rawSQL.query(
-            "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
-            params: [.text(ucid)]
-        )
+        let rows = try rawSQL.query(SharedPaymentSQL.selectChannelBooks, params: [.text(ucid)])
         guard let row = rows.first else {
             throw DatabaseError.missingChannelRow(ucid)
         }
@@ -785,10 +812,7 @@ final class PaymentRepository {
                 "delta_sats": "\(delta)"
             ])
         }
-        try rawSQL.execute(
-            "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?",
-            params: [.integer(newBacking), .text(ucid)]
-        )
+        try rawSQL.execute(SharedPaymentSQL.updateChannelBacking, params: [.integer(newBacking), .text(ucid)])
         let changedRows = rawSQL.changes
         if changedRows != 1 {
             throw DatabaseError.executeFailed(

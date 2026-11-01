@@ -73,8 +73,6 @@ enum Constants {
     // MARK: - Business Logic
 
     static let maxRiskLevel: Int32 = 100
-    static let stabilityThresholdPercent: Double = 0.1
-    static let stabilityThresholdUSD: Double = 0.25
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     /// A stability payment may only be sent when the Lightning wallet synced to chain within
     /// this window (two 60s background sync intervals, so one missed tick is tolerated).

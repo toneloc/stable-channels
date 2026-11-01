@@ -6,6 +6,11 @@ import Foundation
 enum SharedPaymentSQL {
     // MARK: - Payments
 
+    /// [column] holds no txid (NULL or empty): a row no transaction is attached to yet.
+    static func lacksTxid(_ column: String = "txid") -> String {
+        "(\(column) IS NULL OR \(column) = '')"
+    }
+
     /// ?1 status, ?2 fee msat, ?3 payment id. Only a pending row moves.
     static let resolvePendingPaymentWithFee =
         "UPDATE payments SET status = ?, fee_msat = ? WHERE payment_id = ? AND status = 'pending'"
@@ -14,10 +19,26 @@ enum SharedPaymentSQL {
     static let resolvePendingPayment =
         "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'"
 
+    // MARK: - Channels
+
+    /// ?1 user channel id. The books a payment's backing change is applied to.
+    static let selectChannelBooks = "SELECT stable_sats, expected_usd FROM channels WHERE user_channel_id = ?"
+
+    /// ?1 new backing sats, ?2 user channel id.
+    static let updateChannelBacking =
+        "UPDATE channels SET stable_sats = ?, updated_at = strftime('%s', 'now') WHERE user_channel_id = ?"
+
     // MARK: - Trades
 
     /// Statuses a fee payment outcome may still move; signed results and paid fees are final.
-    private static let unresolvedTradeStatuses = "('prepared','sent','uncertain')"
+    static let unresolvedTradeStatuses = "('prepared','sent','uncertain')"
+
+    /// ?1 trade payment id. Whether a trade already carries this fee payment id.
+    static let tradeWithPaymentId = "SELECT 1 FROM trades WHERE trade_payment_id = ? LIMIT 1"
+
+    /// Whether any prepared trade still waits for its fee payment id.
+    static let anyUnattachedPreparedTrade =
+        "SELECT 1 FROM trades WHERE trade_payment_id IS NULL AND status = 'prepared' LIMIT 1"
     /// Binds ?1 reason code.
     private static let sendFailedAssignments =
         "status = 'send_failed', outcome = 'send_failed', reason_code = ?, resolved_at = strftime('%s', 'now')"

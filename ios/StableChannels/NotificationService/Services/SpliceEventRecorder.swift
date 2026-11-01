@@ -1,9 +1,18 @@
 import Foundation
 
+/// The payment types of a splice history row.
+enum SplicePaymentType: String, CaseIterable {
+    case spliceIn = "splice_in"
+    case spliceOut = "splice_out"
+}
+
 /// SQL for durable splice operation identity and event receipts, shared by the app and the
 /// notification extension (both write the same app-group database). Statements are plain SQL
 /// so each writer runs them with its own SQLite wrapper.
 enum SpliceEventRecorder {
+    /// Every splice payment type, as an SQL list for `payment_type IN ...`.
+    static let spliceTypesSQL = "(" + SplicePaymentType.allCases.map { "'\($0.rawValue)'" }.joined(separator: ", ") + ")"
+
     static let createTableStatements = [
         """
         CREATE TABLE IF NOT EXISTS splice_operations (
@@ -45,7 +54,7 @@ enum SpliceEventRecorder {
     WITH
     exact AS (
         SELECT p.id FROM payments p LEFT JOIN splice_operations s ON s.payment_row_id = p.id
-        WHERE p.txid = ?5 AND p.payment_type IN ('splice_in', 'splice_out')
+        WHERE p.txid = ?5 AND p.payment_type IN \(spliceTypesSQL)
           AND (s.user_channel_id IS NULL OR s.user_channel_id = ?3)
         LIMIT 2
     ),
@@ -63,7 +72,7 @@ enum SpliceEventRecorder {
     ),
     legacy AS (
         SELECT p.id FROM payments p
-        WHERE ?2 = 'negotiated' AND p.payment_type IN ('splice_in', 'splice_out')
+        WHERE ?2 = 'negotiated' AND p.payment_type IN \(spliceTypesSQL)
           AND p.status IN ('pending', 'expired') AND p.txid IS NULL
           AND NOT EXISTS (SELECT 1 FROM splice_operations s WHERE s.payment_row_id = p.id)
           AND EXISTS (SELECT 1 FROM channels c WHERE c.user_channel_id = ?3 AND c.channel_id = ?4)
@@ -136,10 +145,10 @@ enum SpliceEventRecorder {
     """
 
     static let hasPendingSpliceSQL =
-        "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') LIMIT 1"
+        "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN \(spliceTypesSQL) LIMIT 1"
 
     /// A pending splice still waiting for its negotiated txid. Splice rows are created with a
     /// NULL txid and only ever stamped with an event's txid, so NULL is the one "no txid" form.
     static let hasPendingSpliceWithoutTxidSQL =
-        "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN ('splice_in', 'splice_out') AND txid IS NULL LIMIT 1"
+        "SELECT 1 FROM payments WHERE status = 'pending' AND payment_type IN \(spliceTypesSQL) AND txid IS NULL LIMIT 1"
 }

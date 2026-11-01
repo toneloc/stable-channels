@@ -25,8 +25,8 @@ struct ResilientEsploraClient {
     struct Config {
         /// One quick pass over the explorers, for best-effort background lookups that the next
         /// tick retries anyway.
-        static func singlePass(chainURLs: [String]) -> Config {
-            Config(chainURLs: chainURLs, maxAttempts: 1, timeout: 10)
+        static func singlePass(chainURLs: [String], maxBodyBytes: Int = defaultMaxBodyBytes) -> Config {
+            Config(chainURLs: chainURLs, maxAttempts: 1, timeout: 10, maxBodyBytes: maxBodyBytes)
         }
 
         let chainURLs: [String]

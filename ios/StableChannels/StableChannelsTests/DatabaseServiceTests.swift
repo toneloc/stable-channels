@@ -69,17 +69,17 @@ final class DatabaseServiceTests: XCTestCase {
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: done)?.status, "completed")
     }
 
-    func testFailUnconfirmedOnchainRowKeepsConfirmedAndNonPendingRows() throws {
+    func testFailDroppedOnchainTxKeepsConfirmedAndNonPendingRows() throws {
         let pending = try insertRow(paymentId: "pending", txid: "tx1", ageSeconds: 0)
         let confirmed = try insertRow(paymentId: "confirmed", txid: "tx2", ageSeconds: 0)
         try service.rawSQL.execute("UPDATE payments SET confirmations = 1 WHERE id = ?", params: [.integer(confirmed)])
-        let completed = try insertRow(paymentId: "completed", status: "completed", txid: "tx3", ageSeconds: 0)
+        _ = try insertRow(paymentId: "completed", status: "completed", txid: "tx3", ageSeconds: 0)
 
-        XCTAssertTrue(try service.paymentRepo.failUnconfirmedOnchainRow(id: pending))
-        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: pending))
-        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: confirmed))
-        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: completed))
-        XCTAssertFalse(try service.paymentRepo.failUnconfirmedOnchainRow(id: 999_999))
+        XCTAssertEqual(try service.paymentRepo.failDroppedOnchainTx(txid: "tx1").failedSends, 1)
+        XCTAssertFalse(try service.paymentRepo.failDroppedOnchainTx(txid: "tx1").failedAny)
+        XCTAssertFalse(try service.paymentRepo.failDroppedOnchainTx(txid: "tx2").failedAny)
+        XCTAssertFalse(try service.paymentRepo.failDroppedOnchainTx(txid: "tx3").failedAny)
+        XCTAssertFalse(try service.paymentRepo.failDroppedOnchainTx(txid: "missing").failedAny)
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: pending)?.status, "failed")
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: confirmed)?.status, "pending")
     }
@@ -2664,6 +2664,16 @@ final class DatabaseServiceTests: XCTestCase {
         try service.paymentRepo.failPaymentByTxid(txid: receiveTxid)
 
         XCTAssertEqual(service.paymentRepo.payment(paymentId: "splice-1")?.status, "pending")
+    }
+
+    func testDetachedReceiveTxidCanBeRecordedAgain() throws {
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000), .inserted)
+        let row = try XCTUnwrap(service.paymentRepo.payment(txid: receiveTxid))
+
+        XCTAssertTrue(try service.paymentRepo.clearPaymentTxid(id: row.id))
+
+        XCTAssertEqual(try recordWebSocketReceive(sats: 50_000, address: "bc1qother"), .inserted)
+        XCTAssertEqual(service.paymentRepo.payment(txid: receiveTxid)?.address, "bc1qother")
     }
 
     func testSecondOnchainReceiveRowWithSameTxidIsRefused() throws {

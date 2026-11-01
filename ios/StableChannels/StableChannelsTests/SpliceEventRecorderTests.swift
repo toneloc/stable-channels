@@ -130,7 +130,7 @@ final class SpliceEventRecorderTests: XCTestCase {
         XCTAssertTrue(service.spliceRepo.completeSplice(txid: newFunding))
 
         let failed = try begin(previousFunding: newFunding)
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         let fresh = try begin(previousFunding: newFunding)
         try service.spliceRepo.recordEvent(negotiated(newFunding))
 
@@ -177,7 +177,7 @@ final class SpliceEventRecorderTests: XCTestCase {
         try service.spliceRepo.recordEvent(negotiated(newFunding))
         XCTAssertNil(try row(first).txid, "ambiguous at receipt")
         // The node refuses the second attempt and it is failed: the first is the only candidate left.
-        XCTAssertTrue(service.spliceRepo.failLatestPendingSplice())
+        XCTAssertTrue(service.spliceRepo.failPendingSplice())
         XCTAssertEqual(try row(second).status, "failed")
 
         let unlocked = oldFunding
@@ -239,8 +239,8 @@ final class SpliceEventRecorderTests: XCTestCase {
         )
         try service.spliceRepo.recordEvent(negotiated(newFunding))
         XCTAssertEqual(try row(own).txid, newFunding)
-        XCTAssertTrue(try service.spliceRepo.isSelfSendSplice(txid: newFunding))
-        XCTAssertFalse(try service.spliceRepo.isSelfSendSplice(txid: oldFunding))
+        XCTAssertEqual(try service.spliceRepo.isSelfSendSplice(txid: newFunding), true)
+        XCTAssertNil(try service.spliceRepo.isSelfSendSplice(txid: oldFunding), "no splice row carries it")
     }
 
     // MARK: - ChannelReady

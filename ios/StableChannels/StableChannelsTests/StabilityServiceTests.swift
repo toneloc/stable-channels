@@ -1479,7 +1479,7 @@ final class StabilityServiceTests: XCTestCase {
         // When pendingSplice exists, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = false
         appState.pendingSplice = PendingSplice(
-            direction: "out",
+            paymentType: .spliceOut,
             amountSats: 20_000,
             address: "tb1qtestaddress"
         )

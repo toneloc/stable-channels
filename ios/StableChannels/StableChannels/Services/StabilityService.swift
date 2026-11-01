@@ -15,9 +15,6 @@ enum StabilityService {
         isStabilityPayment ? accountingPrice : bookedPrice
     }
 
-    /// Below this the position counts as zero-target; a zero target with no backing is closed.
-    static let minimumStableUSD: Double = 0.01
-
     /// Reconcile an outgoing payment against the stable position.
     /// Returns the USD amount the stable target dropped by, or nil if fully covered by native BTC.
     static func reconcileOutgoing(_ sc: inout StableChannel, price: Double) -> Double? {
@@ -189,12 +186,12 @@ enum StabilityService {
         let dollarsFromPar = stableUSDValue - targetUSD
         // Clamp the denominator: at a zero/tiny target an unclamped ratio is 0 (or explodes),
         // which would pin percentFromPar inside the deadband and block settlement of the residue.
-        let percentFromPar = abs(dollarsFromPar / max(targetUSD, minimumStableUSD)) * 100.0
+        let percentFromPar = abs(dollarsFromPar / max(targetUSD, StabilizationPolicy.minimumStableUSD)) * 100.0
         let isReceiverBelowExpected = stableUSDValue < targetUSD
 
         let action: StabilityAction
-        if percentFromPar < Constants.stabilityThresholdPercent
-            || abs(dollarsFromPar) < Constants.stabilityThresholdUSD {
+        if percentFromPar < StabilizationPolicy.thresholdPercent
+            || abs(dollarsFromPar) < StabilizationPolicy.thresholdUSD {
             action = .stable
         } else if sc.riskLevel > Constants.maxRiskLevel {
             action = .highRiskNoAction

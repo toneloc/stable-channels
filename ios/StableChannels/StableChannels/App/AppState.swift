@@ -156,7 +156,7 @@ class AppState {
             paymentId: paymentId,
             paymentType: paymentType,
             amountMsat: amountMsat,
-            amountUSD: price > 0 ? BitcoinUnits.usd(msats: amountMsat, price: price) : nil,
+            amountUSD: OnchainAmount.usd(msats: amountMsat, price: price),
             btcPrice: price > 0 ? price : nil,
             address: address,
             txid: txid
@@ -542,7 +542,8 @@ class AppState {
         transactionLinkService: transactionLinkService,
         makeClient: { [unowned self] in
             ResilientEsploraClient(config: .singlePass(chainURLs: chainLookupURLs))
-        }
+        },
+        makeReceiveChecker: { [unowned self] in TxConfirmationResolver.singlePass(chainURLs: chainLookupURLs) }
     )
 
     // Pending trade payments — deferred until PaymentSuccessful/PaymentFailed
@@ -559,9 +560,9 @@ class AppState {
     /// in-memory map, so the trade sheets poll this while pending and it runs for every
     /// known payment id on startup and foreground.
     func refreshTradeOutcome(paymentId: String) {
-        guard tradeOutcomes[paymentId] == nil, let db = databaseService else { return }
-        guard let terminal =
-            (try? db.channelRepo.terminalTradeOutcome(paymentId: paymentId)) ?? nil else { return }
+        guard tradeOutcomes[paymentId] == nil, let db = databaseService,
+              let terminal =
+              (try? db.channelRepo.terminalTradeOutcome(paymentId: paymentId)) ?? nil else { return }
         tradeOutcomes[paymentId] = terminal.accepted
             ? TradeOutcome(accepted: true, message: "")
             : TradeOutcome(
@@ -650,10 +651,7 @@ class AppState {
             self?.transactionLinkService.clearReceiveTxid(ifMatching: txid)
         }
         // Read live: the cached wallet list is empty until the first balance refresh.
-        pollingService?.walletReceiveTxids = { [weak self] () -> Set<String>? in
-            guard let payments = self?.nodeService.node?.listPayments() else { return nil }
-            return WalletInboundOnchain(payments).txids
-        }
+        pollingService?.walletReceiveTxids = { [weak self] in self?.nodeService.inboundOnchain()?.txids }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
             self.notifyPaymentsChanged()
@@ -1646,8 +1644,8 @@ class AppState {
         let gossipPath = Constants.userDataDir.appendingPathComponent("network_graph.bin")
         let metricsPath = Constants.userDataDir.appendingPathComponent("node_metrics.bin")
 
-        guard FileManager.default.fileExists(atPath: gossipPath.path) else { return }
-        guard let graphData = try? Data(contentsOf: gossipPath) else { return }
+        guard FileManager.default.fileExists(atPath: gossipPath.path),
+              let graphData = try? Data(contentsOf: gossipPath) else { return }
 
         // Skip restoring an empty/corrupt graph
         if graphData.count < 1024 {
@@ -1886,69 +1884,29 @@ class AppState {
             )
 
         case .paymentFailed(let paymentId, let paymentHash, let reason):
-            // Check if this is a pending trade payment
-            let reasonCode = LightningPaymentRecovery.reasonCode(caseName: reason.map { "\($0)" })
-            var failedTrade = paymentId.flatMap { pendingTradePayments["\($0)"] }
-            if let pid = paymentId, failedTrade == nil,
-               let payment = nodeService.node?.payment(paymentId: pid),
-               payment.direction == .outbound,
-               let amountMsat = payment.amountMsat {
-                failedTrade = try? databaseService?.channelRepo.failUnattachedPreparedTrade(
-                    paymentId: "\(pid)",
-                    amountMsat: amountMsat,
-                    reasonCode: reasonCode
+            let pid = paymentId.map { "\($0)" }
+            let channelRepo = databaseService?.channelRepo
+            // The row this failure resolves, by the rule the notification extension and Android share.
+            let target = pid.map { pid in
+                LightningPaymentRecovery.failureTarget(
+                    paymentId: pid,
+                    pendingStabilityPaymentId: databaseService?.stabilityRepo.loadPendingSend()?.paymentId,
+                    tradeExists: pendingTradePayments[pid] != nil
+                        || (try? channelRepo?.tradePaymentExists(paymentId: pid)) == true,
+                    hasUnattachedPreparedTrade: (try? channelRepo?.hasUnattachedPreparedTrade()) == true,
+                    lookupAmountMsat: { [nodeService] in
+                        guard let paymentId, let payment = nodeService.node?.payment(paymentId: paymentId),
+                              payment.direction == .outbound else { return nil }
+                        return payment.amountMsat
+                    }
                 )
             }
-            if let pid = paymentId, let trade = failedTrade {
-                pendingTradePayments.removeValue(forKey: "\(pid)")
-                _ = try? databaseService?.channelRepo.markTradeSendFailed(
-                    tradeDbId: trade.tradeDbId,
-                    reasonCode: reasonCode
-                )
-                statusMessage = "Order failed"
-
-                AuditService.log("TRADE_FAILED", data: [
-                    "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
-                    "action": trade.action,
-                    "new_expected_usd": "\(trade.newExpectedUSD)",
-                    "reason": reason.map { "\($0)" } ?? "unknown"
-                ])
-            } else {
-                // Update payment status in DB
-                if let pid = paymentId {
-                    try? databaseService?.paymentRepo.updatePaymentStatus(
-                        paymentId: "\(pid)", status: "failed"
-                    )
-                    // History and payment details reload only when this epoch moves.
-                    notifyPaymentsChanged()
-                    NotificationCenter.default.post(
-                        name: .paymentFailed,
-                        object: nil,
-                        userInfo: [
-                            "paymentId": "\(pid)",
-                            "errorMessage": WalletErrorMessages.paymentFailure(reason)
-                        ]
-                    )
-                }
-                // If this is the in-flight stability send, the failure means no sats
-                // moved — clear the marker so future sends are unblocked (no debit).
-                if let pid = paymentId,
-                   let pending = databaseService?.stabilityRepo.loadPendingSend(),
-                   !pending.paymentId.isEmpty,
-                   pending.paymentId == "\(pid)" {
-                    databaseService?.stabilityRepo.clearPendingSend()
-                    AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
-                        "payment_id": "\(pid)",
-                        "reason": "payment_failed"
-                    ])
-                }
-                AuditService.log("PAYMENT_FAILED", data: [
-                    "payment_id": paymentId.map { "\($0)" } ?? "nil",
-                    "payment_hash": paymentHash.map { "\($0)" } ?? "nil",
-                    "reason": reason.map { "\($0)" } ?? "unknown"
-                ])
-                statusMessage = WalletErrorMessages.paymentFailure(reason)
-            }
+            handlePaymentFailed(
+                paymentId: pid,
+                target: target,
+                paymentHash: paymentHash.map { "\($0)" },
+                reason: reason
+            )
 
         case .spliceNegotiated(let channelId, let userChannelId, _, let newFundingTxo):
             handleSplicePending(
@@ -2083,7 +2041,7 @@ class AppState {
             accountingPrice: accountingBTCPrice,
             bookedPrice: stableChannel.latestPrice
         )
-        let amountUSD: Double? = price > 0 ? BitcoinUnits.usd(msats: amountMsat, price: price) : nil
+        let amountUSD: Double? = OnchainAmount.usd(msats: amountMsat, price: price)
         let paymentType = isStabilityPayment ? "stability" : "lightning"
         let backingDelta: Int64? = isStabilityPayment ? Int64(amountMsat / 1000) : nil
 
@@ -2231,9 +2189,7 @@ class AppState {
         expectedCounterparty: String? = nil
     ) -> SyncMessageHandlingResult {
         for tlv in customRecords {
-            guard tlv.typeNum == Constants.stableChannelTLVType else { continue }
-
-            guard let message = TradeProtocol.parseSignedControl(
+            guard tlv.typeNum == Constants.stableChannelTLVType, let message = TradeProtocol.parseSignedControl(
                 data: tlv.value,
                 expectedCounterparty: expectedCounterparty ?? stableChannel.counterparty,
                 verifySignature: { [weak self] msg, sig, pubkey in
@@ -2385,6 +2341,80 @@ class AppState {
     }
 
     // MARK: - Payment Successful
+
+    /// Resolves the durable row a failed outbound payment's [target] names. The in-flight stability
+    /// send comes first: no sats moved, so its marker clears and the next send is unblocked.
+    private func handlePaymentFailed(
+        paymentId pid: String?,
+        target: LightningPaymentFailureTarget?,
+        paymentHash: String?,
+        reason: PaymentFailureReason?
+    ) {
+        let reasonCode = LightningPaymentRecovery.reasonCode(caseName: reason.map { "\($0)" })
+        var tradeFailed = false
+        var failedTrade = pid.flatMap { pendingTradePayments[$0] }
+        if let pid {
+            switch target {
+            case .trade?:
+                // Signed results and already-paid fees are protected by the row update itself.
+                if let trade = failedTrade {
+                    _ = try? databaseService?.channelRepo.markTradeSendFailed(
+                        tradeDbId: trade.tradeDbId,
+                        reasonCode: reasonCode
+                    )
+                } else {
+                    _ = try? databaseService?.channelRepo.markTradeSendFailed(paymentId: pid, reasonCode: reasonCode)
+                }
+                tradeFailed = true
+            case .unattachedTrade(let amountMsat)?:
+                failedTrade = try? databaseService?.channelRepo.failUnattachedPreparedTrade(
+                    paymentId: pid,
+                    amountMsat: amountMsat,
+                    reasonCode: reasonCode
+                )
+                tradeFailed = failedTrade != nil
+            case .stabilitySend?, .payment?, nil:
+                break
+            }
+        }
+        if let pid, tradeFailed {
+            pendingTradePayments.removeValue(forKey: pid)
+            statusMessage = "Order failed"
+            AuditService.log("TRADE_FAILED", data: [
+                "payment_hash": paymentHash ?? "nil",
+                "action": failedTrade?.action ?? "unknown",
+                "new_expected_usd": failedTrade.map { "\($0.newExpectedUSD)" } ?? "unknown",
+                "reason": reason.map { "\($0)" } ?? "unknown"
+            ])
+            return
+        }
+        if let pid {
+            try? databaseService?.paymentRepo.updatePaymentStatus(paymentId: pid, status: "failed")
+            // History and payment details reload only when this epoch moves.
+            notifyPaymentsChanged()
+            NotificationCenter.default.post(
+                name: .paymentFailed,
+                object: nil,
+                userInfo: [
+                    "paymentId": pid,
+                    "errorMessage": WalletErrorMessages.paymentFailure(reason)
+                ]
+            )
+        }
+        if let pid, target == .stabilitySend {
+            databaseService?.stabilityRepo.clearPendingSend()
+            AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
+                "payment_id": pid,
+                "reason": "payment_failed"
+            ])
+        }
+        AuditService.log("PAYMENT_FAILED", data: [
+            "payment_id": pid ?? "nil",
+            "payment_hash": paymentHash ?? "nil",
+            "reason": reason.map { "\($0)" } ?? "unknown"
+        ])
+        statusMessage = WalletErrorMessages.paymentFailure(reason)
+    }
 
     private func handlePaymentSuccessful(
         paymentId: PaymentId?,
@@ -2775,29 +2805,20 @@ class AppState {
     }
 
     private func handleOnchainReceiveResolved(resolutionId: Int64, txid: String) {
-        if let db = databaseService,
-           let row = db.onchainRepo.fetchPendingOnchainReceiveRow(resolutionId: resolutionId) {
-            if let wsPayment = db.paymentRepo.payment(txid: txid) {
-                if wsPayment.amountMsat == UInt64(row.amountMsat) {
-                    // Equal amounts do not prove identity. If another writer recorded this
-                    // txid after resolution, retain the placeholder rather than erase a deposit.
-                    AuditService.log("ONCHAIN_RECEIVE_RES_AMBIGUOUS", data: [
-                        "resolution_id": "\(resolutionId)",
-                        "txid": txid
-                    ])
-                } else {
-                    // Mismatched amount! This placeholder belongs to a different deposit.
-                    // Leave it intact to prevent erasing it from history.
-                    AuditService.log("ONCHAIN_RECEIVE_RES_MISMATCHED_AMOUNT", data: [
-                        "resolution_id": "\(resolutionId)",
-                        "txid": txid,
-                        "placeholder_msat": "\(row.amountMsat)",
-                        "websocket_msat": "\(wsPayment.amountMsat)"
-                    ])
-                }
-            } else {
-                // No websocket row exists. Attach the txid to this placeholder.
-                db.paymentRepo.updatePaymentTxid(paymentId: row.paymentId, txid: txid, status: "completed")
+        // The resolver's match (an output of exactly this amount to this address) is not proof on its
+        // own: the placeholder takes the txid only by the one attach rule, which needs it as a candidate.
+        if let db = databaseService, let placeholder = db.onchainRepo.pendingPlaceholder(resolutionId: resolutionId) {
+            let attached = (try? db.onchainRepo.attachTxid(
+                rowId: placeholder.id,
+                txid: txid,
+                address: placeholder.address,
+                amountMsat: placeholder.amountMsat
+            )) == true
+            if !attached {
+                AuditService.log("ONCHAIN_RECEIVE_RES_NOT_ATTACHED", data: [
+                    "resolution_id": "\(resolutionId)",
+                    "txid": txid
+                ])
             }
         }
         if let db = databaseService,
@@ -2927,7 +2948,7 @@ class AppState {
                 )
                 Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
             } else {
-                guard databaseService.spliceRepo.failLatestPendingSplice() else {
+                guard databaseService.spliceRepo.failPendingSplice(rowId: pendingSplice?.rowId) else {
                     throw DatabaseError.executeFailed("Could not persist splice failure")
                 }
                 teardownSpliceState(channelId: channelId, capturedTxid: nil, userChannelId: userChannelId)
@@ -3046,22 +3067,19 @@ class AppState {
         // user taps send, and without a durable row the splice would vanish
         // from history (and from Stable USD accounting) if the app died first.
         // The channel identity is saved with the row so its events can only match this operation.
-        let price = accountingBTCPrice
-        let amountUSD: Double? = price > 0
-            ? BitcoinUnits.usd(sats: amountSats, price: price)
-            : nil
-        let rowId: Int64
         do {
-            rowId = try db.spliceRepo.recordPendingSplice(
-                paymentType: SpliceCompletionPolicy.spliceOutPaymentType,
-                amountMsat: amountSats * 1000,
-                amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil,
-                address: address,
-                selfSend: db.paymentRepo.isOwnReceiveAddress(
-                    address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+            try lockSplice(
+                SpliceStartRequest(
+                    paymentType: .spliceOut,
+                    amountSats: amountSats,
+                    price: accountingBTCPrice,
+                    address: address,
+                    selfSend: db.paymentRepo.isOwnReceiveAddress(
+                        address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
+                    ),
+                    channel: channel
                 ),
-                channel: channel
+                database: db
             )
         } catch {
             AuditService.log("SPLICE_OUT_PERSISTENCE_FAILED", data: [
@@ -3072,19 +3090,38 @@ class AppState {
             throw SpliceOperationError.persistenceFailed(underlyingDescription: error.localizedDescription)
         }
         spliceGeneration &+= 1
-        isSweeping = true
-        pendingSplice = PendingSplice(direction: "out", amountSats: amountSats, address: address, rowId: rowId)
         statusMessage = "Move pending..."
+    }
+
+    /// Saves the splice's row and takes the splice lock: the first half of the one start sequence
+    /// (`SpliceStartService`) for splice-out sends and sweeps.
+    private func lockSplice(_ request: SpliceStartRequest, database: DatabaseService) throws {
+        let rowId = try SpliceStartService(spliceRepo: database.spliceRepo).record(request)
+        isSweeping = true
+        pendingSplice = PendingSplice(
+            paymentType: request.paymentType,
+            amountSats: request.amountSats,
+            address: request.address,
+            rowId: rowId
+        )
+    }
+
+    /// Asks the node to start the locked splice: the second half of the one start sequence. A
+    /// failed call releases the lock and fails the saved row.
+    func startLockedSplice(_ nativeCall: () throws -> Void) throws {
+        do {
+            try nativeCall()
+        } catch {
+            cancelPendingSpliceStart()
+            throw error
+        }
+        spliceStartAccepted()
     }
 
     /// The node accepted the splice just started; older overdue attempts on its channel are dead.
     func spliceStartAccepted() {
-        guard let rowId = pendingSplice?.rowId else { return }
-        do {
-            try databaseService?.spliceRepo.retireSupersededSplices(byRowId: rowId)
-        } catch {
-            AuditService.log("SPLICE_RETIRE_FAILED", data: ["error": error.localizedDescription])
-        }
+        guard let rowId = pendingSplice?.rowId, let databaseService else { return }
+        SpliceStartService(spliceRepo: databaseService.spliceRepo).accepted(rowId: rowId)
     }
 
     func cancelPendingSpliceStart() {
@@ -3093,8 +3130,8 @@ class AppState {
         // The initiation row was persisted before the native call; the native
         // call failed, so mark that (NULL-txid) row failed. Failed rows are
         // terminal — no later event can stamp or resurrect them.
-        if pendingSplice != nil {
-            databaseService?.spliceRepo.failLatestPendingSplice()
+        if let pendingSplice, let databaseService {
+            SpliceStartService(spliceRepo: databaseService.spliceRepo).failed(rowId: pendingSplice.rowId)
         }
         pendingSplice = nil
         statusMessage = ""
@@ -3200,8 +3237,7 @@ class AppState {
     }
 
     private func isTxConfirmed(_ txid: String) async -> Bool {
-        let lookup = try? await TxConfirmationResolver(chainURLs: chainLookupURLs, maxAttempts: 1, esploraTimeout: 10)
-            .status(for: txid)
+        let lookup = try? await TxConfirmationResolver.singlePass(chainURLs: chainLookupURLs).status(for: txid)
         guard case .found(let status)? = lookup else {
             AuditService.log("SPLICE_CONFIRMATION_CHECK_FAILED", data: ["txid": txid])
             return false
@@ -3275,8 +3311,10 @@ class AppState {
                baselineSats: depositBaseline.sats,
                currentOnchainSats: onchainBalanceSats,
                completedRow: row,
-               destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid)) == true
-                   || databaseService.paymentRepo.isOwnReceiveAddress(
+               // The flag saved at the start wins: by now a receive recorded on the splice's own
+               // output can make the destination look like one of ours.
+               destinationIsOwnAddress: (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid))
+                   ?? databaseService.paymentRepo.isOwnReceiveAddress(
                        row.address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
                    )
            ) {
@@ -3502,9 +3540,7 @@ class AppState {
         // Do NOT recalculate backingSats here — it's set at trade time and stays fixed.
         // As price moves, the stability check detects drift and sends payments to rebalance.
 
-        guard let result = evaluateStabilityAction(price: price) else { return }
-
-        guard result.action == .pay else { return }
+        guard let result = evaluateStabilityAction(price: price), result.action == .pay else { return }
 
         // Cooldown check
         let now = Int64(Date().timeIntervalSince1970)
@@ -3829,7 +3865,8 @@ class AppState {
         // splice's own txid and refuses while a splice has no txid yet (#421).
         receiveRecoveryService.recoverMissedReceive(
             address: transactionLinkService.onchainReceiveAddress,
-            price: bookedOrSpotPrice
+            price: bookedOrSpotPrice,
+            balanceCounts: { [weak self] in self?.depositBaseline.counts($0) ?? false }
         )
         if isSweeping || pendingSplice != nil {
             return
@@ -3837,23 +3874,22 @@ class AppState {
         depositBaseline.settleRemovals(wallet: walletInbound, balance: currentOnchain)
         // Only attaches txids to rows for deposits already received, so it waits for the same
         // splice/close guard; retried on every tick.
-        receiveRecoveryService.resolveTxidlessReceives(walletReceives: walletOnchainReceives)
+        receiveRecoveryService.resolvePlaceholderTxids(wallet: { [nodeService] in nodeService.inboundOnchain() })
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {
             if currentOnchain > depositBaseline.sats {
                 let depositSats = currentOnchain - depositBaseline.sats
                 if databaseService?.paymentRepo
-                    .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) != true {
-                    if let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
-                        .filter({ $0.opType == "channel_close" }) {
-                        for op in pendingCloseOps {
-                            let closeSats = op.balanceSats ?? 0
-                            let diff = depositSats > closeSats ? depositSats - closeSats : closeSats - depositSats
-                            if diff <= 15000 {
-                                databaseService?.paymentRepo.markCloseSweepConsumed(paymentId: op.opId)
-                                break
-                            }
+                    .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) != true,
+                   let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
+                       .filter({ $0.opType == "channel_close" }) {
+                    for op in pendingCloseOps {
+                        let closeSats = op.balanceSats ?? 0
+                        let diff = depositSats > closeSats ? depositSats - closeSats : closeSats - depositSats
+                        if diff <= 15000 {
+                            databaseService?.paymentRepo.markCloseSweepConsumed(paymentId: op.opId)
+                            break
                         }
                     }
                 }
@@ -3947,11 +3983,6 @@ class AppState {
             ])
         }
         depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
-    }
-
-    /// The wallet's own inbound on-chain payments, for placeholder txid adoption.
-    private func walletOnchainReceives() -> [ReceiveTxidAdoption.WalletReceive] {
-        nodeService.node?.listPayments().compactMap(ReceiveTxidAdoption.WalletReceive.init) ?? []
     }
 
     private var chainLookupURLs: [String] {
@@ -4087,38 +4118,33 @@ class AppState {
             return
         }
         let sweepAmount = spendable
-        let price = spotOrBookedPrice
-        let amountUSD: Double? = price > 0
-            ? BitcoinUnits.usd(sats: sweepAmount, price: price)
-            : nil
 
         // Persist before the native call so spliceNegotiated always has a
         // row to stamp with the txid, even if the event is delivered before
         // spliceInWithAll returns (and so the operation survives a restart).
-        let rowId = try? databaseService?.spliceRepo.recordPendingSplice(
-            paymentType: SpliceCompletionPolicy.spliceInPaymentType,
-            amountMsat: sweepAmount * 1000,
-            amountUSD: amountUSD,
-            btcPrice: price > 0 ? price : nil,
+        let request = SpliceStartRequest(
+            paymentType: .spliceIn,
+            amountSats: sweepAmount,
+            price: spotOrBookedPrice,
             channel: SpliceChannelIdentity(
                 userChannelId: channel.userChannelId,
                 channelId: channel.channelId,
                 previousFundingTxid: channel.fundingTxo?.txid
             )
         )
-        guard let rowId else {
+        guard let databaseService, (try? lockSplice(request, database: databaseService)) != nil else {
             statusMessage = "Could not save pending move — move not started"
             isSweeping = false
             return
         }
-        pendingSplice = PendingSplice(direction: "in", amountSats: sweepAmount, address: nil, rowId: rowId)
 
         do {
-            try nodeService.spliceInWithAll(
-                userChannelId: channel.userChannelId,
-                counterpartyNodeId: channel.counterpartyNodeId
-            )
-            spliceStartAccepted()
+            try startLockedSplice {
+                try nodeService.spliceInWithAll(
+                    userChannelId: channel.userChannelId,
+                    counterpartyNodeId: channel.counterpartyNodeId
+                )
+            }
             sweepOnchainStart = balances.totalOnchainBalanceSats
             spliceGeneration &+= 1
             statusMessage = "Moving all onchain funds to channel..."
@@ -4132,9 +4158,6 @@ class AppState {
             AuditService.log("SWEEP_FAILED", data: [
                 "error": error.localizedDescription
             ])
-            isSweeping = false
-            pendingSplice = nil
-            databaseService?.spliceRepo.failLatestPendingSplice()
         }
     }
 
@@ -4453,13 +4476,12 @@ class AppState {
             price: price
         )
         // If userChannelId was just discovered or changed, reload saved state (expectedUSD etc.) from DB
-        if !stableChannel.userChannelId.isEmpty && stableChannel.userChannelId != oldUserChannelId {
-            if !loadChannelFromDB() {
-                stableChannel.expectedUSD = .zero
-                stableChannel.backingSats = 0
-                stableChannel.note = ""
-                StabilityService.recomputeNative(&stableChannel)
-            }
+        if !stableChannel.userChannelId.isEmpty && stableChannel.userChannelId != oldUserChannelId,
+           !loadChannelFromDB() {
+            stableChannel.expectedUSD = .zero
+            stableChannel.backingSats = 0
+            stableChannel.note = ""
+            StabilityService.recomputeNative(&stableChannel)
         }
     }
 

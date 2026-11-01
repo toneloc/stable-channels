@@ -967,6 +967,24 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "failed")
     }
 
+    func testStaleReceiveNotFoundIsReportedDropped() async throws {
+        pollingService.onReceiveDropped = { [weak self] txid, sats in self?.droppedReceives[txid] = sats }
+        let id = try recordOnchain(
+            paymentId: "recv_gone",
+            direction: "received",
+            txid: "tx_recv_gone",
+            address: "bc1qexpected",
+            ageSeconds: Self.fifteenDays
+        )
+        mockProvider.mockCurrentHeight = 105
+        mockProvider.notFoundTxids = ["tx_recv_gone"]
+
+        _ = try await pollingService.refresh()
+
+        XCTAssertEqual(try db.paymentRepo.getPayment(byId: id)?.status, "failed")
+        XCTAssertEqual(droppedReceives, ["tx_recv_gone": 100_000])
+    }
+
     private func makePollingService(timeout: Duration, manual: Bool = false) -> ConfirmationPollingService {
         ConfirmationPollingService(
             databaseService: db,
