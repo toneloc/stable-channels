@@ -7,6 +7,7 @@ struct RevealQuizSecretPhraseView: View {
     let mnemonic: String
     let onDone: () -> Void
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var isRevealed: Bool = false
     @State private var copiedSeed = false
     @State private var showCopyWarning = false
@@ -220,6 +221,10 @@ struct RevealQuizSecretPhraseView: View {
                 localized: "reveal_phrase_copy_warning",
                 defaultValue: "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in \(Int(SeedConstants.clipboardClearSeconds)) seconds."
             ))
+        }
+        // Re-blur before the app-switcher snapshot; the app privacy overlay sits below this full-screen cover.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { isRevealed = false }
         }
         .onDisappear {
             clipboardFadeTask?.cancel()
