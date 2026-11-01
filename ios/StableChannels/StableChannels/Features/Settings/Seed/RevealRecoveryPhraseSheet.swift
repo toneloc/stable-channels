@@ -3,6 +3,7 @@ import SwiftUI
 /// Master sheet container hosting the Reveal Secret Recovery Phrase quiz flow.
 struct RevealRecoveryPhraseSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var viewModel: RevealRecoveryQuizViewModel
 
     init(
@@ -26,7 +27,7 @@ struct RevealRecoveryPhraseSheet: View {
                     case .intro:
                         RevealQuizIntroView(
                             onGetStarted: {
-                                withAnimation(.easeInOut(duration: 0.25)) {
+                                withAnimation(Self.stepAnimation) {
                                     viewModel.startQuiz()
                                 }
                             },
@@ -41,7 +42,7 @@ struct RevealRecoveryPhraseSheet: View {
                             RevealQuizQuestionView(
                                 question: viewModel.questions[index],
                                 onSelectOption: { optionIndex in
-                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                    withAnimation(Self.stepAnimation) {
                                         viewModel.selectOption(optionIndex)
                                     }
                                 },
@@ -58,7 +59,7 @@ struct RevealRecoveryPhraseSheet: View {
                                 question: viewModel.questions[questionIndex],
                                 isCorrect: isCorrect,
                                 onContinue: {
-                                    withAnimation(.easeInOut(duration: 0.25)) {
+                                    withAnimation(Self.stepAnimation) {
                                         viewModel.continueFromFeedback()
                                     }
                                 },
@@ -85,12 +86,21 @@ struct RevealRecoveryPhraseSheet: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        dismiss()
+                        if viewModel.canGoBack {
+                            withAnimation(Self.stepAnimation) {
+                                viewModel.goBack()
+                            }
+                        } else {
+                            dismiss()
+                        }
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundStyle(.white)
                     }
+                    .accessibilityLabel(viewModel.canGoBack
+                        ? String(localized: "button_back", defaultValue: "Back")
+                        : String(localized: "button_close", defaultValue: "Close"))
                 }
             }
             .sheet(isPresented: $viewModel.isShowingLearnMore) {
@@ -101,17 +111,15 @@ struct RevealRecoveryPhraseSheet: View {
         .interactiveDismissDisabled(true)
     }
 
+    private static let stepAnimation = Animation.easeInOut(duration: 0.25)
+
+    /// Removal stays a fade: the outgoing view keeps the transition from its last render, before the direction changed.
     private var stepTransition: AnyTransition {
-        if viewModel.navigationDirection == .forward {
-            return .asymmetric(
-                insertion: .opacity.combined(with: .move(edge: .trailing)),
-                removal: .opacity.combined(with: .move(edge: .leading))
-            )
-        } else {
-            return .asymmetric(
-                insertion: .opacity.combined(with: .move(edge: .leading)),
-                removal: .opacity.combined(with: .move(edge: .trailing))
-            )
-        }
+        guard !reduceMotion else { return .opacity }
+        let insertionEdge: Edge = viewModel.navigationDirection == .forward ? .trailing : .leading
+        return .asymmetric(
+            insertion: .opacity.combined(with: .move(edge: insertionEdge)),
+            removal: .opacity
+        )
     }
 }
