@@ -240,7 +240,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "The channel was above its target, but the LSP cannot pull value from the wallet, so it recorded the check without sending a payment."
         }
         "STABILITY_TOP_UP_DEFERRED_OUTCOME_UNKNOWN" => {
-            "The LSP sent a stability payment and the node will not report its outcome: it has lost its record of it, or it still cannot be asked about it 14 days after it was sent. With a lost record the payment itself may still be in flight and be claimed. It is neither booked nor resent, and the channel gets no other stability payment, until an operator releases it from this channel's history: as arrived once the channel's balance shows it, or as not arrived once it is 14 days old and can no longer be in flight."
+            "The LSP sent a stability payment and the node will not report its outcome: it has no record of it (the send never reached it, or the node lost or never stored the record), or it still cannot be asked about it 14 days after it was sent. With a lost record the payment itself may still be in flight and be claimed. It is neither booked nor resent, and the channel gets no other stability payment, until an operator releases it from this channel's history: as arrived once the channel's balance shows it, or as not arrived once it is 14 days old and can no longer be in flight."
         }
         "STABILITY_TOP_UP_RELEASE_CONFLICT" => {
             "An operator had counted this stability payment as not arrived, and the node then reported it claimed. Its sats were added to the books. If another payment was sent in its place, the channel is now above its target by that amount, which the wallet owes back."
@@ -261,7 +261,7 @@ pub fn event_help(event: &ChannelLedgerEvent) -> String {
             "A stability payment was claimed but the channel's record could not be found, so it was not added to the stable backing. It stays pending and no other stability payment is sent to this channel until the record is found."
         }
         "STABILITY_PAYMENT_SENT" => {
-            "The LSP sent a Lightning payment to move the channel's stable value toward its target."
+            "The LSP recorded a Lightning payment to move the channel's stable value toward its target, then handed it to the node. The record is written before the payment goes out, so a payment whose send fails is not paid again until the node or an operator says what happened to it."
         }
         "STABILITY_PAYMENT_SETTLED" => {
             "The stability payment completed successfully and is no longer in flight."
