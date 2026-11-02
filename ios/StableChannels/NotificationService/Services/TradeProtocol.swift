@@ -190,7 +190,7 @@ struct StabilizationSnapshot {
                usd: expectedUSD,
                price: price
            ))
-               .rounded(.down) { return true }
+           .rounded(.down) { return true }
         guard let backing = TradeProtocol.tradeBackingAfterDelta(
             receiverSats: receiverSats - fee,
             currentBackingSats: backingSats,

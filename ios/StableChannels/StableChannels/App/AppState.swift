@@ -3835,8 +3835,8 @@ class AppState {
                 let depositSats = currentOnchain - depositBaseline.sats
                 if databaseService?.paymentRepo
                     .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) != true,
-                   let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
-                       .filter({ $0.opType == "channel_close" }) {
+                    let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
+                    .filter({ $0.opType == "channel_close" }) {
                     for op in pendingCloseOps {
                         let closeSats = op.balanceSats ?? 0
                         let diff = depositSats > closeSats ? depositSats - closeSats : closeSats - depositSats
