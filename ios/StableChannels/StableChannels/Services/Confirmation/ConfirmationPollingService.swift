@@ -55,6 +55,8 @@ final class ConfirmationPollingService {
     private let manualTipProvider: BlockHeightProvider?
     private let manualConfirmationService: ConfirmationService?
     private let manualRefreshTimeout: Duration
+    /// Second opinion before a send is failed: the WebSocket feed alone never fails one.
+    private let presenceProvider: (any TxPresenceProviding)?
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
@@ -66,6 +68,8 @@ final class ConfirmationPollingService {
     /// payment list to reflect updated confirmation state.
     var onUpdate: (@MainActor () -> Void)?
     var onRefreshResult: (@MainActor (ConfirmationRefreshResult) -> Void)?
+    /// A receive the explorer confirmed gone, with the sats it failed.
+    var onReceiveDropped: (@MainActor (_ txid: String, _ sats: Int64) -> Void)?
 
     init(
         databaseService: DatabaseService,
@@ -73,7 +77,8 @@ final class ConfirmationPollingService {
         confirmationService: ConfirmationService,
         manualTipProvider: BlockHeightProvider? = nil,
         manualConfirmationService: ConfirmationService? = nil,
-        manualRefreshTimeout: Duration = .seconds(20)
+        manualRefreshTimeout: Duration = .seconds(20),
+        presenceProvider: (any TxPresenceProviding)? = nil
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
@@ -81,6 +86,69 @@ final class ConfirmationPollingService {
         self.manualTipProvider = manualTipProvider
         self.manualConfirmationService = manualConfirmationService
         self.manualRefreshTimeout = manualRefreshTimeout
+        self.presenceProvider = presenceProvider
+    }
+
+    /// Fails a pending on-chain payment the WebSocket feed reported removed, but only once the block
+    /// explorer also no longer knows its transaction. A feed report alone could fail a payment that
+    /// still confirms; a send left pending after it really dropped blocks books repair. The check is
+    /// queued, so `pollOnce` retries it until the explorer answers or the payment settles.
+    func failIfDropped(txid: String) async {
+        guard presenceProvider != nil,
+              (try? databaseService.paymentRepo.hasPendingOnchainTx(txid: txid)) == true else { return }
+        do {
+            try databaseService.paymentRepo.deferRemovalCheck(txid: txid)
+        } catch {
+            AuditService.log("WEBSOCKET_REMOVAL_QUEUE_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
+        await checkRemoval(txid: txid)
+    }
+
+    /// Retries the removal checks the explorer has not answered yet.
+    func retryRemovalChecks() async {
+        let txids: [String]
+        do {
+            txids = try databaseService.paymentRepo.pendingRemovalChecks()
+        } catch {
+            AuditService.log("REMOVAL_CHECKS_READ_FAILED", data: ["error": "\(error)"])
+            return
+        }
+        for txid in txids {
+            guard !Task.isCancelled else { return }
+            await checkRemoval(txid: txid)
+        }
+    }
+
+    private func checkRemoval(txid: String) async {
+        guard let presenceProvider else { return }
+        let repo = databaseService.paymentRepo
+        do {
+            // Confirmed or failed since it was queued: nothing left to check.
+            guard try repo.hasPendingOnchainTx(txid: txid) else {
+                try repo.clearRemovalCheck(txid: txid)
+                return
+            }
+            let known = await presenceProvider.isKnown(txid: txid)
+            guard known == false else {
+                AuditService.log("WEBSOCKET_REMOVAL_NOT_CONFIRMED", data: [
+                    "txid": txid,
+                    "explorer": known == true ? "known" : "unreachable"
+                ])
+                return
+            }
+            let failedSends = try repo.failDroppedSend(txid: txid)
+            let failedReceiveSats = try repo.failPaymentByTxid(txid: txid)
+            try repo.clearRemovalCheck(txid: txid)
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAILED", data: [
+                "txid": txid,
+                "sends": "\(failedSends)",
+                "receive_sats": failedReceiveSats.map { "\($0)" } ?? "none"
+            ])
+            if let failedReceiveSats { onReceiveDropped?(txid, failedReceiveSats) }
+            onUpdate?()
+        } catch {
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.
@@ -115,6 +183,7 @@ final class ConfirmationPollingService {
                 break
             }
         }
+        await retryRemovalChecks()
 
         if anyUpdated {
             onUpdate?()

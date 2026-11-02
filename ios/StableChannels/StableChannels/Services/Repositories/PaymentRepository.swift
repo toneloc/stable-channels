@@ -213,9 +213,63 @@ final class PaymentRepository {
         }
     }
 
-    func failPaymentByTxid(txid: String) throws {
+    /// Fails an on-chain receive whose transaction left the mempool. Only unconfirmed rows: a
+    /// "removed" report that arrives after a block (or for another row type) must not fail
+    /// a deposit that is already in the chain. Returns the sats of the receive it failed, if any.
+    @discardableResult
+    func failPaymentByTxid(txid: String) throws -> Int64? {
+        let condition = """
+        txid = ? AND status = 'pending' AND confirmations = 0
+          AND payment_type = 'onchain' AND direction = 'received'
+        """
+        return try rawSQL.inTransaction(mode: "IMMEDIATE") {
+            guard let row = try rawSQL.query(
+                "SELECT amount_msat FROM payments WHERE \(condition) LIMIT 1",
+                params: [.text(txid)]
+            ).first else { return nil }
+            try rawSQL.execute("UPDATE payments SET status = 'failed' WHERE \(condition)", params: [.text(txid)])
+            return row.int64(0) / 1000
+        }
+    }
+
+    /// True while an unconfirmed on-chain send or receive with this txid is pending.
+    func hasPendingOnchainTx(txid: String) throws -> Bool {
+        try !rawSQL.query(
+            """
+            SELECT 1 FROM payments
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0 AND payment_type = 'onchain'
+            LIMIT 1
+            """,
+            params: [.text(txid)]
+        ).isEmpty
+    }
+
+    /// Queues a txid the WebSocket feed reported removed until the block explorer answers for it.
+    func deferRemovalCheck(txid: String) throws {
         try rawSQL.execute(
-            "UPDATE payments SET status = 'failed' WHERE txid = ? AND status = 'pending'",
+            "INSERT INTO pending_removal_checks (txid) VALUES (?) ON CONFLICT(txid) DO NOTHING",
+            params: [.text(txid)]
+        )
+    }
+
+    func pendingRemovalChecks() throws -> [String] {
+        try rawSQL.query("SELECT txid FROM pending_removal_checks ORDER BY created_at, rowid").map { $0.string(0) }
+    }
+
+    func clearRemovalCheck(txid: String) throws {
+        try rawSQL.execute("DELETE FROM pending_removal_checks WHERE txid = ?", params: [.text(txid)])
+    }
+
+    /// Fails an unconfirmed on-chain send whose transaction is gone from the mempool. A pending
+    /// send left in place blocks books repair for good. Returns the number of rows failed.
+    @discardableResult
+    func failDroppedSend(txid: String) throws -> Int {
+        try rawSQL.executeReturningChanges(
+            """
+            UPDATE payments SET status = 'failed'
+            WHERE txid = ? AND status = 'pending' AND confirmations = 0
+              AND payment_type = 'onchain' AND direction = 'sent'
+            """,
             params: [.text(txid)]
         )
     }
@@ -294,13 +348,6 @@ final class PaymentRepository {
         return rows.map { row in
             paymentRecord(from: row)
         }
-    }
-
-    /// Check if any payment row exists carrying this transaction ID.
-    func paymentExists(forTxid txid: String) throws -> Bool {
-        let sql = "SELECT 1 FROM payments WHERE txid = ? LIMIT 1"
-        let rows = try rawSQL.query(sql, params: [.text(txid)])
-        return !rows.isEmpty
     }
 
     /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).

@@ -76,6 +76,12 @@ class DatabaseService(context: Context) :
          * wallet learns of a transaction, then the balance change creates the placeholder.
          */
         internal const val RECEIVE_ADOPTION_SLACK_SECS = 600L
+
+        /**
+         * How long after a merged placeholder its deposits' own rows may be recorded. Recovery runs
+         * every 5 minutes, so this allows a retry; later rows are other deposits.
+         */
+        internal const val MERGED_RECEIVE_WINDOW_SECS = 600L
         internal const val PRICE_HISTORY_RETENTION_SECONDS = 90 * 86400L
     }
 
@@ -2075,24 +2081,19 @@ class DatabaseService(context: Context) :
     private data class PendingPlaceholder(val id: Long, val amountMsat: Long)
 
     /**
-     * The newest txid-less pending receive placeholder for an address — the row the balance-delta
-     * path writes before the txid is known. When `amountMsat` is given, only a placeholder with
-     * exactly that amount matches: several deposits to the same (reused) address can be pending at
-     * once, and amount is what tells their placeholders apart.
+     * The newest txid-less pending receive placeholder for an address with exactly `amountMsat` —
+     * the row the balance-delta path writes before the txid is known. Several deposits to the same
+     * (reused) address can be pending at once, and amount is what tells their placeholders apart.
      */
     private fun findPendingPlaceholder(
         db: SQLiteDatabase,
         address: String,
-        amountMsat: Long? = null,
+        amountMsat: Long,
     ): PendingPlaceholder? {
-        val amountFilter = if (amountMsat != null) "AND amount_msat = ? " else ""
-        val args =
-            if (amountMsat != null) arrayOf(address, amountMsat.toString()) else arrayOf(address)
         return db.rawQuery(
-                "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' " +
-                    amountFilter +
+                "SELECT id, amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND (txid IS NULL OR txid = '') AND status = 'pending' AND amount_msat = ? " +
                     "ORDER BY created_at DESC LIMIT 1",
-                args,
+                arrayOf(address, amountMsat.toString()),
             )
             .use { c ->
                 if (c.moveToFirst()) PendingPlaceholder(c.getLong(0), c.getLong(1)) else null
@@ -2161,12 +2162,62 @@ class DatabaseService(context: Context) :
                         put("address", address)
                     }
                 rowId = db.insert("payments", null, cv)
+                dropMergedPlaceholders(db, address)
             }
             db.setTransactionSuccessful()
             return rowId
         } finally {
             db.endTransaction()
         }
+    }
+
+    /**
+     * Deletes txid-less pending placeholders on [address] when two or more receive rows recorded
+     * within [MERGED_RECEIVE_WINDOW_SECS] after them add up to exactly their amount. The
+     * balance-delta path writes one placeholder for everything that arrived between two checks, so
+     * two deposits landing together share one row until each gets its own txid row (#317). A single
+     * later row never matches: that is a separate deposit. Other deposits recorded after the
+     * placeholder are left out of the sum.
+     */
+    private fun dropMergedPlaceholders(db: SQLiteDatabase, address: String) {
+        val placeholders =
+            db.rawQuery(
+                    "SELECT id, amount_msat, created_at FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND status = 'pending' AND (txid IS NULL OR txid = '')",
+                    arrayOf(address),
+                )
+                .use { c ->
+                    buildList {
+                        while (c.moveToNext()) add(Triple(c.getLong(0), c.getLong(1), c.getLong(2)))
+                    }
+                }
+        for ((id, amountMsat, createdAt) in placeholders) {
+            // The rows that split a placeholder are recorded soon after it, so the earliest few
+            // are enough and keep the subset search small.
+            val later =
+                db.rawQuery(
+                        "SELECT amount_msat FROM payments WHERE payment_type = 'onchain' AND direction = 'received' AND address = ? AND txid IS NOT NULL AND txid != '' AND status != 'failed' AND created_at >= ? AND created_at <= ? ORDER BY created_at ASC, id ASC LIMIT 16",
+                        arrayOf(
+                            address,
+                            createdAt.toString(),
+                            (createdAt + MERGED_RECEIVE_WINDOW_SECS).toString(),
+                        ),
+                    )
+                    .use { c -> buildList { while (c.moveToNext()) add(c.getLong(0)) } }
+            if (twoOrMoreSumTo(later, amountMsat)) {
+                db.delete("payments", "id = ?", arrayOf(id.toString()))
+            }
+        }
+    }
+
+    /** Whether two or more of [amounts] add up to exactly [target]. */
+    private fun twoOrMoreSumTo(amounts: List<Long>, target: Long): Boolean {
+        var single = emptySet<Long>()
+        var multiple = emptySet<Long>()
+        for (amount in amounts) {
+            multiple = multiple + (single + multiple).map { it + amount }.filter { it <= target }
+            if (amount <= target) single = single + amount
+        }
+        return target in multiple
     }
 
     /**
@@ -2321,9 +2372,9 @@ class DatabaseService(context: Context) :
      * this same deposit first — the placeholder is a duplicate, delete it. On an amount mismatch
      * the placeholder is a different deposit whose txid the resolver couldn't tell apart (the
      * resolver looks up by address, not per-deposit), so it is left alone rather than deleted or
-     * mislabeled. With no websocket row, attach the txid to the placeholder.
+     * mislabeled. With no websocket row, attach the txid to the placeholder with the same amount.
      */
-    fun reconcileResolvedReceiveTxid(txid: String, address: String): Boolean {
+    fun reconcileResolvedReceiveTxid(txid: String, address: String, amountMsat: Long): Boolean {
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -2343,10 +2394,9 @@ class DatabaseService(context: Context) :
                         db.delete("payments", "id = ?", arrayOf(it.id.toString())) > 0
                     } ?: false
                 } else {
-                    // No amount to disambiguate by (the resolver returns only a txid), so this
-                    // attaches to the newest placeholder — with several deposits pending it can
-                    // pick the wrong one. Making the resolver return per-tx vout sums would fix it.
-                    findPendingPlaceholder(db, address)?.let {
+                    // A placeholder with a different amount is another deposit, or several
+                    // deposits merged into one row (#317), so it must not take this txid.
+                    findPendingPlaceholder(db, address, amountMsat)?.let {
                         val cv = ContentValues().apply { put("txid", txid) }
                         db.update("payments", cv, "id = ?", arrayOf(it.id.toString())) > 0
                     } ?: false

@@ -139,6 +139,8 @@ extension Constants {
     static func exportableLogURLs() -> [URL] {
         let fileManager = FileManager.default
         let candidates = [
+            URL(fileURLWithPath: AuditService
+                .rotatedPath(for: userDataDir.appendingPathComponent("audit_log.txt").path)),
             userDataDir.appendingPathComponent("audit_log.txt"),
             userDataDir.appendingPathComponent("ldk-node.log")
         ]

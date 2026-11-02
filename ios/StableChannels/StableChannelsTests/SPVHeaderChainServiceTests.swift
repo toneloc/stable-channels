@@ -183,6 +183,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
     var mockProvider: MockTxConfirmationProvider!
     var dataDir: URL!
     var updateCount = 0
+    var droppedReceives: [String: Int64] = [:]
 
     override func setUpWithError() throws {
         try super.setUpWithError()
@@ -207,6 +208,106 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         db = nil
         try? FileManager.default.removeItem(at: dataDir)
         try super.tearDownWithError()
+    }
+
+    func testRemovedSendFailsOnlyWhenTheExplorerNoLongerKnowsIt() async throws {
+        let txid = String(repeating: "d", count: 64)
+        for (known, expected) in [(Bool?.some(false), "failed"), (true, "pending"), (nil, "pending")] {
+            _ = try db.paymentRepo.recordPayment(
+                paymentId: "send-\(String(describing: known))",
+                paymentType: "onchain",
+                direction: "sent",
+                amountMsat: 50_000_000,
+                amountUSD: nil,
+                btcPrice: nil,
+                counterparty: nil,
+                status: "pending",
+                txid: txid
+            )
+            let service = ConfirmationPollingService(
+                databaseService: db,
+                blockHeightService: blockHeightService,
+                confirmationService: ConfirmationService(provider: mockProvider),
+                presenceProvider: StubTxPresence(known: known)
+            )
+
+            await service.failIfDropped(txid: txid)
+
+            XCTAssertEqual(
+                db.paymentRepo.payment(paymentId: "send-\(String(describing: known))")?.status,
+                expected,
+                "explorer: \(String(describing: known))"
+            )
+            try db.rawSQL.execute("DELETE FROM payments")
+        }
+    }
+
+    func testUnansweredRemovalIsRetriedByTheNextPoll() async throws {
+        let txid = String(repeating: "d", count: 64)
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "send-1",
+            paymentType: "onchain",
+            direction: "sent",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txid
+        )
+        let presence = SettableTxPresence()
+        let service = ConfirmationPollingService(
+            databaseService: db,
+            blockHeightService: blockHeightService,
+            confirmationService: ConfirmationService(provider: mockProvider),
+            presenceProvider: presence
+        )
+        blockHeightService.setHeightSilently(105)
+
+        await service.failIfDropped(txid: txid)
+        await service.pollOnce()
+        XCTAssertEqual(db.paymentRepo.payment(paymentId: "send-1")?.status, "pending")
+        XCTAssertTrue(try db.paymentRepo.hasPendingOutgoingPayment())
+
+        presence.known = false
+        await service.pollOnce()
+        XCTAssertEqual(db.paymentRepo.payment(paymentId: "send-1")?.status, "failed")
+        XCTAssertFalse(try db.paymentRepo.hasPendingOutgoingPayment())
+        XCTAssertEqual(try db.paymentRepo.pendingRemovalChecks(), [])
+    }
+
+    func testDroppedReceiveIsReportedOnceWithItsSats() async throws {
+        let txid = String(repeating: "e", count: 64)
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "receive-1",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txid
+        )
+        let presence = SettableTxPresence()
+        let service = ConfirmationPollingService(
+            databaseService: db,
+            blockHeightService: blockHeightService,
+            confirmationService: ConfirmationService(provider: mockProvider),
+            presenceProvider: presence
+        )
+        service.onReceiveDropped = { [weak self] txid, sats in self?.droppedReceives[txid] = sats }
+
+        // The explorer still knows it: the feed's report alone fails nothing.
+        presence.known = true
+        await service.failIfDropped(txid: txid)
+        XCTAssertEqual(db.paymentRepo.payment(paymentId: "receive-1")?.status, "pending")
+
+        presence.known = false
+        await service.failIfDropped(txid: txid)
+        await service.failIfDropped(txid: txid)
+        XCTAssertEqual(db.paymentRepo.payment(paymentId: "receive-1")?.status, "failed")
+        XCTAssertEqual(droppedReceives, [txid: 50000])
     }
 
     private func recordPendingPayment(txid: String) throws -> Int64 {
@@ -659,4 +760,14 @@ private final class HangingConfirmationURLProtocol: URLProtocol {
             requestStopped?.fulfill()
         }
     }
+}
+
+private final class SettableTxPresence: TxPresenceProviding, @unchecked Sendable {
+    var known: Bool?
+    func isKnown(txid _: String) async -> Bool? { known }
+}
+
+private struct StubTxPresence: TxPresenceProviding {
+    let known: Bool?
+    func isKnown(txid _: String) async -> Bool? { known }
 }

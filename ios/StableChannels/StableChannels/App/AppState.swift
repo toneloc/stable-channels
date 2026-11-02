@@ -198,6 +198,7 @@ class AppState {
     enum BalanceCacheKey {
         static let lightning = "cached_lightning_sats"
         static let onchain = "cached_onchain_sats"
+        static let onchainTxids = "cached_onchain_wallet_txids"
         static let spendable = "cached_spendable_onchain_sats"
         static let hasReadyChannel = "cached_has_ready_channel"
         static let btcPrice = "cached_btc_price"
@@ -430,10 +431,20 @@ class AppState {
     private var spliceConfirmationTask: Task<Void, Never>?
     private var monitoredSpliceTxid: String?
     private var sweepOnchainStart: UInt64 = 0
-    var prevOnchainSats: UInt64 = {
+    /// Starts from the balance and wallet txids cached at the last refresh.
+    @ObservationIgnored var depositBaseline: OnchainDepositBaseline = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        return UInt64(bitPattern: Int64(ud?.integer(forKey: "cached_onchain_sats") ?? 0))
+        return OnchainDepositBaseline(
+            sats: UInt64(bitPattern: Int64(ud?.integer(forKey: AppState.BalanceCacheKey.onchain) ?? 0)),
+            txids: ud?.stringArray(forKey: AppState.BalanceCacheKey.onchainTxids).map(Set.init)
+        )
     }()
+
+    /// Inbound on-chain payments the wallet listed at the last balance refresh. Once the node has
+    /// a transaction, its amount is used instead of the WebSocket feed's.
+    @ObservationIgnored var walletInbound = WalletInboundOnchain()
+    /// The txid list last cached, so a refresh rewrites it only when it changes.
+    @ObservationIgnored private var cachedOnchainTxids: Set<String>?
 
     var fundingTxid: String? = {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
@@ -542,7 +553,8 @@ class AppState {
                 manualTipProvider: BlockHeightResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1),
                 manualConfirmationService: ConfirmationService(
                     provider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs, maxAttempts: 1)
-                )
+                ),
+                presenceProvider: TxConfirmationResolver(chainURLs: Constants.esploraChainURLs)
             )
         }
         confirmationPollingService = pollingService
@@ -550,6 +562,9 @@ class AppState {
             guard let self else { return }
             self.confirmationRefreshResult = result
             self.confirmationRefreshResultVersion += 1
+        }
+        pollingService?.onReceiveDropped = { [weak self] txid, sats in
+            self?.receiveDropped(txid: txid, sats: sats)
         }
         pollingService?.onUpdate = { [weak self] in
             guard let self else { return }
@@ -749,7 +764,8 @@ class AppState {
         blockHeightService.stop()
         monitoredSpliceTxid = nil
         sweepOnchainStart = 0
-        prevOnchainSats = 0
+        depositBaseline = OnchainDepositBaseline(sats: 0, txids: nil)
+        walletInbound = WalletInboundOnchain()
         fundingTxid = nil
         lightningBalanceSats = 0
         onchainBalanceSats = 0
@@ -769,6 +785,8 @@ class AppState {
         shared?.removeObject(forKey: "node_id")
         shared?.set(Int64(0), forKey: BalanceCacheKey.lightning)
         shared?.set(Int64(0), forKey: BalanceCacheKey.onchain)
+        shared?.removeObject(forKey: BalanceCacheKey.onchainTxids)
+        cachedOnchainTxids = nil
         shared?.set(Int64(0), forKey: BalanceCacheKey.spendable)
         shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
@@ -778,6 +796,8 @@ class AppState {
     private func dropDatabaseServices() {
         blockHeightService.stop()
         blockHeightService.onHeightUpdated = nil
+        // The old wallet's addresses must not feed receives into the next one.
+        mempoolWebSocketService.untrackAll()
         mempoolWebSocketService.disconnect()
         confirmationPollingService = nil
         nodeService.databaseService = nil
@@ -3581,22 +3601,29 @@ class AppState {
 
     // MARK: - On-Chain Deposit Detection
 
+    /// The explorer confirmed a recorded receive gone. The baseline counted the node's amount, so that
+    /// is what comes off; the row's [sats] may be the feed's.
+    func receiveDropped(txid: String, sats: Int64) {
+        depositBaseline.markRemoved(txid: txid, sats: walletInbound.sats[txid] ?? sats)
+    }
+
     func detectOnchainDeposit() {
         // Use already-updated onchainBalanceSats — refreshBalances() was just called before this
         let currentOnchain = onchainBalanceSats
 
         // Deposits are deferred (not dropped) while a splice/close is in flight, since the
-        // on-chain balance can swing for unrelated reasons then. prevOnchainSats is NOT advanced
+        // on-chain balance can swing for unrelated reasons then. The baseline is NOT advanced
         // while deferred, so a deposit landing mid-operation is picked up once it clears instead
         // of being lost.
         if isSweeping || pendingSplice != nil {
             return
         }
+        depositBaseline.settleRemovals(wallet: walletInbound, balance: currentOnchain)
 
         if isChannelClosing || databaseService?.pendingOpRepo.fetchPendingOperations()
             .contains(where: { $0.opType == "channel_close" }) == true {
-            if currentOnchain > prevOnchainSats {
-                let depositSats = currentOnchain - prevOnchainSats
+            if currentOnchain > depositBaseline.sats {
+                let depositSats = currentOnchain - depositBaseline.sats
                 if databaseService?.paymentRepo
                     .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) != true {
                     if let pendingCloseOps = databaseService?.pendingOpRepo.fetchPendingOperations()
@@ -3612,22 +3639,22 @@ class AppState {
                     }
                 }
             }
-            prevOnchainSats = currentOnchain
+            depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
             return
         }
 
-        if currentOnchain > prevOnchainSats {
-            let depositSats = currentOnchain - prevOnchainSats
+        if currentOnchain > depositBaseline.sats {
+            let depositSats = currentOnchain - depositBaseline.sats
             // Ignore tiny fluctuations from fee estimation changes
-            guard depositSats >= 1000 else {
-                prevOnchainSats = currentOnchain
+            guard depositSats >= DepositAttribution.minDepositSats else {
+                depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
                 return
             }
 
             // Deduplicate against channel close sweeps that confirmed after the close was resolved
             if databaseService?.paymentRepo
                 .hasMatchingChannelClosePayment(depositSats: depositSats, consume: true) == true {
-                prevOnchainSats = currentOnchain
+                depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
                 AuditService.log("ONCHAIN_CLOSE_SWEEP_ABSORBED", data: [
                     "amount_sats": "\(depositSats)",
                     "onchain_balance": "\(currentOnchain)"
@@ -3635,11 +3662,26 @@ class AppState {
                 return
             }
 
+            // Only what the WebSocket's recorded receives don't explain is a deposit it missed. If the
+            // lookup fails, retry on the next poll rather than risk recording a deposit twice.
+            guard let missed = databaseService.flatMap({
+                OnchainDepositReconciler(repository: $0.onchainRepo).missedDeposit(
+                    depositSats: Int64(depositSats),
+                    wallet: walletInbound,
+                    baseline: depositBaseline
+                )
+            }) else { return }
+            let remainderSats = missed.sats
+            guard remainderSats >= DepositAttribution.minDepositSats else {
+                depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
+                return
+            }
+
             // We detected a balance increase, clear the old txid link so we don't show a stale one
             transactionLinkService.clearReceiveTxid()
 
             let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
-            let amountUSD: Double? = price > 0 ? Double(depositSats) / 100_000_000.0 * price : nil
+            let amountUSD = OnchainAmount.usd(sats: remainderSats, price: price)
 
             // UUID -> unique depositId -> recordPayment dedup on retry.
             let depositId = "onchain_deposit_\(UUID().uuidString)"
@@ -3648,7 +3690,7 @@ class AppState {
             // address. Each strategy handles its own crash-safe ordering and
             // resolver launching. See DepositRecorder.swift for invariants.
             let address = transactionLinkService.onchainReceiveAddress
-            let recorder: DepositRecorder = (address?.isEmpty == false)
+            let addressRecorder: DepositRecorder = (address?.isEmpty == false)
                 ? KnownAddressDepositRecorder(
                     databaseService: databaseService,
                     onLaunchResolver: { [weak self] resolutionId, addr in
@@ -3656,17 +3698,22 @@ class AppState {
                     }
                 )
                 : UnknownAddressDepositRecorder(databaseService: databaseService)
+            let recorder: DepositRecorder = missed.txid.map {
+                IdentifiedDepositRecorder(txid: $0, databaseService: databaseService, fallback: addressRecorder)
+            } ?? addressRecorder
 
             let deposit = DepositRecordInput(
                 depositId: depositId,
-                depositSats: Int64(depositSats),
+                depositSats: remainderSats,
                 amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil
+                btcPrice: price > 0 ? price : nil,
+                candidateTxids: missed.candidateTxids
             )
             let recorded = recorder.record(deposit: deposit, address: address)
-            if !recorded {
-                prevOnchainSats = currentOnchain
-                return
+            // Leave the baseline so the next poll records the deposit instead of dropping it.
+            guard recorded else { return }
+            if let txid = missed.txid {
+                transactionLinkService.setReceiveTxid(txid)
             }
             // NOTE: do NOT clear lastReceiveTxid here. The view should
             // show the most recent resolved txid, not be blanked during
@@ -3675,12 +3722,12 @@ class AppState {
 
             AuditService.log("ONCHAIN_DEPOSIT_DETECTED", data: [
                 "amount_sats": "\(depositSats)",
-                "prev_onchain": "\(prevOnchainSats)",
+                "prev_onchain": "\(depositBaseline.sats)",
                 "new_onchain": "\(currentOnchain)",
                 "address_known": "\(transactionLinkService.onchainReceiveAddress != nil)"
             ])
         }
-        prevOnchainSats = currentOnchain
+        depositBaseline.advance(to: currentOnchain, wallet: walletInbound.txids)
     }
 
     func handleWebSocketTransactionDetected(event: WebSocketEvent) {
@@ -3700,48 +3747,39 @@ class AppState {
 
         case .removed(let target, let txid):
             guard !isChannelClosing, !isSweeping, pendingSplice == nil else { return }
-            do {
-                try db.paymentRepo.failPaymentByTxid(txid: txid)
-                let currentOnchain = onchainBalanceSats
-                if currentOnchain < prevOnchainSats {
-                    prevOnchainSats = currentOnchain
-                }
-                AuditService.log("WEBSOCKET_RBF_FAILED_PAYMENT", data: ["txid": txid, "target": target])
-            } catch {
-                AuditService.log("WEBSOCKET_RBF_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
-            }
+            Task { [weak self] in await self?.confirmationPollingService?.failIfDropped(txid: txid) }
 
-        case .receive(let target, let txid, let amountSats):
+        case .receive(let target, let txid, let feedSats):
             // Fires only for our own tracked receive address, so unlike the balance-delta
             // fallback it cannot be confused with a splice/close's own movement — safe to
             // record regardless of splice/close state.
-            if (try? db.paymentRepo.paymentExists(forTxid: txid)) == true {
-                return
-            }
-
-            // 1. If amountSats > 0 and address is known, record pending payment in SQLite instantly
-            if amountSats >= 1000 {
+            // Once the node lists the transaction its own amount is used; until then the amount
+            // comes from the WebSocket feed, so convert it with a range check.
+            let amountSats = DepositAttribution.trustedSats(
+                txid: txid,
+                feedSats: feedSats,
+                walletSats: walletInbound.sats
+            )
+            if amountSats >= DepositAttribution.minDepositSats,
+               let amountMsat = OnchainAmount.msats(fromSats: amountSats) {
                 let price = stableChannel.latestPrice > 0 ? stableChannel.latestPrice : btcPrice
-                let amountUSD: Double? = price > 0 ? Double(amountSats) / 100_000_000.0 * price : nil
-                let paymentId = "onchain_receive_\(txid)"
+                let amountUSD = OnchainAmount.usd(sats: amountSats, price: price)
 
                 do {
-                    let recorded = try db.paymentRepo.recordPayment(
-                        paymentId: paymentId,
-                        paymentType: "onchain",
-                        direction: "received",
-                        amountMsat: UInt64(amountSats * 1000),
+                    let outcome = try db.onchainRepo.recordWebSocketReceive(
+                        txid: txid,
+                        address: target,
+                        amountMsat: amountMsat,
                         amountUSD: amountUSD,
                         btcPrice: price > 0 ? price : nil,
-                        counterparty: nil,
-                        status: "pending",
-                        txid: txid,
-                        address: target
+                        balanceCounted: depositBaseline.counts(txid)
                     )
-                    if recorded {
+                    if outcome != .alreadyRecorded {
+                        // This receive now owns its row, so the pending deposit link points at it.
+                        transactionLinkService.setReceiveTxid(txid)
                         AuditService.log(
                             "WEBSOCKET_INSTANT_PAYMENT_RECORDED",
-                            data: ["txid": txid, "sats": "\(amountSats)"]
+                            data: ["txid": txid, "sats": "\(amountSats)", "outcome": "\(outcome)"]
                         )
                         paymentFlash = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
@@ -3997,6 +4035,13 @@ class AppState {
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
+        // Read right after the balance so deposit detection compares the two. They are separate
+        // reads: a wallet sync landing between them can put a txid in the baseline without its
+        // sats, and that one deposit may then be recorded twice. Balances are unaffected.
+        let payments = nodeService.node?.listPayments()
+        if let payments {
+            walletInbound = WalletInboundOnchain(payments)
+        }
         let rawOnchain = balances.totalOnchainBalanceSats
         let rawSpendable = balances.spendableOnchainBalanceSats
         let lightning = balances.totalLightningBalanceSats
@@ -4028,9 +4073,9 @@ class AppState {
         // (TxUnconfirmed/TxConfirmed) diffing the wallet's tx graph, ensuring raw balances
         // already incorporate the spend when .pending is reached.
         var paymentStatusMap: [String: PaymentStatus]?
-        let getPaymentStatus: (String) -> PaymentStatus? = { [weak self] tid in
+        let getPaymentStatus: (String) -> PaymentStatus? = { tid in
             if paymentStatusMap == nil {
-                guard let self, let payments = self.nodeService.node?.listPayments() else { return nil }
+                guard let payments else { return nil }
                 var map: [String: PaymentStatus] = [:]
                 for p in payments {
                     if case let .onchain(paymentTxid, _) = p.kind {
@@ -4096,6 +4141,10 @@ class AppState {
         let ud = UserDefaults(suiteName: Constants.appGroupIdentifier)
         ud?.set(Int64(bitPattern: lightning), forKey: BalanceCacheKey.lightning)
         ud?.set(Int64(bitPattern: onchain), forKey: BalanceCacheKey.onchain)
+        if walletInbound.txids != cachedOnchainTxids {
+            ud?.set(walletInbound.txids.sorted(), forKey: BalanceCacheKey.onchainTxids)
+            cachedOnchainTxids = walletInbound.txids
+        }
         ud?.set(Int64(bitPattern: spendable), forKey: BalanceCacheKey.spendable)
         ud?.set(hasReadyChannel, forKey: BalanceCacheKey.hasReadyChannel)
         if btcPrice > 0 {

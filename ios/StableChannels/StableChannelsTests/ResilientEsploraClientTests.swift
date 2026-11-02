@@ -720,3 +720,26 @@ actor ExhaustedFlag {
     var value: Bool = false
     func set() { value = true }
 }
+
+extension ResilientEsploraClientTests {
+    /// Esplora answers 404 for a txid it does not know; anything else is not an answer.
+    func testTxPresenceTellsNotFoundApartFromNoAnswer() async {
+        let resolver = TxConfirmationResolver(
+            chainURLs: ["https://primary.local", "https://fallback.local"],
+            urlSession: session
+        )
+        let cases: [(primary: Int, fallback: Int, expected: Bool?)] = [
+            (404, 200, true),
+            (404, 404, false),
+            (500, 404, nil),
+            (500, 503, nil)
+        ]
+        for (primary, fallback, expected) in cases {
+            MockURLProtocol.requestHandler = { req in
+                self.jsonResponse(body: [:], status: req.url?.host == "primary.local" ? primary : fallback)
+            }
+            let known = await resolver.isKnown(txid: validTxid)
+            XCTAssertEqual(known, expected, "primary \(primary), fallback \(fallback)")
+        }
+    }
+}
