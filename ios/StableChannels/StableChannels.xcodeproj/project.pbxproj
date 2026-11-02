@@ -171,6 +171,8 @@
 		49AD1B642FEE82000015A7D1 /* RevealQuizFeedbackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B642FEE82000015A7D0 /* RevealQuizFeedbackView.swift */; };
 		49AD1B652FEE82000015A7D1 /* RevealQuizSecretPhraseView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B652FEE82000015A7D0 /* RevealQuizSecretPhraseView.swift */; };
 		49AD1B662FEE82000015A7D1 /* RevealQuizLearnMoreSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49AD1B662FEE82000015A7D0 /* RevealQuizLearnMoreSheet.swift */; };
+		49B22AA93098837C00447D17 /* SeedAccessPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22AA83098837C00447D17 /* SeedAccessPolicy.swift */; };
+		49B22AAB3098839E00447D17 /* SeedAccessPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49B22AAA3098839E00447D17 /* SeedAccessPolicyTests.swift */; };
 		49D4DB062FD02F400074ACD2 /* CloseTxidResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */; };
 		49D4DB092FD02F4E0074ACD2 /* CloseTxidResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */; };
 		49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */; };
@@ -491,6 +493,8 @@
 		49AD1B642FEE82000015A7D0 /* RevealQuizFeedbackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizFeedbackView.swift; sourceTree = "<group>"; };
 		49AD1B652FEE82000015A7D0 /* RevealQuizSecretPhraseView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizSecretPhraseView.swift; sourceTree = "<group>"; };
 		49AD1B662FEE82000015A7D0 /* RevealQuizLearnMoreSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevealQuizLearnMoreSheet.swift; sourceTree = "<group>"; };
+		49B22AA83098837C00447D17 /* SeedAccessPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedAccessPolicy.swift; sourceTree = "<group>"; };
+		49B22AAA3098839E00447D17 /* SeedAccessPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeedAccessPolicyTests.swift; sourceTree = "<group>"; };
 		49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolver.swift; sourceTree = "<group>"; };
 		49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CloseTxidResolverTests.swift; sourceTree = "<group>"; };
 		49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DatabaseServiceTests.swift; sourceTree = "<group>"; };
@@ -676,6 +680,7 @@
 				F147B3819ACA1C8E11C59C72 /* PaymentResultControls.swift */,
 				49DDD0033054000100B5A146 /* PriceHistoryProviding.swift */,
 				8CB09BEF8197120AA1080190 /* SpliceCompletionPolicy.swift */,
+				49B22AA83098837C00447D17 /* SeedAccessPolicy.swift */,
 				49DDD0113054000100B5A146 /* StabilityRepairProtocols.swift */,
 				6DDD82B198645873A6F492F2 /* StableChannel.swift */,
 				45B3E864653E657FB0FCA3D2 /* Trade.swift */,
@@ -1225,6 +1230,8 @@
 				495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */,
 				49DDD0193054000100B5A146 /* RepairBooksUseCaseTests.swift */,
 				499DBE742FD2DADF003E89F9 /* ResilientEsploraClientTests.swift */,
+				49AD1B552FEE82000015A7D0 /* RevealRecoveryQuizViewModelTests.swift */,
+				49B22AAA3098839E00447D17 /* SeedAccessPolicyTests.swift */,
 				49206DF93073A90200217838 /* SendAmountCalculatorTests.swift */,
 				49D7BFE830795E8C0089BF1C /* SendChannelSpendPolicyTests.swift */,
 				49107190307CF1B6005314F1 /* SendDomainPolicyTests.swift */,
@@ -1245,7 +1252,6 @@
 				49B22AA630983B1700447D17 /* TradeFormModelTests.swift */,
 				490A1338304F147D005CDA39 /* TradeSyncParityTests.swift */,
 				49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */,
-				49AD1B552FEE82000015A7D0 /* RevealRecoveryQuizViewModelTests.swift */,
 			);
 			path = StableChannelsTests;
 			sourceTree = "<group>";
@@ -1395,6 +1401,7 @@
 				4993591B30712D1500D6B50E /* PaymentDestinationClassifierTests.swift in Sources */,
 				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
 				D1A60F120000000000000003 /* SPVHeaderChainServiceTests.swift in Sources */,
+				49B22AAB3098839E00447D17 /* SeedAccessPolicyTests.swift in Sources */,
 				499DBE782FD2DADF003E89F9 /* StaggeredTaskLauncherTests.swift in Sources */,
 				49DAFB3C2FDB6587003BE0EB /* FeeRateServiceTests.swift in Sources */,
 				49D4DB0A2FD02F4E0074ACD2 /* DatabaseServiceTests.swift in Sources */,
@@ -1469,6 +1476,7 @@
 				499E5372301A92900050E3F8 /* SettingsBannerView.swift in Sources */,
 				6949A1E4AC3016EB41A5832A /* AuditService.swift in Sources */,
 				49E4D8A62FED9FF3002AF338 /* BackupSettingsSupportBanner.swift in Sources */,
+				49B22AA93098837C00447D17 /* SeedAccessPolicy.swift in Sources */,
 				49206E203073C2C100217838 /* OnChainReviewSheet.swift in Sources */,
 				49206E213073C2C100217838 /* OnChainAmountCard.swift in Sources */,
 				49E4D8A72FED9FF3002AF338 /* BackupSettingsICloudSection.swift in Sources */,

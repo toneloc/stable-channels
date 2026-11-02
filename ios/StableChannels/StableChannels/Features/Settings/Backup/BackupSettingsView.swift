@@ -161,7 +161,12 @@ struct BackupSettingsView: View {
     private var seedSection: some View {
         Section {
             Button {
-                showingRevealPhraseSheet = true
+                Task {
+                    if await appState
+                        .authorizeSeedAccess(reason: "Authenticate to reveal your Secret Recovery Phrase") {
+                        showingRevealPhraseSheet = true
+                    }
+                }
             } label: {
                 HStack {
                     Image(systemName: "eye.fill")
@@ -191,7 +196,11 @@ struct BackupSettingsView: View {
     private var restoreSection: some View {
         Section {
             Button {
-                showRestore = true
+                Task {
+                    if await appState.authorizeSeedAccess(reason: "Authenticate to restore from a recovery phrase") {
+                        showRestore = true
+                    }
+                }
             } label: {
                 HStack {
                     Image(systemName: "arrow.uturn.backward.circle.fill")

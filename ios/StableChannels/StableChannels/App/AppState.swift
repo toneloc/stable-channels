@@ -56,6 +56,17 @@ class AppState {
         authError = nil
     }
 
+    /// Asks for Face ID or the passcode before the recovery phrase is shown or replaced,
+    /// only when the user turned on App Unlock or Payment Confirmation.
+    func authorizeSeedAccess(reason: String) async -> Bool {
+        let defaults = UserDefaults.standard
+        guard SeedAccessPolicy.requiresAuth(
+            appUnlockEnabled: defaults.bool(forKey: Constants.appUnlockEnabledKey),
+            paymentConfirmationEnabled: defaults.bool(forKey: Constants.transactionAuthEnabledKey)
+        ) else { return true }
+        return await authenticate(reason: reason)
+    }
+
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         guard !isAuthenticating else { return false }
         isAuthenticating = true
