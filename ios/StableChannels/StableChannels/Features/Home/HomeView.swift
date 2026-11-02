@@ -12,6 +12,12 @@ struct HomeView: View {
     @State private var showSellSheet = false
     @State private var prefillTradeAmount: Double = 0
     @State private var tradeRequest: TradeRequest?
+    @State private var showEmailPrompt = false
+    private let emailPromptStore: EmailPromptStoring & SavedEmailStoring
+
+    init(emailPromptStore: EmailPromptStoring & SavedEmailStoring = EmailPromptStore.shared) {
+        self.emailPromptStore = emailPromptStore
+    }
 
     @State private var flashScale: CGFloat = 1.0
     @State private var showBTC = false
@@ -78,6 +84,7 @@ struct HomeView: View {
         .task(id: pendingOnchainReloadKey) { loadPendingOnchain() }
         .onAppear {
             checkNotifications()
+            presentEmailPromptIfDue()
             Task.detached { [appState] in appState.ensureLSPConnected() }
         }
         .onChange(of: scenePhase) {
@@ -87,6 +94,9 @@ struct HomeView: View {
             }
         }
         .sheet(isPresented: $showSendSheet) { SendView() }
+        .sheet(isPresented: $showEmailPrompt) {
+            EmailPromptSheet(service: EmailSubmissionService(signer: appState.nodeService), store: emailPromptStore)
+        }
         .sheet(isPresented: $showReceiveSheet) { ReceiveView() }
         .sheet(isPresented: $showBuySheet) { BuyView(prefillAmountUSD: prefillTradeAmount) }
         .sheet(isPresented: $showSellSheet) { SellView(prefillAmountUSD: prefillTradeAmount) }
@@ -104,6 +114,28 @@ struct HomeView: View {
                     withAnimation(.easeInOut(duration: 0.4)) { flashScale = 1.0 }
                 }
             }
+        }
+    }
+
+    // MARK: - Email Prompt
+
+    private var isShowingAnySheet: Bool {
+        showSendSheet || showReceiveSheet || showBuySheet || showSellSheet || tradeRequest != nil
+    }
+
+    private func presentEmailPromptIfDue() {
+        emailPromptStore.recordLaunchOnce()
+        Task {
+            // Wait so the prompt never covers the first look at the balance.
+            try? await Task.sleep(for: .seconds(Constants.emailPromptShowDelaySeconds))
+            guard !isShowingAnySheet, EmailPromptPolicy.shouldShow(
+                launches: emailPromptStore.launches,
+                timesShown: emailPromptStore.timesShown,
+                lastShownLaunch: emailPromptStore.lastShownLaunch,
+                hasResponded: emailPromptStore.hasResponded
+            ) else { return }
+            emailPromptStore.recordShown()
+            showEmailPrompt = true
         }
     }
 

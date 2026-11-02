@@ -154,6 +154,15 @@ struct SettingsView: View {
                 // MARK: - Support
 
                 Section {
+                    NavigationLink {
+                        EmailSettingsView(service: EmailSubmissionService(signer: appState.nodeService))
+                    } label: {
+                        rowLabel(
+                            icon: "envelope.fill",
+                            color: .blue,
+                            text: String(localized: "link_email", defaultValue: "Email")
+                        )
+                    }
                     NavigationLink(destination: DiagnosticsSettingsView()) {
                         rowLabel(
                             icon: "stethoscope",
