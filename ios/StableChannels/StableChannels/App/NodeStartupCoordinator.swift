@@ -186,10 +186,13 @@ final class NodeStartupCoordinator {
     }
 
     /// Forgets the backoff after a successful start. A running retry may be the caller, so it is
-    /// left alone: cancelling it would also cancel the wallet sync that follows the start.
+    /// not cancelled, only forgotten: a later pause must neither cancel the wallet sync that
+    /// follows the start nor refund an attempt the reset already cleared.
     private func clearBackoff() {
         pendingRetry?.cancel()
         pendingRetry = nil
+        runningRetry = nil
+        runningGeneration = nil
         retryAttempt = 0
         isRetrying = false
     }

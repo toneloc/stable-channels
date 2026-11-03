@@ -391,6 +391,49 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isRetrying)
     }
 
+    /// Background during the wallet sync that follows a successful retry must neither cancel that
+    /// sync nor refund an attempt, so a later failure still gets exactly the full retry budget.
+    func testPauseAfterSuccessfulStartInsideARetry_keepsSyncAndFullBudget() async {
+        let coordinator = makeCoordinator()
+        let finished = expectation(description: "retry finished")
+        var cancelledAfterPause = true
+
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in
+            _ = try? await coordinator.start(self.plan, isRetryable: { _ in true }) { _ in }
+            // Stands in for backgrounding while the post-start wallet sync runs.
+            coordinator.pause()
+            cancelledAfterPause = Task.isCancelled
+            finished.fulfill()
+        }))
+        await fulfillment(of: [finished], timeout: 1)
+        await waitUntilIdle(coordinator)
+
+        XCTAssertFalse(cancelledAfterPause, "The post-start sync must not be cancelled")
+        XCTAssertEqual(coordinator.retryAttempt, 0)
+
+        coordinator.resume()
+        let exhausted = expectation(description: "retry budget spent")
+        var failedRuns = 0
+        func failingRun() -> NodeStartupCoordinator.RetryRun {
+            run(start: { _ in
+                failedRuns += 1
+                if NodeStartupPolicy.hasRetriesLeft(
+                    retryAttempt: coordinator.retryAttempt,
+                    maxRetries: Constants.nodeStartMaxRetries
+                ) {
+                    coordinator.scheduleRetry(maxDelay: self.maxDelay, reason: "stall again", run: failingRun())
+                } else {
+                    exhausted.fulfill()
+                }
+            })
+        }
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: failingRun())
+        await fulfillment(of: [exhausted], timeout: 1)
+
+        XCTAssertEqual(failedRuns, Constants.nodeStartMaxRetries)
+        coordinator.reset()
+    }
+
     func testScheduleWhilePaused_countsTheAttemptAndForegroundArmsIt() async {
         let coordinator = makeCoordinator()
         let started = expectation(description: "node started")
