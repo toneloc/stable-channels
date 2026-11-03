@@ -24,10 +24,11 @@ final class NodeStartupCoordinator {
         let stop: @MainActor () -> Void
     }
 
-    /// Number of automatic retries scheduled since the last reset.
+    /// Number of automatic retries that started running since the last reset. A retry that
+    /// background cancels before or while it runs is not counted, so it never spends the budget.
     private(set) var retryAttempt = 0
     /// True while node start is being retried after a transient chain-source failure.
-    var isRetrying: Bool { retryAttempt > 0 }
+    private(set) var isRetrying = false
 
     @ObservationIgnored private var pendingRetry: Task<Void, Never>?
     @ObservationIgnored private var runningRetry: Task<Void, Never>?
@@ -108,15 +109,15 @@ final class NodeStartupCoordinator {
     /// the free pending slot lets a failure inside it schedule the next attempt.
     func scheduleRetry(maxDelay: Duration, reason: String, run: RetryRun) {
         guard pendingRetry == nil else { return }
+        isRetrying = true
         let delay = NodeStartupPolicy.retryDelay(forAttempt: retryAttempt, maxDelay: maxDelay)
-        retryAttempt += 1
         log("NODE_START_RETRY_SCHEDULED", [
-            "attempt": "\(retryAttempt)",
+            "attempt": "\(retryAttempt + 1)",
             "delay_s": "\(delay.components.seconds)",
             "error": reason,
             "armed": isPaused ? "false" : "true"
         ])
-        // A suspended app must not start the node; the attempt is counted and foreground arms it.
+        // A suspended app must not start the node; foreground arms the retry.
         guard !isPaused else { return }
         let sleep = sleep
         retryGeneration &+= 1
@@ -124,6 +125,7 @@ final class NodeStartupCoordinator {
         pendingRetry = Task { [weak self] in
             do { try await sleep(delay) } catch { return }
             guard let self, !Task.isCancelled else { return }
+            self.retryAttempt += 1
             self.runningRetry = self.pendingRetry
             self.runningGeneration = generation
             self.pendingRetry = nil
@@ -166,7 +168,11 @@ final class NodeStartupCoordinator {
         isPaused = true
         pendingRetry?.cancel()
         pendingRetry = nil
-        runningRetry?.cancel()
+        if let runningRetry {
+            // Foreground runs the interrupted retry again; it must not count twice.
+            retryAttempt -= 1
+            runningRetry.cancel()
+        }
         runningRetry = nil
         runningGeneration = nil
     }
@@ -176,6 +182,7 @@ final class NodeStartupCoordinator {
         pause()
         isPaused = false
         retryAttempt = 0
+        isRetrying = false
     }
 
     /// Forgets the backoff after a successful start. A running retry may be the caller, so it is
@@ -184,5 +191,6 @@ final class NodeStartupCoordinator {
         pendingRetry?.cancel()
         pendingRetry = nil
         retryAttempt = 0
+        isRetrying = false
     }
 }
