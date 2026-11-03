@@ -1,3 +1,4 @@
+import LDKNode
 import XCTest
 @testable import StableChannels
 
@@ -223,7 +224,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
         coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
 
-        XCTAssertEqual(coordinator.retryAttempt, 1)
+        XCTAssertEqual(coordinator.retryAttempt, 0, "Only a retry that runs is counted")
+        XCTAssertTrue(coordinator.isRetrying)
         XCTAssertEqual(eventNames(), ["NODE_START_RETRY_SCHEDULED"])
         coordinator.reset()
     }
@@ -235,7 +237,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         coordinator.pause()
         XCTAssertTrue(coordinator.isRetrying)
         coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed", run: run())
-        XCTAssertEqual(coordinator.retryAttempt, 2)
+        XCTAssertEqual(coordinator.retryAttempt, 0, "A retry that never ran spends no attempt")
+        XCTAssertEqual(events.compactMap { $0.data["delay_s"] as? String }, ["1", "1"])
 
         coordinator.reset()
         XCTAssertEqual(coordinator.retryAttempt, 0)
@@ -267,6 +270,45 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertFalse(started, "A retry paused mid-probe must not start the node")
         XCTAssertFalse(coordinator.hasRetryRunning)
         XCTAssertTrue(coordinator.isRetrying, "Pause keeps the backoff for foreground to resume")
+        XCTAssertEqual(coordinator.retryAttempt, 0, "The interrupted retry runs again on foreground")
+    }
+
+    /// Repeated background and foreground while a retry waits must not spend the retry budget,
+    /// and once retries run they keep the normal 1s, 2s, ... schedule.
+    func testPauseAndResumeWhilePending_spendsNoAttemptUntilARetryRuns() async {
+        var holdRetries = true
+        let coordinator = makeCoordinator(sleep: { _ in
+            if holdRetries { try await Task.sleep(for: .seconds(60)) }
+        })
+        let second = expectation(description: "second retry started")
+        var runs = 0
+
+        func retryRun() -> NodeStartupCoordinator.RetryRun {
+            run(start: { _ in
+                runs += 1
+                if runs == 1 {
+                    coordinator.scheduleRetry(maxDelay: self.maxDelay, reason: "stall again", run: retryRun())
+                } else {
+                    second.fulfill()
+                }
+            })
+        }
+        coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: retryRun())
+        for _ in 0 ..< 10 {
+            coordinator.pause()
+            coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed on foreground", run: retryRun())
+        }
+        XCTAssertEqual(coordinator.retryAttempt, 0)
+        XCTAssertTrue(coordinator.isRetrying)
+
+        holdRetries = false
+        coordinator.pause()
+        coordinator.resumeIfIdle(maxDelay: maxDelay, reason: "resumed on foreground", run: retryRun())
+        await fulfillment(of: [second], timeout: 1)
+
+        XCTAssertEqual(coordinator.retryAttempt, 2)
+        let delays = events.compactMap { $0.data["delay_s"] as? String }
+        XCTAssertEqual(delays, Array(repeating: "1", count: 12) + ["2"])
     }
 
     func testResumeIfIdle_doesNotScheduleWhileARetryIsRunning() async {
@@ -369,7 +411,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
             started.fulfill()
         }))
         await fulfillment(of: [started], timeout: 1)
-        XCTAssertEqual(coordinator.retryAttempt, 2)
+        XCTAssertEqual(coordinator.retryAttempt, 1, "Only the retry that ran is counted")
     }
 
     func testCancelledStart_runsNoFurtherAttempts() async {
@@ -428,6 +470,22 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertEqual(appState.stableChannel.backingSats, 150_000)
     }
 
+    /// A scheduled retry runs `retryConnection` with the syncing screen up; when that start fails
+    /// again it must schedule the next retry instead of leaving the syncing screen up for good.
+    func testFailedStartInsideARetry_schedulesTheNextRetry() async {
+        let appState = AppState(
+            nodeService: StallingNodeService(),
+            networkMonitor: MockNetworkMonitor(initialStatus: .online)
+        )
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(appState.phase, .syncing)
+        XCTAssertTrue(appState.nodeStartup.isRetrying, "The failed retry must schedule the next one")
+        appState.nodeStartup.reset()
+    }
+
     func testForegroundInAnyPhase_endsThePause() async {
         let appState = AppState()
         appState.phase = .offline
@@ -450,5 +508,17 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertFalse(appState.hasPendingBackgroundStop, "Foreground must disarm the pending background stop")
         XCTAssertTrue(appState.nodeStartup.isRetrying)
         appState.nodeStartup.reset()
+    }
+}
+
+/// A node whose start always fails with a transient wallet-sync error.
+private final class StallingNodeService: NodeService {
+    override func start(
+        network _: Network,
+        esploraURL _: String,
+        mnemonic _: String,
+        lspConfig _: LSPConfig
+    ) async throws {
+        throw NodeError.TxSyncFailed(message: "sync stalled")
     }
 }
