@@ -202,8 +202,7 @@ enum HomeOnchainRows {
 
     /// The splice row, ignoring any other row that shares its txid.
     private static func spliceRow(_ inputs: Inputs) -> PaymentRecord? {
-        let spliceTypes = [SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue]
-        return inputs.spliceRow.flatMap { spliceTypes.contains($0.paymentType) ? $0 : nil }
+        inputs.spliceRow.flatMap { SplicePaymentType(rawValue: $0.paymentType) != nil ? $0 : nil }
     }
 
     private static func spliceRow(_ inputs: Inputs, isOutgoing: Bool) -> HomeOnchainRow {

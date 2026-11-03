@@ -49,7 +49,7 @@ final class TradeFormModelTests: XCTestCase {
     @MainActor
     func testOutcomePollingRefreshesUntilTheOutcomeIsKnown() async {
         var refreshes = 0
-        await TradeFormModel.awaitOutcome(
+        await TradeOutcomePolling.awaitOutcome(
             isKnown: { refreshes >= 3 },
             refresh: { refreshes += 1 },
             interval: .milliseconds(1)

@@ -127,7 +127,7 @@ class AppState {
             paymentType: paymentType,
             amountMsat: amountMsat,
             amountUSD: OnchainAmount.usd(msats: amountMsat, price: price),
-            btcPrice: price > 0 ? price : nil,
+            btcPrice: OnchainAmount.storedPrice(price),
             address: address,
             txid: txid
         )
@@ -2029,7 +2029,7 @@ class AppState {
                 direction: "received",
                 amountMsat: amountMsat,
                 amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil,
+                btcPrice: OnchainAmount.storedPrice(price),
                 status: "completed",
                 userChannelId: isStabilityPayment ? self.stableChannel.userChannelId : nil,
                 backingDeltaSats: backingDelta,
@@ -2320,32 +2320,15 @@ class AppState {
         paymentHash: String?,
         reason: PaymentFailureReason?
     ) {
-        let reasonCode = LightningPaymentRecovery.reasonCode(caseName: reason.map { "\($0)" })
         var tradeFailed = false
         var failedTrade = pid.flatMap { pendingTradePayments[$0] }
-        if let pid {
-            switch target {
-            case .trade?:
-                // Signed results and already-paid fees are protected by the row update itself.
-                if let trade = failedTrade {
-                    _ = try? databaseService?.channelRepo.markTradeSendFailed(
-                        tradeDbId: trade.tradeDbId,
-                        reasonCode: reasonCode
-                    )
-                } else {
-                    _ = try? databaseService?.channelRepo.markTradeSendFailed(paymentId: pid, reasonCode: reasonCode)
-                }
-                tradeFailed = true
-            case .unattachedTrade(let amountMsat)?:
-                failedTrade = try? databaseService?.channelRepo.failUnattachedPreparedTrade(
-                    paymentId: pid,
-                    amountMsat: amountMsat,
-                    reasonCode: reasonCode
-                )
-                tradeFailed = failedTrade != nil
-            case .stabilitySend?, .payment?, nil:
-                break
-            }
+        if let pid, let target, let recorded = databaseService?.recordOutgoingPaymentFailure(
+            paymentId: pid,
+            target: target,
+            knownTrade: failedTrade,
+            reasonCode: LightningPaymentRecovery.reasonCode(caseName: reason.map { "\($0)" })
+        ) {
+            (tradeFailed, failedTrade) = recorded
         }
         if let pid, tradeFailed {
             pendingTradePayments.removeValue(forKey: pid)
@@ -2359,7 +2342,6 @@ class AppState {
             return
         }
         if let pid {
-            try? databaseService?.paymentRepo.updatePaymentStatus(paymentId: pid, status: "failed")
             // History and payment details reload only when this epoch moves.
             notifyPaymentsChanged()
             NotificationCenter.default.post(
@@ -2372,7 +2354,6 @@ class AppState {
             )
         }
         if let pid, target == .stabilitySend {
-            databaseService?.stabilityRepo.clearPendingSend()
             AuditService.log("STABILITY_PAYMENT_SEND_MARKER_CLEARED", data: [
                 "payment_id": pid,
                 "reason": "payment_failed"
@@ -2643,7 +2624,7 @@ class AppState {
             fundingOutpointVout: fundingOutpointVout,
             balanceSats: balanceSats,
             balanceUsd: balanceUSD,
-            btcPrice: price > 0 ? price : nil,
+            btcPrice: OnchainAmount.storedPrice(price),
             counterparty: counterparty
         )
     }
@@ -2757,7 +2738,7 @@ class AppState {
                 direction: "received",
                 amountMsat: balanceSats * 1000,
                 amountUSD: balanceUSD,
-                btcPrice: price > 0 ? price : nil,
+                btcPrice: OnchainAmount.storedPrice(price),
                 counterparty: counterparty,
                 status: "completed",
                 txid: closingTxid
@@ -3046,7 +3027,7 @@ class AppState {
                     amountSats: amountSats,
                     price: accountingBTCPrice,
                     address: address,
-                    selfSend: db.paymentRepo.isOwnReceiveAddress(
+                    selfSend: db.onchainRepo.isOwnReceiveAddress(
                         address, currentReceiveAddress: transactionLinkService.onchainReceiveAddress
                     ),
                     channel: channel
@@ -3770,7 +3751,7 @@ class AppState {
                 direction: "sent",
                 amountMsat: pending.amountMsat,
                 amountUSD: amountUSD,
-                btcPrice: pending.price > 0 ? pending.price : nil,
+                btcPrice: OnchainAmount.storedPrice(pending.price),
                 status: status,
                 userChannelId: stableChannel.userChannelId,
                 backingDeltaSats: -Int64(pending.amountMsat / 1000)
@@ -3914,7 +3895,7 @@ class AppState {
                 depositId: depositId,
                 depositSats: remainderSats,
                 amountUSD: amountUSD,
-                btcPrice: price > 0 ? price : nil,
+                btcPrice: OnchainAmount.storedPrice(price),
                 candidateTxids: missed.candidateTxids
             )
             let recorded = recorder.record(deposit: deposit, address: address)
@@ -3983,7 +3964,7 @@ class AppState {
                         address: target,
                         amountMsat: amountMsat,
                         amountUSD: amountUSD,
-                        btcPrice: price > 0 ? price : nil,
+                        btcPrice: OnchainAmount.storedPrice(price),
                         balanceCounted: depositBaseline.counts(txid)
                     )
                     if outcome != .alreadyRecorded {

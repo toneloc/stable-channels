@@ -59,8 +59,8 @@ final class DatabaseServiceTests: XCTestCase {
         let done = try insertRow(paymentId: "done", status: "completed", txid: nil, ageSeconds: window + 60)
 
         let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
-        XCTAssertEqual(try service.paymentRepo.failStalePlaceholders(createdBefore: cutoff), 1)
-        XCTAssertEqual(try service.paymentRepo.failStalePlaceholders(createdBefore: cutoff), 0)
+        XCTAssertEqual(try service.onchainRepo.failStalePlaceholders(createdBefore: cutoff), 1)
+        XCTAssertEqual(try service.onchainRepo.failStalePlaceholders(createdBefore: cutoff), 0)
 
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: old)?.status, "failed")
         XCTAssertEqual(try service.paymentRepo.getPayment(byId: young)?.status, "pending")
@@ -2788,6 +2788,19 @@ final class DatabaseServiceTests: XCTestCase {
 
 @MainActor
 final class StabilizationPolicyTests: XCTestCase {
+    func testUnbackedSatsIsTheReceiverSurplusOverBackingAndNeverNegative() {
+        XCTAssertEqual(StabilizationPolicy.unbackedSats(receiverSats: 100_000, backingSats: 55_000), 45_000)
+        XCTAssertEqual(StabilizationPolicy.unbackedSats(receiverSats: 55_000, backingSats: 55_000), 0)
+        XCTAssertEqual(StabilizationPolicy.unbackedSats(receiverSats: 50_000, backingSats: 55_000), 0)
+    }
+
+    func testStoredPriceKeepsOnlyAKnownPrice() {
+        XCTAssertEqual(OnchainAmount.storedPrice(100_000), 100_000)
+        XCTAssertNil(OnchainAmount.storedPrice(0))
+        XCTAssertNil(OnchainAmount.storedPrice(-1))
+        XCTAssertNil(OnchainAmount.storedPrice(.nan))
+    }
+
     func testReserveExplanationIsOnlyInOverLimitFeedback() {
         let maximum = StabilizationPolicy.maximumMessage(123)
         let feedback = StabilizationPolicy.limitExceededMessage(123)
@@ -2962,9 +2975,9 @@ extension DatabaseServiceTests {
             amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending",
             txid: String(repeating: "d", count: 64), address: "bc1qold"
         )
-        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qold", currentReceiveAddress: "bc1qnew"))
-        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qnew", currentReceiveAddress: "bc1qnew"))
-        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qexternal", currentReceiveAddress: "bc1qnew"))
-        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress(nil, currentReceiveAddress: "bc1qnew"))
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qold", currentReceiveAddress: "bc1qnew"))
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qnew", currentReceiveAddress: "bc1qnew"))
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress("bc1qexternal", currentReceiveAddress: "bc1qnew"))
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress(nil, currentReceiveAddress: "bc1qnew"))
     }
 }

@@ -293,6 +293,85 @@ final class LightningPaymentRecoveryTests: XCTestCase {
         XCTAssertEqual(try tradeRow(), ["send_failed", "ROUTE_NOT_FOUND"])
     }
 
+    // MARK: - Foreground failure recording
+
+    private func recordForegroundFailure(
+        _ target: LightningPaymentFailureTarget,
+        knownTrade: PendingTradePayment? = nil,
+        reason: String? = nil
+    ) -> (tradeFailed: Bool, trade: PendingTradePayment?) {
+        service.recordOutgoingPaymentFailure(
+            paymentId: paymentId,
+            target: target,
+            knownTrade: knownTrade,
+            reasonCode: reason
+        )
+    }
+
+    func testForegroundTradeFailureUsesTheKnownTradeRow() throws {
+        let tradeDbId = try service.channelRepo.recordPreparedTrade(prepare())
+        let known = PendingTradePayment(newExpectedUSD: 59.9, price: 100_000, tradeDbId: tradeDbId,
+                                        action: "sell", status: "prepared")
+
+        let recorded = recordForegroundFailure(.trade, knownTrade: known, reason: "PAYMENT_EXPIRED")
+        XCTAssertTrue(recorded.tradeFailed)
+        XCTAssertEqual(recorded.trade?.tradeDbId, tradeDbId)
+        XCTAssertEqual(try tradeRow(), ["send_failed", "PAYMENT_EXPIRED"])
+    }
+
+    func testForegroundTradeFailureFallsBackToThePaymentId() throws {
+        let tradeDbId = try service.channelRepo.recordPreparedTrade(prepare())
+        XCTAssertTrue(try service.channelRepo.attachTradePaymentId(tradeDbId: tradeDbId, paymentId: paymentId))
+        try recordPayment(paymentId, type: "lightning")
+
+        let recorded = recordForegroundFailure(.trade, reason: "RETRIES_EXHAUSTED")
+        XCTAssertTrue(recorded.tradeFailed)
+        XCTAssertNil(recorded.trade)
+        XCTAssertEqual(try tradeRow(), ["send_failed", "RETRIES_EXHAUSTED"])
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: paymentId)?.status, "pending")
+    }
+
+    func testForegroundUnattachedFailureReturnsTheAdoptedTrade() throws {
+        let trade = prepare()
+        _ = try service.channelRepo.recordPreparedTrade(trade)
+
+        let recorded = recordForegroundFailure(.unattachedTrade(amountMsat: trade.feeMsat), reason: "ROUTE_NOT_FOUND")
+        XCTAssertTrue(recorded.tradeFailed)
+        XCTAssertEqual(recorded.trade?.status, "send_failed")
+        XCTAssertEqual(try tradeRow(), ["send_failed", "ROUTE_NOT_FOUND"])
+    }
+
+    func testForegroundUnmatchedUnattachedFailureFailsThePaymentRow() throws {
+        let trade = prepare()
+        _ = try service.channelRepo.recordPreparedTrade(trade)
+        try recordPayment(paymentId, type: "lightning")
+
+        let recorded = recordForegroundFailure(.unattachedTrade(amountMsat: trade.feeMsat + 1))
+        XCTAssertFalse(recorded.tradeFailed)
+        XCTAssertNil(recorded.trade)
+        XCTAssertEqual(try tradeRow(), ["prepared", ""])
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: paymentId)?.status, "failed")
+    }
+
+    func testForegroundOrdinaryFailureFailsThePaymentRow() throws {
+        try recordPayment(paymentId, type: "lightning")
+
+        XCTAssertFalse(recordForegroundFailure(.payment).tradeFailed)
+        XCTAssertEqual(service.paymentRepo.payment(paymentId: paymentId)?.status, "failed")
+    }
+
+    /// As on Android and in the extension: no sats moved, so only the marker clears and no
+    /// payment row is written.
+    func testForegroundStabilityFailureOnlyReleasesTheSendMarker() throws {
+        XCTAssertTrue(service.stabilityRepo.claimPendingSend(amountMsat: 10_000, price: 100_000))
+        XCTAssertTrue(service.stabilityRepo.setPendingSendPaymentId(paymentId))
+
+        XCTAssertFalse(recordForegroundFailure(.stabilitySend).tradeFailed)
+        XCTAssertNil(service.stabilityRepo.loadPendingSend())
+        XCTAssertNil(service.paymentRepo.payment(paymentId: paymentId))
+        XCTAssertEqual(try service.channelRepo.loadChannel(userChannelId: "7")?.backingSats, 55_000)
+    }
+
     // MARK: - Helpers
 
     private func prepare() -> PreparedMobileTrade {

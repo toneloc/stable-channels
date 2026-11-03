@@ -899,7 +899,7 @@ final class ConfirmationPollingRefreshTests: XCTestCase {
         XCTAssertEqual(updated.confirmations, 6)
         XCTAssertEqual(mismatched, [])
         // A later splice-out to it, after the receive address rotated, is still a self-send.
-        XCTAssertTrue(db.paymentRepo.isOwnReceiveAddress(
+        XCTAssertTrue(db.onchainRepo.isOwnReceiveAddress(
             currentAddress,
             currentReceiveAddress: "bc1qnewerreceiveaddress"
         ))

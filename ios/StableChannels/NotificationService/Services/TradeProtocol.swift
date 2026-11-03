@@ -42,6 +42,11 @@ enum StabilizationPolicy {
     static let thresholdUSD = 0.25
     static let thresholdPercent = 0.1
 
+    /// Receiver sats not backing the stable position.
+    static func unbackedSats(receiverSats: UInt64, backingSats: UInt64) -> UInt64 {
+        receiverSats >= backingSats ? receiverSats - backingSats : 0
+    }
+
     static func backingCap(_ postFeeSpendable: UInt64) -> UInt64? {
         return (postFeeSpendable / 100) * maxStableAllocationPercent
             + ((postFeeSpendable % 100) * maxStableAllocationPercent) / 100
@@ -160,7 +165,7 @@ struct StabilizationSnapshot {
 
     /// Receiver sats not backing the stable position.
     private var nativeSats: UInt64 {
-        receiverSats >= backingSats ? receiverSats - backingSats : 0
+        StabilizationPolicy.unbackedSats(receiverSats: receiverSats, backingSats: backingSats)
     }
 
     func accepts(_ orderCents: UInt64) -> Bool {

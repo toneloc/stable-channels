@@ -65,12 +65,9 @@ final class OnchainReceiveRepository {
             let duplicate = try rawSQL.query(
                 """
                 SELECT 1 FROM payments
-                WHERE payment_type = 'onchain' AND direction = 'received'
+                WHERE \(Self.isReceiveRow())
                   AND created_at >= ? AND status NOT IN ('pending', 'failed') AND \(Self.lacksTxid)
-                  AND EXISTS (
-                      SELECT 1 FROM onchain_deposit_candidates c
-                      WHERE c.payment_id = payments.payment_id AND c.txid = ?
-                  )
+                  AND \(Self.listsCandidate())
                 LIMIT 1
                 """,
                 params: [.integer(sinceSecs), .text(txid)]
@@ -161,9 +158,49 @@ final class OnchainReceiveRepository {
 
     /// A row without a txid, as SQL.
     static let lacksTxid = SharedPaymentSQL.lacksTxid()
+
+    /// An on-chain receive row, as SQL; [prefix] qualifies the columns (e.g. "p.").
+    static func isReceiveRow(_ prefix: String = "") -> String {
+        "\(prefix)payment_type = 'onchain' AND \(prefix)direction = 'received'"
+    }
+
+    /// The placeholder [row] lists a txid among [marks] as a candidate, as SQL.
+    static func listsCandidate(_ row: String = "payments", among marks: String = "?") -> String {
+        """
+        EXISTS (
+            SELECT 1 FROM onchain_deposit_candidates c WHERE c.payment_id = \(row).payment_id AND c.txid IN (\(marks))
+        )
+        """
+    }
+
+    /// An on-chain placeholder still pending since before the ?-bound cutoff, as SQL.
+    static let isStalePlaceholder =
+        "payment_type = 'onchain' AND status = 'pending' AND \(lacksTxid) AND created_at < ?"
+
     /// A receive row's address, as SQL over `payments p LEFT JOIN onchain_receive_txids r`: a
     /// placeholder's address lives on its resolution row, a txid row's on the payment.
     static let receiveRowAddress = "COALESCE(NULLIF(p.address, ''), r.address)"
+
+    /// Whether `address` is one this wallet generated for receiving: the current receive address,
+    /// or an older one it has received to before. A failed lookup counts as not ours.
+    func isOwnReceiveAddress(_ address: String?, currentReceiveAddress: String?) -> Bool {
+        guard let address, !address.isEmpty else { return false }
+        if address == currentReceiveAddress { return true }
+        return (try? isKnownReceiveAddress(address)) == true
+    }
+
+    /// True if this address has ever received an on-chain deposit we recorded, i.e. it is one of
+    /// our own wallet's addresses rather than an external destination. A placeholder's address
+    /// lives on its resolution row.
+    private func isKnownReceiveAddress(_ address: String) throws -> Bool {
+        let sql = """
+        SELECT 1 FROM payments p
+        LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
+        WHERE \(Self.isReceiveRow("p.")) AND \(Self.receiveRowAddress) = ?
+        LIMIT 1
+        """
+        return try !rawSQL.query(sql, params: [.text(address)]).isEmpty
+    }
 
     /// The oldest pending placeholder for [address] (or [rowId] alone) that lists [txid] as a
     /// candidate and is at least [amountMsat], preferring one of exactly that amount.
@@ -178,12 +215,10 @@ final class OnchainReceiveRepository {
             """
             SELECT p.id, p.amount_msat FROM payments p
             LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
-            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+            WHERE \(Self.isReceiveRow("p.")) AND p.status = 'pending'
               AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND p.amount_msat >= ?
               AND (r.address IS NULL OR r.address = ?) AND (? IS NULL OR p.id = ?)
-              AND EXISTS (
-                  SELECT 1 FROM onchain_deposit_candidates c WHERE c.payment_id = p.payment_id AND c.txid = ?
-              )
+              AND \(Self.listsCandidate("p"))
             ORDER BY p.amount_msat = ? DESC, p.id ASC LIMIT 1
             """,
             params: [
@@ -259,7 +294,7 @@ final class OnchainReceiveRepository {
             """
             UPDATE payments
             SET amount_usd = amount_usd * ? / amount_msat, amount_msat = ?
-            WHERE payment_type = 'onchain' AND direction = 'received' AND txid = ? AND amount_msat > 0
+            WHERE \(Self.isReceiveRow()) AND txid = ? AND amount_msat > 0
             """,
             params: [.integer(msat.partialValue), .integer(msat.partialValue), .text(txid)]
         )
@@ -275,7 +310,7 @@ final class OnchainReceiveRepository {
         return try rawSQL.query(
             """
             SELECT txid, amount_msat FROM payments
-            WHERE payment_type = 'onchain' AND direction = 'received' AND status != 'failed'
+            WHERE \(Self.isReceiveRow()) AND status != 'failed'
               AND created_at >= ? AND txid IN (\(marks))
             """,
             params: [.integer(since)] + txids.sorted().map { .text($0) }
@@ -305,14 +340,21 @@ final class OnchainReceiveRepository {
         return try rawSQL.executeReturningChanges(
             """
             UPDATE payments SET status = 'completed'
-            WHERE payment_type = 'onchain' AND direction = 'received' AND status = 'pending'
-              AND \(Self.lacksTxid) AND created_at < ?
-              AND EXISTS (
-                  SELECT 1 FROM onchain_deposit_candidates c
-                  WHERE c.payment_id = payments.payment_id AND c.txid IN (\(marks))
-              )
+            WHERE \(Self.isStalePlaceholder) AND direction = 'received'
+              AND \(Self.listsCandidate(among: marks))
             """,
             params: [.integer(cutoff)] + walletTxids.sorted().map { .text($0) }
+        )
+    }
+
+    /// Fails placeholders still pending since before `cutoff`: nothing can ever confirm them. Sends
+    /// are included, as on Android: a send without a txid never confirms either. Returns how many
+    /// rows were failed.
+    @discardableResult
+    func failStalePlaceholders(createdBefore cutoff: Int64) throws -> Int {
+        try rawSQL.executeReturningChanges(
+            "UPDATE payments SET status = 'failed' WHERE \(Self.isStalePlaceholder)",
+            params: [.integer(cutoff)]
         )
     }
 
@@ -396,8 +438,7 @@ final class OnchainReceiveRepository {
                 """
                 SELECT payment_id, amount_msat, created_at
                 FROM payments
-                WHERE payment_type = 'onchain'
-                  AND direction = 'received'
+                WHERE \(Self.isReceiveRow())
                   AND status = 'pending'
                 ORDER BY created_at ASC
                 """,
@@ -466,8 +507,7 @@ final class OnchainReceiveRepository {
                 """
                 SELECT payment_id, amount_msat, created_at
                 FROM payments
-                WHERE payment_type = 'onchain'
-                  AND direction = 'received'
+                WHERE \(Self.isReceiveRow())
                   AND status = 'pending'
                   AND resolution_id = ?
                 ORDER BY created_at ASC
@@ -492,7 +532,7 @@ final class OnchainReceiveRepository {
             """
             SELECT p.id, r.address, p.amount_msat FROM payments p
             JOIN onchain_receive_txids r ON r.id = p.resolution_id
-            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+            WHERE \(Self.isReceiveRow("p.")) AND p.status = 'pending'
               AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND p.resolution_id = ?
             ORDER BY p.created_at ASC LIMIT 1
             """,
@@ -544,7 +584,7 @@ final class OnchainReceiveRepository {
             FROM payments p
             LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
             JOIN onchain_deposit_candidates c ON c.payment_id = p.payment_id
-            WHERE p.payment_type = 'onchain' AND p.direction = 'received' AND p.status = 'pending'
+            WHERE \(Self.isReceiveRow("p.")) AND p.status = 'pending'
               AND \(SharedPaymentSQL.lacksTxid("p.txid")) AND row_address IS NOT NULL AND row_address != ''
             ORDER BY p.created_at ASC, p.id ASC LIMIT \(Self.maxPlaceholderCandidates)
             """,

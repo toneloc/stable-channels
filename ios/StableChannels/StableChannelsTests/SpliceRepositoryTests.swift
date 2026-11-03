@@ -26,13 +26,13 @@ final class SpliceRepositoryTests: XCTestCase {
         super.tearDown()
     }
 
-    private func recordPendingSplice(type: String = "splice_out", selfSend: Bool = false) throws {
+    private func recordPendingSplice(type: SplicePaymentType = .spliceOut, selfSend: Bool = false) throws {
         try service.spliceRepo.recordPendingSplice(
             paymentType: type,
             amountMsat: 50_000_000,
             amountUSD: 25.0,
             btcPrice: 50_000.0,
-            address: type == "splice_out" ? "bc1qtestaddress" : nil,
+            address: type == .spliceOut ? "bc1qtestaddress" : nil,
             selfSend: selfSend,
             channel: SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: nil)
         )
@@ -94,7 +94,7 @@ final class SpliceRepositoryTests: XCTestCase {
     }
 
     func testNegotiationStampsSpliceInRowToo() throws {
-        try recordPendingSplice(type: "splice_in")
+        try recordPendingSplice(type: .spliceIn)
 
         try negotiate("txid-in")
 
@@ -289,7 +289,7 @@ final class SpliceRepositoryTests: XCTestCase {
 
     func testReceiveRowSharingASpliceInTxidIsNeverReclaimed() throws {
         try recordWebSocketReceive(txid: "shared-tx")
-        try recordPendingSplice(type: "splice_in")
+        try recordPendingSplice(type: .spliceIn)
 
         try negotiate("shared-tx")
         XCTAssertNil(try spliceRows()[0].txid)
@@ -355,7 +355,7 @@ final class SpliceRepositoryTests: XCTestCase {
     func testAnAddressWeHaveReceivedToIsOurs() throws {
         try recordWebSocketReceive(txid: "older-tx", address: "bc1qourownaddress")
 
-        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qourownaddress", currentReceiveAddress: nil))
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qourownaddress", currentReceiveAddress: nil))
     }
 
     func testAPlaceholderAddressOnItsResolutionRowIsOurs() throws {
@@ -368,15 +368,15 @@ final class SpliceRepositoryTests: XCTestCase {
             resolutionId: resolutionId
         ))
 
-        XCTAssertTrue(service.paymentRepo.isOwnReceiveAddress("bc1qplaceholder", currentReceiveAddress: nil))
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qplaceholder", currentReceiveAddress: nil))
     }
 
     func testAnAddressWeHaveNeverReceivedToIsNotOurs() throws {
         // A splice-out destination is recorded on the splice row, which must not count.
         try recordPendingSplice()
 
-        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qtestaddress", currentReceiveAddress: nil))
-        XCTAssertFalse(service.paymentRepo.isOwnReceiveAddress("bc1qsomeoneelsesaddress", currentReceiveAddress: nil))
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress("bc1qtestaddress", currentReceiveAddress: nil))
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress("bc1qsomeoneelsesaddress", currentReceiveAddress: nil))
     }
 }
 

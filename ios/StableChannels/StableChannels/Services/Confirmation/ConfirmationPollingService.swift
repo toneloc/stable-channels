@@ -434,7 +434,7 @@ final class ConfirmationPollingService {
             if completed > 0 {
                 AuditService.log("STALE_TXIDLESS_RECEIVE_COMPLETED", data: ["txidless_rows": "\(completed)"])
             }
-            let failed = try databaseService.paymentRepo.failStalePlaceholders(createdBefore: cutoff)
+            let failed = try databaseService.onchainRepo.failStalePlaceholders(createdBefore: cutoff)
             if failed > 0 {
                 AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: ["txidless_rows": "\(failed)"])
             }

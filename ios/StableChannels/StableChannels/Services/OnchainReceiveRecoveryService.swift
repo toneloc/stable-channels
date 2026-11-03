@@ -52,7 +52,7 @@ final class OnchainReceiveRecoveryService {
                         txid: receive.txid,
                         amountSats: receive.sats,
                         amountUSD: OnchainAmount.usd(sats: receive.sats, price: price),
-                        btcPrice: price > 0 ? price : nil,
+                        btcPrice: OnchainAmount.storedPrice(price),
                         address: address,
                         sinceSecs: now - MissedReceiveRecovery.windowSeconds,
                         balanceCounted: balanceCounts(receive.txid),

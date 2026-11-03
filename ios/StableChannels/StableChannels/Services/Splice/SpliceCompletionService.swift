@@ -39,7 +39,7 @@ struct SpliceCompletionService {
     ) -> UInt64? {
         guard !baseline.counts(txid), let row = databaseService.paymentRepo.payment(txid: txid) else { return nil }
         let isOwnAddress = (try? databaseService.spliceRepo.isSelfSendSplice(txid: txid))
-            ?? databaseService.paymentRepo.isOwnReceiveAddress(
+            ?? databaseService.onchainRepo.isOwnReceiveAddress(
                 row.address,
                 currentReceiveAddress: currentReceiveAddress
             )

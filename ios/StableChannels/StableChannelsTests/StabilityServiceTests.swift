@@ -833,7 +833,7 @@ final class StabilityServiceTests: XCTestCase {
         _ = try db.paymentRepo.recordPayment(
             paymentId: "splice-self-send",
             paymentType: SplicePaymentType.spliceOut.rawValue,
-            direction: SpliceCompletionPolicy.sentDirection,
+            direction: SplicePaymentType.spliceOut.direction,
             amountMsat: 50_000_000,
             amountUSD: nil,
             btcPrice: nil,

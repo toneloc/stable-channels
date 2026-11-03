@@ -2,9 +2,6 @@ import Foundation
 
 /// Pure decisions taken around a splice's in-memory lock and its completion.
 enum SpliceCompletionPolicy {
-    static let sentDirection = "sent"
-    static let receivedDirection = "received"
-
     /// What the status line says once a channel reports ready.
     enum ChannelReadyStatus: Equatable {
         case movePendingConfirmation
@@ -24,7 +21,7 @@ enum SpliceCompletionPolicy {
         destinationIsOwnAddress: Bool
     ) -> UInt64? {
         guard completedRow.paymentType == SplicePaymentType.spliceOut.rawValue,
-              completedRow.direction == sentDirection,
+              completedRow.direction == SplicePaymentType.spliceOut.direction,
               destinationIsOwnAddress else { return nil }
         let (sum, overflow) = baselineSats.addingReportingOverflow(completedRow.amountSats)
         return overflow ? currentOnchainSats : min(sum, currentOnchainSats)

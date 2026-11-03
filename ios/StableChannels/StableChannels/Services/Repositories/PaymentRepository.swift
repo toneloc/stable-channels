@@ -299,20 +299,6 @@ final class PaymentRepository {
         )
     }
 
-    /// Fails placeholders (onchain rows without a txid) still pending since before `cutoff`: nothing can ever
-    /// confirm them. Returns how many rows were failed.
-    @discardableResult
-    func failStalePlaceholders(createdBefore cutoff: Int64) throws -> Int {
-        try rawSQL.executeReturningChanges(
-            """
-            UPDATE payments SET status = 'failed'
-            WHERE payment_type = 'onchain' AND status = 'pending'
-            AND \(SharedPaymentSQL.lacksTxid()) AND created_at < ?
-            """,
-            params: [.integer(cutoff)]
-        )
-    }
-
     /// What failing a dropped transaction's rows changed.
     struct DroppedOnchainTx: Equatable {
         let failedSends: Int
@@ -482,28 +468,6 @@ final class PaymentRepository {
         return rows.map { row in
             paymentRecord(from: row)
         }
-    }
-
-    /// Whether `address` is one this wallet generated for receiving: the current receive address,
-    /// or an older one it has received to before. A failed lookup counts as not ours.
-    func isOwnReceiveAddress(_ address: String?, currentReceiveAddress: String?) -> Bool {
-        guard let address, !address.isEmpty else { return false }
-        if address == currentReceiveAddress { return true }
-        return (try? isKnownReceiveAddress(address)) == true
-    }
-
-    /// True if this address has ever received an on-chain deposit we recorded, i.e. it is one of
-    /// our own wallet's addresses rather than an external destination. A placeholder's address
-    /// lives on its resolution row.
-    private func isKnownReceiveAddress(_ address: String) throws -> Bool {
-        let sql = """
-        SELECT 1 FROM payments p
-        LEFT JOIN onchain_receive_txids r ON r.id = p.resolution_id
-        WHERE p.payment_type = 'onchain' AND p.direction = 'received'
-          AND \(OnchainReceiveRepository.receiveRowAddress) = ?
-        LIMIT 1
-        """
-        return try !rawSQL.query(sql, params: [.text(address)]).isEmpty
     }
 
     /// Finds the payment_id of a matching unconsumed channel_close payment within mining fee tolerance (Query).

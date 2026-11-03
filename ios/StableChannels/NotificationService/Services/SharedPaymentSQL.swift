@@ -19,6 +19,11 @@ enum SharedPaymentSQL {
     static let resolvePendingPayment =
         "UPDATE payments SET status = ? WHERE payment_id = ? AND status = 'pending'"
 
+    // MARK: - Stability send
+
+    /// Releases the in-flight stability send marker, unblocking the next send.
+    static let clearPendingStabilitySend = "DELETE FROM pending_stability_send WHERE id = 1"
+
     // MARK: - Channels
 
     /// ?1 user channel id. The books a payment's backing change is applied to.

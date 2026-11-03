@@ -120,7 +120,7 @@ struct StableChannel: Codable {
 
     /// Receiver sats not backing the stable position.
     var unbackedReceiverSats: UInt64 {
-        stableReceiverBTC.sats >= backingSats ? stableReceiverBTC.sats - backingSats : 0
+        StabilizationPolicy.unbackedSats(receiverSats: stableReceiverBTC.sats, backingSats: backingSats)
     }
 }
 

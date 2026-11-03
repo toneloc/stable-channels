@@ -42,6 +42,11 @@ final class SpliceCompletionPolicyTests: XCTestCase {
         )
     }
 
+    func testSpliceTypesNameTheirRowDirection() {
+        XCTAssertEqual(SplicePaymentType.spliceOut.direction, "sent")
+        XCTAssertEqual(SplicePaymentType.spliceIn.direction, "received")
+    }
+
     // MARK: - Baseline advance
 
     func testExactSelfSendSettlementCatchesBaselineUpToCurrent() {

@@ -24,10 +24,10 @@ struct SpliceStartService {
             throw DatabaseError.executeFailed("Splice amount out of range")
         }
         return try spliceRepo.recordPendingSplice(
-            paymentType: request.paymentType.rawValue,
+            paymentType: request.paymentType,
             amountMsat: amountMsat,
             amountUSD: OnchainAmount.usd(sats: Int64(request.amountSats), price: request.price),
-            btcPrice: request.price > 0 ? request.price : nil,
+            btcPrice: OnchainAmount.storedPrice(request.price),
             address: request.address,
             selfSend: request.selfSend,
             channel: request.channel

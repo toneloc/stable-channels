@@ -29,7 +29,7 @@ final class SpliceEventRecorderTests: XCTestCase {
 
     @discardableResult
     private func begin(
-        _ type: String = "splice_out",
+        _ type: SplicePaymentType = .spliceOut,
         userChannelId: String? = nil,
         channelId: String? = nil,
         previousFunding: String?? = .none,
@@ -40,7 +40,7 @@ final class SpliceEventRecorderTests: XCTestCase {
             amountMsat: 50_000_000,
             amountUSD: 25,
             btcPrice: 50000,
-            address: type == "splice_out" ? "bc1qtest" : nil,
+            address: type == .spliceOut ? "bc1qtest" : nil,
             selfSend: selfSend,
             channel: SpliceChannelIdentity(
                 userChannelId: userChannelId ?? ucid,
@@ -84,14 +84,14 @@ final class SpliceEventRecorderTests: XCTestCase {
     // MARK: - Negotiation
 
     func testNegotiatedEventsAssignTheirOperationForBothDirectionsAndReplayIsIdempotent() throws {
-        let out = try begin("splice_out")
+        let out = try begin(.spliceOut)
         try service.spliceRepo.recordEvent(negotiated(newFunding))
         try service.spliceRepo.recordEvent(negotiated(newFunding))
         XCTAssertEqual(try row(out).txid, newFunding)
         XCTAssertEqual(try eventCount(), 1)
 
         XCTAssertTrue(service.spliceRepo.completeSplice(txid: newFunding))
-        let into = try begin("splice_in", previousFunding: newFunding)
+        let into = try begin(.spliceIn, previousFunding: newFunding)
         let next = String(repeating: "0c", count: 32)
         try service.spliceRepo.recordEvent(negotiated(next))
         XCTAssertEqual(try row(into).txid, next)
@@ -236,7 +236,7 @@ final class SpliceEventRecorderTests: XCTestCase {
     func testSelfSendIsReadBackFromTheOperation() throws {
         let identity = SpliceChannelIdentity(userChannelId: ucid, channelId: cid, previousFundingTxid: oldFunding)
         let own = try service.spliceRepo.recordPendingSplice(
-            paymentType: "splice_out", amountMsat: 1000, amountUSD: nil, btcPrice: nil,
+            paymentType: .spliceOut, amountMsat: 1000, amountUSD: nil, btcPrice: nil,
             address: "bc1qown", selfSend: true, channel: identity
         )
         try service.spliceRepo.recordEvent(negotiated(newFunding))

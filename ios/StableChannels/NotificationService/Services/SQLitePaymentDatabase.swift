@@ -991,7 +991,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
 
     func clearPendingSend() {
         guard let db = openDB() else { return }
-        sqlite3_exec(db, "DELETE FROM pending_stability_send WHERE id = 1", nil, nil, nil)
+        sqlite3_exec(db, SharedPaymentSQL.clearPendingStabilitySend, nil, nil, nil)
         sqlite3_close(db)
     }
 
@@ -1126,7 +1126,7 @@ final class SQLitePaymentDatabase: PaymentDatabase {
         switch target {
         case .stabilitySend:
             // No sats moved, so there is no debit to record; unblock the next send.
-            return execute(db, "DELETE FROM pending_stability_send WHERE id = 1")
+            return execute(db, SharedPaymentSQL.clearPendingStabilitySend)
         case .trade:
             // Signed results and already-paid fees are protected by the status filter.
             return execute(db, SharedPaymentSQL.markTradeSendFailedByPaymentId) {

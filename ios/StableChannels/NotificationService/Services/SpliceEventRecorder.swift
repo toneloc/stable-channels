@@ -4,6 +4,11 @@ import Foundation
 enum SplicePaymentType: String, CaseIterable {
     case spliceIn = "splice_in"
     case spliceOut = "splice_out"
+
+    /// The payment row direction: a splice-out leaves the channel, a splice-in enters it.
+    var direction: String {
+        self == .spliceOut ? "sent" : "received"
+    }
 }
 
 /// SQL for durable splice operation identity and event receipts, shared by the app and the

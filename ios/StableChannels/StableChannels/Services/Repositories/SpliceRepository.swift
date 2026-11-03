@@ -59,7 +59,7 @@ final class SpliceRepository {
     /// `selfSend` records, while it is still provable, that the destination is our own address.
     @discardableResult
     func recordPendingSplice(
-        paymentType: String,
+        paymentType type: SplicePaymentType,
         amountMsat: UInt64,
         amountUSD: Double?,
         btcPrice: Double?,
@@ -67,12 +67,9 @@ final class SpliceRepository {
         selfSend: Bool = false,
         channel: SpliceChannelIdentity
     ) throws -> Int64 {
-        guard let type = SplicePaymentType(rawValue: paymentType),
-              !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
+        guard !channel.userChannelId.isEmpty, !channel.channelId.isEmpty else {
             throw DatabaseError.executeFailed("Splice operation identity is incomplete")
         }
-        let direction = type == .spliceOut ? SpliceCompletionPolicy.sentDirection : SpliceCompletionPolicy
-            .receivedDirection
         return try rawSQL.inTransaction {
             try rawSQL.execute(
                 """
@@ -80,7 +77,7 @@ final class SpliceRepository {
                 VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 """,
                 params: [
-                    .text(paymentType), .text(direction),
+                    .text(type.rawValue), .text(type.direction),
                     .integer(Int64(amountMsat)), amountUSD.map { .real($0) } ?? .null,
                     btcPrice.map { .real($0) } ?? .null, address.map { .text($0) } ?? .null
                 ]

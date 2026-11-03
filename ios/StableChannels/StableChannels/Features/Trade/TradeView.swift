@@ -293,7 +293,7 @@ struct TradeView: View {
         }
         .task(id: pendingPaymentId) {
             guard let pid = pendingPaymentId else { return }
-            await TradeFormModel.awaitOutcome(
+            await TradeOutcomePolling.awaitOutcome(
                 isKnown: { appState.tradeOutcomes[pid] != nil },
                 refresh: { appState.refreshTradeOutcome(paymentId: pid) }
             )
@@ -360,6 +360,23 @@ struct TradeView: View {
             errorMessage = error.localizedDescription
         }
         isExecuting = false
+    }
+}
+
+/// Polls until the trade's outcome is known. The notification extension commits results
+/// straight to the database without touching the in-memory outcome map, so a trade resolved
+/// while backgrounded would otherwise stay pending.
+enum TradeOutcomePolling {
+    @MainActor
+    static func awaitOutcome(
+        isKnown: () -> Bool,
+        refresh: () -> Void,
+        interval: Duration = .seconds(2)
+    ) async {
+        while !Task.isCancelled, !isKnown() {
+            refresh()
+            try? await Task.sleep(for: interval)
+        }
     }
 }
 
