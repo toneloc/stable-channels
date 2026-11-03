@@ -46,6 +46,21 @@ final class TradeFormModelTests: XCTestCase {
         )
     }
 
+    func testBuyLimitNeverReadsTheSellLimit() {
+        var sellLimitReads = 0
+        func sellLimit() -> UInt64 {
+            sellLimitReads += 1
+            return 1_234
+        }
+        XCTAssertEqual(
+            TradeFormModel.maxTradeUSD(action: .buyBTC, expectedUSD: 50, maxSellCents: sellLimit()),
+            BuyAmountPolicy.maximumUsd(50)
+        )
+        XCTAssertEqual(sellLimitReads, 0)
+        XCTAssertEqual(TradeFormModel.maxTradeUSD(action: .sellBTC, expectedUSD: 50, maxSellCents: sellLimit()), 12.34)
+        XCTAssertEqual(sellLimitReads, 1)
+    }
+
     @MainActor
     func testOutcomePollingRefreshesUntilTheOutcomeIsKnown() async {
         var refreshes = 0

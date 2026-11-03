@@ -12,10 +12,12 @@ struct TradeFormModel: Equatable {
     let price: Double
 
     /// The most a trade may convert: the stable balance for a buy, the stabilization limit for a sell.
-    static func maxTradeUSD(action: TradeAction, expectedUSD: Double, maxSellCents: UInt64) -> Double {
+    /// [maxSellCents] reads the live channel, so it is evaluated only for a sell.
+    static func maxTradeUSD(action: TradeAction, expectedUSD: Double,
+                            maxSellCents: @autoclosure () -> UInt64) -> Double {
         switch action {
         case .buyBTC: BuyAmountPolicy.maximumUsd(expectedUSD)
-        case .sellBTC: Double(maxSellCents) / 100
+        case .sellBTC: Double(maxSellCents()) / 100
         }
     }
 
