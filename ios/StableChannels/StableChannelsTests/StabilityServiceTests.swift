@@ -2066,4 +2066,57 @@ final class SharedUnitAndPriceRuleTests: XCTestCase {
         )
         XCTAssertEqual(Constants.chainLookupURLs(preferred: Constants.primaryChainURL), Constants.esploraChainURLs)
     }
+
+    // MARK: - settlementPaidUSD
+
+    func testSettlementPaidUSDMatchesFormerInlineExpression() {
+        let cases: [(gap: Double, msat: UInt64, price: Double)] = [
+            (-10.0, 10_000_000, 100_000.0), // amount equals the gap
+            (-10.0, 4_000_000, 100_000.0), // capped amount smaller than the gap
+            (-10.0, 50_000_000, 100_000.0), // amount larger than the gap
+            (10.0, 10_000_000, 100_000.0), // above par: sign dropped
+            (-10.0, 10_000_000, 0.0), // zero price: amount values to 0
+            (-10.0, 10_000_000, -100_000.0), // negative price: not guarded, goes negative
+            (-1_000_000.0, UInt64.max, 100_000.0), // large msat value
+            (.nan, 10_000_000, 100_000.0), // non-finite gap: NaN propagates
+            (-10.0, 10_000_000, .infinity) // non-finite price
+        ]
+        for c in cases {
+            let old = min(abs(c.gap), BitcoinUnits.usd(msats: c.msat, price: c.price))
+            let new = StabilityService.settlementPaidUSD(dollarsFromPar: c.gap, amountMsat: c.msat, price: c.price)
+            XCTAssertEqual(old.bitPattern, new.bitPattern, "\(c)")
+        }
+    }
+
+    func testSettlementPaidUSDCases() {
+        let price = 100_000.0
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: price),
+            10,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 4_000_000, price: price),
+            4,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 50_000_000, price: price),
+            10
+        )
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: 10, amountMsat: 50_000_000, price: price), 10)
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: 0), 0)
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -1_000_000, amountMsat: UInt64.max, price: price),
+            1_000_000
+        )
+        // Not guarded: a NaN gap propagates, a negative price gives a negative value.
+        XCTAssertTrue(
+            StabilityService.settlementPaidUSD(dollarsFromPar: .nan, amountMsat: 10_000_000, price: price).isNaN
+        )
+        XCTAssertLessThan(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: -price),
+            0
+        )
+    }
 }

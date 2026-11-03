@@ -299,4 +299,10 @@ enum StabilityService {
         let maxSpendableMsat = effectiveCapacity / 1000 * 1000
         return min(uncappedMsat, maxSpendableMsat)
     }
+
+    /// USD booked for a sent stability settlement: the gap to par, or less when the sent
+    /// amount was capped. No price guard: callers only send with a positive price.
+    static func settlementPaidUSD(dollarsFromPar: Double, amountMsat: UInt64, price: Double) -> Double {
+        min(abs(dollarsFromPar), BitcoinUnits.usd(msats: amountMsat, price: price))
+    }
 }

@@ -3606,9 +3606,10 @@ class AppState {
         }
 
         do {
-            let paidUSD = min(
-                abs(result.dollarsFromPar),
-                BitcoinUnits.usd(msats: amountMsat, price: price)
+            let paidUSD = StabilityService.settlementPaidUSD(
+                dollarsFromPar: result.dollarsFromPar,
+                amountMsat: amountMsat,
+                price: price
             )
             _ = try databaseService.paymentRepo.recordPaymentAndMaybeUpdateBacking(
                 paymentId: paymentIdString,
