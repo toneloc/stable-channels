@@ -42,6 +42,12 @@ enum StabilizationPolicy {
     static let thresholdUSD = 0.25
     static let thresholdPercent = 0.1
 
+    /// Drift from par as a percentage of [targetUSD]. The denominator is clamped: at a zero/tiny
+    /// target an unclamped ratio would pin the residue inside the deadband and block its settlement.
+    static func percentFromPar(dollarsFromPar: Double, targetUSD: Double) -> Double {
+        abs(dollarsFromPar / max(targetUSD, minimumStableUSD)) * 100.0
+    }
+
     /// Receiver sats not backing the stable position.
     static func unbackedSats(receiverSats: UInt64, backingSats: UInt64) -> UInt64 {
         receiverSats >= backingSats ? receiverSats - backingSats : 0

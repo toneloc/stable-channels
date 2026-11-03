@@ -97,9 +97,7 @@ final class UserToLSPHandler: PaymentHandler {
         let stableUSDValue = BitcoinUnits.usd(sats: backingSats, price: price)
         let targetUSD = channelState.expectedUSD
         let dollarsFromPar = stableUSDValue - targetUSD
-        // Clamp the denominator: at a zero/tiny target an unclamped ratio would pin the residue
-        // inside the deadband and block its settlement.
-        let percentFromPar = abs(dollarsFromPar / max(targetUSD, StabilizationPolicy.minimumStableUSD)) * 100.0
+        let percentFromPar = StabilizationPolicy.percentFromPar(dollarsFromPar: dollarsFromPar, targetUSD: targetUSD)
 
         // Within threshold - no payment needed
         guard percentFromPar >= StabilizationPolicy.thresholdPercent

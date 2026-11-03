@@ -491,6 +491,12 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertGreaterThan(result.percentFromPar, 1.0)
     }
 
+    func testPercentFromParClampsTheTargetAtTheMinimumStableUSD() {
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: -5, targetUSD: 100), 5, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0), 5_000, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0.001), 5_000, accuracy: 1e-9)
+    }
+
     // MARK: - spendConsumesLspSurplus
 
     func testSpendCoveredByNativeDoesNotConsumeSurplus() {

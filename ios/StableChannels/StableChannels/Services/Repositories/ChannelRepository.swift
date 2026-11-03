@@ -195,23 +195,21 @@ final class ChannelRepository {
         price: Double
     ) throws -> StoredBooksReconcile {
         try rawSQL.inTransaction(mode: "IMMEDIATE") {
-            let rows = try rawSQL.query(
-                "SELECT expected_usd, stable_sats FROM channels WHERE user_channel_id = ?",
-                params: [.text(userChannelId)]
-            )
+            let rows = try rawSQL.query(SharedPaymentSQL.selectChannelBooks, params: [.text(userChannelId)])
             guard let row = rows.first else { throw DatabaseError.missingChannelRow(userChannelId) }
-            let backingSigned = row.int64(1)
+            let backingSigned = row.int64(0)
+            let expectedUSD = row.double(1)
             guard backingSigned >= 0 else {
                 throw DatabaseError.executeFailed("Negative backing for user_channel_id=\(userChannelId)")
             }
             guard let repair = StabilityService.overflowRepair(
-                expectedUSD: row.double(0),
+                expectedUSD: expectedUSD,
                 backingSats: UInt64(backingSigned),
                 receiverSats: receiverSats,
                 price: price
             ) else {
                 return StoredBooksReconcile(
-                    repair: nil, expectedUSD: row.double(0), backingSats: UInt64(backingSigned)
+                    repair: nil, expectedUSD: expectedUSD, backingSats: UInt64(backingSigned)
                 )
             }
             let changes = try rawSQL.executeReturningChanges(

@@ -184,9 +184,7 @@ enum StabilityService {
         let stableUSDValue = BitcoinUnits.usd(sats: sc.backingSats, price: price)
 
         let dollarsFromPar = stableUSDValue - targetUSD
-        // Clamp the denominator: at a zero/tiny target an unclamped ratio is 0 (or explodes),
-        // which would pin percentFromPar inside the deadband and block settlement of the residue.
-        let percentFromPar = abs(dollarsFromPar / max(targetUSD, StabilizationPolicy.minimumStableUSD)) * 100.0
+        let percentFromPar = StabilizationPolicy.percentFromPar(dollarsFromPar: dollarsFromPar, targetUSD: targetUSD)
         let isReceiverBelowExpected = stableUSDValue < targetUSD
 
         let action: StabilityAction
