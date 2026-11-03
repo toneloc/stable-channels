@@ -111,14 +111,21 @@ enum SpliceEventRecorder {
     /// A splice-out paying our own address is first seen by the websocket receive handler and
     /// recorded as an onchain deposit (#316), which would block its txid from ever reaching the
     /// splice row. When such deposit rows are the only holders of a txid exactly one captured
-    /// operation is waiting for, they describe the same transaction and are dropped so the
-    /// assignment that follows can stamp the splice row. Any other holder keeps the txid.
+    /// operation is waiting for, and that operation is a splice-out saved as paying our own
+    /// address, they describe the same transaction and are dropped so the assignment that follows
+    /// can stamp the splice row. Any other holder keeps the txid, as does a splice row saved without
+    /// its operation (self-send unknown).
     static let reclaimSelfSendDepositsSQL = """
     WITH
     \(capturedCandidatesCTE),
     reclaimable AS MATERIALIZED (
         SELECT c.txid FROM candidates c
         WHERE (SELECT COUNT(*) FROM candidates d WHERE d.txid = c.txid) = 1
+          AND EXISTS (
+              SELECT 1 FROM payments sp JOIN splice_operations s ON s.payment_row_id = sp.id
+              WHERE sp.id = c.row_id AND sp.payment_type = '\(SplicePaymentType.spliceOut.rawValue)'
+                AND s.self_send = 1
+          )
           AND NOT EXISTS (
               SELECT 1 FROM payments o WHERE o.txid = c.txid
                 AND NOT (o.payment_type = 'onchain' AND o.direction = 'received')

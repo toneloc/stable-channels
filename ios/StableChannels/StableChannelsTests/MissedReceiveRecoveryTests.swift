@@ -253,10 +253,26 @@ final class OnchainReceiveRecoveryRepositoryTests: XCTestCase {
         XCTAssertNotNil(service.paymentRepo.payment(paymentId: "onchain_receive_tx1"))
     }
 
-    func testSkipsWhenCompletedRowWithSameAmountExists() throws {
-        try record("old", "onchain", sats: 11_732, status: "completed")
+    func testSkipsWhenACompletedPlaceholderListsTheTxid() throws {
+        // The stale-placeholder sweep completed it without a txid; it already counts this deposit.
+        let id = try placeholder(11_732, candidates: ["tx1"])
+        try service.rawSQL.execute("UPDATE payments SET status = 'completed' WHERE id = ?", params: [.integer(id)])
 
         XCTAssertFalse(try missed("tx1", 11_732))
+    }
+
+    func testRecordsSameAmountDepositBesideACompletedRowWithoutATxid() throws {
+        // An equal amount alone is no evidence: a different transaction paid the same sats.
+        try record("old", "onchain", sats: 11_732, status: "completed")
+        let placeholderId = try placeholder(11_732, candidates: ["tx0"])
+        try service.rawSQL.execute(
+            "UPDATE payments SET status = 'completed' WHERE id = ?",
+            params: [.integer(placeholderId)]
+        )
+
+        XCTAssertTrue(try missed("tx1", 11_732))
+        XCTAssertEqual(try pending(), [Pending(txid: "tx1", sats: 11_732)])
+        XCTAssertEqual(try receivedSats(), 3 * 11_732, "both earlier deposits and the new one are kept")
     }
 
     func testRecordsTxidOnlyAResolutionRowNamed() throws {

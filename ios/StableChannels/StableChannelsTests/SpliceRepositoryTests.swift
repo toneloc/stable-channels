@@ -26,13 +26,14 @@ final class SpliceRepositoryTests: XCTestCase {
         super.tearDown()
     }
 
-    private func recordPendingSplice(type: String = "splice_out") throws {
+    private func recordPendingSplice(type: String = "splice_out", selfSend: Bool = false) throws {
         try service.spliceRepo.recordPendingSplice(
             paymentType: type,
             amountMsat: 50_000_000,
             amountUSD: 25.0,
             btcPrice: 50_000.0,
             address: type == "splice_out" ? "bc1qtestaddress" : nil,
+            selfSend: selfSend,
             channel: SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: nil)
         )
     }
@@ -274,7 +275,7 @@ final class SpliceRepositoryTests: XCTestCase {
         // The websocket receive handler recorded a splice-out to our own address as a deposit
         // before the negotiated event could stamp the txid.
         try recordWebSocketReceive(txid: "self-send-tx")
-        try recordPendingSplice()
+        try recordPendingSplice(selfSend: true)
 
         try negotiate("self-send-tx")
 
@@ -282,13 +283,32 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].txid, "self-send-tx")
         XCTAssertEqual(try rowCount(txid: "self-send-tx"), 1, "the duplicate deposit row is dropped")
+        XCTAssertEqual(try service.spliceRepo.isSelfSendSplice(txid: "self-send-tx"), true)
         XCTAssertTrue(service.spliceRepo.completeSplice(txid: "self-send-tx"))
+    }
+
+    func testReceiveRowSharingASpliceInTxidIsNeverReclaimed() throws {
+        try recordWebSocketReceive(txid: "shared-tx")
+        try recordPendingSplice(type: "splice_in")
+
+        try negotiate("shared-tx")
+        XCTAssertNil(try spliceRows()[0].txid)
+        XCTAssertEqual(try rowCount(txid: "shared-tx"), 1, "the receive row is kept")
+    }
+
+    func testReceiveRowSharingASpliceOutToAnotherWalletIsNeverReclaimed() throws {
+        try recordWebSocketReceive(txid: "shared-tx")
+        try recordPendingSplice(selfSend: false)
+
+        try negotiate("shared-tx")
+        XCTAssertNil(try spliceRows()[0].txid)
+        XCTAssertEqual(try rowCount(txid: "shared-tx"), 1, "the receive row is kept")
     }
 
     func testCompletedReceiveRowSharingTheSpliceTxidIsAlsoReclaimed() throws {
         try recordWebSocketReceive(txid: "self-send-tx")
         try service.rawSQL.execute("UPDATE payments SET status = 'completed' WHERE txid = 'self-send-tx'")
-        try recordPendingSplice()
+        try recordPendingSplice(selfSend: true)
 
         try negotiate("self-send-tx")
         XCTAssertEqual(try spliceRows()[0].txid, "self-send-tx")

@@ -46,9 +46,10 @@ final class OnchainReceiveRepository {
     /// Records a deposit found by an address lookup, at most once per txid. Skipped while a splice
     /// has no txid yet ([hasSpliceWithoutTxid]: a payment to our address could be that splice's
     /// self-send; retried on a later check), for an amount no transaction can have, and when a row
-    /// with this amount since [sinceSecs] already covers it: one carrying this txid, or an older
-    /// one without a txid that is not a pending placeholder (the txid check alone would duplicate those).
-    /// Placeholders are handled by ``recordReceive``. Returns true when a row took the deposit.
+    /// already covers it: one carrying this txid, or a placeholder since [sinceSecs] that was
+    /// completed without a txid but lists this txid as a candidate. An equal amount alone is never
+    /// evidence. Pending placeholders are handled by ``recordReceive``. Returns true when a row took
+    /// the deposit.
     func recordMissedReceive(
         txid: String,
         amountSats: Int64,
@@ -65,13 +66,14 @@ final class OnchainReceiveRepository {
                 """
                 SELECT 1 FROM payments
                 WHERE payment_type = 'onchain' AND direction = 'received'
-                  AND amount_msat = ? AND created_at >= ?
-                  AND status != 'failed'
-                  AND (\(Self.lacksTxid) OR txid = ?)
-                  AND NOT (status = 'pending' AND \(Self.lacksTxid))
+                  AND created_at >= ? AND status NOT IN ('pending', 'failed') AND \(Self.lacksTxid)
+                  AND EXISTS (
+                      SELECT 1 FROM onchain_deposit_candidates c
+                      WHERE c.payment_id = payments.payment_id AND c.txid = ?
+                  )
                 LIMIT 1
                 """,
-                params: [.integer(Int64(amountMsat)), .integer(sinceSecs), .text(txid)]
+                params: [.integer(sinceSecs), .text(txid)]
             )
             if !duplicate.isEmpty { return false }
             return try recordReceive(

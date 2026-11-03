@@ -32,7 +32,8 @@ final class SpliceEventRecorderTests: XCTestCase {
         _ type: String = "splice_out",
         userChannelId: String? = nil,
         channelId: String? = nil,
-        previousFunding: String?? = .none
+        previousFunding: String?? = .none,
+        selfSend: Bool = false
     ) throws -> Int64 {
         try service.spliceRepo.recordPendingSplice(
             paymentType: type,
@@ -40,6 +41,7 @@ final class SpliceEventRecorderTests: XCTestCase {
             amountUSD: 25,
             btcPrice: 50000,
             address: type == "splice_out" ? "bc1qtest" : nil,
+            selfSend: selfSend,
             channel: SpliceChannelIdentity(
                 userChannelId: userChannelId ?? ucid,
                 channelId: channelId ?? cid,
@@ -383,10 +385,26 @@ final class SpliceEventRecorderTests: XCTestCase {
             paymentId: "deposit", paymentType: "onchain", direction: "received", amountMsat: 1000,
             amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending", txid: newFunding
         )
-        let id = try begin()
+        let id = try begin(selfSend: true)
         XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
 
         XCTAssertEqual(try row(id).txid, newFunding)
+        XCTAssertEqual(try service.spliceRepo.isSelfSendSplice(txid: newFunding), true)
+        XCTAssertEqual(
+            try service.rawSQL.query("SELECT 1 FROM payments WHERE txid = ?", params: [.text(newFunding)]).count,
+            1
+        )
+    }
+
+    func testBackgroundKeepsADepositSharingTheTxidOfASpliceOutToAnotherWallet() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "deposit", paymentType: "onchain", direction: "received", amountMsat: 1000,
+            amountUSD: nil, btcPrice: nil, counterparty: nil, status: "pending", txid: newFunding
+        )
+        let id = try begin(selfSend: false)
+        XCTAssertTrue(backgroundDB.recordSpliceEvent(negotiated(newFunding)))
+
+        XCTAssertNil(try row(id).txid)
         XCTAssertEqual(
             try service.rawSQL.query("SELECT 1 FROM payments WHERE txid = ?", params: [.text(newFunding)]).count,
             1
