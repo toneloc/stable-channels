@@ -377,7 +377,7 @@ class NotificationService: UNNotificationServiceExtension {
 
     private func isMainAppActive() -> Bool {
         let shared = UserDefaults(suiteName: Constants.appGroup)
-        let lastActive = shared?.double(forKey: "main_app_last_active") ?? 0
+        let lastActive = shared?.double(forKey: Constants.SharedDefaultsKey.mainAppLastActive) ?? 0
         return (Date().timeIntervalSince1970 - lastActive) < 10
     }
 

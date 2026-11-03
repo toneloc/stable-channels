@@ -17,11 +17,23 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     private var startedURLs: [String] = []
     private var sleeps: [Duration] = []
     private var events: [(name: String, data: [String: Any])] = []
+    private var chainURLSuite = ""
+    private var chainURLDefaults: UserDefaults!
 
     override func setUp() async throws {
         startedURLs = []
         sleeps = []
         events = []
+        chainURLSuite = "node-startup-test-\(UUID().uuidString)"
+        chainURLDefaults = UserDefaults(suiteName: chainURLSuite)
+    }
+
+    override func tearDown() async throws {
+        chainURLDefaults.removePersistentDomain(forName: chainURLSuite)
+    }
+
+    private var chainURLStore: UserDefaultsChainURLStore {
+        UserDefaultsChainURLStore(defaults: chainURLDefaults)
     }
 
     private var plan: [NodeStartupPolicy.Attempt] {
@@ -34,7 +46,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
                 self.sleeps.append(duration)
                 try await sleep?(duration)
             },
-            log: { name, data in self.events.append((name, data)) }
+            log: { name, data in self.events.append((name, data)) },
+            chainURLStore: chainURLStore
         )
     }
 
@@ -132,6 +145,90 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(coordinator.retryAttempt, 0)
         XCTAssertFalse(coordinator.isRetrying)
+    }
+
+    // MARK: - Start with failover
+
+    func testStartWithFailover_recordsTheProviderThatWorked() async throws {
+        var remaining: [TestError?] = [.feeEstimation(1), nil]
+        let url = try await makeCoordinator().startWithFailover(
+            preferred: primary,
+            providers: [primary, fallback],
+            retryDelay: delay,
+            isRetryable: { _ in true }
+        ) { url in
+            self.startedURLs.append(url)
+            if let error = remaining.removeFirst() { throw error }
+        }
+
+        XCTAssertEqual(url, fallback)
+        XCTAssertEqual(startedURLs, [primary, fallback])
+        XCTAssertEqual(chainURLStore.load(), fallback)
+    }
+
+    func testStartWithFailover_totalFailureKeepsTheRecordedProvider() async {
+        chainURLStore.save(fallback)
+
+        do {
+            _ = try await makeCoordinator().startWithFailover(
+                preferred: primary,
+                providers: [primary, fallback],
+                retryDelay: delay,
+                isRetryable: { _ in true }
+            ) { url in
+                self.startedURLs.append(url)
+                throw TestError.feeEstimation(1)
+            }
+            XCTFail("Expected the first error")
+        } catch {
+            XCTAssertEqual(error as? TestError, .feeEstimation(1))
+        }
+        XCTAssertEqual(startedURLs, [primary, fallback, primary])
+        XCTAssertEqual(chainURLStore.load(), fallback)
+    }
+
+    /// The key is shared with the notification extension and values already saved on devices.
+    func testChainURLStore_usesTheSharedAppGroupKey() {
+        XCTAssertNil(chainURLStore.load())
+
+        chainURLStore.save(fallback)
+
+        XCTAssertEqual(chainURLDefaults.string(forKey: "esplora_chain_url"), fallback)
+        XCTAssertEqual(chainURLStore.load(), fallback)
+        XCTAssertEqual(Constants.SharedDefaultsKey.mainAppLastActive, "main_app_last_active")
+    }
+
+    // MARK: - Chain source probe
+
+    func testProbe_reachablePrimary_startsOnPrimary() async {
+        var probed: [URL] = []
+        let probe = ChainSourceProbe(
+            isReachable: { probed.append($0); return true },
+            primary: primary,
+            fallback: fallback,
+            log: { name, data in self.events.append((name, data)) }
+        )
+
+        let url = await probe.resolve()
+
+        XCTAssertEqual(url, primary)
+        XCTAssertEqual(probed.map(\.absoluteString), ["\(primary)/blocks/tip/height"])
+        XCTAssertEqual(eventNames(), ["CHAIN_SOURCE_RESOLVED"])
+    }
+
+    func testProbe_unreachablePrimary_startsOnFallback() async {
+        let probe = ChainSourceProbe(
+            isReachable: { _ in false },
+            primary: primary,
+            fallback: fallback,
+            log: { name, data in self.events.append((name, data)) }
+        )
+
+        let url = await probe.resolve()
+
+        XCTAssertEqual(url, fallback)
+        XCTAssertEqual(eventNames(), ["CHAIN_SOURCE_FALLBACK"])
+        XCTAssertEqual(events.first?.data["using"] as? String, fallback)
     }
 
     // MARK: - Retry scheduling
@@ -580,12 +677,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     /// A start that fails over adopts the provider that worked and records it in the app group,
     /// where the notification extension reads it to start from a known-working provider.
-    func testAppStateFailover_adoptsAndRecordsTheWorkingProvider() async throws {
-        let shared = try XCTUnwrap(UserDefaults(suiteName: Constants.appGroupIdentifier))
-        let key = "esplora_chain_url"
-        let saved = shared.string(forKey: key)
-        defer { shared.set(saved, forKey: key) }
-        shared.removeObject(forKey: key)
+    func testAppStateFailover_adoptsAndRecordsTheWorkingProvider() async {
         let node = PrimaryStallingNodeService()
         let appState = AppState(
             nodeService: node,
@@ -598,7 +690,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(node.startedURLs, [Constants.primaryChainURL, Constants.fallbackChainURL])
         XCTAssertEqual(appState.chainURL, Constants.fallbackChainURL)
-        XCTAssertEqual(shared.string(forKey: key), Constants.fallbackChainURL)
+        XCTAssertEqual(chainURLStore.load(), Constants.fallbackChainURL)
         appState.nodeStartup.reset()
     }
 

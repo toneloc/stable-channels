@@ -29,6 +29,11 @@ enum NodeStartupPolicy {
             + [Attempt(url: preferred, delayBefore: retryDelay)]
     }
 
+    /// The provider a launch starts against: the primary when its probe answered, otherwise the fallback.
+    static func launchProvider(primaryReachable: Bool, primary: String, fallback: String) -> String {
+        primaryReachable ? primary : fallback
+    }
+
     /// Wait before the first automatic retry; each later retry doubles it.
     static let baseRetryDelay: Duration = .seconds(1)
 

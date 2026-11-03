@@ -13,7 +13,7 @@ extension NodeStarter {
         // Prefer the URL the main app last started a node against (written on every
         // successful start, including failover) so the NSE doesn't pay a degraded
         // primary's failure before falling over itself.
-        let stored = UserDefaults(suiteName: Constants.appGroup)?.string(forKey: "esplora_chain_url")
+        let stored = UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroup)).load()
         let primary = stored ?? Constants.primaryChainURL
         let fallback = (primary == Constants.primaryChainURL)
             ? Constants.fallbackChainURL

@@ -47,13 +47,33 @@ final class NodeStartupCoordinator {
     var hasRetryRunning: Bool { runningRetry != nil }
     @ObservationIgnored private let sleep: (Duration) async throws -> Void
     @ObservationIgnored private let log: (String, [String: Any]) -> Void
+    @ObservationIgnored private let chainURLStore: ChainURLStore
 
     init(
         sleep: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
-        log: @escaping (String, [String: Any]) -> Void = { AuditService.log($0, data: $1) }
+        log: @escaping (String, [String: Any]) -> Void = { AuditService.log($0, data: $1) },
+        chainURLStore: ChainURLStore = UserDefaultsChainURLStore(
+            defaults: UserDefaults(suiteName: Constants.appGroupIdentifier)
+        )
     ) {
         self.sleep = sleep
         self.log = log
+        self.chainURLStore = chainURLStore
+    }
+
+    /// Starts against `preferred`, failing over per `NodeStartupPolicy.attempts`, and records the
+    /// provider that worked so the next start (app or notification extension) begins with it.
+    func startWithFailover(
+        preferred: String,
+        providers: [String] = Constants.esploraChainURLs,
+        retryDelay: Duration = Constants.nodeStartRetryDelay,
+        isRetryable: (Error) -> Bool,
+        using startNode: (String) async throws -> Void
+    ) async throws -> String {
+        let attempts = NodeStartupPolicy.attempts(preferred: preferred, providers: providers, retryDelay: retryDelay)
+        let url = try await start(attempts, isRetryable: isRetryable, using: startNode)
+        chainURLStore.save(url)
+        return url
     }
 
     /// Tries each attempt in order and returns the URL the node started against. Retryable
@@ -236,5 +256,45 @@ final class NodeStartupCoordinator {
         runningGeneration = nil
         retryAttempt = 0
         isRetrying = false
+    }
+}
+
+/// Picks the provider a launch starts against by probing the primary once. It sits on the
+/// critical path before first paint, so the live probe has a short budget of its own.
+struct ChainSourceProbe {
+    /// Whether the provider answered its tip-height endpoint with HTTP 200.
+    let isReachable: (URL) async -> Bool
+    var primary = Constants.primaryChainURL
+    var fallback = Constants.fallbackChainURL
+    var log: (String, [String: Any]) -> Void = { AuditService.log($0, data: $1) }
+
+    func resolve() async -> String {
+        guard let url = URL(string: "\(primary)/blocks/tip/height") else { return fallback }
+        let startedAt = Date()
+        let reachable = await isReachable(url)
+        let chosen = NodeStartupPolicy.launchProvider(primaryReachable: reachable, primary: primary, fallback: fallback)
+        let ms = "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
+        if reachable {
+            log("CHAIN_SOURCE_RESOLVED", ["using": chosen, "ms": ms])
+        } else {
+            log("CHAIN_SOURCE_FALLBACK", ["primary": primary, "using": chosen, "ms": ms])
+        }
+        return chosen
+    }
+}
+
+extension ChainSourceProbe {
+    /// URLSession.shared defaults to a 60s request timeout, which would hold the launch screen
+    /// for a minute on a slow primary.
+    static var live: ChainSourceProbe {
+        ChainSourceProbe(isReachable: { url in
+            let config = URLSessionConfiguration.ephemeral
+            config.timeoutIntervalForRequest = 2
+            config.timeoutIntervalForResource = 3
+            guard let (_, response) = try? await URLSession(configuration: config).data(from: url) else {
+                return false
+            }
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        })
     }
 }

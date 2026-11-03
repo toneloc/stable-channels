@@ -52,6 +52,19 @@ final class NodeStartupPolicyTests: XCTestCase {
         XCTAssertEqual(attempts.last?.delayBefore, delay)
     }
 
+    // MARK: - Launch provider
+
+    func testLaunchProvider_primaryWhenReachableElseFallback() {
+        XCTAssertEqual(
+            NodeStartupPolicy.launchProvider(primaryReachable: true, primary: primary, fallback: fallback),
+            primary
+        )
+        XCTAssertEqual(
+            NodeStartupPolicy.launchProvider(primaryReachable: false, primary: primary, fallback: fallback),
+            fallback
+        )
+    }
+
     // MARK: - Retry delay
 
     func testRetryDelay_doublesFromOneSecond() {
