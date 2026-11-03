@@ -957,7 +957,7 @@ class AppState {
         // Pick best esplora endpoint BEFORE taking the lock — pure network,
         // no DB access, and it can stall; no reason to hold the dir for it.
         let chainStart = Date()
-        chainURL = await resolveChainURL()
+        chainURL = await chainSourceProbe.resolve()
         let chainMs = elapsedMs(chainStart)
 
         // Take the wallet-dir lock before any DB access (network-graph purge,
@@ -1141,7 +1141,10 @@ class AppState {
         NSClassFromString("XCTestCase") != nil
     }
 
-    private func ensureMinimumSplashDuration(since startTime: Date, minDuration: TimeInterval = 1.6) async {
+    private func ensureMinimumSplashDuration(
+        since startTime: Date,
+        minDuration: TimeInterval = Constants.minimumSplashDuration
+    ) async {
         guard !isTestingEnvironment else { return }
         let elapsed = Date().timeIntervalSince(startTime)
         if elapsed < minDuration {
@@ -1299,7 +1302,7 @@ class AppState {
                 }
             },
             // Re-probe providers so the retry doesn't start against the one that just stalled.
-            probe: { [weak self] in await self?.resolveChainURL() ?? Constants.primaryChainURL },
+            probe: { [weak self] in await self?.chainSourceProbe.resolve() ?? Constants.primaryChainURL },
             start: { [weak self] url in
                 guard let self else { return }
                 self.chainURL = url
@@ -1427,6 +1430,7 @@ class AppState {
     private var pendingOnlineRetry = false
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup: NodeStartupCoordinator
+    private let chainSourceProbe = ChainSourceProbe.live
     /// True while node start is being retried after a transient chain-source failure.
     var isRetryingNodeStart: Bool { nodeStartup.isRetrying }
 
@@ -1502,7 +1506,7 @@ class AppState {
         nodeService.stop()
         extractGossipFromDB()
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
         // Last DB write is done — hand the wallet dir to the NSE.
         NodeDirLock.shared.release()
         if backgroundTaskID != .invalid {
@@ -3401,12 +3405,12 @@ class AppState {
         heartbeatTimer?.cancel()
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+        shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
         heartbeatTimer = Task {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
                 guard !Task.isCancelled else { break }
-                shared?.set(Date().timeIntervalSince1970, forKey: "main_app_last_active")
+                shared?.set(Date().timeIntervalSince1970, forKey: Constants.SharedDefaultsKey.mainAppLastActive)
             }
         }
 
@@ -4197,78 +4201,32 @@ class AppState {
     /// failure or timeout, walks `NodeStartupPolicy.attempts`: every other provider once, then
     /// the preferred provider again after a short delay.
     ///
-    /// Two failover layers exist by design: `resolveChainURL()` probes connectivity once
+    /// Two failover layers exist by design: `ChainSourceProbe` probes connectivity once
     /// at launch and picks the starting provider; this helper covers failures that only
     /// surface inside `node.start()` itself (fee-rate estimation against the chosen host).
-    /// Both record the working URL in the app group so the NSE starts from it too.
+    /// The coordinator records the working URL in the app group so the NSE starts from it too.
     ///
     /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
     /// already released its own lease) so a broken app process never starves the NSE.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
         do {
-            try await startNodeOrFailover(mnemonic: mnemonic)
+            chainURL = try await nodeStartup.startWithFailover(
+                preferred: chainURL,
+                isRetryable: { $0.isRetryableEsploraStartupError }
+            ) { url in
+                try await self.nodeService.start(
+                    network: .bitcoin,
+                    esploraURL: url,
+                    mnemonic: mnemonic,
+                    lspConfig: self.activeLSP
+                )
+            }
         } catch {
             if !nodeService.isRunning {
                 NodeDirLock.shared.release()
             }
             throw error
         }
-    }
-
-    private func startNodeOrFailover(mnemonic: String) async throws {
-        let attempts = NodeStartupPolicy.attempts(
-            preferred: chainURL,
-            providers: Constants.esploraChainURLs,
-            retryDelay: Constants.nodeStartRetryDelay
-        )
-        let url = try await nodeStartup.start(attempts, isRetryable: { $0.isRetryableEsploraStartupError }) { url in
-            try await self.nodeService.start(
-                network: .bitcoin,
-                esploraURL: url,
-                mnemonic: mnemonic,
-                lspConfig: self.activeLSP
-            )
-        }
-        chainURL = url
-        publishWorkingChainURL(url)
-    }
-
-    /// Record the Esplora URL a node actually started against, so the NSE begins with a
-    /// known-working provider instead of paying a degraded primary's failure first.
-    private func publishWorkingChainURL(_ url: String) {
-        UserDefaults(suiteName: Constants.appGroupIdentifier)?
-            .set(url, forKey: "esplora_chain_url")
-    }
-
-    /// Test Blockstream connectivity; fall back to mempool.space if unreachable.
-    private func resolveChainURL() async -> String {
-        guard let url = URL(string: "\(Constants.primaryChainURL)/blocks/tip/height") else {
-            return Constants.fallbackChainURL
-        }
-        // This sits on the critical path before first paint, so it gets a short
-        // budget of its own: URLSession.shared defaults to a 60s request timeout,
-        // which would hold the launch screen for a minute on a slow primary.
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 2
-        config.timeoutIntervalForResource = 3
-        let session = URLSession(configuration: config)
-        let startedAt = Date()
-        do {
-            let (_, response) = try await session.data(from: url)
-            if let http = response as? HTTPURLResponse, http.statusCode == 200 {
-                AuditService.log("CHAIN_SOURCE_RESOLVED", data: [
-                    "using": Constants.primaryChainURL,
-                    "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
-                ])
-                return Constants.primaryChainURL
-            }
-        } catch {}
-        AuditService.log("CHAIN_SOURCE_FALLBACK", data: [
-            "primary": Constants.primaryChainURL,
-            "using": Constants.fallbackChainURL,
-            "ms": "\(Int(Date().timeIntervalSince(startedAt) * 1000))"
-        ])
-        return Constants.fallbackChainURL
     }
 
     // MARK: - Balance Refresh
