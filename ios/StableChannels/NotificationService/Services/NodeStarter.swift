@@ -14,15 +14,15 @@ extension NodeStarter {
         // successful start, including failover) so the NSE doesn't pay a degraded
         // primary's failure before falling over itself.
         let stored = UserDefaultsChainURLStore(defaults: UserDefaults(suiteName: Constants.appGroup)).load()
-        let primary = stored ?? Constants.primaryChainURL
-        let fallback = (primary == Constants.primaryChainURL)
-            ? Constants.fallbackChainURL
-            : Constants.primaryChainURL
+        let providers = NodeStartupPolicy.extensionProviders(
+            preferred: stored ?? Constants.primaryChainURL,
+            providers: Constants.esploraChainURLs
+        )
         return try buildNode(
             dataDir: dataDir,
             logger: logger,
-            primaryURL: primary,
-            fallbackURL: fallback
+            primaryURL: providers[0],
+            fallbackURL: providers[1]
         )
     }
 }
@@ -88,16 +88,16 @@ final class DefaultNodeStarter: NodeStarter {
         // long-offline wallets.
         let syncConfig = EsploraSyncConfig(
             backgroundSyncConfig: BackgroundSyncConfig(
-                onchainWalletSyncIntervalSecs: 600,
-                lightningWalletSyncIntervalSecs: 600,
-                feeRateCacheUpdateIntervalSecs: 3600
+                onchainWalletSyncIntervalSecs: Constants.onchainWalletSyncIntervalSecs,
+                lightningWalletSyncIntervalSecs: Constants.lightningWalletSyncIntervalSecs,
+                feeRateCacheUpdateIntervalSecs: Constants.feeRateCacheUpdateIntervalSecs
             ),
             timeoutsConfig: SyncTimeoutsConfig(
-                onchainWalletSyncTimeoutSecs: 60,
-                lightningWalletSyncTimeoutSecs: 60,
-                feeRateCacheUpdateTimeoutSecs: 6,
-                txBroadcastTimeoutSecs: 30,
-                perRequestTimeoutSecs: 15
+                onchainWalletSyncTimeoutSecs: Constants.onchainWalletSyncTimeoutSecs,
+                lightningWalletSyncTimeoutSecs: Constants.lightningWalletSyncTimeoutSecs,
+                feeRateCacheUpdateTimeoutSecs: Constants.feeRateCacheUpdateTimeoutSecs,
+                txBroadcastTimeoutSecs: Constants.txBroadcastTimeoutSecs,
+                perRequestTimeoutSecs: Constants.esploraRequestTimeoutSecs
             )
         )
 

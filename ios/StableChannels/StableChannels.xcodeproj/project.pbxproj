@@ -91,6 +91,10 @@
 		4980E2882FCD0EB5009B5A3E /* ShareSheetPresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */; };
 		4981EF12309A6DC1000A1062 /* ChainURLStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4981EF11309A6DC1000A1062 /* ChainURLStore.swift */; };
 		4981EF13309A6DC1000A1062 /* ChainURLStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4981EF11309A6DC1000A1062 /* ChainURLStore.swift */; };
+		4981EF15309A7424000A1062 /* ChainSourceProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4981EF14309A7424000A1062 /* ChainSourceProbe.swift */; };
+		4981EF17309A7432000A1062 /* SharedDefaultsKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4981EF16309A7432000A1062 /* SharedDefaultsKey.swift */; };
+		4981EF18309A7432000A1062 /* SharedDefaultsKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4981EF16309A7432000A1062 /* SharedDefaultsKey.swift */; };
+		4981EF19309A7478000A1062 /* NodeStartupPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49C46D3C3080C492005A2FF5 /* NodeStartupPolicy.swift */; };
 		498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A83022712F0086BDB6 /* BiometricProtocols.swift */; };
 		498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */; };
 		4983BC9B2FCCA2B800E3B378 /* ShareableQRGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */; };
@@ -409,6 +413,8 @@
 		497A42523067156C003B908A /* LivePriceLabel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LivePriceLabel.swift; sourceTree = "<group>"; };
 		4980E2872FCD0EB5009B5A3E /* ShareSheetPresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareSheetPresenter.swift; sourceTree = "<group>"; };
 		4981EF11309A6DC1000A1062 /* ChainURLStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainURLStore.swift; sourceTree = "<group>"; };
+		4981EF14309A7424000A1062 /* ChainSourceProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainSourceProbe.swift; sourceTree = "<group>"; };
+		4981EF16309A7432000A1062 /* SharedDefaultsKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedDefaultsKey.swift; sourceTree = "<group>"; };
 		498244A83022712F0086BDB6 /* BiometricProtocols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricProtocols.swift; sourceTree = "<group>"; };
 		498244A93022712F0086BDB6 /* BiometricToggleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BiometricToggleCoordinator.swift; sourceTree = "<group>"; };
 		4983BC9A2FCCA2B800E3B378 /* ShareableQRGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareableQRGenerator.swift; sourceTree = "<group>"; };
@@ -1003,6 +1009,7 @@
 				CC3C25041B1DA315BD7CD2E7 /* AuditService.swift */,
 				49E4D8A02FED848F002AF338 /* BackupError.swift */,
 				49E4D8A22FED84B7002AF338 /* BackupServiceProtocol.swift */,
+				4981EF14309A7424000A1062 /* ChainSourceProbe.swift */,
 				4981EF11309A6DC1000A1062 /* ChainURLStore.swift */,
 				49D4DB052FD02F400074ACD2 /* CloseTxidResolver.swift */,
 				5194C003A28A4B2941C7AC40 /* CloudBackupService.swift */,
@@ -1021,6 +1028,7 @@
 				C253FF2C845BE12BC212FDB8 /* RateLimitService.swift */,
 				49DDD0133054000100B5A146 /* RepairBooksUseCase.swift */,
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
+				4981EF16309A7432000A1062 /* SharedDefaultsKey.swift */,
 				DF383D962C3260EA8D14692A /* StabilityService.swift */,
 				49DDD0153054000100B5A146 /* StabilityStatusAdapters.swift */,
 				499DBE6F2FD2DACF003E89F9 /* StaggeredTaskLauncher.swift */,
@@ -1481,6 +1489,7 @@
 				49206E053073A92D00217838 /* SendPaymentExecutor.swift in Sources */,
 				49206E063073A92D00217838 /* SendFlowModel.swift in Sources */,
 				49206E073073A92D00217838 /* SendFlowStep.swift in Sources */,
+				4981EF18309A7432000A1062 /* SharedDefaultsKey.swift in Sources */,
 				49206E083073A92D00217838 /* SlideToSendButton.swift in Sources */,
 				499DBE702FD2DACF003E89F9 /* OnchainTxidResolver.swift in Sources */,
 				49E3080F30080B78009B0014 /* TransactionLinkService.swift in Sources */,
@@ -1584,6 +1593,7 @@
 				49E456822FCC596F00B0CA85 /* FullscreenQRZoomView.swift in Sources */,
 				49F0B0E42FC0EF3A003A3B89 /* StablePositionView.swift in Sources */,
 				49F0B0E52FC0EF3A003A3B89 /* AboutSettingsView.swift in Sources */,
+				4981EF15309A7424000A1062 /* ChainSourceProbe.swift in Sources */,
 				49F0B0E62FC0EF3A003A3B89 /* AppearanceSettingsView.swift in Sources */,
 				49D7BFED30795EAA0089BF1C /* PaymentSettlementObserver.swift in Sources */,
 				49E3081130080F3C009B0014 /* TxidResolutionService.swift in Sources */,
@@ -1643,6 +1653,7 @@
 				4991278A2FFEB51600D9C81F /* PaymentHandler.swift in Sources */,
 				4991278F2FFEC05D00D9C81F /* Constants.swift in Sources */,
 				499127902FFEC05D00D9C81F /* StableControlParser.swift in Sources */,
+				4981EF17309A7432000A1062 /* SharedDefaultsKey.swift in Sources */,
 				A20400000000000000000003 /* TradeProtocol.swift in Sources */,
 				4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */,
 				49A0F0033029000000000001 /* PriceOracle.swift in Sources */,
@@ -1655,6 +1666,7 @@
 				4981EF12309A6DC1000A1062 /* ChainURLStore.swift in Sources */,
 				499127832FFEB50B00D9C81F /* UserToLSPHandler.swift in Sources */,
 				499127842FFEB50B00D9C81F /* LSPToUserHandler.swift in Sources */,
+				4981EF19309A7478000A1062 /* NodeStartupPolicy.swift in Sources */,
 				499127862FFEB50B00D9C81F /* SQLitePaymentDatabase.swift in Sources */,
 				53DFB9332333F587E1450AE8 /* LightningPaymentRecovery.swift in Sources */,
 				D9B7D0185AD3173A302E10ED /* SharedPaymentSQL.swift in Sources */,
