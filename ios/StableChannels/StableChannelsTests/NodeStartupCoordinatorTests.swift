@@ -556,6 +556,52 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         appState.nodeStartup.reset()
     }
 
+    /// Node start walks the current provider, every other configured provider, then the current
+    /// one again after the start retry delay; a total failure keeps the current provider.
+    func testAppStateStart_walksConfiguredProvidersInOrder() async {
+        let node = FeeStallingNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(
+            node.startedURLs,
+            [Constants.primaryChainURL, Constants.fallbackChainURL, Constants.primaryChainURL]
+        )
+        XCTAssertEqual(sleeps.first, Constants.nodeStartRetryDelay)
+        XCTAssertEqual(appState.chainURL, Constants.primaryChainURL)
+        appState.nodeStartup.reset()
+    }
+
+    /// A start that fails over adopts the provider that worked and records it in the app group,
+    /// where the notification extension reads it to start from a known-working provider.
+    func testAppStateFailover_adoptsAndRecordsTheWorkingProvider() async throws {
+        let shared = try XCTUnwrap(UserDefaults(suiteName: Constants.appGroupIdentifier))
+        let key = "esplora_chain_url"
+        let saved = shared.string(forKey: key)
+        defer { shared.set(saved, forKey: key) }
+        shared.removeObject(forKey: key)
+        let node = PrimaryStallingNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(node.startedURLs, [Constants.primaryChainURL, Constants.fallbackChainURL])
+        XCTAssertEqual(appState.chainURL, Constants.fallbackChainURL)
+        XCTAssertEqual(shared.string(forKey: key), Constants.fallbackChainURL)
+        appState.nodeStartup.reset()
+    }
+
     func testForegroundInAnyPhase_endsThePause() async {
         let appState = AppState()
         appState.phase = .offline
@@ -582,13 +628,28 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 }
 
 /// A node whose start always fails with a transient wallet-sync error.
-private final class StallingNodeService: NodeService {
+private class StallingNodeService: NodeService {
+    private(set) var startedURLs: [String] = []
+
     override func start(
         network _: Network,
-        esploraURL _: String,
+        esploraURL: String,
         mnemonic _: String,
         lspConfig _: LSPConfig
     ) async throws {
-        throw NodeError.TxSyncFailed(message: "sync stalled")
+        startedURLs.append(esploraURL)
+        if let error = stall(esploraURL) { throw error }
     }
+
+    func stall(_: String) -> NodeError? { .TxSyncFailed(message: "sync stalled") }
+}
+
+/// A node whose start fails fee-rate estimation against every provider, which fails over.
+private class FeeStallingNodeService: StallingNodeService {
+    override func stall(_: String) -> NodeError? { .FeerateEstimationUpdateFailed(message: "stalled") }
+}
+
+/// A node whose start fails fee-rate estimation only against the primary provider.
+private final class PrimaryStallingNodeService: FeeStallingNodeService {
+    override func stall(_ url: String) -> NodeError? { url == Constants.primaryChainURL ? super.stall(url) : nil }
 }
