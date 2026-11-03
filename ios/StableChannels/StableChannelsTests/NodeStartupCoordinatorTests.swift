@@ -1,4 +1,5 @@
 import LDKNode
+import os
 import XCTest
 @testable import StableChannels
 
@@ -195,40 +196,59 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(chainURLDefaults.string(forKey: "esplora_chain_url"), fallback)
         XCTAssertEqual(chainURLStore.load(), fallback)
+        XCTAssertEqual(Constants.SharedDefaultsKey.workingChainURL, "esplora_chain_url")
         XCTAssertEqual(Constants.SharedDefaultsKey.mainAppLastActive, "main_app_last_active")
     }
 
     // MARK: - Chain source probe
 
     func testProbe_reachablePrimary_startsOnPrimary() async {
-        var probed: [URL] = []
+        let probed = OSAllocatedUnfairLock(initialState: [URL]())
+        let logged = OSAllocatedUnfairLock(initialState: [String]())
         let probe = ChainSourceProbe(
-            isReachable: { probed.append($0); return true },
+            isReachable: { url in
+                probed.withLock { $0.append(url) }
+                return true
+            },
             primary: primary,
             fallback: fallback,
-            log: { name, data in self.events.append((name, data)) }
+            log: { name, _ in logged.withLock { $0.append(name) } }
         )
 
         let url = await probe.resolve()
 
         XCTAssertEqual(url, primary)
-        XCTAssertEqual(probed.map(\.absoluteString), ["\(primary)/blocks/tip/height"])
-        XCTAssertEqual(eventNames(), ["CHAIN_SOURCE_RESOLVED"])
+        XCTAssertEqual(probed.withLock { $0 }.map(\.absoluteString), ["\(primary)/blocks/tip/height"])
+        XCTAssertEqual(logged.withLock { $0 }, ["CHAIN_SOURCE_RESOLVED"])
     }
 
     func testProbe_unreachablePrimary_startsOnFallback() async {
+        let logged = OSAllocatedUnfairLock(initialState: [(name: String, using: String?)]())
         let probe = ChainSourceProbe(
             isReachable: { _ in false },
             primary: primary,
             fallback: fallback,
-            log: { name, data in self.events.append((name, data)) }
+            log: { name, data in
+                let using = data["using"] as? String
+                logged.withLock { $0.append((name, using)) }
+            }
         )
 
         let url = await probe.resolve()
 
         XCTAssertEqual(url, fallback)
-        XCTAssertEqual(eventNames(), ["CHAIN_SOURCE_FALLBACK"])
-        XCTAssertEqual(events.first?.data["using"] as? String, fallback)
+        XCTAssertEqual(logged.withLock { $0 }.map(\.name), ["CHAIN_SOURCE_FALLBACK"])
+        XCTAssertEqual(logged.withLock { $0 }.first?.using, fallback)
+    }
+
+    /// Every live probe shares one session capped at the launch budget, so no probe leaves a session behind.
+    func testLiveProbe_sharesOneSessionWithTheLaunchBudget() {
+        let config = ChainSourceProbe.liveSession.configuration
+
+        XCTAssertEqual(config.timeoutIntervalForRequest, Constants.chainProbeRequestTimeoutSecs)
+        XCTAssertEqual(config.timeoutIntervalForResource, Constants.chainProbeResourceTimeoutSecs)
+        XCTAssertEqual(Constants.chainProbeRequestTimeoutSecs, 2)
+        XCTAssertEqual(Constants.chainProbeResourceTimeoutSecs, 3)
     }
 
     // MARK: - Retry scheduling

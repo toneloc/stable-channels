@@ -168,7 +168,8 @@ class AppState {
         repairBooksUseCase: RepairBooksUseCase? = nil,
         networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared,
         seedAccessDefaults: UserDefaults = .standard,
-        nodeStartup: NodeStartupCoordinator? = nil
+        nodeStartup: NodeStartupCoordinator? = nil,
+        chainSourceProbe: ChainSourceProbe = .live
     ) {
         self.seedAccessDefaults = seedAccessDefaults
         self.nodeService = nodeService
@@ -178,6 +179,7 @@ class AppState {
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
         self.nodeStartup = nodeStartup ?? NodeStartupCoordinator()
+        self.chainSourceProbe = chainSourceProbe
         self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
@@ -1481,7 +1483,7 @@ class AppState {
     private var pendingOnlineRetry = false
     /// Node-start failover and automatic retry after transient chain-source failures.
     let nodeStartup: NodeStartupCoordinator
-    private let chainSourceProbe = ChainSourceProbe.live
+    private let chainSourceProbe: ChainSourceProbe
     /// True while node start is being retried after a transient chain-source failure.
     var isRetryingNodeStart: Bool { nodeStartup.isRetrying }
 
