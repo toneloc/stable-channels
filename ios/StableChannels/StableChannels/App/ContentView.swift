@@ -28,7 +28,7 @@ struct ContentView: View {
             case .loading, .onboarding, .syncing:
                 SyncingView(
                     isSyncComplete: appState.hasCompletedInitialSync,
-                    isRetrying: appState.nodeStartup.isRetrying,
+                    isRetrying: appState.isRetryingNodeStart,
                     onBalanced: {
                         withAnimation(.easeInOut(duration: 0.35)) {
                             appState.phase = .wallet

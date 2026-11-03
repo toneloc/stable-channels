@@ -134,7 +134,7 @@ class NodeService: NodeServiceProtocol {
             timeoutsConfig: SyncTimeoutsConfig(
                 onchainWalletSyncTimeoutSecs: Constants.onchainWalletSyncTimeoutSecs,
                 lightningWalletSyncTimeoutSecs: Constants.lightningWalletSyncTimeoutSecs,
-                feeRateCacheUpdateTimeoutSecs: Constants.nodeStartFeeRateTimeoutSecs,
+                feeRateCacheUpdateTimeoutSecs: Constants.feeRateCacheUpdateTimeoutSecs,
                 txBroadcastTimeoutSecs: Constants.txBroadcastTimeoutSecs,
                 perRequestTimeoutSecs: Constants.esploraRequestTimeoutSecs
             )

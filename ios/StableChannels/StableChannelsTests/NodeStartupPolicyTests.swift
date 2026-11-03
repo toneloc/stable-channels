@@ -70,6 +70,35 @@ final class NodeStartupPolicyTests: XCTestCase {
         XCTAssertEqual(NodeStartupPolicy.retryDelay(forAttempt: -3, maxDelay: maxDelay), .seconds(1))
     }
 
+    func testRetryDelay_startsAtBaseDelay() {
+        XCTAssertEqual(
+            NodeStartupPolicy.retryDelay(forAttempt: 0, maxDelay: maxDelay),
+            NodeStartupPolicy.baseRetryDelay
+        )
+    }
+
+    // MARK: - Retry gate
+
+    func testRetryGate_runningNodeSkips() {
+        for isNetworkOffline in [true, false] {
+            XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: true, isNetworkOffline: isNetworkOffline), .skip)
+        }
+    }
+
+    func testRetryGate_offlineGoesOfflineAndOnlineRuns() {
+        XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: false, isNetworkOffline: true), .offline)
+        XCTAssertEqual(NodeStartupPolicy.retryGate(isNodeRunning: false, isNetworkOffline: false), .run)
+    }
+
+    // MARK: - Foreground resume
+
+    func testShouldResumeRetry_onlyWhileSyncingRetryingAndNodeDown() {
+        XCTAssertTrue(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: true, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: false, isRetrying: true, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: false, isNodeRunning: false))
+        XCTAssertFalse(NodeStartupPolicy.shouldResumeRetry(isSyncing: true, isRetrying: true, isNodeRunning: true))
+    }
+
     // MARK: - Failure outcome
 
     func testFailureOutcome_offlineWinsOverRetryable() {

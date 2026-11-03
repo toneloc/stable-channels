@@ -417,20 +417,32 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         func failingRun() -> NodeStartupCoordinator.RetryRun {
             run(start: { _ in
                 failedRuns += 1
-                if NodeStartupPolicy.hasRetriesLeft(
-                    retryAttempt: coordinator.retryAttempt,
-                    maxRetries: Constants.nodeStartMaxRetries
-                ) {
-                    coordinator.scheduleRetry(maxDelay: self.maxDelay, reason: "stall again", run: failingRun())
-                } else {
-                    exhausted.fulfill()
-                }
+                let schedule = coordinator.scheduleRetry(
+                    maxDelay: self.maxDelay,
+                    reason: "stall again",
+                    run: failingRun()
+                )
+                if schedule == .exhausted { exhausted.fulfill() }
             })
         }
         coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: failingRun())
         await fulfillment(of: [exhausted], timeout: 1)
 
         XCTAssertEqual(failedRuns, Constants.nodeStartMaxRetries)
+        XCTAssertFalse(coordinator.isRetrying, "Exhaustion resets the backoff")
+        XCTAssertEqual(eventNames().last, "NODE_START_RETRIES_EXHAUSTED")
+    }
+
+    func testRescheduleIfResumed_waitsForForegroundWhilePaused() {
+        let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .seconds(60)) })
+
+        coordinator.pause()
+        XCTAssertNil(coordinator.rescheduleIfResumed(maxDelay: maxDelay, reason: "paused", run: run()))
+        XCTAssertFalse(coordinator.isRetrying)
+
+        coordinator.resume()
+        XCTAssertEqual(coordinator.rescheduleIfResumed(maxDelay: maxDelay, reason: "resumed", run: run()), .scheduled)
+        XCTAssertTrue(coordinator.isRetrying)
         coordinator.reset()
     }
 
@@ -474,18 +486,32 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertTrue(startedURLs.isEmpty)
     }
 
-    func testCancelledRetry_doesNotRun() async throws {
-        let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .milliseconds(50)) })
+    func testCancelledRetry_doesNotRun() async {
+        let coordinator = makeCoordinator()
         var started = false
 
+        // The retry task cannot run before this test yields, so it wakes already cancelled.
         coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(start: { _ in started = true }))
         coordinator.reset()
-        try await Task.sleep(for: .milliseconds(150))
+        for _ in 0 ..< 100 where sleeps.isEmpty {
+            await Task.yield()
+        }
+        await Task.yield()
 
+        XCTAssertEqual(sleeps, [.seconds(1)], "The retry woke up")
         XCTAssertFalse(started)
     }
 
     // MARK: - App wiring
+
+    /// A coordinator for AppState tests: the in-start failover pause passes at once, while the
+    /// retry backoff waits until reset cancels it, so no real retry runs.
+    private func heldRetries() -> NodeStartupCoordinator {
+        makeCoordinator(sleep: { duration in
+            guard duration != Constants.nodeStartRetryDelay else { return }
+            try await Task.sleep(for: .seconds(60))
+        })
+    }
 
     /// A recovered start reloads the books the NSE wrote while the app was suspended, so
     /// stability work never resumes on the launch-time snapshot.
@@ -518,7 +544,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     func testFailedStartInsideARetry_schedulesTheNextRetry() async {
         let appState = AppState(
             nodeService: StallingNodeService(),
-            networkMonitor: MockNetworkMonitor(initialStatus: .online)
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
         )
         appState.phase = .syncing
 
@@ -540,7 +567,7 @@ final class NodeStartupCoordinatorTests: XCTestCase {
     }
 
     func testForegroundWhileRetrying_disarmsTheBackgroundStop() async {
-        let appState = AppState()
+        let appState = AppState(nodeStartup: heldRetries())
         appState.phase = .syncing
         appState.nodeStartup.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run(shouldRun: { false }))
         appState.stopNodeForBackground()
