@@ -82,6 +82,14 @@
 		4944458530540C3500B5A146 /* BinarySearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458130540C3500B5A146 /* BinarySearchTests.swift */; };
 		4944458730540C3500B5A146 /* ExtensionsFormattingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */; };
 		4944458830540C3500B5A146 /* InputSanitizerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4944458330540C3500B5A146 /* InputSanitizerTests.swift */; };
+		494A93583095F83500CC0FF5 /* EmailAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A93573095F83500CC0FF5 /* EmailAddress.swift */; };
+		494A935A3095F84200CC0FF5 /* EmailSubmissionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A93593095F84200CC0FF5 /* EmailSubmissionService.swift */; };
+		494A935C3095F87700CC0FF5 /* EmailSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A935B3095F87700CC0FF5 /* EmailSettingsTests.swift */; };
+		494A935E3095FA9F00CC0FF5 /* EmailPromptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A935D3095FA9F00CC0FF5 /* EmailPromptStore.swift */; };
+		494A93603095FACC00CC0FF5 /* EmailPromptSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A935F3095FACC00CC0FF5 /* EmailPromptSheet.swift */; };
+		494A93623095FCAF00CC0FF5 /* EmailPromptPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A93613095FCAF00CC0FF5 /* EmailPromptPolicy.swift */; };
+		494A93643095FCE300CC0FF5 /* EmailSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A93633095FCE300CC0FF5 /* EmailSettingsView.swift */; };
+		494A93673095FD9F00CC0FF5 /* EmailCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 494A93653095FD9F00CC0FF5 /* EmailCapture.swift */; };
 		495895DD3051824D002CF62A /* QRCodeExtractorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */; };
 		495CB3FA3013F14100560837 /* TransactionMatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3F93013F14100560837 /* TransactionMatcher.swift */; };
 		495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */; };
@@ -416,6 +424,14 @@
 		4944458130540C3500B5A146 /* BinarySearchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BinarySearchTests.swift; sourceTree = "<group>"; };
 		4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionsFormattingTests.swift; sourceTree = "<group>"; };
 		4944458330540C3500B5A146 /* InputSanitizerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputSanitizerTests.swift; sourceTree = "<group>"; };
+		494A93573095F83500CC0FF5 /* EmailAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailAddress.swift; sourceTree = "<group>"; };
+		494A93593095F84200CC0FF5 /* EmailSubmissionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailSubmissionService.swift; sourceTree = "<group>"; };
+		494A935B3095F87700CC0FF5 /* EmailSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailSettingsTests.swift; sourceTree = "<group>"; };
+		494A935D3095FA9F00CC0FF5 /* EmailPromptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailPromptStore.swift; sourceTree = "<group>"; };
+		494A935F3095FACC00CC0FF5 /* EmailPromptSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailPromptSheet.swift; sourceTree = "<group>"; };
+		494A93613095FCAF00CC0FF5 /* EmailPromptPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailPromptPolicy.swift; sourceTree = "<group>"; };
+		494A93633095FCE300CC0FF5 /* EmailSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailSettingsView.swift; sourceTree = "<group>"; };
+		494A93653095FD9F00CC0FF5 /* EmailCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmailCapture.swift; sourceTree = "<group>"; };
 		495895DC3051824D002CF62A /* QRCodeExtractorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QRCodeExtractorTests.swift; sourceTree = "<group>"; };
 		495CB3F93013F14100560837 /* TransactionMatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransactionMatcher.swift; sourceTree = "<group>"; };
 		495CB3FB3013F15600560837 /* MempoolWebSocketProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MempoolWebSocketProtocol.swift; sourceTree = "<group>"; };
@@ -693,6 +709,8 @@
 				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
 				49F363000000000000000A /* ClosedChannelFunds.swift */,
 				49D8450F308D013600882583 /* DepositAttribution.swift */,
+				494A93573095F83500CC0FF5 /* EmailAddress.swift */,
+				494A93613095FCAF00CC0FF5 /* EmailPromptPolicy.swift */,
 				49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */,
 				379669F5815ECD9926C3A5D2 /* LSPConfig.swift */,
 				E5DDDD1C556BFD22DE6F5E59 /* MissedReceiveRecovery.swift */,
@@ -763,6 +781,14 @@
 				0446A88D1E083A380EDC5436 /* PriceService.swift */,
 			);
 			path = Price;
+			sourceTree = "<group>";
+		};
+		494A93663095FD9F00CC0FF5 /* Email */ = {
+			isa = PBXGroup;
+			children = (
+				494A93653095FD9F00CC0FF5 /* EmailCapture.swift */,
+			);
+			path = Email;
 			sourceTree = "<group>";
 		};
 		495CB4013017917400560837 /* WebSocket */ = {
@@ -896,6 +922,7 @@
 				49F0B0D62FC0EF3A003A3B89 /* AppearanceSettingsView.swift */,
 				49F0B0D82FC0EF3A003A3B89 /* ChannelSettingsView.swift */,
 				499E5369301A7D260050E3F8 /* DiagnosticsSettingsView.swift */,
+				494A93633095FCE300CC0FF5 /* EmailSettingsView.swift */,
 				134775C01F3C51CA39B262FC /* LSPSettingsView.swift */,
 				49F0B0DA2FC0EF3A003A3B89 /* NodeSettingsView.swift */,
 				49F0B0DB2FC0EF3A003A3B89 /* NotificationsSettingsView.swift */,
@@ -1050,6 +1077,8 @@
 				CB7BB840EC5C451056C5C21D /* CryptoService.swift */,
 				3940DC5406ABC63AA090441A /* DatabaseService.swift */,
 				499DBE792FD2F06F003E89F9 /* DepositRecorder.swift */,
+				494A935D3095FA9F00CC0FF5 /* EmailPromptStore.swift */,
+				494A93593095F84200CC0FF5 /* EmailSubmissionService.swift */,
 				492B54AB300CC81D003EC383 /* EsploraError.swift */,
 				49B22A9C30983AF200447D17 /* EsploraTransaction.swift */,
 				49DAFB392FDB5FEB003BE0EB /* FeeRateService.swift */,
@@ -1138,6 +1167,7 @@
 		B94101FB9F6D7A28B1CA6C2C /* Features */ = {
 			isa = PBXGroup;
 			children = (
+				494A93663095FD9F00CC0FF5 /* Email */,
 				E6E0520C798AB1005E6A3B2E /* History */,
 				EC3EE79DFC487BD8FC094DF5 /* Home */,
 				9EB6CDA4F614F973AF602691 /* Settings */,
@@ -1204,6 +1234,7 @@
 			isa = PBXGroup;
 			children = (
 				49D2229F078D1812443B9072 /* ActionButton.swift */,
+				494A935F3095FACC00CC0FF5 /* EmailPromptSheet.swift */,
 				840E14EF06B6DF0135F2BE70 /* FundWalletView.swift */,
 				49D2E016357DA1F64326A795 /* HomeActionButtonsView.swift */,
 				49DDD0093054000100B5A146 /* HomeBalanceSectionView.swift */,
@@ -1235,6 +1266,7 @@
 				49D4DB072FD02F4E0074ACD2 /* CloseTxidResolverTests.swift */,
 				49206DF83073A90200217838 /* CurveGeometryTests.swift */,
 				49D4DB082FD02F4E0074ACD2 /* DatabaseServiceTests.swift */,
+				494A935B3095F87700CC0FF5 /* EmailSettingsTests.swift */,
 				4944458230540C3500B5A146 /* ExtensionsFormattingTests.swift */,
 				49DAFB3B2FDB6587003BE0EB /* FeeRateServiceTests.swift */,
 				0874B3D19B79A2C866999887 /* HomeOnchainRowsTests.swift */,
@@ -1430,6 +1462,7 @@
 				49F36400000000000000B005 /* ToRemoteRecoveryTests.swift in Sources */,
 				4993591A30712D1500D6B50E /* SQLitePaymentDatabaseTests.swift in Sources */,
 				490A133B304F147D005CDA39 /* TradeSyncParityTests.swift in Sources */,
+				494A935C3095F87700CC0FF5 /* EmailSettingsTests.swift in Sources */,
 				499DBE762FD2DADF003E89F9 /* OnchainTxidResolverTests.swift in Sources */,
 				4993591B30712D1500D6B50E /* PaymentDestinationClassifierTests.swift in Sources */,
 				499DBE772FD2DADF003E89F9 /* ResilientEsploraClientTests.swift in Sources */,
@@ -1486,6 +1519,7 @@
 				49D997513074F6090024B3A7 /* NetworkReachabilityEvaluator.swift in Sources */,
 				D20000000000000000000021 /* HTTPResponseParser.swift in Sources */,
 				D20000000000000000000023 /* URLSessionTransport.swift in Sources */,
+				494A93643095FCE300CC0FF5 /* EmailSettingsView.swift in Sources */,
 				D20000000000000000000011 /* Bech32.swift in Sources */,
 				D20000000000000000000019 /* LNURLService.swift in Sources */,
 				62340228B969D280C66FD733 /* AppState.swift in Sources */,
@@ -1508,6 +1542,7 @@
 				49DDD00C3054000100B5A146 /* HomeSyncStatusSectionView.swift in Sources */,
 				49DDD0103054000100B5A146 /* BookRepairPolicy.swift in Sources */,
 				49DDD0123054000100B5A146 /* StabilityRepairProtocols.swift in Sources */,
+				494A93673095FD9F00CC0FF5 /* EmailCapture.swift in Sources */,
 				49DDD0143054000100B5A146 /* RepairBooksUseCase.swift in Sources */,
 				49DDD0163054000100B5A146 /* StabilityStatusAdapters.swift in Sources */,
 				499E5371301A92900050E3F8 /* SettingsIconBadgeView.swift in Sources */,
@@ -1531,6 +1566,7 @@
 				499F1E513009F02300936944 /* BlockHeightService.swift in Sources */,
 				499F1E543009F02300936944 /* TxConfirmationProvider.swift in Sources */,
 				499F1E553009F02300936944 /* ConfirmationService.swift in Sources */,
+				494A93583095F83500CC0FF5 /* EmailAddress.swift in Sources */,
 				49AD1B512FEE812E0015A7D9 /* NativeTimerAlert.swift in Sources */,
 				49AD1B512FEE82000015A7D1 /* RevealRecoveryQuizModels.swift in Sources */,
 				49AD1B522FEE82000015A7D1 /* RevealRecoveryQuizViewModel.swift in Sources */,
@@ -1632,6 +1668,7 @@
 				49F0B0E22FC0EF3A003A3B89 /* Colors.swift in Sources */,
 				49F0B0E32FC0EF3A003A3B89 /* PushConnectivitySettingsView.swift in Sources */,
 				49E456812FCC596F00B0CA85 /* QRCodeUtility.swift in Sources */,
+				494A93623095FCAF00CC0FF5 /* EmailPromptPolicy.swift in Sources */,
 				49206E123073C27600217838 /* AddressVisualChunkView.swift in Sources */,
 				49206E133073C27600217838 /* SendConfirmStepView.swift in Sources */,
 				49206E143073C27600217838 /* SendRecipientStepView.swift in Sources */,
@@ -1666,6 +1703,7 @@
 				4962F9A830340E8A00852B66 /* PriceChartService.swift in Sources */,
 				49D7BFE730794B280089BF1C /* SendChannelSpendPolicy.swift in Sources */,
 				2FA17E14D9F4E24E05FF09E3 /* CryptoService.swift in Sources */,
+				494A935E3095FA9F00CC0FF5 /* EmailPromptStore.swift in Sources */,
 				1A972F89DB503A5171D1525C /* KeychainService.swift in Sources */,
 				49D84510308D013600882583 /* DepositAttribution.swift in Sources */,
 				8C6EB05C5C93E0A887851D5D /* RateLimitService.swift in Sources */,
@@ -1675,6 +1713,7 @@
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */,
 				49D997533074F6490024B3A7 /* OfflineNoticeSheet.swift in Sources */,
+				494A93603095FACC00CC0FF5 /* EmailPromptSheet.swift in Sources */,
 				9EBF713364DF88022CB4F1D0 /* RestoreSeedSheet.swift in Sources */,
 				10B6FDC89D0F405959F39079 /* SeedWordGridView.swift in Sources */,
 				495CB3FF3017724E00560837 /* ReconnectionManager.swift in Sources */,
@@ -1683,6 +1722,7 @@
 				1039784966D1ED4635CA96E6 /* LSPConfig.swift in Sources */,
 				49D8450E308CF99000882583 /* OnchainAmount.swift in Sources */,
 				A576FC086B9C883563FBE05A /* LSPSettingsView.swift in Sources */,
+				494A935A3095F84200CC0FF5 /* EmailSubmissionService.swift in Sources */,
 				49B22AA530983B0400447D17 /* TradeFormModel.swift in Sources */,
 				498244AA3022712F0086BDB6 /* BiometricProtocols.swift in Sources */,
 				498244AB3022712F0086BDB6 /* BiometricToggleCoordinator.swift in Sources */,
