@@ -3,14 +3,14 @@ import SwiftUI
 struct BackupSettingsICloudSection: View {
     let backupService: any BackupServiceProtocol
     @Binding var showingBackupPrompt: Bool
-    @Binding var showingExportSheet: Bool
-    @Binding var showingImportSheet: Bool
     @Binding var showingDeleteConfirmation: Bool
-    @Binding var showingRestoreSheet: Bool
     @Binding var showBackupSuccess: Bool
     @Binding var backupError: String?
     @Binding var isCheckingRemote: Bool
     let onBackupNow: () async -> Void
+    let onRestoreFromCloud: () -> Void
+    let onExportToFiles: () -> Void
+    let onImportFromFile: () -> Void
 
     var body: some View {
         Section {
@@ -76,7 +76,7 @@ struct BackupSettingsICloudSection: View {
         }
 
         Button {
-            showingExportSheet = true
+            onExportToFiles()
         } label: {
             HStack {
                 Image(systemName: "square.and.arrow.up.on.square")
@@ -105,7 +105,7 @@ struct BackupSettingsICloudSection: View {
         }
 
         Button {
-            showingRestoreSheet = true
+            onRestoreFromCloud()
         } label: {
             HStack {
                 Image(systemName: "icloud.and.arrow.down.fill")
@@ -138,7 +138,7 @@ struct BackupSettingsICloudSection: View {
         .foregroundStyle(.primary)
 
         Button {
-            showingRestoreSheet = true
+            onRestoreFromCloud()
         } label: {
             HStack {
                 Image(systemName: "icloud.and.arrow.down.fill")
@@ -153,7 +153,7 @@ struct BackupSettingsICloudSection: View {
         .foregroundStyle(.primary)
 
         Button {
-            showingImportSheet = true
+            onImportFromFile()
         } label: {
             HStack {
                 Image(systemName: "square.and.arrow.down.on.square")

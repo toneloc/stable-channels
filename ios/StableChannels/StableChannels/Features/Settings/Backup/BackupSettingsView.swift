@@ -54,6 +54,15 @@ struct BackupSettingsView: View {
         showRestore = true
     }
 
+    /// Every path that shows the seed, decrypts a backup or replaces the wallet goes through here.
+    private func authorizeSeedAccess(reason: String, then action: @escaping () -> Void) {
+        Task {
+            if await appState.authorizeSeedAccess(reason: reason) {
+                action()
+            }
+        }
+    }
+
     private func backupNow() async {
         guard appState.nodeService.savedMnemonic != nil else { return }
         isCheckingRemote = true
@@ -161,11 +170,8 @@ struct BackupSettingsView: View {
     private var seedSection: some View {
         Section {
             Button {
-                Task {
-                    if await appState
-                        .authorizeSeedAccess(reason: "Authenticate to reveal your Secret Recovery Phrase") {
-                        showingRevealPhraseSheet = true
-                    }
+                authorizeSeedAccess(reason: "Authenticate to reveal your Secret Recovery Phrase") {
+                    showingRevealPhraseSheet = true
                 }
             } label: {
                 HStack {
@@ -196,10 +202,8 @@ struct BackupSettingsView: View {
     private var restoreSection: some View {
         Section {
             Button {
-                Task {
-                    if await appState.authorizeSeedAccess(reason: "Authenticate to restore from a recovery phrase") {
-                        showRestore = true
-                    }
+                authorizeSeedAccess(reason: "Authenticate to restore from a recovery phrase") {
+                    showRestore = true
                 }
             } label: {
                 HStack {
@@ -233,14 +237,26 @@ struct BackupSettingsView: View {
         BackupSettingsICloudSection(
             backupService: backupService,
             showingBackupPrompt: $showingBackupPrompt,
-            showingExportSheet: $showingExportSheet,
-            showingImportSheet: $showingImportSheet,
             showingDeleteConfirmation: $showingDeleteConfirmation,
-            showingRestoreSheet: $showingRestoreSheet,
             showBackupSuccess: $showBackupSuccess,
             backupError: $backupError,
             isCheckingRemote: $isCheckingRemote,
-            onBackupNow: { await backupNow() }
+            onBackupNow: { await backupNow() },
+            onRestoreFromCloud: {
+                authorizeSeedAccess(reason: "Authenticate to restore your backup") {
+                    showingRestoreSheet = true
+                }
+            },
+            onExportToFiles: {
+                authorizeSeedAccess(reason: "Authenticate to export your backup") {
+                    showingExportSheet = true
+                }
+            },
+            onImportFromFile: {
+                authorizeSeedAccess(reason: "Authenticate to import a backup") {
+                    showingImportSheet = true
+                }
+            }
         )
     }
 }
