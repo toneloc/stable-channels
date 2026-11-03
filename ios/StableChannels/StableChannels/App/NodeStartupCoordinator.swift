@@ -24,6 +24,13 @@ final class NodeStartupCoordinator {
         let stop: @MainActor () -> Void
     }
 
+    /// Whether a requested retry was scheduled or the retry budget is spent.
+    enum RetrySchedule: Equatable {
+        case scheduled
+        /// The budget is spent and the backoff was reset; the caller surfaces the error.
+        case exhausted
+    }
+
     /// Number of automatic retries that started running since the last reset. A retry that
     /// background cancels before or while it runs is not counted, so it never spends the budget.
     private(set) var retryAttempt = 0
@@ -104,10 +111,44 @@ final class NodeStartupCoordinator {
         throw firstError ?? lastError ?? NodeStartupError.noAttempts
     }
 
-    /// Schedules one retry after the policy backoff. A pending retry is not duplicated. Once it
+    /// Schedules one retry after the policy backoff, or resets and reports `.exhausted` once
+    /// `maxRetries` retries have run.
+    @discardableResult
+    func scheduleRetry(
+        maxDelay: Duration,
+        maxRetries: Int = Constants.nodeStartMaxRetries,
+        reason: String,
+        run: RetryRun
+    ) -> RetrySchedule {
+        guard NodeStartupPolicy.hasRetriesLeft(retryAttempt: retryAttempt, maxRetries: maxRetries) else {
+            log("NODE_START_RETRIES_EXHAUSTED", [
+                "attempts": "\(retryAttempt)",
+                "error": reason
+            ])
+            reset()
+            return .exhausted
+        }
+        arm(maxDelay: maxDelay, reason: reason, run: run)
+        return .scheduled
+    }
+
+    /// After background cancelled a retry mid-start: if foreground already came back, the retry
+    /// it armed may have been turned away while this one ran, so schedule the next one here.
+    /// Returns nil while still paused; foreground resumes the retry then.
+    func rescheduleIfResumed(
+        maxDelay: Duration,
+        maxRetries: Int = Constants.nodeStartMaxRetries,
+        reason: String,
+        run: RetryRun
+    ) -> RetrySchedule? {
+        guard !isPaused else { return nil }
+        return scheduleRetry(maxDelay: maxDelay, maxRetries: maxRetries, reason: reason, run: run)
+    }
+
+    /// Arms one retry after the policy backoff. A pending retry is not duplicated. Once it
     /// fires, the retry moves from pending to running: it stays cancellable until it finishes, and
     /// the free pending slot lets a failure inside it schedule the next attempt.
-    func scheduleRetry(maxDelay: Duration, reason: String, run: RetryRun) {
+    private func arm(maxDelay: Duration, reason: String, run: RetryRun) {
         guard pendingRetry == nil else { return }
         isRetrying = true
         let delay = NodeStartupPolicy.retryDelay(forAttempt: retryAttempt, maxDelay: maxDelay)
@@ -142,7 +183,7 @@ final class NodeStartupCoordinator {
     func resumeIfIdle(maxDelay: Duration, reason: String, run: RetryRun) {
         resume()
         guard runningRetry == nil else { return }
-        scheduleRetry(maxDelay: maxDelay, reason: reason, run: run)
+        arm(maxDelay: maxDelay, reason: reason, run: run)
     }
 
     private func perform(_ run: RetryRun) async {

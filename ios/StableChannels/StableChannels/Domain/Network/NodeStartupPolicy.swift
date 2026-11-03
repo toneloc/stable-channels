@@ -29,12 +29,15 @@ enum NodeStartupPolicy {
             + [Attempt(url: preferred, delayBefore: retryDelay)]
     }
 
+    /// Wait before the first automatic retry; each later retry doubles it.
+    static let baseRetryDelay: Duration = .seconds(1)
+
     /// Backoff between automatic retries: 1s, 2s, 4s, ... doubling per attempt, capped at `maxDelay`.
     static func retryDelay(forAttempt attempt: Int, maxDelay: Duration) -> Duration {
         let exponent = max(attempt, 0)
         // 2^62 seconds is already far past any sane cap; shifting further would overflow Int.
         guard exponent < 62 else { return maxDelay }
-        return min(.seconds(1 << exponent), maxDelay)
+        return min(baseRetryDelay * (1 << exponent), maxDelay)
     }
 
     /// No network wins, so the user sees the offline page instead of retries that cannot succeed.
@@ -50,5 +53,28 @@ enum NodeStartupPolicy {
     /// error screen with Try Again instead of a syncing screen that retries forever.
     static func hasRetriesLeft(retryAttempt: Int, maxRetries: Int) -> Bool {
         retryAttempt < maxRetries
+    }
+
+    /// What a scheduled retry does when it fires.
+    enum RetryGate: Equatable {
+        /// Probe providers and start the node.
+        case run
+        /// The node is already up; nothing to do.
+        case skip
+        /// Show the offline page; the network monitor drives recovery.
+        case offline
+    }
+
+    /// A fired retry goes offline exactly when a retryable failure would, so the two never disagree.
+    static func retryGate(isNodeRunning: Bool, isNetworkOffline: Bool) -> RetryGate {
+        if isNodeRunning { return .skip }
+        let outcome = failureOutcome(isNetworkOffline: isNetworkOffline, looksOffline: false, isRetryable: true)
+        return outcome == .offline ? .offline : .run
+    }
+
+    /// Whether foreground resumes a retry paused by background: only while the syncing screen
+    /// waits on it and the node is not up yet.
+    static func shouldResumeRetry(isSyncing: Bool, isRetrying: Bool, isNodeRunning: Bool) -> Bool {
+        isSyncing && isRetrying && !isNodeRunning
     }
 }

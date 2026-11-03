@@ -30,7 +30,7 @@ enum Constants {
 
     // Caps every Esplora fee-rate refresh (node start and runtime): a stalled provider fails fast, start
     // moves on to the next provider or the retry loop, and a failed runtime refresh keeps cached rates.
-    static let nodeStartFeeRateTimeoutSecs: UInt64 = 8
+    static let feeRateCacheUpdateTimeoutSecs: UInt64 = 8
     static let nodeStartRetryDelay: Duration = .seconds(2)
     // Ceiling for the launch-time backoff that keeps retrying node start after every provider failed.
     static let nodeStartRetryMaxDelay: Duration = .seconds(60)

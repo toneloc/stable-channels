@@ -31,6 +31,12 @@ class AppState {
         case wallet
         case offline
         case error(String)
+
+        /// A failed start from these phases comes from recovery after a failed launch (the
+        /// network monitor or a scheduled retry), so it routes like a launch failure.
+        var isRecoveringNodeStart: Bool {
+            self == .offline || self == .syncing
+        }
     }
 
     var phase: Phase = .loading
@@ -161,7 +167,8 @@ class AppState {
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
         repairBooksUseCase: RepairBooksUseCase? = nil,
         networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared,
-        seedAccessDefaults: UserDefaults = .standard
+        seedAccessDefaults: UserDefaults = .standard,
+        nodeStartup: NodeStartupCoordinator? = nil
     ) {
         self.seedAccessDefaults = seedAccessDefaults
         self.nodeService = nodeService
@@ -170,6 +177,7 @@ class AppState {
         self.priceHistoryProvider = PriceHistoryService(databaseService: nil)
         self.customRepairBooksUseCase = repairBooksUseCase
         self.networkMonitor = networkMonitor
+        self.nodeStartup = nodeStartup ?? NodeStartupCoordinator()
         self.isOnline = networkMonitor.isOnline
 
         self.networkMonitor.onStatusChange = { [weak self] status in
@@ -1121,15 +1129,9 @@ class AppState {
                 }
                 await resumeAfterNodeStart()
             } catch {
-                switch nodeStartFailureOutcome(for: error) {
-                case .offline:
+                await handleNodeStartFailure(error, failPrefix: "Node start failed") {
                     AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                case .retry:
-                    retryNodeStartLater(reason: error.localizedDescription)
-                case .fail:
-                    nodeStartup.reset()
-                    phase = .error("Node start failed: \(error.localizedDescription)")
                 }
             }
         } else {
@@ -1178,15 +1180,9 @@ class AppState {
                 txidResolutionService.replayPendingChannelCloses()
                 txidResolutionService.replayPendingOnchainReceives()
             } catch {
-                switch nodeStartFailureOutcome(for: error) {
-                case .offline:
+                await handleNodeStartFailure(error, failPrefix: "Wallet creation failed") {
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
                     await transitionToOfflineAfterSplash(since: prologueStart)
-                case .retry:
-                    retryNodeStartLater(reason: error.localizedDescription)
-                case .fail:
-                    nodeStartup.reset()
-                    phase = .error("Wallet creation failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -1254,23 +1250,18 @@ class AppState {
             } catch is CancellationError {
                 // Background paused the retry mid-start; the backoff is kept and foreground resumes it.
                 AuditService.log("NODE_START_RETRY_PAUSED", data: [:])
-                // Foreground already came back: the retry it armed may have been turned away while
-                // this one was still running, so arm the next one here.
-                if !nodeStartup.isPaused {
-                    retryNodeStartLater(reason: "resumed after pause")
+                if let schedule = nodeStartup.rescheduleIfResumed(
+                    maxDelay: Constants.nodeStartRetryMaxDelay,
+                    maxRetries: Constants.nodeStartMaxRetries,
+                    reason: "resumed after pause",
+                    run: nodeStartRetryRun()
+                ) {
+                    showRetrySchedule(schedule)
                 }
             } catch {
-                // .syncing here means a scheduled node-start retry (or the network monitor)
-                // is driving recovery from a failed launch, so failures route like .offline.
-                if previousPhase == .offline || previousPhase == .syncing {
-                    switch nodeStartFailureOutcome(for: error) {
-                    case .offline:
-                        phase = .offline
-                    case .retry:
-                        retryNodeStartLater(reason: error.localizedDescription)
-                    case .fail:
-                        nodeStartup.reset()
-                        phase = .error("Node start failed: \(error.localizedDescription)")
+                if previousPhase.isRecoveringNodeStart {
+                    await handleNodeStartFailure(error, failPrefix: "Node start failed") {
+                        self.phase = .offline
                     }
                 } else {
                     AuditService.log("RETRY_CONNECTION_WALLET_FAILED", data: [
@@ -1296,40 +1287,67 @@ class AppState {
         )
     }
 
-    /// Keeps the syncing screen up and retries node start with backoff after a transient
-    /// chain-source failure. Once the retry budget is spent, shows the error screen, whose
-    /// Try Again starts a fresh launch.
-    private func retryNodeStartLater(reason: String) {
-        guard NodeStartupPolicy.hasRetriesLeft(
-            retryAttempt: nodeStartup.retryAttempt,
-            maxRetries: Constants.nodeStartMaxRetries
-        ) else {
-            AuditService.log("NODE_START_RETRIES_EXHAUSTED", data: [
-                "attempts": "\(nodeStartup.retryAttempt)",
-                "error": reason
-            ])
+    /// Routes a failed node start by `NodeStartupPolicy`: offline runs `onOffline`, a transient
+    /// failure retries with backoff, anything else shows the error screen.
+    private func handleNodeStartFailure(
+        _ error: Error,
+        failPrefix: String,
+        onOffline: () async -> Void
+    ) async {
+        switch nodeStartFailureOutcome(for: error) {
+        case .offline:
+            await onOffline()
+        case .retry:
+            retryNodeStartLater(reason: error.localizedDescription)
+        case .fail:
             nodeStartup.reset()
+            phase = .error("\(failPrefix): \(error.localizedDescription)")
+        }
+    }
+
+    /// Keeps the syncing screen up and retries node start with backoff after a transient
+    /// chain-source failure.
+    private func retryNodeStartLater(reason: String) {
+        showRetrySchedule(nodeStartup.scheduleRetry(
+            maxDelay: Constants.nodeStartRetryMaxDelay,
+            maxRetries: Constants.nodeStartMaxRetries,
+            reason: reason,
+            run: nodeStartRetryRun()
+        ))
+    }
+
+    /// Syncing while a retry is scheduled; once the budget is spent, the error screen, whose
+    /// Try Again starts a fresh launch.
+    private func showRetrySchedule(_ schedule: NodeStartupCoordinator.RetrySchedule) {
+        switch schedule {
+        case .scheduled:
+            phase = .syncing
+        case .exhausted:
             phase = .error(String(
                 localized: "error_network_unstable_sync",
                 defaultValue: "Could not sync your wallet. The network is unstable right now. Please try again."
             ))
-            return
         }
-        phase = .syncing
-        nodeStartup.scheduleRetry(maxDelay: Constants.nodeStartRetryMaxDelay, reason: reason, run: nodeStartRetryRun())
     }
 
     /// The node-start retry steps for `NodeStartupCoordinator`.
     private func nodeStartRetryRun() -> NodeStartupCoordinator.RetryRun {
         NodeStartupCoordinator.RetryRun(
             shouldRun: { [weak self] in
-                guard let self, !self.nodeService.isRunning else { return false }
-                guard self.networkMonitor.isOnline else {
+                guard let self else { return false }
+                switch NodeStartupPolicy.retryGate(
+                    isNodeRunning: self.nodeService.isRunning,
+                    isNetworkOffline: !self.networkMonitor.isOnline
+                ) {
+                case .run:
+                    return true
+                case .skip:
+                    return false
+                case .offline:
                     // Offline recovery belongs to the network monitor, which calls retryConnection when back online.
                     self.phase = .offline
                     return false
                 }
-                return true
             },
             // Re-probe providers so the retry doesn't start against the one that just stalled.
             probe: { [weak self] in await self?.resolveChainURL() ?? Constants.primaryChainURL },
@@ -1459,7 +1477,9 @@ class AppState {
     private var nodeFlowInProgress = false
     private var pendingOnlineRetry = false
     /// Node-start failover and automatic retry after transient chain-source failures.
-    let nodeStartup = NodeStartupCoordinator()
+    let nodeStartup: NodeStartupCoordinator
+    /// True while node start is being retried after a transient chain-source failure.
+    var isRetryingNodeStart: Bool { nodeStartup.isRetrying }
 
     private func finishNodeFlow() {
         nodeFlowInProgress = false
@@ -1546,7 +1566,11 @@ class AppState {
     func restartNodeFromForeground() async {
         // Every foreground ends the pause, whatever the phase, so a later start keeps its node.
         nodeStartup.resume()
-        if phase == .syncing, nodeStartup.isRetrying, !nodeService.isRunning {
+        if NodeStartupPolicy.shouldResumeRetry(
+            isSyncing: phase == .syncing,
+            isRetrying: nodeStartup.isRetrying,
+            isNodeRunning: nodeService.isRunning
+        ) {
             // Back in foreground: the pending background stop must not pause this retry again.
             cancelBackgroundStop()
             nodeStartup.resumeIfIdle(
