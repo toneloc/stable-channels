@@ -29,6 +29,12 @@ enum NodeStartupPolicy {
             + [Attempt(url: preferred, delayBefore: retryDelay)]
     }
 
+    /// The notification extension's two tries: `attempts` without the delayed final retry, which
+    /// its short run cannot wait out.
+    static func extensionProviders(preferred: String, providers: [String]) -> [String] {
+        attempts(preferred: preferred, providers: providers, retryDelay: .zero).prefix(2).map(\.url)
+    }
+
     /// The provider a launch starts against: the primary when its probe answered, otherwise the fallback.
     static func launchProvider(primaryReachable: Bool, primary: String, fallback: String) -> String {
         primaryReachable ? primary : fallback

@@ -52,6 +52,30 @@ final class NodeStartupPolicyTests: XCTestCase {
         XCTAssertEqual(attempts.last?.delayBefore, delay)
     }
 
+    // MARK: - Notification extension providers
+
+    /// The extension starts on the stored provider (or the primary) and fails over once, exactly
+    /// as it did before it shared the policy: no delayed final retry.
+    func testExtensionProviders_areTheFirstTwoAttempts() {
+        let providers = [primary, fallback]
+        let cases: [(stored: String?, expected: [String])] = [
+            (nil, [primary, fallback]),
+            (primary, [primary, fallback]),
+            (fallback, [fallback, primary])
+        ]
+        for (stored, expected) in cases {
+            let preferred = stored ?? primary
+            let order = NodeStartupPolicy.extensionProviders(preferred: preferred, providers: providers)
+
+            XCTAssertEqual(order, expected, "stored: \(stored ?? "nil")")
+            XCTAssertEqual(
+                order,
+                NodeStartupPolicy.attempts(preferred: preferred, providers: providers, retryDelay: delay)
+                    .prefix(2).map(\.url)
+            )
+        }
+    }
+
     // MARK: - Launch provider
 
     func testLaunchProvider_primaryWhenReachableElseFallback() {
