@@ -20,17 +20,14 @@ struct BackupPromptView: View {
                     .foregroundStyle(.blue)
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 8)
 
-                Text(String(localized: "icloud_backup_title", defaultValue: "iCloud Seed Backup"))
+                Text(String(localized: .icloudBackupTitle))
                     .font(.title.bold())
 
-                Text(String(
-                    localized: "icloud_backup_description",
-                    defaultValue: "Protect your wallet with encrypted cloud backup."
-                ))
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+                Text(String(localized: .icloudBackupDescription))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
 
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "lock.shield.fill", text: "Encrypted backup to your iCloud")
@@ -66,7 +63,7 @@ struct BackupPromptView: View {
                             } else {
                                 Image(systemName: "icloud.and.arrow.up")
                             }
-                            Text(String(localized: "enable_icloud_backup", defaultValue: "Enable iCloud Backup"))
+                            Text(String(localized: .enableIcloudBackup))
                                 .fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity)
@@ -85,7 +82,7 @@ struct BackupPromptView: View {
                         dismiss()
                         UserDefaults.standard.set(true, forKey: "backupPromptDismissed")
                     } label: {
-                        Text(String(localized: "maybe_later", defaultValue: "Maybe Later"))
+                        Text(String(localized: .maybeLater))
                             .font(.subheadline)
                     }
                 }
@@ -116,11 +113,8 @@ struct BackupPromptView: View {
         SettingsBanner(
             icon: "exclamationmark.triangle.fill",
             iconColor: .red,
-            title: String(localized: "backup_warning_title", defaultValue: "Important"),
-            bodyText: String(
-                localized: "backup_warning_body",
-                defaultValue: "This backup contains your seed phrase. Lightning channel state is NOT included. Please email support@stablechannels.com for questions or assistance."
-            ),
+            title: String(localized: .backupWarningTitle),
+            bodyText: String(localized: .backupWarningBody),
             borderColor: .red
         )
     }

@@ -74,11 +74,11 @@ struct BuyView: View {
                 }
             }
             .padding()
-            .navigationTitle(String(localized: "title_buy_btc", defaultValue: "USD → BTC"))
+            .navigationTitle(String(localized: .titleBuyBtc))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
+                    Button(String(localized: .buttonCancel)) { dismiss() }
                 }
             }
         }
@@ -86,10 +86,10 @@ struct BuyView: View {
 
     private var amountScreen: some View {
         VStack(spacing: 20) {
-            Text(String(localized: "headline_how_much_usd", defaultValue: "How much USD to convert to BTC?"))
+            Text(String(localized: .headlineHowMuchUsd))
                 .font(.headline)
 
-            TextField(String(localized: "placeholder_amount_usd", defaultValue: "0.00"), text: $amountStr)
+            TextField(String(localized: .placeholderAmountUsd), text: $amountStr)
                 .keyboardType(.decimalPad)
                 .font(.system(size: 36, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
@@ -100,7 +100,7 @@ struct BuyView: View {
                             let textWidth = amountStr.size(withAttributes: [
                                 .font: UIFont.rounded(ofSize: 36, weight: .bold)
                             ]).width
-                            Text(String(localized: "label_dollar_sign", defaultValue: "$"))
+                            Text(String(localized: .labelDollarSign))
                                 .font(.system(size: 36, weight: .bold, design: .rounded))
                                 .position(x: geo.size.width / 2 - textWidth / 2 - 10,
                                           y: geo.size.height / 2)
@@ -116,27 +116,26 @@ struct BuyView: View {
             if !appState.isOnline {
                 OfflineBadgeView()
             } else {
-                let availableStr = String(localized: "available_balance", defaultValue: "Available: ") + maxBuyUSD
-                    .usdFormatted
+                let availableStr = String(localized: .availableAmount(maxBuyUSD.usdFormatted))
                 Text(availableStr)
                     .foregroundStyle(.secondary)
             }
 
             if amountUSD > maxBuyUSD && amountUSD > 0 {
-                Text(String(localized: "error_exceeds_balance", defaultValue: "Exceeds available stable balance"))
+                Text(String(localized: .errorExceedsBalance))
                     .font(.caption)
                     .foregroundStyle(.red)
             }
 
             if tradePrice <= 0 {
-                Text("A fresh BTC/USD consensus is required before trading")
+                Text(String(localized: .errorFreshPriceRequired))
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
 
             Spacer()
 
-            Button(String(localized: "button_continue", defaultValue: "Continue")) { step = .confirm }
+            Button(String(localized: .buttonContinue)) { step = .confirm }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(!BuyAmountPolicy
@@ -147,15 +146,15 @@ struct BuyView: View {
 
     private var confirmScreen: some View {
         VStack(spacing: 20) {
-            Text(String(localized: "title_confirm_buy", defaultValue: "Review USD -> BTC"))
+            Text(String(localized: .titleConfirmBuy))
                 .font(.title2.bold())
-            Text(String(localized: "subtitle_manage_exposure", defaultValue: "Manage your BTC exposure"))
+            Text(String(localized: .subtitleManageExposure))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
             VStack(spacing: 12) {
                 confirmRow(
-                    String(localized: "label_amount", defaultValue: "Amount"),
+                    String(localized: .labelAmount),
                     String(format: "$%.2f", amountUSD)
                 )
                 confirmRow(
@@ -163,12 +162,12 @@ struct BuyView: View {
                     String(format: "$%.2f", feeUSD)
                 )
                 confirmRow(
-                    String(localized: "label_btc_price", defaultValue: "BTC Price"),
+                    String(localized: .labelBtcPrice),
                     tradePrice.usdFormatted
                 )
                 Divider()
                 confirmRow(
-                    String(localized: "label_you_receive", defaultValue: "You receive"),
+                    String(localized: .labelYouReceive),
                     btcAmountFinalText,
                     bold: true
                 )
@@ -192,7 +191,7 @@ struct BuyView: View {
                     ProgressView()
                         .frame(maxWidth: .infinity)
                 } else {
-                    Text(String(localized: "button_confirm_order", defaultValue: "Confirm Order"))
+                    Text(String(localized: .buttonConfirmOrder))
                         .frame(maxWidth: .infinity)
                 }
             }
@@ -221,10 +220,10 @@ struct BuyView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.red)
 
-                Text(String(localized: "status_trade_rejected", defaultValue: "Order Rejected"))
+                Text(String(localized: .statusTradeRejected))
                     .font(.title2.bold())
 
-                Text(tradeOutcome?.message ?? "The provider could not process the trade.")
+                Text(tradeOutcome?.message ?? String(localized: .rejectionDefault))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else if tradeConfirmed {
@@ -232,31 +231,29 @@ struct BuyView: View {
                     .font(.system(size: 64))
                     .foregroundStyle(.green)
 
-                Text(String(localized: "status_trade_confirmed", defaultValue: "Order Confirmed"))
+                Text(String(localized: .statusTradeConfirmed))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_bought_btc_for", defaultValue: "Converted ") + btcAmountFinalText +
-                    " for " + amountUSD.usdFormatted)
+                Text(.tradeBoughtBtcFor(btcAmountFinalText, amountUSD.usdFormatted))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             } else {
                 CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
                     .padding(.bottom, 4)
 
-                Text(String(localized: "status_waiting_lsp", defaultValue: "Order Pending"))
+                Text(String(localized: .statusStabilityPending))
                     .font(.title2.bold())
 
-                Text(String(localized: "trade_buying_btc_for", defaultValue: "Converting ") + btcAmountFinalText +
-                    " for " + amountUSD.usdFormatted)
+                Text(.tradeBuyingBtcFor(btcAmountFinalText, amountUSD.usdFormatted))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
 
-                Text(String(localized: "status_waiting_lsp", defaultValue: "Waiting for LSP confirmation..."))
+                Text(String(localized: .statusWaitingLsp))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
 
-            Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
+            Button(String(localized: .buttonDone)) { dismiss() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
@@ -283,10 +280,7 @@ struct BuyView: View {
 
     private func executeTrade() {
         guard appState.isOnline else {
-            errorMessage = String(
-                localized: "error_offline_trade",
-                defaultValue: "You’re offline. Trades cannot be executed until network connectivity is restored."
-            )
+            errorMessage = String(localized: .errorOfflineTrade)
             return
         }
         isExecuting = true
@@ -295,7 +289,7 @@ struct BuyView: View {
         let sc = appState.stableChannel
         let price = tradePrice
         guard price > 0 else {
-            errorMessage = "A fresh BTC/USD consensus is required before trading"
+            errorMessage = String(localized: .errorFreshPriceRequired)
             isExecuting = false
             return
         }
@@ -303,10 +297,7 @@ struct BuyView: View {
         // the service throws its own TradeValidationError reason and is rendered as-is below,
         // never re-labeled (issue #272).
         guard let service = appState.tradeService else {
-            errorMessage = String(
-                localized: "error_trade_service_unavailable",
-                defaultValue: "Trade service unavailable"
-            )
+            errorMessage = String(localized: .errorTradeServiceUnavailable)
             isExecuting = false
             return
         }
@@ -328,7 +319,7 @@ struct BuyView: View {
             )
 
             pendingPaymentId = result.paymentId
-            appState.statusMessage = String(format: "Buy pending (fee: $%.2f)", feeUSD)
+            appState.statusMessage = String(localized: .statusReleasePendingFee(feeUSD.usdFormatted))
             step = .done
         } catch {
             errorMessage = error.localizedDescription
@@ -337,15 +328,15 @@ struct BuyView: View {
     }
 }
 
-#Preview("Buy - Order Pending") {
+#Preview("Unstabilize - Pending") {
     VStack(spacing: 20) {
         CurveProgressIndicator(curve: .sixPetalSpiral, size: 72, tint: .orange)
             .padding(.bottom, 4)
 
-        Text("Order Pending")
+        Text("Stability Change Pending")
             .font(.title2.bold())
 
-        Text("Converting 0.00500000 BTC for $485.20")
+        Text("Unstabilizing $485.20 into 0.00500000 BTC")
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
 

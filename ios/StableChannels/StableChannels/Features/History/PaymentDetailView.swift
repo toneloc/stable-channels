@@ -15,22 +15,19 @@ struct PaymentDetailView: View {
                     paymentList(payment)
                 } else if loadError {
                     ContentUnavailableView(
-                        String(localized: "payment_detail_error_title", defaultValue: "Error"),
+                        String(localized: .paymentDetailErrorTitle),
                         systemImage: "exclamationmark.triangle",
-                        description: Text(String(
-                            localized: "payment_detail_error_desc",
-                            defaultValue: "Could not load payment details."
-                        ))
+                        description: Text(String(localized: .paymentDetailErrorDesc))
                     )
                 } else {
                     ProgressView()
                 }
             }
-            .navigationTitle(String(localized: "title_payment_detail", defaultValue: "Payment Detail"))
+            .navigationTitle(String(localized: .titlePaymentDetail))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_done", defaultValue: "Done")) { dismiss() }
+                    Button(String(localized: .buttonDone)) { dismiss() }
                 }
             }
             .task {
@@ -55,50 +52,50 @@ struct PaymentDetailView: View {
 
     private func paymentList(_ payment: PaymentRecord) -> some View {
         List {
-            Section(String(localized: "section_payment_details", defaultValue: "Payment Details")) {
-                row(String(localized: "label_direction", defaultValue: "Direction"),
+            Section(String(localized: .sectionPaymentDetails)) {
+                row(String(localized: .labelDirection),
                     payment.isIncoming
-                        ? String(localized: "payment_received", defaultValue: "Received")
-                        : String(localized: "payment_sent", defaultValue: "Sent"))
-                row(String(localized: "label_type", defaultValue: "Type"), paymentTypeLabel)
+                        ? String(localized: .paymentReceived)
+                        : String(localized: .paymentSent))
+                row(String(localized: .labelType), paymentTypeLabel)
                 row(
-                    String(localized: "label_amount", defaultValue: "Amount"),
+                    String(localized: .labelAmount),
                     "\(payment.amountSats.btcSpacedFormatted) BTC"
                 )
                 if let usd = displayUSD {
-                    row(String(localized: "label_usd_value", defaultValue: "USD Value"), usd.usdFormatted)
+                    row(String(localized: .labelUsdValue), usd.usdFormatted)
                 }
                 if let price = payment.btcPrice {
-                    row(String(localized: "label_btc_price", defaultValue: "BTC Price"), price.usdFormatted)
+                    row(String(localized: .labelBtcPrice), price.usdFormatted)
                 }
                 if payment.feeMsat > 0 {
                     row(
-                        String(localized: "label_fee", defaultValue: "Fee"),
+                        String(localized: .labelFee),
                         "\((payment.feeMsat / 1000).btcSpacedFormatted) BTC"
                     )
                 }
-                row(String(localized: "label_status", defaultValue: "Status"), statusLabel(for: payment))
+                row(String(localized: .labelStatus), statusLabel(for: payment))
                 if payment.shouldShowConfirmationProgress {
                     confirmationProgressRow(for: payment)
                 } else if payment.confirmations > 0 {
                     row(
-                        String(localized: "label_confirmations", defaultValue: "Confirmations"),
+                        String(localized: .labelConfirmations),
                         "\(payment.confirmations)"
                     )
                 }
             }
 
-            Section(String(localized: "section_metadata", defaultValue: "Metadata")) {
-                row(String(localized: "label_date", defaultValue: "Date"), payment.date.formatted())
+            Section(String(localized: .sectionMetadata)) {
+                row(String(localized: .labelDate), payment.date.formatted())
                 if let pId = payment.paymentId {
-                    row(String(localized: "label_payment_id", defaultValue: "Payment ID"), pId)
+                    row(String(localized: .labelPaymentId), pId)
                 }
                 if let txid = payment.txid {
-                    row(String(localized: "label_txid", defaultValue: "TXID"), txid)
+                    row(String(localized: .labelTxid), txid)
                     if let url = Constants.txExplorerLink(for: txid) {
                         Link(destination: url) {
                             HStack(spacing: 4) {
-                                Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                                Text(String(localized: .viewOnExplorer))
                                 Image(systemName: "arrow.up.right.square")
                             }
                             .font(.caption)
@@ -106,7 +103,7 @@ struct PaymentDetailView: View {
                     }
                 }
                 if let address = payment.address {
-                    row(String(localized: "label_address", defaultValue: "Address"), address)
+                    row(String(localized: .labelAddress), address)
                 }
             }
         }
@@ -139,12 +136,12 @@ struct PaymentDetailView: View {
     private func confirmationProgressRow(for payment: PaymentRecord) -> some View {
         let progress = payment.confirmationProgress
         HStack {
-            Text(String(localized: "label_confirmations", defaultValue: "Confirmations"))
+            Text(String(localized: .labelConfirmations))
                 .foregroundStyle(.secondary)
             Spacer()
             if progress.isComplete {
                 Label(
-                    String(localized: "confirmations_complete", defaultValue: "Confirmed"),
+                    String(localized: .confirmationsComplete),
                     systemImage: "checkmark.circle.fill"
                 )
                 .foregroundStyle(.green)
@@ -181,13 +178,13 @@ struct PaymentDetailView: View {
 
     private var paymentTypeLabel: String {
         switch payment?.paymentType {
-        case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
-        case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
-        case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
-        case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
-        case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
+        case "stability": return String(localized: .paymentTypeStability)
+        case "lightning": return String(localized: .paymentTypeLightning)
+        case "splice_in": return String(localized: .paymentTypeSpliceIn)
+        case "splice_out": return String(localized: .paymentTypeSpliceOut)
+        case "onchain": return String(localized: .paymentTypeOnChain)
+        case "channel_close": return String(localized: .paymentTypeChannelClose)
+        case "bolt12": return String(localized: .paymentTypeBolt12)
         default: return payment?.paymentType ?? ""
         }
     }

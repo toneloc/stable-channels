@@ -31,7 +31,8 @@ struct ActionButton: View {
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(textColor)
-                    .lineLimit(1)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
                     .minimumScaleFactor(0.85)
             }
             .padding(.horizontal, 14)

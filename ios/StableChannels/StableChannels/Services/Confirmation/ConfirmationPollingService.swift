@@ -15,32 +15,15 @@ enum ConfirmationRefreshResult: Equatable {
             switch failedLookups {
             case 0:
                 return nil
-            case 1:
-                return String(
-                    localized: "history_refresh_failed_one",
-                    defaultValue: "Couldn't check 1 transaction. Pull to try again."
-                )
             default:
-                return String(
-                    localized: "history_refresh_failed_many",
-                    defaultValue: "Couldn't check \(failedLookups) transactions. Pull to try again."
-                )
+                return String(localized: .historyRefreshFailed(failedLookups))
             }
         case .chainTipUnavailable:
-            return String(
-                localized: "history_refresh_chain_unavailable",
-                defaultValue: "Couldn't reach the block explorer. Pull to try again."
-            )
+            return String(localized: .historyRefreshChainUnavailable)
         case .databaseUnavailable:
-            return String(
-                localized: "history_refresh_db_unavailable",
-                defaultValue: "Payment history is unavailable right now."
-            )
+            return String(localized: .historyRefreshDbUnavailable)
         case .timedOut:
-            return String(
-                localized: "history_refresh_timed_out",
-                defaultValue: "Checking confirmations took too long. Pull to try again."
-            )
+            return String(localized: .historyRefreshTimedOut)
         }
     }
 }

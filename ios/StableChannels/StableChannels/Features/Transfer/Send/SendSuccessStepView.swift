@@ -27,7 +27,7 @@ struct SendSuccessStepView: View {
             Button {
                 onDismiss()
             } label: {
-                Text(String(localized: "button_done", defaultValue: "Done"))
+                Text(String(localized: .buttonDone))
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
@@ -113,7 +113,7 @@ struct SendSuccessStepView: View {
             if let txid = model.successTxid, let explorerURL = Constants.txExplorerLink(for: txid) {
                 Link(destination: explorerURL) {
                     HStack(spacing: 6) {
-                        Text(String(localized: "button_view_on_explorer", defaultValue: "View on Block Explorer"))
+                        Text(String(localized: .buttonViewOnExplorer))
                             .font(.caption.weight(.medium))
                         Image(systemName: "arrow.up.right")
                             .font(.caption2.weight(.semibold))
@@ -129,7 +129,7 @@ struct SendSuccessStepView: View {
         VStack(alignment: .leading, spacing: 0) {
             if let recipient = recipientDisplay {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(String(localized: "label_recipient_caps", defaultValue: "RECIPIENT"))
+                    Text(String(localized: .labelRecipientCaps))
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
 
@@ -147,8 +147,8 @@ struct SendSuccessStepView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(
                     isTxid
-                        ? String(localized: "label_txid_caps", defaultValue: "TRANSACTION ID")
-                        : String(localized: "label_payment_id_caps", defaultValue: "PAYMENT ID")
+                        ? String(localized: .labelTxidCaps)
+                        : String(localized: .labelPaymentIdCaps)
                 )
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
@@ -251,13 +251,13 @@ struct SendSuccessStepView: View {
     private var successTitle: String {
         switch model.successStatus {
         case .completed:
-            String(localized: "title_payment_sent", defaultValue: "Payment Sent")
+            String(localized: .titlePaymentSent)
         case .awaitingConfirmation:
-            String(localized: "title_sent_awaiting_confirmation", defaultValue: "Sent - Awaiting Confirmation")
+            String(localized: .titleSentAwaitingConfirmation)
         case .pending:
             isBolt12
-                ? String(localized: "title_payment_initiated", defaultValue: "Payment Initiated")
-                : String(localized: "title_payment_pending", defaultValue: "Payment Pending")
+                ? String(localized: .titlePaymentInitiated)
+                : String(localized: .titlePaymentPending)
         }
     }
 
@@ -266,20 +266,11 @@ struct SendSuccessStepView: View {
         case .completed:
             nil
         case .awaitingConfirmation:
-            String(
-                localized: "note_onchain_awaiting_confirmation",
-                defaultValue: "Transaction broadcast. It will be final once it confirms on-chain."
-            )
+            String(localized: .noteOnchainAwaitingConfirmation)
         case .pending:
             isBolt12
-                ? String(
-                    localized: "note_bolt12_asynchronous",
-                    defaultValue: "Offer payment dispatched. Your node is requesting an invoice over Lightning onion messaging."
-                )
-                : String(
-                    localized: "note_payment_pending",
-                    defaultValue: "Payment dispatched. Settlement is pending in the background. Check History for final status."
-                )
+                ? String(localized: .noteBolt12Asynchronous)
+                : String(localized: .notePaymentPending)
         }
     }
 }

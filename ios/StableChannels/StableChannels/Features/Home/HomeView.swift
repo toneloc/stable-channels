@@ -136,7 +136,7 @@ struct HomeView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "shield.fill")
                             .font(.caption2)
-                        Text(String(localized: "label_usd", defaultValue: "USD"))
+                        Text(String(localized: .labelSliderStable))
                             .font(.caption.bold())
                     }
                     .foregroundStyle(.green)
@@ -153,7 +153,7 @@ struct HomeView: View {
 
                 VStack(alignment: .trailing, spacing: 1) {
                     HStack(spacing: 4) {
-                        Text(String(localized: "label_btc", defaultValue: "BTC"))
+                        Text(String(localized: .labelSliderBitcoin))
                             .font(.caption.bold())
                         Image(systemName: "bitcoinsign.circle.fill")
                             .font(.caption2)
@@ -179,13 +179,10 @@ struct HomeView: View {
     // MARK: - Helpers
 
     private var receiveHintText: some View {
-        Text(String(
-            localized: "home_hint_receive",
-            defaultValue: "Receive bitcoin over Lightning to get started"
-        ))
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.bottom, 4)
+        Text(String(localized: .homeHintReceive))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.bottom, 4)
     }
 
     private func checkNotifications() {

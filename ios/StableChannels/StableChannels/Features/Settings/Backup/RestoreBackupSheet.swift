@@ -20,17 +20,14 @@ struct RestoreBackupSheet: View {
                     .foregroundStyle(.blue)
                     .shadow(color: .blue.opacity(0.3), radius: 20, x: 0, y: 8)
 
-                Text(String(localized: "restore_from_icloud", defaultValue: "Restore from iCloud"))
+                Text(String(localized: .restoreFromIcloud))
                     .font(.title.bold())
 
-                Text(String(
-                    localized: "restore_description",
-                    defaultValue: "Restore your wallet from backup."
-                ))
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
+                Text(String(localized: .restoreDescription))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
 
                 VStack(alignment: .leading, spacing: 16) {
                     featureRow(icon: "key.fill", text: "AES-256 encrypted backup")
@@ -95,7 +92,7 @@ struct RestoreBackupSheet: View {
                 } else {
                     Image(systemName: "arrow.down.circle")
                 }
-                Text(String(localized: "restore_action", defaultValue: "Restore Wallet"))
+                Text(String(localized: .restoreAction))
                     .fontWeight(.semibold)
             }
             .frame(maxWidth: .infinity)

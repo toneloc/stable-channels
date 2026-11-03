@@ -17,7 +17,7 @@ struct HomeSavingsSectionView: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(String(localized: "label_on_chain", defaultValue: "Onchain Account"))
+                Text(String(localized: .labelOnChain))
                     .font(.caption.bold())
                 Spacer()
                 Text(showBTC
@@ -37,14 +37,14 @@ struct HomeSavingsSectionView: View {
                 }
             } else if hasReadyChannel && appState.spendableOnchainSats > 0 {
                 HStack {
-                    Text(String(localized: "move_to_trading", defaultValue: "Move to Lightning Account"))
+                    Text(String(localized: .moveToTrading))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button {
                         appState.sweepToChannel()
                     } label: {
-                        Text(String(localized: "button_swap", defaultValue: "Move"))
+                        Text(String(localized: .buttonSwap))
                             .font(.caption.bold())
                             .padding(.horizontal, 16)
                             .padding(.vertical, 6)
@@ -60,20 +60,14 @@ struct HomeSavingsSectionView: View {
                     pendingRow(kind: .onchainReceive(txid: appState.transactionLinkService.lastReceiveTxid))
                 }
                 if !hasReadyChannel {
-                    Text(String(
-                        localized: "hint_create_wallet",
-                        defaultValue: "Get your first payment over Lightning to activate your account"
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    Text(String(localized: .hintCreateWallet))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             } else {
-                Text(String(
-                    localized: "hint_create_wallet",
-                    defaultValue: "Get your first payment over Lightning to activate your account"
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                Text(String(localized: .hintCreateWallet))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(10)
@@ -93,17 +87,17 @@ struct HomeSavingsSectionView: View {
         switch kind {
         case .deposit(let txid):
             pendingRowImpl(
-                text: String(localized: "status_channel_opening", defaultValue: "Deposit confirming..."),
+                text: String(localized: .statusChannelOpening),
                 txid: txid
             )
         case .sweep(let txid):
             pendingRowImpl(
-                text: String(localized: "status_sweeping", defaultValue: "Move pending..."),
+                text: String(localized: .statusSweeping),
                 txid: txid
             )
         case .close(let txid):
             pendingRowImpl(
-                text: String(localized: "status_channel_closing", defaultValue: "Channel closing..."),
+                text: String(localized: .statusChannelClosing),
                 txid: txid
             )
         case .closeNoLink:
@@ -111,17 +105,14 @@ struct HomeSavingsSectionView: View {
                 Image(systemName: "hourglass")
                     .font(.caption)
                     .foregroundStyle(.orange)
-                Text(String(
-                    localized: "info_close_pending_confirmation",
-                    defaultValue: "Channel closing - pending confirmation"
-                ))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                Text(String(localized: .infoClosePendingConfirmation))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Spacer()
             }
         case .onchainReceive(let txid):
             pendingRowImpl(
-                text: String(localized: "status_onchain_receiving", defaultValue: "Receiving onchain..."),
+                text: String(localized: .statusOnchainReceiving),
                 txid: txid
             )
         }
@@ -140,7 +131,7 @@ struct HomeSavingsSectionView: View {
                 if let url = Constants.txExplorerLink(for: txid) {
                     Link(destination: url) {
                         HStack(spacing: 2) {
-                            Text(String(localized: "view_on_explorer", defaultValue: "View on explorer"))
+                            Text(String(localized: .viewOnExplorer))
                                 .font(.caption2)
                             Image(systemName: "arrow.up.right.square")
                                 .font(.caption2)

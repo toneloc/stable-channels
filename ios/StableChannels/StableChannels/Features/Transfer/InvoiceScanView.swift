@@ -54,7 +54,7 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
         }
 
         let close = UIButton(type: .system)
-        close.setTitle(String(localized: "button_cancel", defaultValue: "Cancel"), for: .normal)
+        close.setTitle(String(localized: .buttonCancel), for: .normal)
         close.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         close.translatesAutoresizingMaskIntoConstraints = false
         close.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
@@ -87,7 +87,7 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
 
     private func showNoCamera() {
         let label = UILabel()
-        label.text = String(localized: "label_no_camera", defaultValue: "No camera available. Paste invoice manually.")
+        label.text = String(localized: .labelNoCamera)
         label.textColor = .white
         label.numberOfLines = 0
         label.textAlignment = .center
@@ -113,10 +113,7 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
         ])
 
         let label = UILabel()
-        label.text = String(
-            localized: "label_camera_denied",
-            defaultValue: "Camera access required. Enable in Settings."
-        )
+        label.text = String(localized: .labelCameraDenied)
         label.textColor = .white
         label.numberOfLines = 0
         label.textAlignment = .center
@@ -125,7 +122,7 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
         container.addSubview(label)
 
         let settingsButton = UIButton(type: .system)
-        settingsButton.setTitle(String(localized: "button_open_settings", defaultValue: "Open Settings"), for: .normal)
+        settingsButton.setTitle(String(localized: .buttonOpenSettings), for: .normal)
         settingsButton.titleLabel?.font = .systemFont(ofSize: 17, weight: .semibold)
         settingsButton.setTitleColor(.systemBlue, for: .normal)
         settingsButton.translatesAutoresizingMaskIntoConstraints = false
@@ -184,10 +181,7 @@ final class InvoiceScannerViewController: UIViewController, AVCaptureMetadataOut
         captureSession = session
 
         let hint = UILabel()
-        hint.text = String(
-            localized: "hint_scan_invoice",
-            defaultValue: "Scan invoice (lnbc1…), offer (lno…), or Bitcoin address."
-        )
+        hint.text = String(localized: .hintScanInvoice)
         hint.textColor = UIColor.white.withAlphaComponent(0.85)
         hint.font = .systemFont(ofSize: 14)
         hint.numberOfLines = 0

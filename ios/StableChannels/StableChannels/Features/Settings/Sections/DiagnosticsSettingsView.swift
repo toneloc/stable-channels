@@ -14,7 +14,7 @@ struct DiagnosticsSettingsView: View {
                         HStack {
                             Image(systemName: "square.and.arrow.up")
                                 .foregroundStyle(.green)
-                            Text("Share the logs")
+                            Text(String(localized: .buttonShareLogs))
                                 .foregroundStyle(.primary)
                         }
                     }
@@ -31,7 +31,7 @@ struct DiagnosticsSettingsView: View {
                         HStack {
                             Image(systemName: "arrow.down.doc")
                                 .foregroundStyle(.green)
-                            Text("Download logs")
+                            Text(String(localized: .buttonDownloadLogs))
                                 .foregroundStyle(.primary)
                         }
                     }
@@ -39,23 +39,23 @@ struct DiagnosticsSettingsView: View {
                     Button {} label: {
                         HStack {
                             Image(systemName: "square.and.arrow.up")
-                            Text("Share the logs")
+                            Text(String(localized: .buttonShareLogs))
                         }
                         .foregroundStyle(.gray)
                     }.disabled(true)
                     Button {} label: {
                         HStack {
                             Image(systemName: "arrow.down.doc")
-                            Text("Download logs")
+                            Text(String(localized: .buttonDownloadLogs))
                         }
                         .foregroundStyle(.gray)
                     }.disabled(true)
                 }
             } footer: {
-                Text("Save app logs to a file for debugging and support.")
+                Text(String(localized: .footerSaveLogs))
             }
         }
-        .navigationTitle("Logs & Diagnostics")
+        .navigationTitle(String(localized: .titleLogsDiagnostics))
         .navigationBarTitleDisplayMode(.inline)
         .fileExporter(
             isPresented: $isExporting,

@@ -23,11 +23,8 @@ struct SendView: View {
 
                 if model.isFetchingLNURL {
                     SendLoadingView(
-                        title: String(localized: "title_resolving_lnurl", defaultValue: "Resolving Lightning Address"),
-                        subtitle: String(
-                            localized: "subtitle_resolving_lnurl",
-                            defaultValue: "Fetching invoice parameters from payee server..."
-                        ),
+                        title: String(localized: .titleResolvingLnurl),
+                        subtitle: String(localized: .subtitleResolvingLnurl),
                         curve: .roseCurve,
                         tint: .orange
                     )
@@ -73,28 +70,28 @@ struct SendView: View {
         }
         switch model.step {
         case .recipient:
-            return String(localized: "title_send", defaultValue: "Send")
+            return String(localized: .titleSend)
         case .amount:
-            return String(localized: "title_send_amount", defaultValue: "Amount")
+            return String(localized: .titleSendAmount)
         case .confirm:
-            return String(localized: "title_send_confirm", defaultValue: "Review")
+            return String(localized: .titleSendConfirm)
         case .success:
             return model.isPendingSettlement
-                ? String(localized: "title_send_pending", defaultValue: "Payment Pending")
-                : String(localized: "title_send_success", defaultValue: "Payment Sent")
+                ? String(localized: .titleSendPending)
+                : String(localized: .titleSendSuccess)
         }
     }
 
     @ViewBuilder
     private var leadingToolbarButton: some View {
         if model.isFetchingLNURL {
-            Button(String(localized: "button_cancel", defaultValue: "Cancel")) {
+            Button(String(localized: .buttonCancel)) {
                 model.cancelProceedFromRecipient()
             }
         } else {
             switch model.step {
             case .recipient:
-                Button(String(localized: "button_done", defaultValue: "Done")) {
+                Button(String(localized: .buttonDone)) {
                     dismiss()
                 }
             case .amount:
@@ -105,7 +102,7 @@ struct SendView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
-                        Text(String(localized: "button_back", defaultValue: "Back"))
+                        Text(String(localized: .buttonBack))
                     }
                 }
             case .confirm:
@@ -120,7 +117,7 @@ struct SendView: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "chevron.left")
-                        Text(String(localized: "button_back", defaultValue: "Back"))
+                        Text(String(localized: .buttonBack))
                     }
                 }
                 // Leaving mid-send would surface its result on the wrong step.

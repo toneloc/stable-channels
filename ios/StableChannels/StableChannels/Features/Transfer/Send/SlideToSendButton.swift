@@ -48,7 +48,7 @@ struct SlideToSendButton: View {
                         Spacer()
                         ProgressView()
                             .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        Text(String(localized: "label_sending", defaultValue: "Sending..."))
+                        Text(String(localized: .labelSending))
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.white)
                         Spacer()

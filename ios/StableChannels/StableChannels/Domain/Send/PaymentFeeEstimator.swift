@@ -84,9 +84,9 @@ enum NetworkFeeSpeedTier: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .economy: return String(localized: "tier_economy", defaultValue: "Economy")
-        case .standard: return String(localized: "tier_standard", defaultValue: "Standard")
-        case .priority: return String(localized: "tier_priority", defaultValue: "Priority")
+        case .economy: return String(localized: .tierEconomy)
+        case .standard: return String(localized: .tierStandard)
+        case .priority: return String(localized: .tierPriority)
         }
     }
 

@@ -8,7 +8,7 @@ struct HomeSyncSpinnerView: View {
             HStack(spacing: 6) {
                 ProgressView()
                     .controlSize(.small)
-                Text(String(localized: "home_syncing", defaultValue: "Syncing..."))
+                Text(String(localized: .homeSyncing))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

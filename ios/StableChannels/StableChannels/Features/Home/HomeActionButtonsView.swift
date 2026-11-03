@@ -19,14 +19,14 @@ struct HomeActionButtonsView: View {
         VStack(spacing: 10) {
             HStack(spacing: 10) {
                 ActionButton(
-                    title: String(localized: "button_send", defaultValue: "Send"),
+                    title: String(localized: .buttonSend),
                     icon: "arrow.up",
                     color: sendBlue,
                     textColor: .primary,
                     action: onSend
                 )
                 ActionButton(
-                    title: String(localized: "button_receive", defaultValue: "Receive"),
+                    title: String(localized: .buttonReceive),
                     icon: "arrow.down",
                     color: receiveGreen,
                     textColor: .primary,
@@ -37,14 +37,14 @@ struct HomeActionButtonsView: View {
 
             HStack(spacing: 10) {
                 ActionButton(
-                    title: String(localized: "button_buy_btc", defaultValue: "USD → BTC"),
+                    title: String(localized: .buttonBuyBtc),
                     icon: "arrow.up.right",
                     color: buyAmber,
                     textColor: .primary,
                     action: onBuy
                 )
                 ActionButton(
-                    title: String(localized: "button_sell_btc", defaultValue: "BTC → USD"),
+                    title: String(localized: .buttonSellBtc),
                     icon: "arrow.down.right",
                     color: sellPlum,
                     textColor: .primary,

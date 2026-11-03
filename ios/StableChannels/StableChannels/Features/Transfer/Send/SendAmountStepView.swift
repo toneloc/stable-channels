@@ -54,13 +54,13 @@ struct SendAmountStepView: View {
         // Fee-aware decision comes from the model; `sats > available` only picks the wording.
         let isInsufficient = sats > 0 && model.isInsufficientBalance(appState: appState)
         let insufficientLabel = sats > available
-            ? String(localized: "error_insufficient_funds", defaultValue: "Insufficient funds")
-            : String(localized: "error_insufficient_funds_incl_fee", defaultValue: "Insufficient funds incl. fee")
+            ? String(localized: .errorInsufficientFunds)
+            : String(localized: .errorInsufficientFundsInclFee)
         let usd = (Double(available) / Double(Constants.satsInBTC)) * appState.accountingBTCPrice
 
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text(String(localized: "header_available_balance", defaultValue: "Available Balance"))
+                Text(String(localized: .headerAvailableBalance))
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -211,7 +211,7 @@ struct SendAmountStepView: View {
                     .foregroundStyle(.secondary)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(String(localized: "header_payee", defaultValue: "Payee"))
+                Text(String(localized: .headerPayee))
                     .font(.caption).foregroundStyle(.secondary)
                 Text(description).font(.subheadline.weight(.medium)).lineLimit(2)
             }
@@ -239,7 +239,7 @@ struct SendAmountStepView: View {
                     if pct == 100 {
                         HStack(spacing: 6) {
                             LemniscateBloomIcon(isActive: model.isMaxAmount, size: 16, tint: Color.blue)
-                            Text(String(localized: "button_max", defaultValue: "Max"))
+                            Text(String(localized: .buttonMax))
                                 .font(.subheadline.weight(.medium))
                         }
                         .frame(maxWidth: .infinity)
@@ -258,14 +258,14 @@ struct SendAmountStepView: View {
     private func commentCard(maxCharacters: Int) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(String(localized: "header_comment", defaultValue: "Note"))
+                Text(String(localized: .headerComment))
                     .font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 Spacer()
                 Text(verbatim: "\(model.lnurlComment.count)/\(maxCharacters)").font(.caption2)
                     .foregroundStyle(.secondary)
             }
             TextField(
-                String(localized: "placeholder_optional_comment", defaultValue: "Optional note for payee"),
+                String(localized: .placeholderOptionalComment),
                 text: $model.lnurlComment
             )
             .font(.subheadline)
@@ -290,7 +290,7 @@ struct SendAmountStepView: View {
             )
             model.proceedFromAmount(appState: appState)
         } label: {
-            Text(String(localized: "button_continue", defaultValue: "Continue"))
+            Text(String(localized: .buttonContinue))
                 .font(.headline).frame(maxWidth: .infinity)
         }
         .buttonStyle(.borderedProminent)

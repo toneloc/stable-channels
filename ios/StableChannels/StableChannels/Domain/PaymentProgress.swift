@@ -29,7 +29,7 @@ struct ConfirmationProgress: Equatable {
 
     var label: String {
         if isComplete {
-            return String(localized: "status_confirmed", defaultValue: "Confirmed")
+            return String(localized: .statusConfirmed)
         } else if raw <= 0 {
             return "0/\(required) confirmed"
         } else {

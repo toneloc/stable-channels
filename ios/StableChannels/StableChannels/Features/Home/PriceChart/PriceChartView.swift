@@ -77,7 +77,7 @@ struct PriceChartView: View {
                     .foregroundStyle(.orange)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(localized: "label_btc_price", defaultValue: "BTC Price"))
+                    Text(String(localized: .labelBtcPrice))
                         .font(.caption.weight(.medium))
                         .foregroundStyle(.secondary)
                     if let selected = selectedPricePoint {

@@ -29,36 +29,30 @@ struct LSPSettingsView: View {
                 resetSection
             }
         }
-        .navigationTitle(String(localized: "title_lsp", defaultValue: "Lightning Service Provider"))
+        .navigationTitle(String(localized: .titleLsp))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { loadCurrentConfig() }
         .alert(
-            String(localized: "alert_connect_lsp_title", defaultValue: "Connect to LSP"),
+            String(localized: .alertConnectLspTitle),
             isPresented: $showConnectAlert
         ) {
-            Button(String(localized: "alert_cancel", defaultValue: "Cancel"), role: .cancel) {}
-            Button(String(localized: "alert_connect", defaultValue: "Connect")) {
+            Button(String(localized: .alertCancel), role: .cancel) {}
+            Button(String(localized: .alertConnect)) {
                 applyCustomLSP()
             }
         } message: {
-            Text(String(
-                localized: "alert_connect_lsp_message",
-                defaultValue: "This will restart your node to connect to the new LSP. No funds will be lost."
-            ))
+            Text(String(localized: .alertConnectLspMessage))
         }
         .alert(
-            String(localized: "alert_reset_lsp_title", defaultValue: "Reset LSP"),
+            String(localized: .alertResetLspTitle),
             isPresented: $showResetAlert
         ) {
-            Button(String(localized: "alert_cancel", defaultValue: "Cancel"), role: .cancel) {}
-            Button(String(localized: "alert_reset", defaultValue: "Reset"), role: .destructive) {
+            Button(String(localized: .alertCancel), role: .cancel) {}
+            Button(String(localized: .alertReset), role: .destructive) {
                 resetToDefault()
             }
         } message: {
-            Text(String(
-                localized: "alert_reset_lsp_message",
-                defaultValue: "This will reconnect to the default Stable Channels LSP and restart your node."
-            ))
+            Text(String(localized: .alertResetLspMessage))
         }
     }
 
@@ -91,7 +85,7 @@ struct LSPSettingsView: View {
                     }
                     Spacer()
                     if appState.activeLSP.isDefault {
-                        Text(String(localized: "badge_default", defaultValue: "Default"))
+                        Text(String(localized: .badgeDefault))
                             .font(.caption2)
                             .fontWeight(.medium)
                             .padding(.horizontal, 8)
@@ -100,7 +94,7 @@ struct LSPSettingsView: View {
                             .foregroundStyle(.green)
                             .clipShape(Capsule())
                     } else {
-                        Text(String(localized: "badge_custom", defaultValue: "Custom"))
+                        Text(String(localized: .badgeCustom))
                             .font(.caption2)
                             .fontWeight(.medium)
                             .padding(.horizontal, 8)
@@ -114,24 +108,21 @@ struct LSPSettingsView: View {
                 Divider()
 
                 configRow(
-                    label: String(localized: "label_pubkey", defaultValue: "Pubkey"),
+                    label: String(localized: .labelPubkey),
                     value: String(appState.activeLSP.pubkey.prefix(12)) + "..." +
                         String(appState.activeLSP.pubkey.suffix(8))
                 )
                 configRow(
-                    label: String(localized: "label_address", defaultValue: "Address"),
+                    label: String(localized: .labelAddress),
                     value: appState.activeLSP.address
                 )
             }
             .padding(.vertical, 4)
         } header: {
-            Text(String(localized: "section_active_lsp", defaultValue: "Active LSP"))
+            Text(String(localized: .sectionActiveLsp))
         } footer: {
             if !appState.isOnline {
-                Text(String(
-                    localized: "info_active_lsp_offline",
-                    defaultValue: "Connect to the internet to check your connection to this Lightning Service Provider."
-                ))
+                Text(String(localized: .infoActiveLspOffline))
             }
         }
     }
@@ -145,32 +136,20 @@ struct LSPSettingsView: View {
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(
-                        localized: "lsp_locked_title",
-                        defaultValue: "LSP configuration locked"
-                    ))
-                    .font(.subheadline)
-                    .fontWeight(.medium)
-                    Text(String(
-                        localized: "lsp_locked_body",
-                        defaultValue: "Close your active channel to switch LSP."
-                    ))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    Text(String(localized: .lspLockedTitle))
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Text(String(localized: .lspLockedBody))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             .padding(.vertical, 4)
         } footer: {
             if !appState.isOnline {
-                Text(String(
-                    localized: "lsp_locked_footer_offline",
-                    defaultValue: "Connect to the internet to verify your Lightning Service Provider connection. Configuration remains locked while a channel is open."
-                ))
+                Text(String(localized: .lspLockedFooterOffline))
             } else {
-                Text(String(
-                    localized: "lsp_locked_footer",
-                    defaultValue: "The Lightning Service Provider cannot be changed while a channel is open. The counterparty node is part of the channel's funding transaction."
-                ))
+                Text(String(localized: .lspLockedFooter))
             }
         }
     }
@@ -180,11 +159,11 @@ struct LSPSettingsView: View {
     private var customLSPFormSection: some View {
         Section {
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "label_display_name", defaultValue: "Display Name"))
+                Text(String(localized: .labelDisplayName))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField(
-                    String(localized: "placeholder_alias", defaultValue: "My LSP"),
+                    String(localized: .placeholderAlias),
                     text: $alias
                 )
                 .textInputAutocapitalization(.words)
@@ -193,11 +172,11 @@ struct LSPSettingsView: View {
             .padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "label_node_pubkey", defaultValue: "Node Pubkey"))
+                Text(String(localized: .labelNodePubkey))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField(
-                    String(localized: "placeholder_pubkey", defaultValue: "02... or 03..."),
+                    String(localized: .placeholderPubkey),
                     text: $pubkey
                 )
                 .font(.system(.caption, design: .monospaced))
@@ -207,11 +186,11 @@ struct LSPSettingsView: View {
             .padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "label_host_port", defaultValue: "Host:Port"))
+                Text(String(localized: .labelHostPort))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField(
-                    String(localized: "placeholder_address", defaultValue: "example.com:9735"),
+                    String(localized: .placeholderAddress),
                     text: $address
                 )
                 .textInputAutocapitalization(.never)
@@ -221,11 +200,11 @@ struct LSPSettingsView: View {
             .padding(.vertical, 2)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(String(localized: "label_lsps2_token", defaultValue: "LSPS2 Token (optional)"))
+                Text(String(localized: .labelLsps2Token))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField(
-                    String(localized: "placeholder_token", defaultValue: "Leave empty if not required"),
+                    String(localized: .placeholderToken),
                     text: $token
                 )
                 .textInputAutocapitalization(.never)
@@ -249,7 +228,7 @@ struct LSPSettingsView: View {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
-                    Text(String(localized: "lsp_switch_success", defaultValue: "Node restarted with new LSP"))
+                    Text(String(localized: .lspSwitchSuccess))
                         .font(.caption)
                         .foregroundStyle(.green)
                 }
@@ -266,7 +245,7 @@ struct LSPSettingsView: View {
                             .controlSize(.small)
                     } else {
                         Label(
-                            String(localized: "button_connect_lsp", defaultValue: "Connect"),
+                            String(localized: .buttonConnectLsp),
                             systemImage: "bolt.fill"
                         )
                         .fontWeight(.semibold)
@@ -277,18 +256,12 @@ struct LSPSettingsView: View {
             .disabled(!appState.isOnline || isRestarting)
             .padding(.vertical, 4)
         } header: {
-            Text(String(localized: "section_custom_lsp", defaultValue: "Connect to a Custom LSP"))
+            Text(String(localized: .sectionCustomLsp))
         } footer: {
             if !appState.isOnline {
-                Text(String(
-                    localized: "info_custom_lsp_offline",
-                    defaultValue: "Internet connection required to connect to a new LSP."
-                ))
+                Text(String(localized: .infoCustomLspOffline))
             } else {
-                Text(String(
-                    localized: "info_custom_lsp",
-                    defaultValue: "Enter the details of a compatible Lightning Service Provider. Your node will restart to apply the new configuration."
-                ))
+                Text(String(localized: .infoCustomLsp))
             }
         }
     }
@@ -302,7 +275,7 @@ struct LSPSettingsView: View {
             } label: {
                 HStack {
                     Image(systemName: "arrow.counterclockwise")
-                    Text(String(localized: "button_reset_lsp", defaultValue: "Reset LSP"))
+                    Text(String(localized: .buttonResetLsp))
                 }
             }
             .disabled(!appState.isOnline || appState.activeLSP.isDefault || isRestarting)
@@ -322,12 +295,12 @@ struct LSPSettingsView: View {
 
     private var connectionLabel: String {
         guard appState.isOnline else {
-            return String(localized: "status_offline", defaultValue: "Offline")
+            return String(localized: .statusOffline)
         }
         guard appState.nodeService.isRunning else {
-            return String(localized: "status_disconnected", defaultValue: "Disconnected")
+            return String(localized: .statusDisconnected)
         }
-        return String(localized: "status_connected", defaultValue: "Connected")
+        return String(localized: .statusConnected)
     }
 
     private func configRow(label: String, value: String) -> some View {
@@ -358,21 +331,15 @@ struct LSPSettingsView: View {
         let trimmedAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !trimmedAlias.isEmpty else {
-            validationError = String(localized: "error_alias_empty", defaultValue: "Display name is required.")
+            validationError = String(localized: .errorAliasEmpty)
             return
         }
         guard LSPConfig.isValidPubkey(trimmedPubkey) else {
-            validationError = String(
-                localized: "error_pubkey_invalid",
-                defaultValue: "Pubkey must be a 66-character hex string starting with 02 or 03."
-            )
+            validationError = String(localized: .errorPubkeyInvalid)
             return
         }
         guard LSPConfig.isValidAddress(trimmedAddress) else {
-            validationError = String(
-                localized: "error_address_invalid",
-                defaultValue: "Address must be in host:port format (e.g. example.com:9735)."
-            )
+            validationError = String(localized: .errorAddressInvalid)
             return
         }
 
@@ -400,10 +367,7 @@ struct LSPSettingsView: View {
                     withAnimation { showSuccess = false }
                 }
             } else {
-                validationError = String(
-                    localized: "error_lsp_restart_failed",
-                    defaultValue: "Failed to connect. The node has been restored to the previous LSP."
-                )
+                validationError = String(localized: .errorLspRestartFailed)
             }
         }
     }
@@ -417,10 +381,7 @@ struct LSPSettingsView: View {
             isRestarting = false
             loadCurrentConfig()
             if !success {
-                validationError = String(
-                    localized: "error_lsp_reset_failed",
-                    defaultValue: "Failed to reset. Please try again."
-                )
+                validationError = String(localized: .errorLspResetFailed)
             }
         }
     }

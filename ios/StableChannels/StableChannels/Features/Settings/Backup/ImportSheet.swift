@@ -24,11 +24,8 @@ struct ImportSheet: View {
 
                     if selectedFileURL != nil {
                         PassphraseCard(
-                            label: String(localized: "passphrase", defaultValue: "Passphrase"),
-                            prompt: String(
-                                localized: "enter_backup_passphrase",
-                                defaultValue: "Enter backup passphrase"
-                            ),
+                            label: String(localized: .passphrase),
+                            prompt: String(localized: .enterBackupPassphrase),
                             text: $passphrase,
                             isNew: false
                         )
@@ -48,7 +45,7 @@ struct ImportSheet: View {
                             } else {
                                 Image(systemName: "arrow.down.circle.fill")
                             }
-                            Text(String(localized: "import", defaultValue: "Import"))
+                            Text(String(localized: .import))
                                 .fontWeight(.semibold)
                         }
                         .frame(maxWidth: .infinity)
@@ -67,11 +64,11 @@ struct ImportSheet: View {
                 .padding(20)
             }
             .background(Color(.systemGroupedBackground))
-            .navigationTitle(String(localized: "import_backup", defaultValue: "Import Backup"))
+            .navigationTitle(String(localized: .importBackup))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(String(localized: "button_cancel", defaultValue: "Cancel")) { dismiss() }
+                    Button(String(localized: .buttonCancel)) { dismiss() }
                         .foregroundStyle(.secondary)
                 }
             }
@@ -99,17 +96,14 @@ struct ImportSheet: View {
                     .foregroundStyle(.blue)
             }
 
-            Text(String(localized: "import_title", defaultValue: "Restore from Backup"))
+            Text(String(localized: .importTitle))
                 .font(.title2.bold())
                 .foregroundStyle(.primary)
 
-            Text(String(
-                localized: "import_description",
-                defaultValue: "Select your .stablebackup file and enter the passphrase used when creating it."
-            ))
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
+            Text(String(localized: .importDescription))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
         }
         .padding(.top, 8)
     }
@@ -135,14 +129,14 @@ struct ImportSheet: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(selectedFileURL != nil
                         ? (selectedFileName ?? "File selected")
-                        : String(localized: "select_backup_file", defaultValue: "Select .stablebackup File"))
+                        : String(localized: .selectBackupFile))
                         .font(.body)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
 
                     Text(selectedFileURL != nil
-                        ? String(localized: "file_ready", defaultValue: "File ready to restore")
-                        : String(localized: "tap_to_select", defaultValue: "Tap to browse your files"))
+                        ? String(localized: .fileReady)
+                        : String(localized: .tapToSelect))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -196,7 +190,7 @@ struct ImportSheet: View {
 
     private func importBackup() async {
         guard let fileURL = selectedFileURL else {
-            errorMessage = String(localized: "error_no_file", defaultValue: "No file selected")
+            errorMessage = String(localized: .errorNoFile)
             return
         }
 
@@ -204,7 +198,7 @@ struct ImportSheet: View {
         if RateLimitService.shared.isLocked {
             lockoutSeconds = RateLimitService.shared.lockoutRemainingSeconds
             isRateLimited = true
-            errorMessage = "\(String(localized: "error_rate_limited", defaultValue: "Too many attempts. Try again in")) \(lockoutSeconds)s"
+            errorMessage = String(localized: .errorRateLimited(lockoutSeconds))
             return
         }
 
@@ -231,26 +225,23 @@ struct ImportSheet: View {
             RateLimitService.shared.recordFailedAttempt()
 
             if case .invalidMagicBytes = error {
-                errorMessage = String(localized: "error_invalid_backup", defaultValue: "Invalid backup file")
+                errorMessage = String(localized: .errorInvalidBackup)
             } else if case .unsupportedVersion = error {
-                errorMessage = String(localized: "error_old_backup", defaultValue: "Backup version not supported")
+                errorMessage = String(localized: .errorOldBackup)
             } else {
                 let remaining = RateLimitService.shared.attemptsRemaining
                 if RateLimitService.shared.isLocked {
                     lockoutSeconds = RateLimitService.shared.lockoutRemainingSeconds
-                    errorMessage = "\(String(localized: "error_wrong_passphrase", defaultValue: "Wrong passphrase. \(remaining) attempts remaining")) "
-                        + "\(String(localized: "error_locked_for", defaultValue: "Locked for")) \(lockoutSeconds)s"
+                    errorMessage = String(localized: .errorWrongPassphrase(remaining)) + " "
+                        + String(localized: .errorLockedFor(lockoutSeconds))
                 } else {
-                    errorMessage = "\(String(localized: "error_import_failed", defaultValue: "Decryption failed. Check passphrase.")) "
-                        + "(\(remaining) \(String(localized: "label_attempts_left", defaultValue: "attempts left")))"
+                    errorMessage = String(localized: .errorImportFailed) + " "
+                        + String(localized: .labelAttemptsLeft(remaining))
                 }
             }
         } catch {
             RateLimitService.shared.recordFailedAttempt()
-            errorMessage = String(
-                localized: "error_import_failed",
-                defaultValue: "Decryption failed. Check passphrase."
-            )
+            errorMessage = String(localized: .errorImportFailed)
         }
     }
 }

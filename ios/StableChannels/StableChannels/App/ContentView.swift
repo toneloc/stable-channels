@@ -120,7 +120,7 @@ struct ContentView: View {
                 .font(.system(size: 60))
                 .foregroundStyle(.green.opacity(0.5))
 
-            Text(String(localized: "label_authenticate", defaultValue: "Authenticate"))
+            Text(String(localized: .labelAuthenticate))
                 .font(.headline)
                 .foregroundStyle(.white)
         }
@@ -132,7 +132,7 @@ struct ContentView: View {
                 .font(.system(size: 60))
                 .foregroundStyle(.green)
 
-            Text(String(localized: "label_auth_failed", defaultValue: "Authentication Failed"))
+            Text(String(localized: .labelAuthFailed))
                 .font(.headline)
                 .foregroundStyle(.white)
 
@@ -144,13 +144,13 @@ struct ContentView: View {
                     .padding(.horizontal)
             }
 
-            Button(String(localized: "try_again", defaultValue: "Try Again")) {
+            Button(String(localized: .tryAgain)) {
                 Task { await runAuth() }
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
 
-            Button(String(localized: "button_cancel", defaultValue: "Cancel")) { }
+            Button(String(localized: .buttonCancel)) { }
                 .foregroundStyle(.white.opacity(0.6))
         }
     }
@@ -219,11 +219,11 @@ struct SyncingView: View {
                 ZStack {
                     // Screen 1: Brand title & subtitle during initial shimmer
                     VStack(spacing: 6) {
-                        Text(String(localized: "app_name", defaultValue: "Stable Channels"))
+                        Text(String(localized: .appName))
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 
-                        Text(String(localized: "app_subtitle", defaultValue: "Self-custodial bitcoin wallet"))
+                        Text(String(localized: .appSubtitle))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -233,11 +233,11 @@ struct SyncingView: View {
 
                     // Screen 2: Active syncing status during oscillation
                     VStack(spacing: 6) {
-                        Text(String(localized: "status_syncing_wallet", defaultValue: "Syncing Wallet"))
+                        Text(String(localized: .statusSyncingWallet))
                             .font(.title3.weight(.bold))
                             .foregroundStyle(.primary)
 
-                        Text(String(localized: "status_syncing_moment", defaultValue: "This may take a moment"))
+                        Text(String(localized: .statusSyncingMoment))
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -268,14 +268,14 @@ struct ErrorDisplayView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.largeTitle)
                 .foregroundStyle(.red)
-            Text(String(localized: "error_title", defaultValue: "Error"))
+            Text(String(localized: .errorTitle))
                 .font(.title2.bold())
             Text(message)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button(String(localized: "try_again", defaultValue: "Try Again")) {
+            Button(String(localized: .tryAgain)) {
                 appState.phase = .loading
                 Task { await appState.start() }
             }
@@ -332,7 +332,7 @@ private struct SyncingFlowPreviewContainer: View {
                         replayId = UUID()
                     } label: {
                         Label(
-                            String(localized: "preview_replay", defaultValue: "Replay Flow"),
+                            String(localized: .previewReplay),
                             systemImage: "arrow.counterclockwise"
                         )
                     }
@@ -343,8 +343,8 @@ private struct SyncingFlowPreviewContainer: View {
                     } label: {
                         Text(
                             isSyncComplete
-                                ? String(localized: "preview_reset_sync", defaultValue: "Reset Sync")
-                                : String(localized: "preview_complete_sync", defaultValue: "Complete Sync")
+                                ? String(localized: .previewResetSync)
+                                : String(localized: .previewCompleteSync)
                         )
                     }
                     .buttonStyle(.borderedProminent)

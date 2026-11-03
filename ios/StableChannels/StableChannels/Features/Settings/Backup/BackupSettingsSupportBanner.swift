@@ -5,25 +5,19 @@ struct BackupSettingsSupportBanner: View {
         HStack(spacing: 14) {
             supportIconBadge
             VStack(alignment: .leading, spacing: 2) {
-                Text(String(localized: "recovery_banner_title", defaultValue: "Need Help?"))
+                Text(String(localized: .recoveryBannerTitle))
                     .font(.subheadline)
                     .fontWeight(.bold)
                     .foregroundStyle(.primary)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(String(
-                        localized: "recovery_banner_text_prefix",
-                        defaultValue: "Please email"
-                    ))
+                    Text(String(localized: .recoveryBannerTextPrefix))
                         + Text(" ")
                         + Text("support@stablechannels.com")
                         .foregroundStyle(.blue)
                         .underline()
                         + Text(" ")
-                        + Text(String(
-                            localized: "recovery_banner_text_suffix",
-                            defaultValue: "for wallet recovery assistance."
-                        ))
+                        + Text(String(localized: .recoveryBannerTextSuffix))
                 }
                 .font(.caption)
                 .foregroundStyle(Color(uiColor: .label).opacity(0.7))
