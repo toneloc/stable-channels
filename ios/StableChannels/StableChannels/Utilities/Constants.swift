@@ -73,6 +73,9 @@ enum Constants {
     /// Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
     /// than a single-price ticker and must not share the short per-feed ticker timeout.
     static let chartFetchTimeoutSecs: TimeInterval = 30
+    /// The launch-time chain source probe's budget: a slow primary must not hold the launch screen.
+    static let chainProbeRequestTimeoutSecs: TimeInterval = 2
+    static let chainProbeResourceTimeoutSecs: TimeInterval = 3
     /// Shortest time the launch screen stays up, so a fast start never flashes it.
     static let minimumSplashDuration: TimeInterval = 1.6
 
