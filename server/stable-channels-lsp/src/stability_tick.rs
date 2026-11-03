@@ -53,7 +53,7 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
         }
         let plan = {
             let mut mgr = state.stable_manager.lock().await;
-            mgr.reconcile_if_empty(state.ldk_server.as_ref() as &dyn LdkServerCalls, btc_price)
+            mgr.reconcile_unless_hydrated(state.ldk_server.as_ref() as &dyn LdkServerCalls, btc_price)
                 .await;
             mgr.run_tick_plan(
                 state.ldk_server.as_ref() as &dyn LdkServerCalls,

@@ -302,13 +302,10 @@ async fn run(state: AppState) {
                 state.ldk_server.as_ref(),
             )
             .await;
+            // The books need no price, so the list is reloaded whatever the price cache holds.
             let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
-            if btc_price > 0.0 {
-                mgr.reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
-                    .await;
-            } else {
-                warn!("[event_loop] reconnect reconcile skipped: price cache cold");
-            }
+            mgr.reconcile_from_grpc(state.ldk_server.as_ref(), btc_price)
+                .await;
             drop(mgr);
             let counts = crate::backfill::reconcile_event_history(
                 state.ldk_server.as_ref(),

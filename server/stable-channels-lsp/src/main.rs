@@ -52,8 +52,8 @@ use tracing_subscriber::EnvFilter;
 use crate::config::Config;
 use crate::state::AppState;
 
-/// Bound on how long startup waits for the price cache to warm before deferring reconcile to the stability-tick backstop.
-const STARTUP_RECONCILE_PRICE_WAIT_SECS: u64 = 60;
+/// Longest wait between attempts to load the channel list at startup.
+const STARTUP_RECONCILE_MAX_RETRY_SECS: u64 = 60;
 
 #[derive(Parser, Debug)]
 #[command(name = "stable-channels-lsp", about = "Stable Channels LSP daemon")]
@@ -158,39 +158,32 @@ async fn main() -> Result<()> {
         last_event_before_start_ms,
     };
 
-    let (price_tx, price_rx) = tokio::sync::watch::channel(0.0_f64);
+    let (price_tx, _price_rx) = tokio::sync::watch::channel(0.0_f64);
     tokio::spawn(async move {
         price_task::run(price_tx).await;
     });
 
-    // Reconcile from gRPC to catch up snapshots that changed while the daemon was down. The stable math needs a BTC/USD price, so wait (bounded) for the cache to warm first; spawned so the REST server and event loop come up immediately.
+    // Load the channel list from the database and the node before events, ticks or edits act on it. The books need no price, so this does not wait for one; it retries until it succeeds.
     {
         let state = state.clone();
-        let mut price_rx = price_rx;
         tokio::spawn(async move {
-            // Copy the price out and drop the watch guard before any await so the future stays Send.
-            let warmed = tokio::time::timeout(
-                Duration::from_secs(STARTUP_RECONCILE_PRICE_WAIT_SECS),
-                price_rx.wait_for(|&p| p > 0.0),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .map(|price| *price);
-            match warmed {
-                Some(btc_price) => {
-                    let ldk: &dyn crate::stable_manager::LdkServerCalls =
-                        state.ldk_server.as_ref();
-                    state
-                        .stable_manager
-                        .lock()
-                        .await
-                        .reconcile_from_grpc(ldk, btc_price)
-                        .await;
+            let ldk: &dyn crate::stable_manager::LdkServerCalls = state.ldk_server.as_ref();
+            let mut retry = Duration::from_secs(1);
+            loop {
+                let hydrated = {
+                    let mut mgr = state.stable_manager.lock().await;
+                    if !mgr.is_hydrated() {
+                        let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
+                        mgr.reconcile_from_grpc(ldk, btc_price).await;
+                    }
+                    mgr.is_hydrated()
+                };
+                if hydrated {
+                    break;
                 }
-                None => tracing::warn!(
-                    "startup reconcile skipped: price cache stayed cold; tick backstop will retry"
-                ),
+                tracing::warn!("startup reconcile failed; retrying in {:?}", retry);
+                tokio::time::sleep(retry).await;
+                retry = (retry * 2).min(Duration::from_secs(STARTUP_RECONCILE_MAX_RETRY_SECS));
             }
         });
     }
