@@ -4,6 +4,8 @@ enum Constants {
     // MARK: - Network
 
     static let satsInBTC = UInt64(BitcoinUnits.satsPerBTC)
+    /// How long the app waits for the wallet-dir lock; outlasts the notification extension's ~30 s window.
+    static let nodeDirLockTimeoutSecs: TimeInterval = 35
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let tradeMessageType = "TRADE_V1"
