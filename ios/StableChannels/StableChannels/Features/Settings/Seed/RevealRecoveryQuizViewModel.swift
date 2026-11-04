@@ -13,11 +13,17 @@ final class RevealRecoveryQuizViewModel {
     var currentStep: RevealQuizStep = .intro
     var navigationDirection: QuizNavigationDirection = .forward
     var isShowingLearnMore: Bool = false
-    let mnemonic: String
     let questions: [RevealQuizQuestion]
+    private let mnemonicProvider: () -> String?
 
-    init(mnemonic: String) {
-        self.mnemonic = mnemonic
+    /// Read from its source only once the quiz is passed, so the phrase is not held during the quiz.
+    var mnemonic: String? {
+        guard currentStep == .revealed, let phrase = mnemonicProvider(), !phrase.isEmpty else { return nil }
+        return phrase
+    }
+
+    init(mnemonicProvider: @escaping () -> String?) {
+        self.mnemonicProvider = mnemonicProvider
         self.questions = RevealQuizQuestion.all
     }
 

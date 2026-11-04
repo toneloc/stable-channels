@@ -6,8 +6,8 @@ struct RevealRecoveryPhraseSheet: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var viewModel: RevealRecoveryQuizViewModel
 
-    init(mnemonic: String) {
-        _viewModel = State(initialValue: RevealRecoveryQuizViewModel(mnemonic: mnemonic))
+    init(mnemonicProvider: @escaping () -> String?) {
+        _viewModel = State(initialValue: RevealRecoveryQuizViewModel(mnemonicProvider: mnemonicProvider))
     }
 
     var body: some View {
@@ -67,13 +67,18 @@ struct RevealRecoveryPhraseSheet: View {
                         }
 
                     case .revealed:
-                        RevealQuizSecretPhraseView(
-                            mnemonic: viewModel.mnemonic,
-                            onDone: {
-                                dismiss()
-                            }
-                        )
-                        .transition(stepTransition)
+                        if let mnemonic = viewModel.mnemonic {
+                            RevealQuizSecretPhraseView(
+                                mnemonic: mnemonic,
+                                onDone: {
+                                    dismiss()
+                                }
+                            )
+                            .transition(stepTransition)
+                        } else {
+                            // The phrase was removed during the quiz: close rather than show an empty screen.
+                            Color.clear.onAppear { dismiss() }
+                        }
                     }
                 }
             }

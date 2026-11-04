@@ -6,8 +6,12 @@ import XCTest
 final class RevealRecoveryQuizViewModelTests: XCTestCase {
     private let testMnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
 
+    private func makeViewModel() -> RevealRecoveryQuizViewModel {
+        RevealRecoveryQuizViewModel(mnemonicProvider: { self.testMnemonic })
+    }
+
     private func revealedViewModel() -> RevealRecoveryQuizViewModel {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         vm.selectOption(1)
         vm.continueFromFeedback()
@@ -17,22 +21,50 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testInitialStateIsIntro() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         XCTAssertEqual(vm.currentStep, .intro)
         XCTAssertFalse(vm.canGoBack)
         XCTAssertEqual(vm.questions.count, 2)
+    }
+
+    func testPhraseIsReadOnlyOnceRevealed() {
+        var reads = 0
+        let vm = RevealRecoveryQuizViewModel(mnemonicProvider: {
+            reads += 1
+            return self.testMnemonic
+        })
+        vm.startQuiz()
+        XCTAssertNil(vm.mnemonic)
+        XCTAssertEqual(reads, 0)
+
+        vm.selectOption(1)
+        vm.continueFromFeedback()
+        vm.selectOption(0)
+        vm.continueFromFeedback()
         XCTAssertEqual(vm.mnemonic, testMnemonic)
+        XCTAssertEqual(reads, 1)
+    }
+
+    func testRevealedWithoutSavedPhraseHasNoPhrase() {
+        let vm = RevealRecoveryQuizViewModel(mnemonicProvider: { "" })
+        vm.startQuiz()
+        vm.selectOption(1)
+        vm.continueFromFeedback()
+        vm.selectOption(0)
+        vm.continueFromFeedback()
+        XCTAssertEqual(vm.currentStep, .revealed)
+        XCTAssertNil(vm.mnemonic)
     }
 
     func testStartQuizMovesToFirstQuestion() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         XCTAssertEqual(vm.currentStep, .question(index: 0))
         XCTAssertTrue(vm.canGoBack)
     }
 
     func testAnswerQuestion1CorrectTransition() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
 
         // Question 1: correct answer is index 1 ("Can't help you")
@@ -44,7 +76,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testAnswerQuestion1IncorrectTransitionAndRetry() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
 
         // Question 1: incorrect answer is index 0 ("Can get it back for you")
@@ -56,7 +88,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testWrongAnswerOnLastQuestionNeverReveals() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         vm.selectOption(1)
         vm.continueFromFeedback()
@@ -67,7 +99,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testFullHappyPathRevealsPhrase() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
 
         vm.selectOption(1)
@@ -84,7 +116,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testSelectOptionOutsideQuestionStepIsNoOp() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.selectOption(1)
         XCTAssertEqual(vm.currentStep, .intro)
 
@@ -95,7 +127,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testContinueOutsideFeedbackStepIsNoOp() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.continueFromFeedback()
         XCTAssertEqual(vm.currentStep, .intro)
 
@@ -105,7 +137,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testGoBackFromQuestion1ReturnsToIntro() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
 
         vm.goBack()
@@ -115,7 +147,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testGoBackFromQuestion2ReturnsToQuestion1() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         vm.selectOption(1)
         vm.continueFromFeedback()
@@ -126,7 +158,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testGoBackFromFeedbackReturnsToQuestion() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         vm.selectOption(0)
 
@@ -135,7 +167,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testForwardActionsResetDirectionAfterGoingBack() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.startQuiz()
         vm.goBack()
         vm.startQuiz()
@@ -152,7 +184,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testProgressTextCountsFromTheQuestionList() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         XCTAssertEqual(vm.progressText(forQuestionAt: 0), "Question 1 of 2")
         XCTAssertEqual(vm.progressText(forQuestionAt: 1), "Question 2 of 2")
     }
@@ -164,7 +196,7 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     }
 
     func testGoBackFromIntroIsNoOp() {
-        let vm = RevealRecoveryQuizViewModel(mnemonic: testMnemonic)
+        let vm = makeViewModel()
         vm.goBack()
         XCTAssertEqual(vm.currentStep, .intro)
     }

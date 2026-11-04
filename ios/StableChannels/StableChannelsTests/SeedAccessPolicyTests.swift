@@ -23,4 +23,37 @@ final class SeedAccessPolicyTests: XCTestCase {
         XCTAssertTrue(SeedAccessPolicy.canOpenSeedScreen(after: .inactive))
         XCTAssertFalse(SeedAccessPolicy.canOpenSeedScreen(after: .background))
     }
+
+    @MainActor
+    func testAppStatePromptsForSeedAccessOnlyWhenAToggleIsOn() async throws {
+        let suiteName = "SeedAccessPolicyTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let probe = SeedAuthProbe()
+        let appState = AppState(seedAccessDefaults: defaults)
+        appState.biometricAuth = probe
+
+        let allowedWithBothOff = await appState.authorizeSeedAccess(reason: "test")
+        XCTAssertTrue(allowedWithBothOff)
+        XCTAssertEqual(probe.calls, 0)
+
+        for key in [Constants.appUnlockEnabledKey, Constants.transactionAuthEnabledKey] {
+            defaults.removePersistentDomain(forName: suiteName)
+            defaults.set(true, forKey: key)
+            let allowed = await appState.authorizeSeedAccess(reason: "test")
+            XCTAssertFalse(allowed, "the probe denies, so a prompt must decide")
+        }
+        XCTAssertEqual(probe.calls, 2)
+    }
+}
+
+/// Stands in for biometrics: counts prompts and always denies.
+@MainActor
+private final class SeedAuthProbe: BiometricAuthenticating {
+    private(set) var calls = 0
+
+    func authenticate(reason _: String, allowPasscodeFallback _: Bool) async throws -> Bool {
+        calls += 1
+        return false
+    }
 }
