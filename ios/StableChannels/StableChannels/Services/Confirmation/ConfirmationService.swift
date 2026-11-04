@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+import Observation
 
 @Observable
 @MainActor
@@ -18,7 +18,8 @@ final class ConfirmationService {
     func resolve(
         payment: PaymentRecord,
         currentBlockHeight: UInt32,
-        forceRecheck: Bool = false
+        forceRecheck: Bool = false,
+        checksReceiveAddress: Bool = true
     ) async -> ConfirmationOutcome {
         guard let txid = payment.txid, !txid.isEmpty else {
             return .noTxid
@@ -36,11 +37,38 @@ final class ConfirmationService {
             }
         }
         do {
-            guard let height = try await provider.blockHeight(for: txid) else {
-                return .pending
+            let lookup: EsploraLookup<TxStatus>
+            if checksReceiveAddress, let address = ConfirmationPolicy.expectedReceiveAddress(for: payment) {
+                switch try await provider.receiveCheck(for: txid, paysTo: address) {
+                case .found(let check):
+                    guard check.paysToAddress else { return .addressMismatch }
+                    if let status = check.status {
+                        lookup = .found(status)
+                    } else {
+                        lookup = try await provider.status(for: txid)
+                    }
+                case .notFound:
+                    lookup = .notFound
+                case .unavailable:
+                    lookup = .unavailable
+                }
+            } else {
+                lookup = try await provider.status(for: txid)
             }
-            let progress = calculator.progress(for: height, currentBlockHeight: currentBlockHeight, required: required)
-            return .confirmed(progress: progress, blockHeight: height)
+            switch lookup {
+            case .found(let status):
+                guard let height = status.blockHeight else { return .pending }
+                let progress = calculator.progress(
+                    for: height,
+                    currentBlockHeight: currentBlockHeight,
+                    required: required
+                )
+                return .confirmed(progress: progress, blockHeight: height)
+            case .notFound:
+                return .notFound
+            case .unavailable:
+                return .error(EsploraError.invalidResponse.localizedDescription)
+            }
         } catch {
             return .error(error.localizedDescription)
         }
@@ -51,5 +79,9 @@ enum ConfirmationOutcome: Equatable {
     case noTxid
     case pending
     case confirmed(progress: ConfirmationProgress, blockHeight: UInt32)
+    /// Every explorer answered 404 for the txid.
+    case notFound
+    /// A received onchain row's txid does not pay the row's stored address.
+    case addressMismatch
     case error(String)
 }

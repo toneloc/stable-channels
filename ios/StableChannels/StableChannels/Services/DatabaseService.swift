@@ -262,7 +262,7 @@ final class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
         ]
 
-        for sql in statements {
+        for sql in statements + SpliceEventRecorder.createTableStatements {
             try rawSQL.execute(sql)
         }
 
@@ -430,6 +430,46 @@ final class DatabaseService {
     private func pruneHistoricalData() throws {
         let cutoffSeconds = 90 * 86400
         try rawSQL.execute("DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - \(cutoffSeconds)")
+    }
+
+    // MARK: - Outbound Payment Failure
+
+    /// Records a failed outbound payment on the row its [target] names, through the shared
+    /// statements the notification extension's `recordOutgoingPaymentFailure` runs. [knownTrade] is
+    /// the in-memory trade the payment pays for, if any. Returns whether a trade took the failure,
+    /// and that trade when known.
+    func recordOutgoingPaymentFailure(
+        paymentId: String,
+        target: LightningPaymentFailureTarget,
+        knownTrade: PendingTradePayment?,
+        reasonCode: String?
+    ) -> (tradeFailed: Bool, trade: PendingTradePayment?) {
+        switch target {
+        case .trade:
+            // Signed results and already-paid fees are protected by the row update itself.
+            if let knownTrade {
+                _ = try? channelRepo.markTradeSendFailed(tradeDbId: knownTrade.tradeDbId, reasonCode: reasonCode)
+            } else {
+                _ = try? channelRepo.markTradeSendFailed(paymentId: paymentId, reasonCode: reasonCode)
+            }
+            return (true, knownTrade)
+        case .unattachedTrade(let amountMsat):
+            if let trade = try? channelRepo.failUnattachedPreparedTrade(
+                paymentId: paymentId,
+                amountMsat: amountMsat,
+                reasonCode: reasonCode
+            ) {
+                return (true, trade)
+            }
+        case .stabilitySend:
+            // No sats moved, so there is no row to fail; unblock the next send (as on Android).
+            stabilityRepo.clearPendingSend()
+            return (false, nil)
+        case .payment:
+            break
+        }
+        try? paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "failed")
+        return (false, nil)
     }
 
     // MARK: - Transaction & SPV Header Delegations

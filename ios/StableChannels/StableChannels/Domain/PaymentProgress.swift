@@ -8,11 +8,52 @@ enum ConfirmationPolicy {
 
     static func requiredConfirmations(for paymentType: String) -> Int {
         switch paymentType {
-        case "splice_in", "splice_out":
+        case SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue:
             return spliceRequiredConfirmations
         default:
             return defaultRequiredConfirmations
         }
+    }
+
+    /// Nodes drop unconfirmed transactions after about two weeks.
+    static let stalePendingOnchainSeconds: Int64 = 14 * 86400
+
+    /// Rows created before this are old enough to age out.
+    static func staleCutoff(now: Int64) -> Int64 {
+        now - stalePendingOnchainSeconds
+    }
+
+    /// Whether a row whose transaction every explorer reported missing (404 from all, not an
+    /// outage) may be failed: an unconfirmed onchain row older than `stalePendingOnchainSeconds`.
+    /// A confirmed or younger row stays pollable so a later lookup can still confirm it.
+    static func shouldFailUnfound(_ payment: PaymentRecord, now: Int64) -> Bool {
+        payment.paymentType == "onchain"
+            && payment.status == "pending"
+            && payment.confirmations == 0
+            && payment.createdAt < staleCutoff(now: now)
+    }
+
+    /// The address a received onchain row's transaction must pay, or nil when there is nothing to
+    /// check (other row kinds, or no stored address).
+    static func expectedReceiveAddress(for payment: PaymentRecord) -> String? {
+        guard payment.paymentType == "onchain", payment.direction == "received" else { return nil }
+        let address = payment.address?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return address.isEmpty ? nil : address
+    }
+
+    enum ReceiveAddressMismatch: Equatable {
+        case keepTxid
+        case detachTxid
+        /// The wallet could not be read; decide on a later poll.
+        case retryLater
+    }
+
+    /// What to do with a received row whose txid does not pay its stored address. The balance path
+    /// stores a deposit the node identified with the then-current receive address, which need not be
+    /// the one paid, so a txid the node's wallet lists as received stays: it is ours either way.
+    static func receiveAddressMismatch(txid: String, walletReceiveTxids: Set<String>?) -> ReceiveAddressMismatch {
+        guard let walletReceiveTxids else { return .retryLater }
+        return walletReceiveTxids.contains(txid) ? .keepTxid : .detachTxid
     }
 }
 
@@ -61,7 +102,12 @@ struct ConfirmationCalculator: ConfirmationCalculating {
     }
 }
 
-private let onchainPaymentTypes: Set<String> = ["onchain", "splice_in", "splice_out", "channel_close"]
+private let onchainPaymentTypes: Set<String> = [
+    "onchain",
+    SplicePaymentType.spliceIn.rawValue,
+    SplicePaymentType.spliceOut.rawValue,
+    "channel_close"
+]
 
 extension PaymentRecord {
     var shouldShowConfirmationProgress: Bool {

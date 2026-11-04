@@ -50,9 +50,31 @@ enum DepositAttribution {
     /// The txid of the deposit the WebSocket missed, when it is the only [unrecorded] arrival and the
     /// node's amount for it is the whole remainder. Several unrecorded arrivals cannot be told apart.
     static func missedTxid(remainderSats: Int64, unrecorded: Set<String>, walletSats: [String: Int64]) -> String? {
-        guard remainderSats > 0, unrecorded.count == 1, let txid = unrecorded.first,
-              walletSats[txid] == remainderSats else { return nil }
-        return txid
+        guard unrecorded.count == 1 else { return nil }
+        return soleTxid(paying: remainderSats, among: unrecorded, walletSats: walletSats)
+    }
+
+    /// The transaction a deposit can be when the baseline's txids are unknown, so arrivals cannot be
+    /// told from older receives: the one wallet receive no row [claimed] whose node amount is the whole
+    /// remainder. Several such receives, or none, leave the deposit without a candidate.
+    static func unknownBaselineCandidate(
+        remainderSats: Int64,
+        walletSats: [String: Int64],
+        claimed: Set<String>
+    ) -> String? {
+        soleTxid(paying: remainderSats, among: walletSats.keys.filter { !claimed.contains($0) }, walletSats: walletSats)
+    }
+
+    /// The one txid among [txids] whose node amount is exactly [sats]; nil when none or several are.
+    /// The single "exactly one wallet transaction of this amount" rule.
+    private static func soleTxid(
+        paying sats: Int64,
+        among txids: some Sequence<String>,
+        walletSats: [String: Int64]
+    ) -> String? {
+        guard sats > 0 else { return nil }
+        let matches = txids.filter { walletSats[$0] == sats }
+        return matches.count == 1 ? matches.first : nil
     }
 
     /// Txids whose deposits are inside the increase: the wallet lists them now but did not when
@@ -91,7 +113,7 @@ enum DepositAttribution {
 }
 
 /// The wallet's inbound on-chain payments that have not failed, in the form deposit attribution
-/// needs.
+/// and placeholder txid adoption need. NodeService maps the node's payment list into it once.
 struct WalletInboundOnchain: Equatable {
     let txids: Set<String>
     /// The node's amount for each txid that has one.
@@ -121,6 +143,14 @@ struct OnchainDepositBaseline: Equatable {
     mutating func advance(to sats: UInt64, wallet: Set<String>) {
         self.sats = sats
         txids = wallet
+    }
+
+    /// Moves the baseline to [sats] for a self-send splice's own rise and counts [txid], so a retry
+    /// (after a crash before the splice row completed) sees it absorbed. Unknown txids stay unknown:
+    /// marking them would change how the reconciler reads the baseline.
+    mutating func absorbSelfSend(txid: String, sats: UInt64) {
+        self.sats = sats
+        txids?.insert(txid)
     }
 
     /// Whether the baseline already counts [txid].

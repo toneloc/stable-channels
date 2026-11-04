@@ -118,7 +118,7 @@ struct BalanceBarHeaderView: View {
 
     private var sellLimitPill: some View {
         VStack(spacing: 1) {
-            Text(StabilizationPolicy.maximumMessage(UInt64(maxSellUSD * 100 + 1e-7)))
+            Text(StabilizationPolicy.maximumMessage(TradeFormModel.cents(maxSellUSD)))
                 .font(.caption2.bold())
                 .foregroundStyle(.red)
                 .lineLimit(1)

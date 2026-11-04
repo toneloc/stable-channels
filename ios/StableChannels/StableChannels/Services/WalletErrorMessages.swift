@@ -1,6 +1,18 @@
 import Foundation
 import LDKNode
 
+/// Status-line copy for splice states the domain names.
+extension SpliceCompletionPolicy.ChannelReadyStatus {
+    var message: String {
+        switch self {
+        case .movePendingConfirmation:
+            String(localized: "status_move_pending_confirmation", defaultValue: "Move pending confirmation")
+        case .channelReady:
+            String(localized: "status_channel_is_ready", defaultValue: "Channel is ready")
+        }
+    }
+}
+
 /// User-facing copy mapped from low-level failure reasons and exceptions.
 /// Keep technical details and raw exceptions in telemetry/logs, not in UI banners.
 enum WalletErrorMessages {

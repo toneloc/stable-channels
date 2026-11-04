@@ -491,6 +491,12 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertGreaterThan(result.percentFromPar, 1.0)
     }
 
+    func testPercentFromParClampsTheTargetAtTheMinimumStableUSD() {
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: -5, targetUSD: 100), 5, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0), 5_000, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0.001), 5_000, accuracy: 1e-9)
+    }
+
     // MARK: - spendConsumesLspSurplus
 
     func testSpendCoveredByNativeDoesNotConsumeSurplus() {
@@ -824,6 +830,37 @@ final class StabilityServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testConfirmedSelfSendSpliceAdvancesTheBaselineSoNoDepositIsRecorded() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.priceService.setPriceForTesting(100_000.0)
+        appState.stableChannel.userChannelId = "self-send-chan"
+        appState.saveChannelToDB()
+        appState.transactionLinkService.onchainReceiveAddress = "bc1qown"
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "splice-self-send",
+            paymentType: SplicePaymentType.spliceOut.rawValue,
+            direction: SplicePaymentType.spliceOut.direction,
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txA,
+            address: "bc1qown"
+        )
+        appState.walletInbound = WalletInboundOnchain(txids: [txA])
+        appState.onchainBalanceSats = 55000
+
+        XCTAssertTrue(appState.completeConfirmedSplice(txid: txA, expectedGeneration: 0))
+
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+        XCTAssertTrue(appState.depositBaseline.counts(txA))
+        XCTAssertEqual(db.paymentRepo.payment(txid: txA)?.status, "completed")
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [], "the splice's own output is not a deposit")
+    }
+
+    @MainActor
     func testWebSocketThenBalanceRecordsTheDepositOnce() throws {
         let (appState, db) = try makeDepositAppState()
 
@@ -885,14 +922,59 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertEqual(try receivedSats(db), [50000, 60000])
     }
 
+    /// The stale-lock release frees a lock with no pending splice row, so the sweep must never return
+    /// holding its lock before the row is written: it either saves the row or drops the lock first.
+    @MainActor
+    func testSweepNeverReturnsHoldingTheLockWithoutItsRow() {
+        let appState = AppState()
+
+        appState.sweepToChannel()
+
+        XCTAssertFalse(appState.isSweeping)
+        XCTAssertNil(appState.pendingSplice)
+        XCTAssertEqual(appState.statusMessage, "No ready channel")
+    }
+
     @MainActor
     func testLaunchLoadsTheBaselineTxidsCachedWithTheBalance() {
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
-        let saved = shared?.stringArray(forKey: AppState.BalanceCacheKey.onchainTxids)
-        defer { shared?.set(saved, forKey: AppState.BalanceCacheKey.onchainTxids) }
+        let keys = [
+            AppState.BalanceCacheKey.onchain, AppState.BalanceCacheKey.onchainTxids,
+            OnchainDepositBaselineStore.satsKey, OnchainDepositBaselineStore.txidsKey
+        ]
+        let saved = keys.map { shared?.object(forKey: $0) }
+        defer { zip(keys, saved).forEach { shared?.set($1, forKey: $0) } }
+        // First launch: nothing persisted yet.
+        shared?.removeObject(forKey: OnchainDepositBaselineStore.satsKey)
+        shared?.removeObject(forKey: OnchainDepositBaselineStore.txidsKey)
+        shared?.set(Int64(40000), forKey: AppState.BalanceCacheKey.onchain)
         shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
 
         XCTAssertEqual(AppState().depositBaseline.txids, [txA, txB])
+        XCTAssertEqual(AppState().depositBaseline.sats, 40000)
+    }
+
+    /// The balance cache refreshes while detection is deferred during a splice/close; a restart
+    /// must keep the baseline from before the deferral so the deposit is still detected.
+    @MainActor
+    func testRestartKeepsTheBaselineFromBeforeADeferredDeposit() {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let keys = [
+            AppState.BalanceCacheKey.onchain, AppState.BalanceCacheKey.onchainTxids,
+            OnchainDepositBaselineStore.satsKey, OnchainDepositBaselineStore.txidsKey
+        ]
+        let saved = keys.map { shared?.object(forKey: $0) }
+        defer { zip(keys, saved).forEach { shared?.set($1, forKey: $0) } }
+
+        let before = AppState()
+        before.depositBaseline.advance(to: 40000, wallet: [txA])
+        // A deposit (txB) lands while a splice defers detection; the balance cache still refreshes.
+        shared?.set(Int64(90000), forKey: AppState.BalanceCacheKey.onchain)
+        shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
+
+        let relaunched = AppState().depositBaseline
+        XCTAssertEqual(relaunched.sats, 40000)
+        XCTAssertEqual(relaunched.txids, [txA])
     }
 
     @MainActor
@@ -1403,7 +1485,7 @@ final class StabilityServiceTests: XCTestCase {
         // When pendingSplice exists, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = false
         appState.pendingSplice = PendingSplice(
-            direction: "out",
+            paymentType: .spliceOut,
             amountSats: 20_000,
             address: "tb1qtestaddress"
         )
@@ -1812,7 +1894,7 @@ final class StabilityServiceTests: XCTestCase {
 
         _ = StabilityService.updateBalances(
             &sc,
-            channels: [mockChannel],
+            channels: [ChannelSnapshot(mockChannel)],
             onchainBalanceSats: 0,
             price: 100_000.0
         )
@@ -1828,5 +1910,219 @@ final class StabilityServiceTests: XCTestCase {
         // 5. Assert nativeChannelBTC == liveReceiverSats and expectedUSD == 0
         XCTAssertEqual(sc.expectedUSD.amount, 0.0, accuracy: 0.001)
         XCTAssertEqual(sc.nativeChannelBTC.sats, liveReceiverSats)
+    }
+}
+
+// MARK: - Incoming stability allocation (#320)
+
+extension StabilityServiceTests {
+    private func incoming(_ current: Int64, _ expected: Double, _ price: Double, _ amount: Int64) -> Int64? {
+        StabilityAllocation.backingAfterIncomingStability(
+            currentBackingSats: current,
+            expectedUSD: expected,
+            price: price,
+            amountSats: amount
+        )
+    }
+
+    func testIncomingStabilityMatchesRustShortfallAndExcessRules() {
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, 1_000), 10_000)
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, 5_000), 10_000)
+        XCTAssertEqual(incoming(10_000, 10.0, 110_000.0, 1_000), 10_000)
+        XCTAssertEqual(incoming(10_001, 10.0, 100_000.0, 1_000), 10_001)
+    }
+
+    func testIncomingStabilityRejectsInvalidBooksAndUnrepresentableTargets() {
+        for target in [-1.0, Double.nan, Double.infinity, Double.greatestFiniteMagnitude] {
+            XCTAssertNil(incoming(9_000, target, 100_000.0, 500))
+        }
+        XCTAssertNil(incoming(-1, 10.0, 100_000.0, 500))
+        XCTAssertNil(incoming(9_000, 10.0, 100_000.0, 0))
+        XCTAssertNil(incoming(9_000, 10.0, 100_000.0, -1))
+        XCTAssertNil(incoming(0, Double(Int64.max), 100_000_000.0, 1))
+        for price in [0.0, -1.0, Double.nan, Double.infinity] {
+            XCTAssertNil(incoming(9_000, 10.0, price, 500))
+        }
+    }
+
+    func testIncomingStabilityCapsBeforeAddingToAvoidOverflow() {
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, Int64.max), 10_000)
+    }
+
+    func testIncomingStabilityUsesWholeSatsEvenForSubCentTargets() {
+        XCTAssertEqual(incoming(0, 0.0009, 100_000.0, 500), 0)
+        XCTAssertEqual(incoming(0, 0.0099, 100_000.0, 500), 9)
+        XCTAssertEqual(incoming(20, 0.0099, 100_000.0, 500), 20)
+    }
+
+    func testBackingAfterPaymentOnlyCapsIncomingStability() {
+        let cap: (String, String, Int64) -> Int64? = { type, direction, delta in
+            StabilityAllocation.backingAfterPayment(
+                currentBackingSats: 9_000,
+                expectedUSD: 10.0,
+                price: 100_000.0,
+                deltaSats: delta,
+                paymentType: type,
+                direction: direction
+            )
+        }
+        XCTAssertEqual(cap("stability", "received", 5_000), 10_000)
+        // Outgoing sats already moved: keep the floor-at-zero debit clamp.
+        XCTAssertEqual(cap("stability", "sent", -4_000), 5_000)
+        XCTAssertEqual(cap("stability", "sent", -20_000), 0)
+        // A missing receipt price fails the incoming credit so the row is retried.
+        XCTAssertNil(StabilityAllocation.backingAfterPayment(
+            currentBackingSats: 9_000,
+            expectedUSD: 10.0,
+            price: nil,
+            deltaSats: 5_000,
+            paymentType: "stability",
+            direction: "received"
+        ))
+    }
+
+    // MARK: - Outgoing overflow repair (#318)
+
+    func testOverflowRepairDeductsOnlyTheOverflowAndIsIdempotent() throws {
+        let repair = try XCTUnwrap(StabilityService.overflowRepair(
+            expectedUSD: 10.0,
+            backingSats: 10_000,
+            receiverSats: 9_000,
+            price: 100_000.0
+        ))
+        XCTAssertEqual(repair.overflowSats, 1_000)
+        XCTAssertEqual(repair.newExpectedUSD, 9.0, accuracy: 0.000001)
+        XCTAssertEqual(repair.usdDeducted, 1.0, accuracy: 0.000001)
+        XCTAssertNil(StabilityService.overflowRepair(
+            expectedUSD: 9.0,
+            backingSats: 9_000,
+            receiverSats: 9_000,
+            price: 100_000.0
+        ))
+        XCTAssertNil(StabilityService.overflowRepair(
+            expectedUSD: 10.0,
+            backingSats: 10_000,
+            receiverSats: 9_000,
+            price: 0
+        ))
+    }
+
+    func testOverflowRepairReportsOnlyTheTargetDropPastZero() throws {
+        let repair = try XCTUnwrap(StabilityService.overflowRepair(
+            expectedUSD: 1.0,
+            backingSats: 10_000,
+            receiverSats: 5_000,
+            price: 100_000.0
+        ))
+        XCTAssertEqual(repair.newExpectedUSD, 0.0)
+        XCTAssertEqual(repair.usdDeducted, 1.0, accuracy: 0.000001)
+    }
+}
+
+/// Shared unit conversion and price selection that replaced repeated inline formulas.
+final class SharedUnitAndPriceRuleTests: XCTestCase {
+    func testConversionsMatchTheInlineFormulasTheyReplaced() {
+        XCTAssertEqual(BitcoinUnits.usd(sats: UInt64(150_000), price: 60000), 90, accuracy: 1e-9)
+        XCTAssertEqual(BitcoinUnits.usd(msats: UInt64(150_000_000), price: 60000), 90, accuracy: 1e-9)
+        XCTAssertEqual(BitcoinUnits.sats(usd: 90, price: 60000), 150_000, accuracy: 1e-6)
+        XCTAssertEqual(Constants.satsInBTC, 100_000_000)
+    }
+
+    func testFloorTargetSatsRoundsDownAndRejectsUnrepresentableTargets() {
+        XCTAssertEqual(BitcoinUnits.floorTargetSats(usd: 1, price: 3), 33_333_333)
+        XCTAssertEqual(BitcoinUnits.floorTargetSats(usd: 0, price: 50000), 0)
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: 1, price: 0))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: -1, price: 1))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: .infinity, price: 1))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: 1e30, price: 1))
+    }
+
+    func testFirstPositivePriceSkipsZeroNegativeAndNonFinite() {
+        XCTAssertEqual(StabilityService.firstPositivePrice(0, -1, .nan, .infinity, 42, 7), 42)
+        XCTAssertEqual(StabilityService.firstPositivePrice(0, 0), 0)
+    }
+
+    func testReceiptPriceUsesTheAccountingPriceOnlyForStabilityReceipts() {
+        XCTAssertEqual(
+            StabilityService.receiptPrice(isStabilityPayment: true, accountingPrice: 100, bookedPrice: 90), 100
+        )
+        XCTAssertEqual(
+            StabilityService.receiptPrice(isStabilityPayment: false, accountingPrice: 100, bookedPrice: 90), 90
+        )
+    }
+
+    func testReconcileOutgoingReportsTheSameDropAsTheOverflowRepair() {
+        var sc = StableChannel.default
+        sc.expectedUSD = USD(amount: 10)
+        sc.backingSats = 10000
+        sc.stableReceiverBTC = Bitcoin(sats: 9000)
+
+        let deducted = StabilityService.reconcileOutgoing(&sc, price: 100_000)
+
+        XCTAssertEqual(try XCTUnwrap(deducted), 1, accuracy: 1e-9)
+        XCTAssertEqual(sc.expectedUSD.amount, 9, accuracy: 1e-9)
+        XCTAssertEqual(sc.backingSats, 9000)
+        XCTAssertNil(StabilityService.reconcileOutgoing(&sc, price: 100_000), "a retry deducts nothing")
+    }
+
+    func testChainLookupURLsPutTheConfiguredChainFirstWithoutDuplicates() {
+        XCTAssertEqual(
+            Constants.chainLookupURLs(preferred: "https://custom/api"),
+            ["https://custom/api"] + Constants.esploraChainURLs
+        )
+        XCTAssertEqual(Constants.chainLookupURLs(preferred: Constants.primaryChainURL), Constants.esploraChainURLs)
+    }
+
+    // MARK: - settlementPaidUSD
+
+    func testSettlementPaidUSDMatchesFormerInlineExpression() {
+        let cases: [(gap: Double, msat: UInt64, price: Double)] = [
+            (-10.0, 10_000_000, 100_000.0), // amount equals the gap
+            (-10.0, 4_000_000, 100_000.0), // capped amount smaller than the gap
+            (-10.0, 50_000_000, 100_000.0), // amount larger than the gap
+            (10.0, 10_000_000, 100_000.0), // above par: sign dropped
+            (-10.0, 10_000_000, 0.0), // zero price: amount values to 0
+            (-10.0, 10_000_000, -100_000.0), // negative price: not guarded, goes negative
+            (-1_000_000.0, UInt64.max, 100_000.0), // large msat value
+            (.nan, 10_000_000, 100_000.0), // non-finite gap: NaN propagates
+            (-10.0, 10_000_000, .infinity) // non-finite price
+        ]
+        for c in cases {
+            let old = min(abs(c.gap), BitcoinUnits.usd(msats: c.msat, price: c.price))
+            let new = StabilityService.settlementPaidUSD(dollarsFromPar: c.gap, amountMsat: c.msat, price: c.price)
+            XCTAssertEqual(old.bitPattern, new.bitPattern, "\(c)")
+        }
+    }
+
+    func testSettlementPaidUSDCases() {
+        let price = 100_000.0
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: price),
+            10,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 4_000_000, price: price),
+            4,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 50_000_000, price: price),
+            10
+        )
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: 10, amountMsat: 50_000_000, price: price), 10)
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: 0), 0)
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -1_000_000, amountMsat: UInt64.max, price: price),
+            1_000_000
+        )
+        // Not guarded: a NaN gap propagates, a negative price gives a negative value.
+        XCTAssertTrue(
+            StabilityService.settlementPaidUSD(dollarsFromPar: .nan, amountMsat: 10_000_000, price: price).isNaN
+        )
+        XCTAssertLessThan(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: -price),
+            0
+        )
     }
 }

@@ -176,17 +176,22 @@ struct SendPaymentExecutor {
                     ]
                 )
             }
-            try appState.beginSpliceOut(amountSats: effectiveSats, address: address)
-            do {
+            try appState.beginSpliceOut(
+                amountSats: effectiveSats,
+                address: address,
+                channel: SpliceChannelIdentity(
+                    userChannelId: channel.userChannelId,
+                    channelId: channel.channelId,
+                    previousFundingTxid: channel.fundingTxo?.txid
+                )
+            )
+            try appState.startLockedSplice {
                 try appState.nodeService.spliceOut(
                     userChannelId: channel.userChannelId,
                     counterpartyNodeId: channel.counterpartyNodeId,
                     address: address,
                     amountSats: effectiveSats
                 )
-            } catch {
-                appState.cancelPendingSpliceStart()
-                throw error
             }
             return SendPaymentResult(sentAmountSats: effectiveSats, outcome: .spliceOut)
         } else {
@@ -249,35 +254,8 @@ struct SendPaymentExecutor {
         txid: String? = nil,
         appState: AppState
     ) {
-        let usd: Double? = price > 0 ? (Double(msat) / 1000.0 / Double(Constants.satsInBTC)) * price : nil
-        // Guard against downgrading: if the event handler already marked
-        // this payment completed or failed, backfill details and do not insert "pending".
-        if let existing = appState.databaseService?.paymentRepo.payment(paymentId: id) {
-            if existing.isSettled || existing.isFailed {
-                try? appState.databaseService?.paymentRepo.backfillPaymentDetails(
-                    paymentId: id,
-                    amountMsat: msat,
-                    amountUSD: usd,
-                    btcPrice: price > 0 ? price : nil,
-                    counterparty: nil,
-                    address: address,
-                    txid: txid
-                )
-                return
-            }
-        }
-
-        _ = try? appState.databaseService?.paymentRepo.recordPayment(
-            paymentId: id,
-            paymentType: type,
-            direction: "sent",
-            amountMsat: msat,
-            amountUSD: usd,
-            btcPrice: price > 0 ? price : nil,
-            counterparty: nil,
-            status: "pending",
-            txid: txid,
-            address: address
+        appState.recordOutgoingPending(
+            paymentId: id, paymentType: type, amountMsat: msat, price: price, address: address, txid: txid
         )
     }
 }

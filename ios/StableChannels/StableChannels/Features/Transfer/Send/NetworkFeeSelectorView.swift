@@ -40,7 +40,7 @@ struct NetworkFeeSelectorView: View {
         let isSelected = selectedTier == tier
         let rate = displayedRate(for: tier)
         let feeSats = PaymentFeeEstimator.estimateOnchainFee(feeRateSatVb: rate, isSendAll: isSendAll)
-        let feeUSD = (Double(feeSats) / Double(Constants.satsInBTC)) * btcPrice
+        let feeUSD = BitcoinUnits.usd(sats: feeSats, price: btcPrice)
 
         return Button {
             withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {

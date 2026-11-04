@@ -625,6 +625,25 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertEqual(capturedAmount, 150_000, "Amount should sum all matching vouts")
     }
 
+    func testAmountMatchesOutputsByNormalizedAddress() {
+        let json = """
+        { "address-transactions": [{ "txid": "\(makeValidTxid())", "vout": [
+        { "scriptpubkey_address": "bc1qmultivout", "value": 100000 },
+        { "scriptpubkey_address": "BC1QMULTIVOUT", "value": 50000 }
+        ] }] }
+        """
+        service.trackAddress("bc1qmultivout")
+        var capturedAmount: Int64?
+        service.onTransactionDetected = { event in
+            guard case let .receive(_, _, amount) = event else { return }
+            capturedAmount = amount
+        }
+
+        service.handleMessage(json)
+
+        XCTAssertEqual(capturedAmount, 150_000, "bech32 case never changes the match, as in recovery")
+    }
+
     // MARK: - Edge Cases
 
     func testHandleMessageWithEmptyString() {
@@ -1318,6 +1337,30 @@ final class MempoolWebSocketServiceTests: XCTestCase {
         XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [txB: 50_000]))
         XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 60_000, unrecorded: [txB], walletSats: [:]))
         XCTAssertNil(DepositAttribution.missedTxid(remainderSats: 0, unrecorded: [txB], walletSats: [txB: 0]))
+    }
+
+    func testUnknownBaselineCandidateIsTheOneUnclaimedReceiveOfTheRemainder() {
+        let txA = String(repeating: "a", count: 64)
+        let txB = String(repeating: "b", count: 64)
+        XCTAssertEqual(
+            DepositAttribution.unknownBaselineCandidate(
+                remainderSats: 60000, walletSats: [txA: 60000, txB: 20000], claimed: []
+            ),
+            txA
+        )
+        // A claimed receive, two of that amount, another amount, or nothing left: no candidate.
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 60000], claimed: [txA]
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 60000, txB: 60000], claimed: []
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 60000, walletSats: [txA: 50000], claimed: []
+        ))
+        XCTAssertNil(DepositAttribution.unknownBaselineCandidate(
+            remainderSats: 0, walletSats: [txA: 0], claimed: []
+        ))
     }
 
     func testRemovedReceiveLeavesTheBaselineOnceTheNodeSyncs() {

@@ -370,6 +370,11 @@ class NodeService: NodeServiceProtocol {
         channels = node.listChannels()
     }
 
+    /// The wallet's inbound on-chain payments, read live; nil while the node is not running.
+    func inboundOnchain() -> WalletInboundOnchain? {
+        node.map { WalletInboundOnchain($0.listPayments()) }
+    }
+
     func connectAndOpenChannel(
         pubkey: String,
         address: String,
@@ -789,7 +794,10 @@ extension WalletInboundOnchain {
             guard case let .onchain(txid, _) = payment.kind else { continue }
             if case .failed = payment.status { continue }
             txids.insert(txid)
-            if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000) { sats[txid] = amount }
+            if let msat = payment.amountMsat, let amount = Int64(exactly: msat / 1000),
+               amount <= OnchainAmount.maxSats {
+                sats[txid] = amount
+            }
         }
         self.init(txids: txids, sats: sats)
     }
@@ -815,5 +823,30 @@ extension Error {
         default:
             return false
         }
+    }
+}
+
+extension LightningPaymentResolution {
+    /// nil while LDK still reports the payment pending. An unreported fee is recorded as 0.
+    init?(_ payment: PaymentDetails) {
+        switch payment.status {
+        case .succeeded: self = .succeeded(feeMsat: payment.feePaidMsat ?? 0)
+        case .failed: self = .failed(reasonCode: nil)
+        case .pending: return nil
+        }
+    }
+}
+
+extension ChannelSnapshot {
+    init(_ details: ChannelDetails) {
+        self.init(
+            userChannelId: details.userChannelId,
+            channelId: details.channelId,
+            counterpartyNodeId: details.counterpartyNodeId,
+            isChannelReady: details.isChannelReady,
+            outboundCapacityMsat: details.outboundCapacityMsat,
+            unspendablePunishmentReserve: details.unspendablePunishmentReserve,
+            channelValueSats: details.channelValueSats
+        )
     }
 }

@@ -25,8 +25,18 @@ enum OnchainAmount {
         return UInt64(sats) * 1000
     }
 
+    /// The price a payment row stores: nil when no price is known.
+    static func storedPrice(_ price: Double) -> Double? {
+        price > 0 ? price : nil
+    }
+
     /// USD value of `sats` at `price`, or nil when no price is known.
     static func usd(sats: Int64, price: Double) -> Double? {
         price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil
+    }
+
+    /// USD value of `msats` at `price`, or nil when no price is known.
+    static func usd(msats: UInt64, price: Double) -> Double? {
+        price > 0 ? BitcoinUnits.usd(msats: msats, price: price) : nil
     }
 }

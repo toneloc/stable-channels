@@ -77,10 +77,20 @@ struct OnchainDepositReconciler {
                 "remainder_sats": "\(attribution.remainderSats)"
             ])
         }
+        var candidates = attribution.unrecordedTxids
+        // Without one, a placeholder still "Receiving" after the age-out window is failed.
+        if baseline.txids == nil, let claimed = try? repository.recordedReceiveTxids(),
+           let txid = DepositAttribution.unknownBaselineCandidate(
+               remainderSats: attribution.remainderSats,
+               walletSats: wallet.sats,
+               claimed: claimed
+           ) {
+            candidates.insert(txid)
+        }
         return MissedDeposit(
             sats: attribution.remainderSats,
             txid: attribution.missedTxid,
-            candidateTxids: attribution.unrecordedTxids
+            candidateTxids: candidates
         )
     }
 }
@@ -95,7 +105,7 @@ struct DepositRecordInput {
     var candidateTxids: Set<String> = []
 }
 
-/// Stores a fallback row's candidate txids after the row. A crash or failure in between leaves a row
+/// Stores a placeholder's candidate txids after the row. A crash or failure in between leaves a row
 /// without candidates, which a WebSocket receive never takes over: it records its own row instead.
 @MainActor
 private func recordCandidates(_ deposit: DepositRecordInput, databaseService: DatabaseService) {
@@ -214,5 +224,31 @@ final class IdentifiedDepositRecorder: DepositRecorder {
         } catch {
             return false
         }
+    }
+}
+
+/// Persists the deposit baseline, so a deposit deferred during a splice/close is still detected
+/// after a restart. The balance cache can't serve as the baseline: it is refreshed while detection
+/// is deferred. Seeded once from the cached balance and wallet txids.
+enum OnchainDepositBaselineStore {
+    static let satsKey = "deposit_baseline_sats"
+    static let txidsKey = "deposit_baseline_txids"
+
+    static func load(defaults: UserDefaults?, seedSatsKey: String, seedTxidsKey: String) -> OnchainDepositBaseline {
+        guard let defaults else { return OnchainDepositBaseline(sats: 0, txids: nil) }
+        if defaults.object(forKey: satsKey) == nil {
+            defaults.set(defaults.integer(forKey: seedSatsKey), forKey: satsKey)
+            defaults.set(defaults.stringArray(forKey: seedTxidsKey), forKey: txidsKey)
+        }
+        return OnchainDepositBaseline(
+            sats: UInt64(bitPattern: Int64(defaults.integer(forKey: satsKey))),
+            txids: defaults.stringArray(forKey: txidsKey).map(Set.init)
+        )
+    }
+
+    /// Unknown txids (nil) remove the stored list, so a later load reads them as unknown too.
+    static func save(_ baseline: OnchainDepositBaseline, defaults: UserDefaults?) {
+        defaults?.set(Int64(bitPattern: baseline.sats), forKey: satsKey)
+        defaults?.set(baseline.txids?.sorted(), forKey: txidsKey)
     }
 }
