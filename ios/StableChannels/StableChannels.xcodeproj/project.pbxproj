@@ -137,6 +137,7 @@
 		49A0F0033029000000000001 /* PriceOracle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A0F0013029000000000001 /* PriceOracle.swift */; };
 		49A3297B300CC81D003EC383 /* WalletErrorMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A3297A300CC81D003EC383 /* WalletErrorMessages.swift */; };
 		49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */; };
+		49A368E3309B7975009FF99E /* HeaderChainPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */; };
 		49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */; };
 		49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */; };
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
@@ -422,6 +423,7 @@
 		49A0F0013029000000000001 /* PriceOracle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PriceOracle.swift; sourceTree = "<group>"; };
 		49A3297A300CC81D003EC383 /* WalletErrorMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletErrorMessages.swift; sourceTree = "<group>"; };
 		49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletErrorMessagesTests.swift; sourceTree = "<group>"; };
+		49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderChainPolicy.swift; sourceTree = "<group>"; };
 		49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSheetHelpers.swift; sourceTree = "<group>"; };
 		49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSheet.swift; sourceTree = "<group>"; };
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
@@ -598,6 +600,7 @@
 				49DDD00F3054000100B5A146 /* BookRepairPolicy.swift */,
 				49DDD0013054000100B5A146 /* ChannelAllocation.swift */,
 				49D8450F308D013600882583 /* DepositAttribution.swift */,
+				49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */,
 				379669F5815ECD9926C3A5D2 /* LSPConfig.swift */,
 				49D8450D308CF99000882583 /* OnchainAmount.swift */,
 				499F1E563009F03E00936944 /* PaymentProgress.swift */,
@@ -1335,6 +1338,7 @@
 				4993591F30712DDF00D6B50E /* AddressVisualChunker.swift in Sources */,
 				4993592130712DDF00D6B50E /* Base58Check.swift in Sources */,
 				4993592030712DDF00D6B50E /* SendDestination.swift in Sources */,
+				49A368E3309B7975009FF99E /* HeaderChainPolicy.swift in Sources */,
 				49DDD0023054000100B5A146 /* ChannelAllocation.swift in Sources */,
 				49DDD0043054000100B5A146 /* PriceHistoryProviding.swift in Sources */,
 				49DDD0063054000100B5A146 /* PriceHistoryService.swift in Sources */,

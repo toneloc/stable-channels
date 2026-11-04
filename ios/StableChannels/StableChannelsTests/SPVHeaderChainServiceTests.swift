@@ -81,6 +81,59 @@ final class SPVHeaderChainServiceTests: XCTestCase {
         try super.tearDownWithError()
     }
 
+    // MARK: - Unverified WebSocket heights
+
+    private func block(_ height: UInt32, _ hash: String, prev: String) -> MempoolWSBlock {
+        MempoolWSBlock(height: height, id: hash, previousblockhash: prev, timestamp: 1_700_000_000)
+    }
+
+    func testReorgKeepsTheVerifiedTipWhenTheRefreshFails() async throws {
+        blockHeightService.setHeightSilently(100)
+        mockProvider.currentHeightFails = true
+        await spvService.processBlockHeader(block(100, "hash_100", prev: "hash_99"))
+        await spvService.processBlockHeader(block(104, "hash_104", prev: "hash_103"))
+
+        // Same-or-next height with a different parent takes the reorg path.
+        await spvService.processBlockHeader(block(105, "hash_105b", prev: "other_104"))
+
+        XCTAssertEqual(try db.fetchLatestHeader()?.hash, "hash_105b")
+        XCTAssertEqual(blockHeightService.currentHeight, 100, "an unverified WebSocket height must not become the tip")
+    }
+
+    func testMaximumHeightTipNeitherCrashesNorSticks() async throws {
+        await spvService.processBlockHeader(block(UInt32.max, "poison", prev: "poison_parent"))
+        XCTAssertEqual(try db.fetchLatestHeader()?.height, UInt32.max)
+
+        blockHeightService.setHeightSilently(800_000)
+        mockProvider.mockCurrentHeight = 800_000
+        await spvService.processBlockHeader(block(800_001, "hash_800001", prev: "hash_800000"))
+
+        let tip = try db.fetchLatestHeader()
+        XCTAssertEqual(tip?.height, 800_001)
+        XCTAssertEqual(tip?.hash, "hash_800001")
+    }
+
+    func testHeaderFarAheadOfTheVerifiedTipIsNotStored() async throws {
+        blockHeightService.setHeightSilently(100)
+        mockProvider.mockCurrentHeight = 100
+        await spvService.processBlockHeader(block(100, "hash_100", prev: "hash_99"))
+
+        await spvService.processBlockHeader(block(900_000, "fake", prev: "fake_parent"))
+
+        XCTAssertEqual(try db.fetchLatestHeader()?.height, 100)
+    }
+
+    func testCatchUpBeyondTheLeadIsStoredOnceTheVerifiedTipRefreshes() async throws {
+        blockHeightService.setHeightSilently(100)
+        await spvService.processBlockHeader(block(100, "hash_100", prev: "hash_99"))
+
+        mockProvider.mockCurrentHeight = 120
+        await spvService.processBlockHeader(block(120, "hash_120", prev: "hash_119"))
+
+        XCTAssertEqual(try db.fetchLatestHeader()?.height, 120)
+        XCTAssertEqual(blockHeightService.currentHeight, 120)
+    }
+
     // MARK: - Test 1: Ordinary Offline Gap
 
     func testOrdinaryOfflineGapAdvancesTipAndStoresHeader() async throws {
@@ -770,4 +823,45 @@ private final class SettableTxPresence: TxPresenceProviding, @unchecked Sendable
 private struct StubTxPresence: TxPresenceProviding {
     let known: Bool?
     func isKnown(txid _: String) async -> Bool? { known }
+}
+
+final class HeaderChainPolicyTests: XCTestCase {
+    func testStepClassifiesAppendCatchUpAndReorg() {
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: 100, tipHash: "a", incomingHeight: 101, incomingPrevHash: "a"),
+            .append
+        )
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: 100, tipHash: "a", incomingHeight: 105, incomingPrevHash: "x"),
+            .catchUp
+        )
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: 100, tipHash: "a", incomingHeight: 101, incomingPrevHash: "x"),
+            .reorg
+        )
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: 100, tipHash: "a", incomingHeight: 99, incomingPrevHash: "x"),
+            .reorg
+        )
+    }
+
+    func testStepDoesNotOverflowOnAMaximumHeightTip() {
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: .max, tipHash: "a", incomingHeight: 800_001, incomingPrevHash: "x"),
+            .reorg
+        )
+        XCTAssertEqual(
+            HeaderChainPolicy.step(tipHeight: .max - 1, tipHash: "a", incomingHeight: .max, incomingPrevHash: "x"),
+            .reorg
+        )
+    }
+
+    func testCanStoreLimitsTheLeadOverTheVerifiedTip() {
+        let lead = HeaderChainPolicy.maxLeadOverVerifiedTip
+        XCTAssertTrue(HeaderChainPolicy.canStore(incomingHeight: 900_000, verifiedTip: 0))
+        XCTAssertTrue(HeaderChainPolicy.canStore(incomingHeight: 90, verifiedTip: 100))
+        XCTAssertTrue(HeaderChainPolicy.canStore(incomingHeight: 100 + lead, verifiedTip: 100))
+        XCTAssertFalse(HeaderChainPolicy.canStore(incomingHeight: 101 + lead, verifiedTip: 100))
+        XCTAssertFalse(HeaderChainPolicy.canStore(incomingHeight: .max, verifiedTip: 100))
+    }
 }
