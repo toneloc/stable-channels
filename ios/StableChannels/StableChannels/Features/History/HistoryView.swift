@@ -103,7 +103,7 @@ struct HistoryView: View {
     }
 
     private var historyDisplayPrice: Double {
-        appState.btcPrice > 0 ? appState.btcPrice : appState.stableChannel.latestPrice
+        appState.spotOrBookedPrice
     }
 
     private var trades: [TradeRecord] { history.trades }
@@ -158,7 +158,10 @@ struct HistoryView: View {
     }
 
     private func loadHistory() {
-        history.reload(database: appState.databaseService)
+        history.reload(
+            loadTrades: { try appState.paymentQueries.recentTrades(limit: 50) },
+            loadPayments: { try appState.paymentQueries.recentPayments(limit: 50) }
+        )
     }
 }
 
@@ -178,17 +181,6 @@ struct HistoryContent {
     mutating func clearErrors() {
         networkError = nil
         loadError = nil
-    }
-
-    mutating func reload(database: DatabaseService?) {
-        guard let database else {
-            loadError = ConfirmationRefreshResult.databaseUnavailable.errorMessage
-            return
-        }
-        reload(
-            loadTrades: { try database.channelRepo.getRecentTrades(limit: 50) },
-            loadPayments: { try database.paymentRepo.getRecentPayments(limit: 50) }
-        )
     }
 
     mutating func reload(
@@ -295,8 +287,14 @@ struct PaymentRowView: View {
         switch payment.paymentType {
         case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
         case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
+        case SplicePaymentType.spliceIn.rawValue: return String(
+                localized: "payment_type_splice_in",
+                defaultValue: "Splice In"
+            )
+        case SplicePaymentType.spliceOut.rawValue: return String(
+                localized: "payment_type_splice_out",
+                defaultValue: "Splice Out"
+            )
         case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")
@@ -340,7 +338,7 @@ struct PaymentRowView: View {
 private extension PaymentRecord {
     var shouldPreferUSDDisplay: Bool {
         switch paymentType {
-        case "splice_in", "splice_out", "onchain", "channel_close":
+        case SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue, "onchain", "channel_close":
             return true
         default:
             return false
@@ -354,7 +352,7 @@ private extension PaymentRecord {
         guard shouldPreferUSDDisplay else { return nil }
         let price = (btcPrice ?? 0) > 0 ? (btcPrice ?? 0) : fallbackPrice
         guard price > 0 else { return nil }
-        return Double(amountSats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: amountSats, price: price)
     }
 }
 

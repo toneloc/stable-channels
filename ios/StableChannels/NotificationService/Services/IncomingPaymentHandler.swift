@@ -133,6 +133,19 @@ final class IncomingPaymentHandler: PaymentHandler {
                         persistenceFailed = true
                     }
                 }
+            case .spliceNegotiated, .channelReady, .spliceNegotiationFailed:
+                // Commit splice details before acking; a failure while a splice is pending is
+                // left for the foreground.
+                guard SpliceEventAcknowledgement.backgroundMayAcknowledge(event, db: db, node: node)
+                else { break eventLoop }
+                try? node.eventHandled()
+            case .paymentSuccessful, .paymentFailed:
+                // Not acked on a failed write: the foreground replays and records it.
+                if recordOutgoingOutcome(event, node: node, db: db) {
+                    try? node.eventHandled()
+                } else {
+                    persistenceFailed = true
+                }
             default:
                 try? node.eventHandled()
             }
@@ -190,7 +203,7 @@ final class IncomingPaymentHandler: PaymentHandler {
             shouldPersist = nil
         } else {
             let totalSats = totalMsat / 1000
-            let usd = Double(totalSats) / 100_000_000.0 * price
+            let usd = BitcoinUnits.usd(sats: totalSats, price: price)
             content = mutator.buildForReceived(base: baseContent, amountSats: totalSats, usd: usd, btcPrice: price)
             shouldPersist = false
         }
@@ -199,6 +212,6 @@ final class IncomingPaymentHandler: PaymentHandler {
     }
 
     private func calculateUSD(_ sats: UInt64, price: Double) -> Double {
-        Double(sats) / 100_000_000.0 * price
+        BitcoinUnits.usd(sats: sats, price: price)
     }
 }

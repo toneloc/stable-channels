@@ -127,6 +127,7 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             user_channel_id TEXT NOT NULL UNIQUE,
+            expected_usd REAL NOT NULL DEFAULT 0.0,
             stable_sats INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
@@ -334,6 +335,7 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             user_channel_id TEXT NOT NULL UNIQUE,
+            expected_usd REAL NOT NULL DEFAULT 0.0,
             stable_sats INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
@@ -520,5 +522,78 @@ final class SQLitePaymentDatabaseTests: XCTestCase {
         } else {
             XCTFail("Failed to query schema_migrations")
         }
+    }
+}
+
+// MARK: - Incoming stability allocation (#320)
+
+extension SQLitePaymentDatabaseTests {
+    private func seedIncomingBooks(backing: Int64) throws {
+        try executeRawSQL(path: tempDBPath, sql: """
+        CREATE TABLE payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            payment_id TEXT UNIQUE,
+            payment_type TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            amount_msat INTEGER NOT NULL,
+            amount_usd REAL,
+            btc_price REAL,
+            status TEXT NOT NULL,
+            is_placeholder INTEGER NOT NULL DEFAULT 0,
+            backing_applied INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        CREATE TABLE channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT NOT NULL,
+            user_channel_id TEXT NOT NULL UNIQUE,
+            expected_usd REAL NOT NULL DEFAULT 0.0,
+            stable_sats INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+        );
+        INSERT INTO channels (channel_id, user_channel_id, expected_usd, stable_sats)
+        VALUES ('chan-320', 'ucid-320', 10.0, \(backing));
+        """)
+    }
+
+    private func scalar(_ sql: String) -> Int64? {
+        var sqlite: OpaquePointer?
+        guard sqlite3_open_v2(tempDBPath, &sqlite, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_close(sqlite) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(sqlite, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? sqlite3_column_int64(stmt, 0) : nil
+    }
+
+    private func receiveStability(_ db: SQLitePaymentDatabase, _ paymentId: String,
+                                  price: Double) -> PaymentInsertResult {
+        db.recordPayment(
+            paymentId: paymentId,
+            paymentType: "stability",
+            direction: "received",
+            amountMsat: 5_000_000,
+            amountUSD: 5.0,
+            btcPrice: price,
+            backingDeltaSats: 5_000,
+            userChannelId: "ucid-320",
+            settlementId: nil
+        )
+    }
+
+    func testRecordPayment_incomingStabilityCreditsOnlyTheShortfall() throws {
+        try seedIncomingBooks(backing: 9_000)
+        let db = SQLitePaymentDatabase(dbPath: tempDBPath)
+        XCTAssertEqual(receiveStability(db, "nse-320-1", price: 100_000), .inserted)
+        XCTAssertEqual(scalar("SELECT stable_sats FROM channels WHERE user_channel_id = 'ucid-320'"), 10_000)
+        XCTAssertEqual(scalar("SELECT amount_msat FROM payments WHERE payment_id = 'nse-320-1'"), 5_000_000)
+    }
+
+    func testRecordPayment_incomingStabilityWithoutPriceRollsBack() throws {
+        try seedIncomingBooks(backing: 9_000)
+        let db = SQLitePaymentDatabase(dbPath: tempDBPath)
+        XCTAssertNotEqual(receiveStability(db, "nse-320-2", price: 0), .inserted)
+        XCTAssertEqual(scalar("SELECT stable_sats FROM channels WHERE user_channel_id = 'ucid-320'"), 9_000)
+        XCTAssertEqual(scalar("SELECT COUNT(*) FROM payments WHERE payment_id = 'nse-320-2'"), 0)
     }
 }

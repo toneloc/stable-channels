@@ -28,6 +28,12 @@ final class TransactionLinkService {
         setReceiveTxid(nil)
     }
 
+    /// Drops the stored receive txid only if it is `txid` (e.g. it was found not to pay the address).
+    func clearReceiveTxid(ifMatching txid: String) {
+        guard lastReceiveTxid == txid else { return }
+        clearReceiveTxid()
+    }
+
     func clearCloseTxid() {
         setCloseTxid(nil)
     }

@@ -16,7 +16,7 @@ struct HomeBalanceSectionView: View {
             return appState.totalBalanceUSD
         }
         if appState.btcPrice > 0 && displaySats > 0 {
-            return Double(displaySats) / Double(Constants.satsInBTC) * appState.btcPrice
+            return BitcoinUnits.usd(sats: displaySats, price: appState.btcPrice)
         }
         return appState.stableUSD
     }

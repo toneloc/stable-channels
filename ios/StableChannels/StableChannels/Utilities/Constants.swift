@@ -3,7 +3,7 @@ import Foundation
 enum Constants {
     // MARK: - Network
 
-    static let satsInBTC: UInt64 = 100_000_000
+    static let satsInBTC = UInt64(BitcoinUnits.satsPerBTC)
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let tradeMessageType = "TRADE_V1"
@@ -20,6 +20,14 @@ enum Constants {
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
     static let esploraChainURLs: [String] = [primaryChainURL, fallbackChainURL]
+
+    /// Explorer lookup order: the user's configured chain first, then the defaults, deduplicated.
+    static func chainLookupURLs(preferred: String) -> [String] {
+        ([preferred] + esploraChainURLs).reduce(into: []) { urls, url in
+            if !urls.contains(url) { urls.append(url) }
+        }
+    }
+
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL
@@ -65,8 +73,6 @@ enum Constants {
     // MARK: - Business Logic
 
     static let maxRiskLevel: Int32 = 100
-    static let stabilityThresholdPercent: Double = 0.1
-    static let stabilityThresholdUSD: Double = 0.25
     static let stabilityPaymentCooldownSecs: UInt64 = 120
     /// A stability payment may only be sent when the Lightning wallet synced to chain within
     /// this window (two 60s background sync intervals, so one missed tick is tolerated).
@@ -139,6 +145,8 @@ extension Constants {
     static func exportableLogURLs() -> [URL] {
         let fileManager = FileManager.default
         let candidates = [
+            URL(fileURLWithPath: AuditService
+                .rotatedPath(for: userDataDir.appendingPathComponent("audit_log.txt").path)),
             userDataDir.appendingPathComponent("audit_log.txt"),
             userDataDir.appendingPathComponent("ldk-node.log")
         ]

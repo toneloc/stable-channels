@@ -43,4 +43,6 @@ protocol MempoolWebSocketProtocol: AnyObject {
     func untrackAddress(_ address: String)
     func trackTx(_ txid: String)
     func untrackTx(_ txid: String)
+    /// Drops every address and txid subscription, for a wallet reset.
+    func untrackAll()
 }
