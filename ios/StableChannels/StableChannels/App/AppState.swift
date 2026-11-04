@@ -1482,7 +1482,7 @@ class AppState {
         }
     }
 
-    private func performBackgroundStop() {
+    func performBackgroundStop() {
         backgroundStopWorkItem = nil
         // A suspended app must not start the node and take the wallet dir from the NSE;
         // foreground resumes the retry with the same backoff.
@@ -1493,7 +1493,7 @@ class AppState {
             // starved of stability pushes for the suspended app's lifetime.
             // While a flow IS live (even pre-isStarting, e.g. stalled in DB
             // init), the lock stays: that flow owns it and may still resume.
-            if !nodeService.isStarting && !nodeFlowInProgress {
+            if !nodeService.isStarting && !nodeFlowInProgress && !nodeStartup.isFailoverRunning {
                 NodeDirLock.shared.release()
             }
             if backgroundTaskID != .invalid {

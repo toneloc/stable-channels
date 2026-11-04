@@ -45,6 +45,12 @@ final class NodeStartupCoordinator {
     @ObservationIgnored private(set) var isPaused = false
     /// True while a fired retry is still running (probing providers or starting the node).
     var hasRetryRunning: Bool { runningRetry != nil }
+    /// True while `start` walks its attempts, including the delay between them, when no
+    /// `NodeService` start is in flight; background stop must keep the lock the failover holds.
+    var isFailoverRunning: Bool { runningFailovers > 0 }
+    @ObservationIgnored private var runningFailovers = 0
+    /// Bumped by every background pause, so a failover can tell it was paused mid-sequence.
+    @ObservationIgnored private var pauseCount = 0
     @ObservationIgnored private let sleep: (Duration) async throws -> Void
     @ObservationIgnored private let log: (String, [String: Any]) -> Void
     @ObservationIgnored private let chainURLStore: ChainURLStore
@@ -85,6 +91,9 @@ final class NodeStartupCoordinator {
         using startNode: (String) async throws -> Void
     ) async throws -> String {
         guard let primaryURL = attempts.first?.url else { throw NodeStartupError.noAttempts }
+        runningFailovers += 1
+        defer { runningFailovers -= 1 }
+        let pausesAtStart = pauseCount
         var firstError: Error?
         var lastError: Error?
 
@@ -94,6 +103,8 @@ final class NodeStartupCoordinator {
             if attempt.delayBefore > .zero {
                 try await sleep(attempt.delayBefore)
             }
+            // Background stopped the app mid-failover: end as paused, never start a node while suspended.
+            guard pauseCount == pausesAtStart else { throw CancellationError() }
             do {
                 try await startNode(attempt.url)
                 if index > 0 {
@@ -227,6 +238,12 @@ final class NodeStartupCoordinator {
     /// left off. A running retry sees cancellation and must not start the node afterwards.
     func pause() {
         isPaused = true
+        pauseCount += 1
+        cancelRetries()
+    }
+
+    /// Cancels a pending or running retry, refunding the running one's attempt.
+    private func cancelRetries() {
         pendingRetry?.cancel()
         pendingRetry = nil
         if let runningRetry {
@@ -240,7 +257,7 @@ final class NodeStartupCoordinator {
 
     /// Stops any retry and forgets the backoff.
     func reset() {
-        pause()
+        cancelRetries()
         isPaused = false
         retryAttempt = 0
         isRetrying = false

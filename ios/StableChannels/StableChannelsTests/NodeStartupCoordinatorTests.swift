@@ -694,6 +694,41 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(sleeps.first, Constants.nodeStartRetryDelay)
         XCTAssertEqual(appState.chainURL, Constants.primaryChainURL)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "A total failure hands the wallet dir back")
+        appState.nodeStartup.reset()
+    }
+
+    /// A retry cancelled while waiting for the wallet dir reports the pause, not a locked dir,
+    /// starts no node and leaves the lock free.
+    func testCancelledLockWait_endsPausedWithoutTheLock() async throws {
+        NodeDirLock.shared.release()
+        try FileManager.default.createDirectory(at: Constants.userDataDir, withIntermediateDirectories: true)
+        let lockPath = Constants.userDataDir.appendingPathComponent(NodeDirLock.lockFilename).path
+        let otherHolder = open(lockPath, O_CREAT | O_RDWR, 0o644)
+        XCTAssertGreaterThanOrEqual(otherHolder, 0)
+        defer { close(otherHolder) }
+        XCTAssertEqual(flock(otherHolder, LOCK_EX | LOCK_NB), 0, "Another holder takes the wallet dir")
+        let node = FeeStallingNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .syncing
+
+        let retry = Task { await appState.retryConnection() }
+        retry.cancel()
+        await retry.value
+
+        XCTAssertTrue(node.startedURLs.isEmpty)
+        XCTAssertFalse(NodeDirLock.shared.isHeld)
+        XCTAssertTrue(
+            events
+                .contains {
+                    $0.name == "NODE_START_RETRY_SCHEDULED" && $0.data["error"] as? String == "resumed after pause"
+                },
+            "The cancelled wait must take the pause path"
+        )
         appState.nodeStartup.reset()
     }
 
@@ -734,6 +769,39 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertEqual(node.lockHeldAtAttemptStart, [true, true], "Every attempt must run under one held lease")
         XCTAssertTrue(NodeDirLock.shared.isHeld, "The started node keeps the wallet dir")
         appState.nodeStartup.reset()
+    }
+
+    /// Background stop during the delay between failover attempts must not free the wallet dir the
+    /// failover holds, and the failover must not start another node in the suspended app: it ends
+    /// paused and only then hands the dir back.
+    func testBackgroundStopBetweenFailoverAttempts_keepsTheLockAndStartsNoFurtherAttempt() async {
+        NodeDirLock.shared.release()
+        let node = FeeStallingNodeService()
+        var appState: AppState?
+        var lockHeldAfterStop: Bool?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+            lockHeldAfterStop = NodeDirLock.shared.isHeld
+        })
+        appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+        appState?.phase = .syncing
+
+        await appState?.retryConnection()
+
+        XCTAssertEqual(lockHeldAfterStop, true, "Background stop must leave the failover's lock held")
+        XCTAssertEqual(
+            node.startedURLs,
+            [Constants.primaryChainURL, Constants.fallbackChainURL],
+            "No attempt may start after background stop"
+        )
+        XCTAssertTrue(coordinator.isPaused)
+        XCTAssertFalse(NodeDirLock.shared.isHeld, "The stopped failover hands the wallet dir back")
+        coordinator.reset()
     }
 
     func testForegroundInAnyPhase_endsThePause() async {
