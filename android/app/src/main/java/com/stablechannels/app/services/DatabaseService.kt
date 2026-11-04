@@ -2733,6 +2733,24 @@ class DatabaseService(context: Context) :
         return txids.singleOrNull()
     }
 
+    /** The txid of the pending splice on this channel, if there is exactly one. */
+    fun getPendingSpliceTxid(userChannelId: String, channelId: String): String? {
+        val txids =
+            readableDatabase
+                .rawQuery(
+                    "SELECT p.txid FROM payments p " +
+                        "JOIN splice_operations s ON s.payment_row_id = p.id " +
+                        "WHERE p.status = 'pending' AND p.txid IS NOT NULL " +
+                        "AND p.payment_type IN ('splice_in','splice_out') " +
+                        "AND s.user_channel_id = ? AND s.channel_id = ? LIMIT 2",
+                    arrayOf(userChannelId, channelId),
+                )
+                .use { cursor ->
+                    buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+                }
+        return txids.singleOrNull()
+    }
+
     fun hasPendingSplice(): Boolean {
         // If the app died before SpliceNegotiated delivered a txid, there is no
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.

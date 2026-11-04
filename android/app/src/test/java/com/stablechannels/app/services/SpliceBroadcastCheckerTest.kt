@@ -2,8 +2,10 @@ package com.stablechannels.app.services
 
 import java.util.concurrent.TimeUnit
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,6 +66,24 @@ class SpliceBroadcastCheckerTest {
         val result = checker(retries = 3).checkStatus("abc", listOf(server.url("/").toString()))
 
         assertEquals(TxBroadcastStatus.NOT_FOUND, result)
+    }
+
+    @Test
+    fun `unknown txid is NOT_FOUND though esplora answers its status`() {
+        // Esplora's answers for a txid it has never seen (#467).
+        val status = MockResponse().setBody("{\"confirmed\":false}")
+        val missing = MockResponse().setResponseCode(404)
+        val server = newServer()
+        server.dispatcher =
+            object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse =
+                    if (request.path!!.endsWith("/status")) status else missing
+            }
+
+        val result = checker(retries = 1).checkStatus("abc", listOf(server.url("/api").toString()))
+
+        assertEquals(TxBroadcastStatus.NOT_FOUND, result)
+        assertEquals("/api/tx/abc/hex", server.takeRequest().path)
     }
 
     @Test
