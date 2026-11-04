@@ -191,7 +191,10 @@ class NodeService: NodeServiceProtocol {
 
         // Cross-process exclusivity: never open the wallet dir while another
         // process (the NSE) has a node on it. No-op if already held.
-        let lease = await NodeDirLock.shared.acquireReportingNew(dataDir: Constants.userDataDir, timeout: 35)
+        let lease = await NodeDirLock.shared.acquireReportingNew(
+            dataDir: Constants.userDataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs
+        )
         guard lease.held else {
             // A paused retry gave up waiting; report the pause, not a locked wallet dir.
             try Task.checkCancellation()

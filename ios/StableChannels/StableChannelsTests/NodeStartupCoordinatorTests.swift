@@ -31,6 +31,8 @@ final class NodeStartupCoordinatorTests: XCTestCase {
 
     override func tearDown() async throws {
         chainURLDefaults.removePersistentDomain(forName: chainURLSuite)
+        // A test node that started keeps the process-wide wallet-dir lock; free it for later tests.
+        NodeDirLock.shared.release()
     }
 
     private var chainURLStore: UserDefaultsChainURLStore {
@@ -714,6 +716,26 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         appState.nodeStartup.reset()
     }
 
+    /// A scheduled retry holds the wallet-dir lock across its whole failover, so a failed primary
+    /// attempt never frees the dir for the notification extension before the fallback starts.
+    func testRetryFailover_holdsTheWalletDirLockAcrossAttempts() async {
+        NodeDirLock.shared.release()
+        let node = LeaseMirroringNodeService()
+        let appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: heldRetries()
+        )
+        appState.phase = .syncing
+
+        await appState.retryConnection()
+
+        XCTAssertEqual(node.startedURLs, [Constants.primaryChainURL, Constants.fallbackChainURL])
+        XCTAssertEqual(node.lockHeldAtAttemptStart, [true, true], "Every attempt must run under one held lease")
+        XCTAssertTrue(NodeDirLock.shared.isHeld, "The started node keeps the wallet dir")
+        appState.nodeStartup.reset()
+    }
+
     func testForegroundInAnyPhase_endsThePause() async {
         let appState = AppState()
         appState.phase = .offline
@@ -762,6 +784,25 @@ private class FeeStallingNodeService: StallingNodeService {
 }
 
 /// A node whose start fails fee-rate estimation only against the primary provider.
-private final class PrimaryStallingNodeService: FeeStallingNodeService {
+private class PrimaryStallingNodeService: FeeStallingNodeService {
     override func stall(_ url: String) -> NodeError? { url == Constants.primaryChainURL ? super.stall(url) : nil }
+}
+
+/// Fails over like `PrimaryStallingNodeService` and takes the wallet-dir lease the way `NodeService.start`
+/// does: a failed attempt releases it only when that attempt newly acquired it.
+private final class LeaseMirroringNodeService: PrimaryStallingNodeService {
+    private(set) var lockHeldAtAttemptStart: [Bool] = []
+
+    override func start(network: Network, esploraURL: String, mnemonic: String, lspConfig: LSPConfig) async throws {
+        lockHeldAtAttemptStart.append(NodeDirLock.shared.isHeld)
+        let lease = NodeDirLock.shared.tryAcquireReportingNew(dataDir: Constants.userDataDir)
+        do {
+            try await super.start(network: network, esploraURL: esploraURL, mnemonic: mnemonic, lspConfig: lspConfig)
+        } catch {
+            if lease.newlyAcquired {
+                NodeDirLock.shared.release()
+            }
+            throw error
+        }
+    }
 }

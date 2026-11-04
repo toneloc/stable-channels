@@ -800,7 +800,10 @@ class AppState {
         // Own the wallet dir before stopping/wiping: restore can be reached
         // while the lock is not held (e.g. after a startup failure released
         // it), and wiping under a live NSE node would corrupt its state.
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(
+            dataDir: Constants.userDataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs
+        )) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restoreWalletFromMnemonic"])
             phase = priorPhase
             statusMessage = ""
@@ -1016,7 +1019,10 @@ class AppState {
         // Take the wallet-dir lock before any DB access (network-graph purge,
         // database init, node start). Kernel-enforced; outlasts a live NSE.
         let lockStart = Date()
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(
+            dataDir: Constants.userDataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs
+        )) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "AppState.start"])
             await MainActor.run { phase = .error("Wallet is busy. Please reopen the app.") }
             return
@@ -1607,7 +1613,10 @@ class AppState {
         }
         print("[App] Restarting node from foreground")
         // Reclaim the wallet dir before writing gossip back into the LDK DB.
-        if await !(NodeDirLock.shared.acquire(dataDir: Constants.userDataDir, timeout: 35)) {
+        if await !(NodeDirLock.shared.acquire(
+            dataDir: Constants.userDataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs
+        )) {
             AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "restartNodeFromForeground"])
             return
         }
@@ -4271,10 +4280,21 @@ class AppState {
     /// surface inside `node.start()` itself (fee-rate estimation against the chosen host).
     /// The coordinator records the working URL in the app group so the NSE starts from it too.
     ///
-    /// On total failure the wallet-dir lock is released (a no-op when NodeService.start
-    /// already released its own lease) so a broken app process never starves the NSE.
+    /// One wallet-dir lease spans every provider attempt (a no-op where the caller already
+    /// holds it), so a failed attempt never frees the dir for the NSE before the next one.
+    /// On total failure the lock is released so a broken app process never starves the NSE;
+    /// on success the running node keeps it.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
         do {
+            guard await NodeDirLock.shared.acquire(
+                dataDir: Constants.userDataDir,
+                timeout: Constants.nodeDirLockTimeoutSecs
+            ) else {
+                // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+                try Task.checkCancellation()
+                AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "startNodeWithFailover"])
+                throw NodeServiceError.dataDirLocked
+            }
             chainURL = try await nodeStartup.startWithFailover(
                 preferred: chainURL,
                 isRetryable: { $0.isRetryableEsploraStartupError }
