@@ -2693,6 +2693,13 @@ class AppState {
             data["counterparty_node_id"] = "\(counterpartyNodeId)"
         }
         AuditService.log("CHANNEL_CLOSED", data: data)
+        let spliceOfClosedChannel = try? databaseService?.spliceRepo.getPendingSpliceTxid(
+            userChannelId: "\(userChannelId)",
+            channelId: "\(channelId)"
+        )
+        if let txid = spliceOfClosedChannel {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "\(channelId)", userChannelId: "\(userChannelId)")
+        }
 
         // Funding txid is NOT close txid; defer payments row to handleCloseTxidResolved
 
@@ -2913,6 +2920,20 @@ class AppState {
     }
 
     private var isCheckingSpliceFailures = false
+
+    /// A splice can't complete once its channel has closed. Queues the check that fails it if its
+    /// tx never reached the network, so it stops blocking Move and on-chain sends (#467).
+    func checkSpliceOfClosedChannel(txid: String, channelId: String, userChannelId: String) {
+        do {
+            try databaseService?.spliceRepo.deferFailureCheck(
+                txid: txid, channelId: channelId, userChannelId: userChannelId
+            )
+        } catch {
+            AuditService.log("SPLICE_FAILURE_QUEUE_FAILED", data: ["error": error.localizedDescription])
+            return
+        }
+        Task { [weak self] in await self?.retryPendingSpliceFailureChecks() }
+    }
 
     func retryPendingSpliceFailureChecks() async {
         guard !isCheckingSpliceFailures, let databaseService else { return }
@@ -3177,6 +3198,10 @@ class AppState {
         // before its txid has arrived.
         isSweeping = true
         guard let txid = (try? spliceRepo.getPendingSpliceTxid()) ?? nil else { return }
+        // No channel is left: the splice's channel closed, maybe while the app was not running.
+        if nodeService.isRunning, nodeService.channels.isEmpty {
+            checkSpliceOfClosedChannel(txid: txid, channelId: "", userChannelId: "")
+        }
         let alreadyMonitoring = Self.shouldSkipGenerationBumpOnResume(
             monitorActive: spliceConfirmationTask != nil,
             monitoredTxid: monitoredSpliceTxid,

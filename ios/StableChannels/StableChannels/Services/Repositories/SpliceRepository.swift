@@ -249,6 +249,19 @@ final class SpliceRepository {
         return rows.first?.optString(0)
     }
 
+    /// The txid of the pending splice on this channel, if any.
+    func getPendingSpliceTxid(userChannelId: String, channelId: String) throws -> String? {
+        try rawSQL.query(
+            """
+            SELECT p.txid FROM payments p JOIN splice_operations s ON s.payment_row_id = p.id
+            WHERE p.status = 'pending' AND p.payment_type IN \(SpliceEventRecorder.spliceTypesSQL)
+              AND p.txid IS NOT NULL AND s.user_channel_id = ? AND s.channel_id = ?
+            ORDER BY p.id DESC LIMIT 1
+            """,
+            params: [.text(userChannelId), .text(channelId)]
+        ).first?.optString(0)
+    }
+
     func hasPendingSplice() throws -> Bool {
         // Recover first: a captured event proves negotiation, so its row must not expire.
         try recoverAssignments()
