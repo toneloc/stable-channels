@@ -1167,9 +1167,7 @@ class AppState {
                     if isTestingEnvironment {
                         phase = .wallet
                     }
-                    blockHeightService.start()
-                    mempoolWebSocketService.connect()
-                    Task { await confirmationPollingService?.pollOnce() }
+                    startChainWatchers()
                     refreshBalances()
                     updateStableBalances()
                 }
@@ -1185,8 +1183,7 @@ class AppState {
                 }
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
-                txidResolutionService.replayPendingChannelCloses()
-                txidResolutionService.replayPendingOnchainReceives()
+                replayPendingTxidWork()
             } catch {
                 await handleNodeStartFailure(error, failPrefix: "Wallet creation failed") {
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
@@ -1282,6 +1279,7 @@ class AppState {
             }
         } else {
             await synchronizeActiveWalletState()
+            mempoolWebSocketService.connect()
         }
     }
 
@@ -1380,13 +1378,23 @@ class AppState {
         fundingTxid = UserDefaults(suiteName: Constants.appGroupIdentifier)?
             .string(forKey: "funding_txid")
         resumePendingSpliceConfirmation()
-        blockHeightService.start()
-        mempoolWebSocketService.connect()
-        Task { await confirmationPollingService?.pollOnce() }
+        startChainWatchers()
         startStabilityTimer()
         reregisterPushTokenIfNeeded()
         await processPendingPushPayment()
         reconcilePendingLightningPayments()
+        replayPendingTxidWork()
+    }
+
+    /// Starts block-height and mempool watchers and polls confirmations once after a node start.
+    private func startChainWatchers() {
+        blockHeightService.start()
+        mempoolWebSocketService.connect()
+        Task { await confirmationPollingService?.pollOnce() }
+    }
+
+    /// Replays channel closes and on-chain receives whose txids were queued while the node was down.
+    private func replayPendingTxidWork() {
         txidResolutionService.replayPendingChannelCloses()
         txidResolutionService.replayPendingOnchainReceives()
     }
@@ -1400,7 +1408,6 @@ class AppState {
         await priceService.fetchPrice()
         recordCurrentPrice()
         ensureLSPConnected()
-        mempoolWebSocketService.connect()
         priceService.startAutoRefresh()
     }
 
@@ -1624,9 +1631,7 @@ class AppState {
         do {
             try await startNodeWithFailover(mnemonic: "")
             refreshBalances()
-            blockHeightService.start()
-            mempoolWebSocketService.connect()
-            Task { await confirmationPollingService?.pollOnce() }
+            startChainWatchers()
             updateStableBalances()
             StabilityService.reconcileIncoming(&stableChannel)
             saveChannelToDB()
@@ -4285,17 +4290,13 @@ class AppState {
     /// On total failure the lock is released so a broken app process never starves the NSE;
     /// on success the running node keeps it.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
-        do {
-            guard await NodeDirLock.shared.acquire(
-                dataDir: Constants.userDataDir,
-                timeout: Constants.nodeDirLockTimeoutSecs
-            ) else {
-                // A paused retry gave up waiting; report the pause, not a locked wallet dir.
-                try Task.checkCancellation()
-                AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": "startNodeWithFailover"])
-                throw NodeServiceError.dataDirLocked
-            }
-            chainURL = try await nodeStartup.startWithFailover(
+        chainURL = try await NodeDirLock.shared.withHeldLock(
+            dataDir: Constants.userDataDir,
+            timeout: Constants.nodeDirLockTimeoutSecs,
+            caller: "startNodeWithFailover",
+            isNodeRunning: { nodeService.isRunning }
+        ) {
+            try await nodeStartup.startWithFailover(
                 preferred: chainURL,
                 isRetryable: { $0.isRetryableEsploraStartupError }
             ) { url in
@@ -4306,11 +4307,6 @@ class AppState {
                     lspConfig: self.activeLSP
                 )
             }
-        } catch {
-            if !nodeService.isRunning {
-                NodeDirLock.shared.release()
-            }
-            throw error
         }
     }
 

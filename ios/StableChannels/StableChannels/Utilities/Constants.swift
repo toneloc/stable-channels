@@ -38,10 +38,6 @@ enum Constants {
     static let nodeStartRetryMaxDelay: Duration = .seconds(60)
     // Automatic node-start retries before the error screen (backoff 1+2+4+8+16+32s, about 1-3 minutes).
     static let nodeStartMaxRetries = 6
-    static let onchainWalletSyncTimeoutSecs: UInt64 = 60
-    static let lightningWalletSyncTimeoutSecs: UInt64 = 60
-    static let txBroadcastTimeoutSecs: UInt64 = 30
-    static let esploraRequestTimeoutSecs: UInt8 = 15
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL

@@ -102,6 +102,36 @@ final class NodeDirLock: @unchecked Sendable {
     }
 }
 
+extension NodeDirLock {
+    /// Runs `body` under one wallet-dir lease (a no-op acquire under an outer lease). When `body`
+    /// fails and no node is running, the lock is released so a broken start never starves the NSE.
+    /// A wait cancelled by a pause throws `CancellationError`; a timed-out wait logs
+    /// `NODE_LOCK_TIMEOUT` for `caller` and throws `NodeServiceError.dataDirLocked`.
+    @MainActor
+    func withHeldLock<T>(
+        dataDir: URL,
+        timeout: TimeInterval,
+        caller: String,
+        isNodeRunning: () -> Bool,
+        _ body: () async throws -> T
+    ) async throws -> T {
+        do {
+            guard await acquire(dataDir: dataDir, timeout: timeout) else {
+                // A paused retry gave up waiting; report the pause, not a locked wallet dir.
+                try Task.checkCancellation()
+                AuditService.log("NODE_LOCK_TIMEOUT", data: ["where": caller])
+                throw NodeServiceError.dataDirLocked
+            }
+            return try await body()
+        } catch {
+            if !isNodeRunning() {
+                release()
+            }
+            throw error
+        }
+    }
+}
+
 /// Passed in notification userInfo so the handler can veto the eventHandled() call.
 /// NotificationCenter.post() is synchronous on MainActor, so all observers run
 /// before NodeService checks shouldAck — no race condition.

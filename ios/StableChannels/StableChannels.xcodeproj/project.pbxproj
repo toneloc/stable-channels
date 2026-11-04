@@ -159,6 +159,8 @@
 		49A3297D300CC81D003EC383 /* WalletErrorMessagesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */; };
 		49A368E8309BA3C5009FF99E /* SecureClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A368E7309BA3C5009FF99E /* SecureClipboard.swift */; };
 		49A368E3309B7975009FF99E /* HeaderChainPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */; };
+		49A368E5309B907D009FF99E /* SharedNodeSyncConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A368E4309B907D009FF99E /* SharedNodeSyncConstants.swift */; };
+		49A368E6309B9171009FF99E /* SharedNodeSyncConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49A368E4309B907D009FF99E /* SharedNodeSyncConstants.swift */; };
 		49ACB1D7301BD2A500C3B1A7 /* BackupSheetHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */; };
 		49ACB1D8301BD2A500C3B1A7 /* ExportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */; };
 		49ACB1D9301BD2A500C3B1A7 /* ImportSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */; };
@@ -497,6 +499,7 @@
 		49A3297C300CC81D003EC383 /* WalletErrorMessagesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WalletErrorMessagesTests.swift; sourceTree = "<group>"; };
 		49A368E7309BA3C5009FF99E /* SecureClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureClipboard.swift; sourceTree = "<group>"; };
 		49A368E2309B7975009FF99E /* HeaderChainPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeaderChainPolicy.swift; sourceTree = "<group>"; };
+		49A368E4309B907D009FF99E /* SharedNodeSyncConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedNodeSyncConstants.swift; sourceTree = "<group>"; };
 		49ACB1D4301BD2A500C3B1A7 /* BackupSheetHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupSheetHelpers.swift; sourceTree = "<group>"; };
 		49ACB1D5301BD2A500C3B1A7 /* ExportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSheet.swift; sourceTree = "<group>"; };
 		49ACB1D6301BD2A500C3B1A7 /* ImportSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSheet.swift; sourceTree = "<group>"; };
@@ -1085,6 +1088,7 @@
 				499DBE6E2FD2DACF003E89F9 /* ResilientEsploraClient.swift */,
 				49F36400000000000000A001 /* Secp256k1.swift */,
 				4981EF16309A7432000A1062 /* SharedDefaultsKey.swift */,
+				49A368E4309B907D009FF99E /* SharedNodeSyncConstants.swift */,
 				49F36400000000000000A002 /* ToRemoteKeys.swift */,
 				49F36400000000000000A003 /* ToRemoteSweep.swift */,
 				49F36400000000000000A004 /* ToRemoteRecovery.swift */,
@@ -1702,6 +1706,7 @@
 				8C6EB05C5C93E0A887851D5D /* RateLimitService.swift in Sources */,
 				6410EE715C16CF8D006022EC /* MnemonicUtils.swift in Sources */,
 				49D997563074F6E40024B3A7 /* NWPathNetworkMonitor.swift in Sources */,
+				49A368E5309B907D009FF99E /* SharedNodeSyncConstants.swift in Sources */,
 				FE2F09CF9E95112AC80D178F /* BackupPromptView.swift in Sources */,
 				C6695312119E768D5A04925A /* RestoreBackupSheet.swift in Sources */,
 				495CB3FC3013F15600560837 /* MempoolWebSocketProtocol.swift in Sources */,
@@ -1744,6 +1749,7 @@
 				4981EF17309A7432000A1062 /* SharedDefaultsKey.swift in Sources */,
 				A20400000000000000000003 /* TradeProtocol.swift in Sources */,
 				4991278B2FFEB51600D9C81F /* PriceFetcher.swift in Sources */,
+				49A368E6309B9171009FF99E /* SharedNodeSyncConstants.swift in Sources */,
 				49A0F0033029000000000001 /* PriceOracle.swift in Sources */,
 				4991278C2FFEB51600D9C81F /* PaymentDatabase.swift in Sources */,
 				499127922FFEC7B700D9C81F /* NotificationContentMutator.swift in Sources */,
