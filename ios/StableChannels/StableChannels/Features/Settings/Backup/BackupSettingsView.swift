@@ -44,6 +44,16 @@ struct BackupSettingsView: View {
         isWordFieldsReadOnly = false
     }
 
+    /// Closes every sheet holding the phrase or backup secrets and clears the phrase from memory.
+    /// A restore already running keeps its own copy of the phrase and finishes in AppState.
+    private func closeSeedScreens() {
+        cancelRestore()
+        isImportingSeed = false
+        showingRestoreSheet = false
+        showingImportSheet = false
+        showingExportSheet = false
+    }
+
     private func importMnemonic(_ mnemonic: String, fromCloud: Bool = false) {
         isImportingSeed = true
         restoreSourceIsCloud = fromCloud
@@ -133,6 +143,8 @@ struct BackupSettingsView: View {
         }
         .sheet(isPresented: $showingRestoreSheet) {
             RestoreBackupSheet(backupService: backupService) { mnemonic in
+                // A download that lands after the sheet closed must not reopen the phrase.
+                guard showingRestoreSheet else { return }
                 importMnemonic(mnemonic, fromCloud: true)
             }
         }
@@ -141,6 +153,7 @@ struct BackupSettingsView: View {
         }
         .sheet(isPresented: $showingImportSheet) {
             ImportSheet { mnemonic in
+                guard showingImportSheet else { return }
                 importMnemonic(mnemonic)
             }
         }
@@ -152,6 +165,7 @@ struct BackupSettingsView: View {
                 Color.clear.onAppear { showingRevealPhraseSheet = false }
             }
         }
+        .closesSeedScreenOnBackground { closeSeedScreens() }
         .alert("Delete Backup?", isPresented: $showingDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {

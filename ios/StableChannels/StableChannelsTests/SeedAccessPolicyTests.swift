@@ -11,4 +11,10 @@ final class SeedAccessPolicyTests: XCTestCase {
         XCTAssertTrue(SeedAccessPolicy.requiresAuth(appUnlockEnabled: false, paymentConfirmationEnabled: true))
         XCTAssertTrue(SeedAccessPolicy.requiresAuth(appUnlockEnabled: true, paymentConfirmationEnabled: true))
     }
+
+    func testOnlyBackgroundClosesSeedScreens() {
+        XCTAssertTrue(SeedAccessPolicy.shouldCloseSeedScreens(for: .background))
+        XCTAssertFalse(SeedAccessPolicy.shouldCloseSeedScreens(for: .inactive))
+        XCTAssertFalse(SeedAccessPolicy.shouldCloseSeedScreens(for: .active))
+    }
 }

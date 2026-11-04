@@ -157,12 +157,6 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
         XCTAssertEqual(vm.progressText(forQuestionAt: 1), "Question 2 of 2")
     }
 
-    func testOnlyBackgroundDismissesTheReveal() {
-        XCTAssertTrue(RevealRecoveryQuizViewModel.shouldDismiss(for: .background))
-        XCTAssertFalse(RevealRecoveryQuizViewModel.shouldDismiss(for: .inactive))
-        XCTAssertFalse(RevealRecoveryQuizViewModel.shouldDismiss(for: .active))
-    }
-
     func testEntryButtonStaysTranslated() throws {
         let dePath = try XCTUnwrap(Bundle.main.path(forResource: "de", ofType: "lproj"))
         let de = try XCTUnwrap(Bundle(path: dePath))

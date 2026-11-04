@@ -1,13 +1,6 @@
 import Foundation
 import Observation
 
-/// The app lifecycle states the reveal reacts to, kept free of SwiftUI so the rule stays testable.
-enum RevealAppPhase {
-    case active
-    case inactive
-    case background
-}
-
 enum QuizNavigationDirection: Equatable {
     case forward
     case backward
@@ -46,12 +39,6 @@ final class RevealRecoveryQuizViewModel {
     /// "Question N of M" for the question at `index`, counted from the question list.
     func progressText(forQuestionAt index: Int) -> String {
         String(localized: "reveal_quiz_progress", defaultValue: "Question \(index + 1) of \(questions.count)")
-    }
-
-    /// Leaving the app closes the reveal, because the cover sits above the app lock overlay.
-    /// Not `.inactive`: the Face ID prompt raises it, and the phrase view re-blurs there already.
-    static func shouldDismiss(for phase: RevealAppPhase) -> Bool {
-        phase == .background
     }
 
     // MARK: - Actions

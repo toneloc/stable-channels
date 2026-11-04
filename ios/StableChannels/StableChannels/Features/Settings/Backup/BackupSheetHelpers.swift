@@ -19,6 +19,36 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_: UIActivityViewController, context _: Context) {}
 }
 
+// MARK: - Background Close
+
+extension View {
+    /// Runs `close` when the app goes to the background, per `SeedAccessPolicy`.
+    func closesSeedScreenOnBackground(_ close: @escaping () -> Void) -> some View {
+        modifier(SeedScreenBackgroundCloser(close: close))
+    }
+}
+
+private struct SeedScreenBackgroundCloser: ViewModifier {
+    @Environment(\.scenePhase) private var scenePhase
+    let close: () -> Void
+
+    func body(content: Content) -> some View {
+        content.onChange(of: scenePhase) { _, phase in
+            if SeedAccessPolicy.shouldCloseSeedScreens(for: AppLifecyclePhase(phase)) { close() }
+        }
+    }
+}
+
+private extension AppLifecyclePhase {
+    init(_ phase: ScenePhase) {
+        switch phase {
+        case .background: self = .background
+        case .inactive: self = .inactive
+        default: self = .active
+        }
+    }
+}
+
 // MARK: - Shared UI Components
 
 struct PassphraseCard: View {
