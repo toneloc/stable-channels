@@ -1,6 +1,7 @@
 package com.stablechannels.app.services
 
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Finds deposits to our receive address that the websocket and balance-delta paths both missed
@@ -20,14 +21,7 @@ object MissedReceiveRecovery {
                 val tx = txs.getJSONObject(i)
                 val txid = tx.optString("txid")
                 if (txid.isBlank()) continue
-                val vouts = tx.optJSONArray("vout") ?: continue
-                var sats = 0L
-                for (j in 0 until vouts.length()) {
-                    val out = vouts.getJSONObject(j)
-                    if (out.optString("scriptpubkey_address") == address) {
-                        sats += out.optLong("value")
-                    }
-                }
+                val sats = satsPaidTo(tx, address)
                 val time = tx.optJSONObject("status")?.optLong("block_time", 0L) ?: 0L
                 val receivedAt = if (time > 0) time else nowSecs
                 if (sats >= MIN_SATS && nowSecs - receivedAt <= WINDOW_SECS) {
@@ -35,5 +29,18 @@ object MissedReceiveRecovery {
                 }
             }
         }
+    }
+
+    /** Sum of the outputs of an Esplora transaction that pay [address]. */
+    fun satsPaidTo(tx: JSONObject, address: String): Long {
+        val vouts = tx.optJSONArray("vout") ?: return 0L
+        var sats = 0L
+        for (j in 0 until vouts.length()) {
+            val out = vouts.getJSONObject(j)
+            if (out.optString("scriptpubkey_address") == address) {
+                sats += out.optLong("value")
+            }
+        }
+        return sats
     }
 }

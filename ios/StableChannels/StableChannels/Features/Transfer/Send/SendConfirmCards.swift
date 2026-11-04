@@ -128,7 +128,7 @@ struct SendConfirmReceivesCard: View {
                 .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 4) {
-                let usd = (Double(amountSats) / Double(Constants.satsInBTC)) * btcPrice
+                let usd = BitcoinUnits.usd(sats: amountSats, price: btcPrice)
                 if btcPrice > 0 {
                     Text(usd.usdFormatted)
                         .font(.system(size: 26, weight: .bold, design: .rounded))
@@ -198,7 +198,7 @@ struct SendConfirmFeeTotalCard: View {
                     }
                 }
                 Spacer()
-                let feeUSD = (Double(estimatedFeeSats) / Double(Constants.satsInBTC)) * btcPrice
+                let feeUSD = BitcoinUnits.usd(sats: estimatedFeeSats, price: btcPrice)
                 VStack(alignment: .trailing, spacing: 1) {
                     let feeSatsText = "\(estimatedFeeSats.formatted()) sats"
                     if hasPrice {
@@ -221,7 +221,7 @@ struct SendConfirmFeeTotalCard: View {
                 Text(String(localized: "label_total_spent", defaultValue: "Total Debit"))
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                let totalUSD = (Double(totalDebitSats) / Double(Constants.satsInBTC)) * btcPrice
+                let totalUSD = BitcoinUnits.usd(sats: totalDebitSats, price: btcPrice)
                 VStack(alignment: .trailing, spacing: 1) {
                     let totalBTCText = "\(totalDebitSats.btcSpacedFormatted) BTC"
                     if hasPrice {

@@ -511,3 +511,272 @@ final class TradeResponseRecoveryTests: XCTestCase {
         XCTAssertFalse(BuyAmountPolicy.accepts(amountUsd: 10.0, balanceUsd: 0.0))
     }
 }
+
+// MARK: - Balance correction SYNC (#318) and zero-target SYNC (#322)
+
+extension TradeSyncParityTests {
+    private static let correctionChannelId = String(repeating: "ab", count: 32)
+    private static let correctionUserChannelId = "7"
+    private static let correctionPrice = 100_000.0
+
+    private func saveBooks(expected: Double, backing: UInt64, receiver: UInt64) throws {
+        try service.channelRepo.saveChannel(
+            channelId: Self.correctionChannelId,
+            userChannelId: Self.correctionUserChannelId,
+            expectedUSD: expected,
+            backingSats: backing,
+            note: nil,
+            receiverSats: receiver,
+            latestPrice: Self.correctionPrice
+        )
+    }
+
+    private func correctionSync(
+        _ expected: Double,
+        version: UInt64 = 1,
+        backing: UInt64 = 999_999
+    ) -> TradeControlMessage.Sync {
+        TradeControlMessage.Sync(
+            channelId: Self.correctionChannelId,
+            userChannelId: "lsp-has-a-different-id",
+            expectedUSD: expected,
+            backingSats: backing,
+            syncVersion: version,
+            correlation: nil
+        )
+    }
+
+    private func assertBooks(
+        _ expected: Double,
+        _ backing: UInt64,
+        _ version: UInt64,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let row = try XCTUnwrap(service.channelRepo.loadChannel(userChannelId: Self.correctionUserChannelId))
+        XCTAssertEqual(row.expectedUSD, expected, accuracy: 0.000000001, file: file, line: line)
+        XCTAssertEqual(row.backingSats, backing, file: file, line: line)
+        XCTAssertEqual(row.syncVersion, version, file: file, line: line)
+    }
+
+    func testSyncBackingAfterDeltaClampsToCapacityInsteadOfFailing() {
+        XCTAssertNil(TradeProtocol.tradeBackingAfterDelta(
+            receiverSats: 58_000, currentBackingSats: 55_000,
+            currentExpectedUSD: 50, newExpectedUSD: 60, price: Self.correctionPrice
+        ))
+        XCTAssertEqual(TradeProtocol.syncBackingAfterDelta(
+            receiverSats: 58_000, currentBackingSats: 55_000,
+            currentExpectedUSD: 50, newExpectedUSD: 60, price: Self.correctionPrice
+        ), 58_000)
+        // Negative delta clamps into [0, receiver]; a zero result is nil.
+        XCTAssertEqual(TradeProtocol.syncBackingAfterDelta(
+            receiverSats: 30_000, currentBackingSats: 55_000,
+            currentExpectedUSD: 50, newExpectedUSD: 40, price: Self.correctionPrice
+        ), 30_000)
+        XCTAssertNil(TradeProtocol.syncBackingAfterDelta(
+            receiverSats: 100_000, currentBackingSats: 1_000,
+            currentExpectedUSD: 50, newExpectedUSD: 40, price: Self.correctionPrice
+        ))
+        // Zero targets are the caller's job; invalid inputs never derive a backing.
+        XCTAssertNil(TradeProtocol.syncBackingAfterDelta(
+            receiverSats: 100_000, currentBackingSats: 1_000,
+            currentExpectedUSD: 50, newExpectedUSD: 0, price: Self.correctionPrice
+        ))
+        for price in [0.0, -1.0, Double.nan, Double.infinity] {
+            XCTAssertNil(TradeProtocol.syncBackingAfterDelta(
+                receiverSats: 100_000, currentBackingSats: 1_000,
+                currentExpectedUSD: 50, newExpectedUSD: 60, price: price
+            ))
+        }
+    }
+
+    func testUncorrelatedSyncBackingAtZeroTargetKeepsOnlyWhatTheLspBooks() {
+        let backing: (UInt64, UInt64, UInt64) -> UInt64? = { current, signed, receiver in
+            TradeProtocol.uncorrelatedSyncBacking(
+                receiverSats: receiver,
+                currentBackingSats: current,
+                currentExpectedUSD: 60,
+                sync: self.correctionSync(0, backing: signed),
+                price: Self.correctionPrice
+            )
+        }
+        XCTAssertEqual(backing(20_000, 20_000, 15_000), 15_000)
+        XCTAssertEqual(backing(20_000, 5_000, 15_000), 5_000)
+        XCTAssertEqual(backing(60_000, 0, 100_000), 0)
+        XCTAssertEqual(backing(0, 5_000, 100_000), 0)
+    }
+
+    func testCorrectionClampsAnOverCapacityAllocationAndSurvivesReplay() throws {
+        try saveBooks(expected: 50, backing: 55_000, receiver: 58_000)
+        let result = service.channelRepo.applyUncorrelatedSyncIfNewer(
+            correctionSync(60),
+            trustedPrice: Self.correctionPrice
+        )
+        XCTAssertEqual(result.status, .applied)
+        XCTAssertEqual(result.localBackingSats, 58_000)
+        XCTAssertEqual(result.peerBackingSats, 999_999)
+        try assertBooks(60, 58_000, 1)
+
+        service = try DatabaseService(dataDir: dataDir)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(60), trustedPrice: Self.correctionPrice)
+                .status,
+            .duplicate
+        )
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(
+                correctionSync(70, version: 1),
+                trustedPrice: Self.correctionPrice
+            ).status,
+            .duplicate
+        )
+        try assertBooks(60, 58_000, 1)
+    }
+
+    func testCorrectionRestoresATargetJustAboveTheWalletsCapacity() throws {
+        try saveBooks(expected: 0, backing: 0, receiver: 100_000)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(
+                correctionSync(100.001),
+                trustedPrice: Self.correctionPrice
+            )
+            .status,
+            .applied
+        )
+        try assertBooks(100.001, 100_000, 1)
+    }
+
+    func testCorrectionPreservesLocalDriftAndUsesCumulativeFloorsForTheDelta() throws {
+        try saveBooks(expected: 70, backing: 65_000, receiver: 100_000)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(60), trustedPrice: Self.correctionPrice)
+                .status,
+            .applied
+        )
+        // At this floating-point price, floor(60 / price * satsPerBtc) is 59,999.
+        try assertBooks(60, 54_999, 1)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(60, version: 2), trustedPrice: 90_000)
+                .status,
+            .applied
+        )
+        try assertBooks(60, 54_999, 2)
+    }
+
+    func testCorrectionStillRetriesWhenNoPositiveBackingCanBeDerived() throws {
+        try saveBooks(expected: 50, backing: 1_000, receiver: 100_000)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(40), trustedPrice: Self.correctionPrice)
+                .status,
+            .retry
+        )
+        try assertBooks(50, 1_000, 0)
+        try saveBooks(expected: 0, backing: 0, receiver: 0)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(40), trustedPrice: Self.correctionPrice)
+                .status,
+            .retry
+        )
+        try assertBooks(0, 0, 0)
+    }
+
+    func testCorrectionWithUnusablePricesNeverAdvancesTheVersion() throws {
+        try saveBooks(expected: 50, backing: 55_000, receiver: 58_000)
+        for badPrice in [0.0, -1.0, Double.nan, Double.infinity] {
+            XCTAssertEqual(
+                service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(60), trustedPrice: badPrice).status,
+                .invalid
+            )
+            try assertBooks(50, 55_000, 0)
+        }
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(
+                correctionSync(60),
+                trustedPrice: Double.leastNonzeroMagnitude
+            ).status,
+            .retry
+        )
+        try assertBooks(50, 55_000, 0)
+        // Adding the derived delta would overflow before it is clamped.
+        let max = UInt64(Int64.max)
+        try saveBooks(expected: 0, backing: max - 2, receiver: max - 1)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(10), trustedPrice: Self.correctionPrice)
+                .status,
+            .applied
+        )
+        try assertBooks(10, max - 1, 1)
+    }
+
+    func testUncorrelatedSyncAtZeroTargetPreservesTheResidueTheLspStillBooks() throws {
+        try saveBooks(expected: 10, backing: 20_000, receiver: 15_000)
+        let result = service.channelRepo.applyUncorrelatedSyncIfNewer(
+            correctionSync(0, backing: 20_000),
+            trustedPrice: Self.correctionPrice
+        )
+        XCTAssertEqual(result.status, .applied)
+        XCTAssertEqual(result.localBackingSats, 15_000)
+        try assertBooks(0, 15_000, 1)
+    }
+
+    func testUncorrelatedSyncAtZeroTargetReleasesWhatTheLspBookedAsClosed() throws {
+        try saveBooks(expected: 60, backing: 60_000, receiver: 100_000)
+        let result = service.channelRepo.applyUncorrelatedSyncIfNewer(
+            correctionSync(0, backing: 0),
+            trustedPrice: Self.correctionPrice
+        )
+        XCTAssertEqual(result.status, .applied)
+        XCTAssertEqual(result.localBackingSats, 0)
+        try assertBooks(0, 0, 1)
+    }
+
+    // MARK: - Splice reconcile against the stored row (#318)
+
+    func testOutgoingReconcileUsesCommittedCorrectionNotAnOlderSnapshot() throws {
+        try saveBooks(expected: 10, backing: 10_000, receiver: 9_000)
+        XCTAssertEqual(
+            service.channelRepo.applyUncorrelatedSyncIfNewer(correctionSync(8), trustedPrice: Self.correctionPrice)
+                .status,
+            .applied
+        )
+        // Memory may still hold 10.0 / 10_000; the row already fits the confirmed balance.
+        XCTAssertNil(try service.channelRepo.reconcileOutgoingBacking(
+            userChannelId: Self.correctionUserChannelId,
+            receiverSats: 9_000,
+            price: Self.correctionPrice
+        ).repair)
+        try assertBooks(8, 8_000, 1)
+    }
+
+    func testOutgoingReconcileDeductsOverflowOnceAndRetriesAreIdempotent() throws {
+        try saveBooks(expected: 10, backing: 10_000, receiver: 10_000)
+        let books = try service.channelRepo.reconcileOutgoingBacking(
+            userChannelId: Self.correctionUserChannelId,
+            receiverSats: 9_000,
+            price: Self.correctionPrice
+        )
+        XCTAssertEqual(books.expectedUSD, 9, accuracy: 0.000001)
+        XCTAssertEqual(books.backingSats, 9_000)
+        let repair = try XCTUnwrap(books.repair)
+        XCTAssertEqual(repair.usdDeducted, 1, accuracy: 0.000001)
+        try assertBooks(9, 9_000, 0)
+        XCTAssertNil(try service.channelRepo.reconcileOutgoingBacking(
+            userChannelId: Self.correctionUserChannelId,
+            receiverSats: 9_000,
+            price: Self.correctionPrice
+        ).repair)
+        try assertBooks(9, 9_000, 0)
+    }
+
+    func testOutgoingReconcileWithMissingRowThrowsDedicatedError() {
+        XCTAssertThrowsError(try service.channelRepo.reconcileOutgoingBacking(
+            userChannelId: "missing",
+            receiverSats: 9_000,
+            price: Self.correctionPrice
+        )) { error in
+            guard case DatabaseError.missingChannelRow("missing") = error else {
+                return XCTFail("unexpected error \(error)")
+            }
+        }
+    }
+}

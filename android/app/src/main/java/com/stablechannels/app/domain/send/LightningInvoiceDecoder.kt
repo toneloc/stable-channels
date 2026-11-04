@@ -9,7 +9,11 @@ data class DecodedBolt11(
     val amountMsat: Long?,
     val descriptionHash: String? = null,
     val expiresAtEpochSecs: Long = Long.MAX_VALUE,
-)
+    /** Hex payment hash; LDK uses it as the payment id of an outbound BOLT11 payment. */
+    val paymentHash: String? = null,
+) {
+    fun isExpired(nowEpochSecs: Long): Boolean = nowEpochSecs >= expiresAtEpochSecs
+}
 
 /** What the classifier needs from a parsed BOLT12 offer. An empty [chains] means mainnet. */
 data class DecodedBolt12(val chains: Set<BitcoinNetwork>)

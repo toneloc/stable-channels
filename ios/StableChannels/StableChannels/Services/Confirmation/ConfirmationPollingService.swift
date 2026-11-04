@@ -55,6 +55,8 @@ final class ConfirmationPollingService {
     private let manualTipProvider: BlockHeightProvider?
     private let manualConfirmationService: ConfirmationService?
     private let manualRefreshTimeout: Duration
+    /// Second opinion before a send is failed: the WebSocket feed alone never fails one.
+    private let presenceProvider: (any TxPresenceProviding)?
     private let logger = Logger(subsystem: "com.stablechannels", category: "confirmation")
 
     /// True while a poll cycle is in progress, prevents concurrent runs.
@@ -66,6 +68,12 @@ final class ConfirmationPollingService {
     /// payment list to reflect updated confirmation state.
     var onUpdate: (@MainActor () -> Void)?
     var onRefreshResult: (@MainActor (ConfirmationRefreshResult) -> Void)?
+    /// A receive the explorer confirmed gone, with the sats it failed.
+    var onReceiveDropped: (@MainActor (_ txid: String, _ sats: Int64) -> Void)?
+    /// Fires with a received row's txid after it was detached for not paying the row's address.
+    var onReceiveTxidMismatch: (@MainActor (String) -> Void)?
+    /// The txids the node's wallet lists as received, or nil when the wallet cannot be read.
+    var walletReceiveTxids: @MainActor () -> Set<String>? = { nil }
 
     init(
         databaseService: DatabaseService,
@@ -73,7 +81,8 @@ final class ConfirmationPollingService {
         confirmationService: ConfirmationService,
         manualTipProvider: BlockHeightProvider? = nil,
         manualConfirmationService: ConfirmationService? = nil,
-        manualRefreshTimeout: Duration = .seconds(20)
+        manualRefreshTimeout: Duration = .seconds(20),
+        presenceProvider: (any TxPresenceProviding)? = nil
     ) {
         self.databaseService = databaseService
         self.blockHeightService = blockHeightService
@@ -81,6 +90,75 @@ final class ConfirmationPollingService {
         self.manualTipProvider = manualTipProvider
         self.manualConfirmationService = manualConfirmationService
         self.manualRefreshTimeout = manualRefreshTimeout
+        self.presenceProvider = presenceProvider
+    }
+
+    /// Fails a pending on-chain payment the WebSocket feed reported removed, but only once the block
+    /// explorer also no longer knows its transaction. A feed report alone could fail a payment that
+    /// still confirms; a send left pending after it really dropped blocks books repair. The check is
+    /// queued, so `pollOnce` retries it until the explorer answers or the payment settles.
+    func failIfDropped(txid: String) async {
+        guard presenceProvider != nil,
+              (try? databaseService.paymentRepo.hasPendingOnchainTx(txid: txid)) == true else { return }
+        do {
+            try databaseService.paymentRepo.deferRemovalCheck(txid: txid)
+        } catch {
+            AuditService.log("WEBSOCKET_REMOVAL_QUEUE_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
+        await checkRemoval(txid: txid)
+    }
+
+    /// Retries the removal checks the explorer has not answered yet.
+    func retryRemovalChecks() async {
+        let txids: [String]
+        do {
+            txids = try databaseService.paymentRepo.pendingRemovalChecks()
+        } catch {
+            AuditService.log("REMOVAL_CHECKS_READ_FAILED", data: ["error": "\(error)"])
+            return
+        }
+        for txid in txids {
+            guard !Task.isCancelled else { return }
+            await checkRemoval(txid: txid)
+        }
+    }
+
+    private func checkRemoval(txid: String) async {
+        guard let presenceProvider else { return }
+        let repo = databaseService.paymentRepo
+        do {
+            // Confirmed or failed since it was queued: nothing left to check.
+            guard try repo.hasPendingOnchainTx(txid: txid) else {
+                try repo.clearRemovalCheck(txid: txid)
+                return
+            }
+            let known = await presenceProvider.isKnown(txid: txid)
+            guard known == false else {
+                AuditService.log("WEBSOCKET_REMOVAL_NOT_CONFIRMED", data: [
+                    "txid": txid,
+                    "explorer": known == true ? "known" : "unreachable"
+                ])
+                return
+            }
+            let dropped = try failDropped(txid: txid)
+            try repo.clearRemovalCheck(txid: txid)
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAILED", data: [
+                "txid": txid,
+                "sends": "\(dropped.failedSends)",
+                "receive_sats": dropped.failedReceiveSats.map { "\($0)" } ?? "none"
+            ])
+            onUpdate?()
+        } catch {
+            AuditService.log("WEBSOCKET_DROPPED_TX_FAIL_FAILED", data: ["error": "\(error)", "txid": txid])
+        }
+    }
+
+    /// Fails the rows of a transaction the explorers no longer know and reports a failed receive's
+    /// sats: the one place a dropped transaction is failed.
+    private func failDropped(txid: String) throws -> PaymentRepository.DroppedOnchainTx {
+        let dropped = try databaseService.paymentRepo.failDroppedOnchainTx(txid: txid)
+        if let sats = dropped.failedReceiveSats { onReceiveDropped?(txid, sats) }
+        return dropped
     }
 
     /// Called by BlockHeightService whenever the chain tip changes.
@@ -90,19 +168,23 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = completeOrFailStalePlaceholders()
         let currentHeight = blockHeightService.currentHeight
-        guard currentHeight > 0 else { return }
+        guard currentHeight > 0 else {
+            if anyUpdated { onUpdate?() }
+            return
+        }
 
         let pending: [PaymentRecord]
         do {
             pending = try databaseService.paymentRepo.paymentsNeedingConfirmation()
         } catch {
             logger.error("Failed to load pending confirmations: \(error.localizedDescription)")
+            if anyUpdated { onUpdate?() }
             onRefreshResult?(.databaseUnavailable)
             return
         }
 
-        var anyUpdated = false
         var failedLookups = 0
         for payment in pending {
             guard !Task.isCancelled else { return }
@@ -115,6 +197,7 @@ final class ConfirmationPollingService {
                 break
             }
         }
+        await retryRemovalChecks()
 
         if anyUpdated {
             onUpdate?()
@@ -174,6 +257,10 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = completeOrFailStalePlaceholders()
+        defer {
+            if anyUpdated { onUpdate?() }
+        }
         let currentHeight: UInt32
         do {
             let height: UInt32
@@ -202,10 +289,6 @@ final class ConfirmationPollingService {
             return .databaseUnavailable
         }
 
-        var anyUpdated = false
-        defer {
-            if anyUpdated { onUpdate?() }
-        }
         var failedLookups = 0
         for payment in pending {
             try Task.checkCancellation()
@@ -238,13 +321,14 @@ final class ConfirmationPollingService {
         isPolling = true
         defer { finishPass() }
 
+        var anyUpdated = completeOrFailStalePlaceholders()
         // Refresh authoritative chain tip from Esplora first.
         guard let currentHeight = await blockHeightService.refresh(), currentHeight > 0 else {
+            if anyUpdated { onUpdate?() }
             onRefreshResult?(.chainTipUnavailable)
             return
         }
 
-        var anyUpdated = false
         var failedLookups = 0
 
         // 1. Process pending payments
@@ -279,7 +363,7 @@ final class ConfirmationPollingService {
                     forceRecheck: true
                 )
                 switch outcome {
-                case .pending:
+                case .pending, .notFound:
                     // Esplora reports transaction is no longer confirmed — downgrade to pending
                     do {
                         try databaseService.paymentRepo.downgradePaymentToPending(paymentId: payment.id)
@@ -313,7 +397,8 @@ final class ConfirmationPollingService {
                     }
                 case .error:
                     failedLookups += 1
-                case .noTxid:
+                case .noTxid, .addressMismatch:
+                    // A completed row is only revalidated for reorgs, never re-attributed.
                     break
                 }
             }
@@ -335,14 +420,41 @@ final class ConfirmationPollingService {
         case failed
     }
 
+    /// Ages out placeholders (onchain rows without a txid); returns whether any row changed. A placeholder
+    /// whose candidate transaction the wallet still lists did arrive, so it completes instead of
+    /// failing. Waits for a readable wallet, which tells the two apart.
+    private func completeOrFailStalePlaceholders() -> Bool {
+        let cutoff = ConfirmationPolicy.staleCutoff(now: Int64(Date().timeIntervalSince1970))
+        guard let walletTxids = walletReceiveTxids() else { return false }
+        do {
+            let completed = try databaseService.onchainRepo.completeStalePlaceholders(
+                createdBefore: cutoff,
+                walletTxids: walletTxids
+            )
+            if completed > 0 {
+                AuditService.log("STALE_TXIDLESS_RECEIVE_COMPLETED", data: ["txidless_rows": "\(completed)"])
+            }
+            let failed = try databaseService.onchainRepo.failStalePlaceholders(createdBefore: cutoff)
+            if failed > 0 {
+                AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: ["txidless_rows": "\(failed)"])
+            }
+            return completed + failed > 0
+        } catch {
+            logger.error("Failed to age out placeholders: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     private func resolve(
         payment: PaymentRecord,
         currentHeight: UInt32,
-        using service: ConfirmationService? = nil
+        using service: ConfirmationService? = nil,
+        checksReceiveAddress: Bool = true
     ) async -> ResolveResult {
         let outcome = await (service ?? confirmationService).resolve(
             payment: payment,
-            currentBlockHeight: currentHeight
+            currentBlockHeight: currentHeight,
+            checksReceiveAddress: checksReceiveAddress
         )
         guard !Task.isCancelled else { return .unchanged }
         switch outcome {
@@ -367,6 +479,40 @@ final class ConfirmationPollingService {
                 logger.error("Failed to update confirmations: \(error.localizedDescription)")
                 return .failed
             }
+        case .notFound:
+            // Only an authoritative "not found" may retire an old row; an outage must leave it
+            // pollable so a later recovery can still confirm it.
+            let now = Int64(Date().timeIntervalSince1970)
+            // A fresh row the explorers have not indexed yet is still pending, not a failed lookup.
+            guard ConfirmationPolicy.shouldFailUnfound(payment, now: now), let txid = payment.txid else {
+                return .unchanged
+            }
+            do {
+                guard try failDropped(txid: txid).failedAny else { return .unchanged }
+                AuditService.log("STALE_PENDING_ONCHAIN_FAILED", data: [
+                    "payment_id": "\(payment.id)",
+                    "txid": payment.txid ?? ""
+                ])
+                return .updated
+            } catch {
+                logger.error("Failed to fail stale onchain row: \(error.localizedDescription)")
+                return .failed
+            }
+        case .addressMismatch:
+            let txid = payment.txid ?? ""
+            switch ConfirmationPolicy.receiveAddressMismatch(txid: txid, walletReceiveTxids: walletReceiveTxids()) {
+            case .keepTxid:
+                return await resolve(
+                    payment: payment,
+                    currentHeight: currentHeight,
+                    using: service,
+                    checksReceiveAddress: false
+                )
+            case .detachTxid:
+                return clearMismatchedReceiveTxid(payment)
+            case .retryLater:
+                return .unchanged
+            }
         case .error(let message):
             AuditService.log("CONFIRMATION_RESOLVE_FAILED", data: [
                 "payment_id": "\(payment.id)",
@@ -376,5 +522,23 @@ final class ConfirmationPollingService {
         case .pending, .noTxid:
             return .unchanged
         }
+    }
+
+    private func clearMismatchedReceiveTxid(_ payment: PaymentRecord) -> ResolveResult {
+        let txid = payment.txid ?? ""
+        let cleared: Bool
+        do {
+            cleared = try databaseService.paymentRepo.clearPaymentTxid(id: payment.id)
+        } catch {
+            logger.error("Failed to clear mismatched receive txid: \(error.localizedDescription)")
+            return .failed
+        }
+        onReceiveTxidMismatch?(txid)
+        AuditService.log("ONCHAIN_TXID_ADDRESS_MISMATCH", data: [
+            "payment_id": "\(payment.id)",
+            "txid": txid,
+            "address": payment.address ?? ""
+        ])
+        return cleared ? .updated : .unchanged
     }
 }

@@ -44,9 +44,8 @@ struct PaymentDetailView: View {
 
     @MainActor
     private func loadPayment() async {
-        guard let db = appState.databaseService else { return }
         do {
-            payment = try db.paymentRepo.getPayment(byId: paymentId)
+            payment = try appState.paymentQueries.payment(byId: paymentId)
             loadError = false
         } catch {
             loadError = true
@@ -169,12 +168,13 @@ struct PaymentDetailView: View {
         guard shouldPreferUSDDisplay else { return nil }
         let price = (payment.btcPrice ?? 0) > 0 ? (payment.btcPrice ?? 0) : displayPrice
         guard price > 0 else { return nil }
-        return Double(payment.amountSats) / Double(Constants.satsInBTC) * price
+        return BitcoinUnits.usd(sats: payment.amountSats, price: price)
     }
 
     private var shouldPreferUSDDisplay: Bool {
         switch payment?.paymentType {
-        case "splice_in", "splice_out", "onchain", "channel_close": return true
+        case SplicePaymentType.spliceIn.rawValue, SplicePaymentType.spliceOut.rawValue, "onchain",
+             "channel_close": return true
         default: return false
         }
     }
@@ -183,8 +183,14 @@ struct PaymentDetailView: View {
         switch payment?.paymentType {
         case "stability": return String(localized: "payment_type_stability", defaultValue: "Stability")
         case "lightning": return String(localized: "payment_type_lightning", defaultValue: "Lightning")
-        case "splice_in": return String(localized: "payment_type_splice_in", defaultValue: "Splice In")
-        case "splice_out": return String(localized: "payment_type_splice_out", defaultValue: "Splice Out")
+        case SplicePaymentType.spliceIn.rawValue: return String(
+                localized: "payment_type_splice_in",
+                defaultValue: "Splice In"
+            )
+        case SplicePaymentType.spliceOut.rawValue: return String(
+                localized: "payment_type_splice_out",
+                defaultValue: "Splice Out"
+            )
         case "onchain": return String(localized: "payment_type_on_chain", defaultValue: "Onchain")
         case "channel_close": return String(localized: "payment_type_channel_close", defaultValue: "Channel Close")
         case "bolt12": return String(localized: "payment_type_bolt12", defaultValue: "Bolt12")

@@ -687,6 +687,26 @@ class SpliceEventRecoveryTest {
     }
 
     @Test
+    fun aMoveOutOfAnotherChannelIsTrackedOnTheChannelItSplices() {
+        val other = "12".repeat(32)
+        val state = appState()
+        setChannel(state, "7")
+        val server = MockWebServer().also { it.start() }
+        var job: Job? = null
+        try {
+            routeEsploraTo(state, server) { MockResponse().setBody("{\"confirmed\":false}") }
+            state.beginSpliceOut(1_000, "addr", 100_000.0, userChannelId = "8", channelId = other)
+            val rowId = (read(state, "pendingSplice") as PendingSplice).paymentRowId
+            handle(state, Event.SpliceNegotiated(other, "8", "peer", funding))
+            job = read(state, "spliceConfirmationJob") as? Job
+            assertEquals(txid, payment(rowId).txid)
+        } finally {
+            runBlocking { job?.cancelAndJoin() }
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun aReplayedNegotiationKeepsTheLiveOperationsMonitorAndGeneration() {
         val state = appState()
         setChannel(state, "7")

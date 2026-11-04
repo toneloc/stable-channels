@@ -1,3 +1,4 @@
+import LDKNode
 import SQLite3
 import XCTest
 @testable import StableChannels
@@ -5,7 +6,7 @@ import XCTest
 /// Covers the persist-at-initiation splice flow (issue #279, port of Android
 /// PR #252): beginSpliceOut/sweepToChannel write a pending NULL-txid row
 /// before the native splice call, and spliceNegotiated stamps the txid onto
-/// that row via setPendingSpliceTxid instead of creating it.
+/// that row via the splice event recorder instead of creating it.
 final class SpliceRepositoryTests: XCTestCase {
     private var service: DatabaseService!
     private var dataDir: URL!
@@ -25,18 +26,23 @@ final class SpliceRepositoryTests: XCTestCase {
         super.tearDown()
     }
 
-    private func recordPendingSplice(type: String = "splice_out") throws {
-        _ = try service.paymentRepo.recordPayment(
-            paymentId: nil,
+    private func recordPendingSplice(type: SplicePaymentType = .spliceOut, selfSend: Bool = false) throws {
+        try service.spliceRepo.recordPendingSplice(
             paymentType: type,
-            direction: type == "splice_out" ? "sent" : "received",
             amountMsat: 50_000_000,
             amountUSD: 25.0,
             btcPrice: 50_000.0,
-            counterparty: nil,
-            status: "pending",
-            address: type == "splice_out" ? "bc1qtestaddress" : nil
+            address: type == .spliceOut ? "bc1qtestaddress" : nil,
+            selfSend: selfSend,
+            channel: SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: nil)
         )
+    }
+
+    private func negotiate(_ txid: String) throws {
+        try service.spliceRepo.recordEvent(SpliceEventReceipt(
+            kind: .negotiated, userChannelId: "7", channelId: "channel",
+            identityTxid: txid, funding: OutPoint(txid: txid, vout: 0)
+        ))
     }
 
     /// Backdates every NULL-txid splice row past the 600s no-txid expiry
@@ -76,10 +82,10 @@ final class SpliceRepositoryTests: XCTestCase {
 
     // MARK: - Txid stamping
 
-    func testSetPendingSpliceTxidStampsPendingNullTxidRow() throws {
+    func testNegotiationStampsPendingNullTxidRow() throws {
         try recordPendingSplice()
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-abc")
+        try negotiate("txid-abc")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
@@ -87,25 +93,25 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(rows[0].txid, "txid-abc")
     }
 
-    func testSetPendingSpliceTxidStampsSpliceInRowToo() throws {
-        try recordPendingSplice(type: "splice_in")
+    func testNegotiationStampsSpliceInRowToo() throws {
+        try recordPendingSplice(type: .spliceIn)
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-in")
+        try negotiate("txid-in")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].txid, "txid-in")
     }
 
-    func testSetPendingSpliceTxidNeverStampsFailedRow() throws {
+    func testNegotiationNeverStampsFailedRow() throws {
         // A failed initiation row (native call threw) followed by a fresh
         // pending initiation row. The stamp must land on the pending row and
         // must never resurrect the failed one.
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         try recordPendingSplice()
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-def")
+        try negotiate("txid-def")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 2)
@@ -115,11 +121,11 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(rows[1].txid, "txid-def")
     }
 
-    func testSetPendingSpliceTxidOnlyFailedRowsIsNoOp() throws {
+    func testNegotiationOnlyFailedRowsIsNoOp() throws {
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-ghi")
+        try negotiate("txid-ghi")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
@@ -129,11 +135,11 @@ final class SpliceRepositoryTests: XCTestCase {
 
     func testReplayedTxidIsNotStampedOntoASecondRow() throws {
         try recordPendingSplice()
-        try service.spliceRepo.setPendingSpliceTxid("txid-once")
+        try negotiate("txid-once")
         // A second operation starts, then the old spliceNegotiated replays.
         try recordPendingSplice()
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-once")
+        try negotiate("txid-once")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 2)
@@ -168,7 +174,7 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
         XCTAssertEqual(try spliceRows()[0].status, "expired")
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-late")
+        try negotiate("txid-late")
 
         var rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
@@ -186,11 +192,11 @@ final class SpliceRepositoryTests: XCTestCase {
         // terminal, unlike the passive expiry sweep: aging the row changes
         // nothing, and a late stamp must not resurrect it.
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
         try ageOutPendingSplices()
         XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
 
-        try service.spliceRepo.setPendingSpliceTxid("txid-necro")
+        try negotiate("txid-necro")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
@@ -205,8 +211,8 @@ final class SpliceRepositoryTests: XCTestCase {
         try ageOutPendingSplices()
         XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
 
-        service.spliceRepo.failLatestPendingSplice()
-        try service.spliceRepo.setPendingSpliceTxid("txid-after-fail")
+        service.spliceRepo.failPendingSplice()
+        try negotiate("txid-after-fail")
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 1)
@@ -221,10 +227,10 @@ final class SpliceRepositoryTests: XCTestCase {
         // confirmation) must survive a newer operation's pre-negotiation
         // failure.
         try recordPendingSplice()
-        try service.spliceRepo.setPendingSpliceTxid("txid-live")
+        try negotiate("txid-live")
         try recordPendingSplice()
 
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
         let rows = try spliceRows()
         XCTAssertEqual(rows.count, 2)
@@ -236,12 +242,141 @@ final class SpliceRepositoryTests: XCTestCase {
 
     func testCompleteSpliceDoesNotFindFailedNullTxidRow() throws {
         try recordPendingSplice()
-        service.spliceRepo.failLatestPendingSplice()
+        service.spliceRepo.failPendingSplice()
 
         XCTAssertFalse(service.spliceRepo.completeSplice(txid: "txid-jkl"))
 
         let rows = try spliceRows()
         XCTAssertEqual(rows[0].status, "failed")
+    }
+
+    // MARK: - Self-send reclaim (Android #316 review)
+
+    private func recordWebSocketReceive(txid: String, address: String = "bc1qourownaddress") throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "onchain_receive_\(txid)",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txid,
+            address: address
+        )
+    }
+
+    private func rowCount(txid: String) throws -> Int {
+        try service.rawSQL.query("SELECT 1 FROM payments WHERE txid = ?", params: [.text(txid)]).count
+    }
+
+    func testSelfSendReceiveRowIsReclaimedForTheSpliceRow() throws {
+        // The websocket receive handler recorded a splice-out to our own address as a deposit
+        // before the negotiated event could stamp the txid.
+        try recordWebSocketReceive(txid: "self-send-tx")
+        try recordPendingSplice(selfSend: true)
+
+        try negotiate("self-send-tx")
+
+        let rows = try spliceRows()
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].txid, "self-send-tx")
+        XCTAssertEqual(try rowCount(txid: "self-send-tx"), 1, "the duplicate deposit row is dropped")
+        XCTAssertEqual(try service.spliceRepo.isSelfSendSplice(txid: "self-send-tx"), true)
+        XCTAssertTrue(service.spliceRepo.completeSplice(txid: "self-send-tx"))
+    }
+
+    func testReceiveRowSharingASpliceInTxidIsNeverReclaimed() throws {
+        try recordWebSocketReceive(txid: "shared-tx")
+        try recordPendingSplice(type: .spliceIn)
+
+        try negotiate("shared-tx")
+        XCTAssertNil(try spliceRows()[0].txid)
+        XCTAssertEqual(try rowCount(txid: "shared-tx"), 1, "the receive row is kept")
+    }
+
+    func testReceiveRowSharingASpliceOutToAnotherWalletIsNeverReclaimed() throws {
+        try recordWebSocketReceive(txid: "shared-tx")
+        try recordPendingSplice(selfSend: false)
+
+        try negotiate("shared-tx")
+        XCTAssertNil(try spliceRows()[0].txid)
+        XCTAssertEqual(try rowCount(txid: "shared-tx"), 1, "the receive row is kept")
+    }
+
+    func testCompletedReceiveRowSharingTheSpliceTxidIsAlsoReclaimed() throws {
+        try recordWebSocketReceive(txid: "self-send-tx")
+        try service.rawSQL.execute("UPDATE payments SET status = 'completed' WHERE txid = 'self-send-tx'")
+        try recordPendingSplice(selfSend: true)
+
+        try negotiate("self-send-tx")
+        XCTAssertEqual(try spliceRows()[0].txid, "self-send-tx")
+        XCTAssertEqual(try rowCount(txid: "self-send-tx"), 1)
+    }
+
+    func testReceiveRowSurvivesWhenNoSpliceRowCanTakeTheTxid() throws {
+        try recordWebSocketReceive(txid: "plain-deposit-tx")
+
+        try negotiate("plain-deposit-tx")
+        XCTAssertEqual(try rowCount(txid: "plain-deposit-tx"), 1)
+    }
+
+    func testTxidOwnedByANonDepositRowIsNeverReclaimed() throws {
+        _ = try service.paymentRepo.recordPayment(
+            paymentId: "close-1",
+            paymentType: "channel_close",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: "close-tx"
+        )
+        try recordPendingSplice()
+
+        try negotiate("close-tx")
+        XCTAssertNil(try spliceRows()[0].txid)
+        XCTAssertEqual(try rowCount(txid: "close-tx"), 1)
+    }
+
+    func testTxidOnASpliceRowAndADepositRowIsNotReassigned() throws {
+        try recordPendingSplice()
+        try negotiate("txid-once")
+        try recordWebSocketReceive(txid: "txid-once")
+        try recordPendingSplice()
+
+        try negotiate("txid-once")
+        XCTAssertNil(try spliceRows()[1].txid)
+        XCTAssertEqual(try rowCount(txid: "txid-once"), 2, "neither owner is deleted")
+    }
+
+    func testAnAddressWeHaveReceivedToIsOurs() throws {
+        try recordWebSocketReceive(txid: "older-tx", address: "bc1qourownaddress")
+
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qourownaddress", currentReceiveAddress: nil))
+    }
+
+    func testAPlaceholderAddressOnItsResolutionRowIsOurs() throws {
+        let resolutionId = try XCTUnwrap(service.onchainRepo.insertOnchainReceiveResolution(address: "bc1qplaceholder"))
+        XCTAssertTrue(service.onchainRepo.recordOnchainPaymentWithResolution(
+            paymentId: "onchain_deposit_1",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            resolutionId: resolutionId
+        ))
+
+        XCTAssertTrue(service.onchainRepo.isOwnReceiveAddress("bc1qplaceholder", currentReceiveAddress: nil))
+    }
+
+    func testAnAddressWeHaveNeverReceivedToIsNotOurs() throws {
+        // A splice-out destination is recorded on the splice row, which must not count.
+        try recordPendingSplice()
+
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress("bc1qtestaddress", currentReceiveAddress: nil))
+        XCTAssertFalse(service.onchainRepo.isOwnReceiveAddress("bc1qsomeoneelsesaddress", currentReceiveAddress: nil))
     }
 }
 
@@ -261,6 +396,7 @@ final class SpliceFailureRecoveryTests: XCTestCase {
     private var db: DatabaseService!
     private var app: AppState!
     private let txid = String(repeating: "ab", count: 32)
+    private let channel = SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: nil)
 
     override func setUp() async throws {
         dataDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -281,8 +417,11 @@ final class SpliceFailureRecoveryTests: XCTestCase {
     }
 
     private func beginNegotiatedSplice() throws {
-        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest")
-        try db.spliceRepo.setPendingSpliceTxid(txid)
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        try db.spliceRepo.recordEvent(SpliceEventReceipt(
+            kind: .negotiated, userChannelId: "7", channelId: "channel",
+            identityTxid: txid, funding: OutPoint(txid: txid, vout: 0)
+        ))
         app.spliceTxid = txid
     }
 
@@ -332,7 +471,7 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
         XCTAssertFalse(try db.spliceRepo.hasPendingSplice())
         XCTAssertFalse(app.isSweeping)
-        XCTAssertNoThrow(try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnext"))
+        XCTAssertNoThrow(try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnext", channel: channel))
     }
 
     func testBroadcastTransactionKeepsConfirmationOwnership() async throws {
@@ -367,7 +506,7 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         app = AppState(spliceBroadcastChecker: CallbackSpliceChecker { [unowned self] in
             self.app.spliceTxid = nil
             self.app.cancelPendingSpliceStart()
-            try! self.app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew")
+            try! self.app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew", channel: channel)
             return .notFound
         })
         app.databaseService = db
@@ -387,7 +526,7 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         try queueFailure()
         app.spliceTxid = nil
         app.cancelPendingSpliceStart()
-        try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew")
+        try app.beginSpliceOut(amountSats: 10_000, address: "bc1qnew", channel: channel)
         XCTAssertTrue(try db.spliceRepo.failUnbroadcastSplice(txid: txid))
         XCTAssertTrue(try db.spliceRepo.hasPendingSplice(), "The newer NULL-txid splice is still pending")
         XCTAssertTrue(db.spliceRepo.completeSplice(txid: txid))
@@ -395,5 +534,58 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         XCTAssertFalse(try db.spliceRepo.failUnbroadcastSplice(txid: txid))
         XCTAssertEqual(try status(txid), "completed")
         XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+    }
+
+    // MARK: - Stale splice lock (Android c577ccb1 / 5fb6c459)
+
+    private func expirePendingSplices() throws {
+        try db.rawSQL.execute(
+            "UPDATE payments SET created_at = created_at - 700 WHERE payment_type IN ('splice_in', 'splice_out')"
+        )
+    }
+
+    func testStabilityTickReleasesALockWhosePreNegotiationRowExpired() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        XCTAssertTrue(app.isSweeping)
+        try expirePendingSplices()
+
+        app.runStabilityCheck()
+
+        XCTAssertFalse(app.isSweeping)
+        XCTAssertNil(app.pendingSplice)
+    }
+
+    func testStabilityTickKeepsTheLockWhileThePreNegotiationRowIsPending() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+
+        app.runStabilityCheck()
+
+        XCTAssertTrue(app.isSweeping)
+        XCTAssertNotNil(app.pendingSplice)
+    }
+
+    func testStabilityTickKeepsTheLockOnceATxidWasNegotiated() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        try expirePendingSplices()
+        app.spliceTxid = txid
+
+        app.runStabilityCheck()
+
+        XCTAssertTrue(app.isSweeping)
+    }
+
+    func testFailingStaleLockCheckKeepsTheLock() throws {
+        try app.beginSpliceOut(amountSats: 50_000, address: "bc1qtest", channel: channel)
+        try expirePendingSplices()
+        try db.rawSQL.execute(
+            "CREATE TRIGGER refuse_expiry BEFORE UPDATE OF status ON payments BEGIN SELECT RAISE(ABORT, 'test'); END"
+        )
+
+        app.runStabilityCheck()
+        XCTAssertTrue(app.isSweeping)
+
+        try db.rawSQL.execute("DROP TRIGGER refuse_expiry")
+        app.runStabilityCheck()
+        XCTAssertFalse(app.isSweeping)
     }
 }
