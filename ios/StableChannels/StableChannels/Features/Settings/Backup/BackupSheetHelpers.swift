@@ -39,7 +39,7 @@ private struct SeedScreenBackgroundCloser: ViewModifier {
     }
 }
 
-private extension AppLifecyclePhase {
+extension AppLifecyclePhase {
     init(_ phase: ScenePhase) {
         switch phase {
         case .background: self = .background

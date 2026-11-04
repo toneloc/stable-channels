@@ -13,6 +13,12 @@ enum SeedAccessPolicy {
     static func shouldCloseSeedScreens(for phase: AppLifecyclePhase) -> Bool {
         phase == .background
     }
+
+    /// An auth reply that lands after the app left must not open a seed screen. `.inactive` still
+    /// counts as in the app, because the Face ID prompt itself raises it.
+    static func canOpenSeedScreen(after phase: AppLifecyclePhase) -> Bool {
+        !shouldCloseSeedScreens(for: phase)
+    }
 }
 
 /// The app lifecycle states seed screens react to, kept free of SwiftUI so the rule stays testable.

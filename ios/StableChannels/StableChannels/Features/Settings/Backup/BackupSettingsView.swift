@@ -2,6 +2,7 @@ import SwiftUI
 
 struct BackupSettingsView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
     let backupService: any BackupServiceProtocol
 
     // MARK: - UI State
@@ -24,6 +25,8 @@ struct BackupSettingsView: View {
     @State private var showingOverwriteAlert = false
     @State private var isCheckingRemote = false
     @State private var showingRevealPhraseSheet = false
+    /// Mirrors `scenePhase` in state: the auth task reads it after an await, when an environment copy would be stale.
+    @State private var lifecyclePhase = AppLifecyclePhase.active
 
     // MARK: - Computed Properties
 
@@ -52,6 +55,7 @@ struct BackupSettingsView: View {
         showingRestoreSheet = false
         showingImportSheet = false
         showingExportSheet = false
+        showingRevealPhraseSheet = false
     }
 
     private func importMnemonic(_ mnemonic: String, fromCloud: Bool = false) {
@@ -67,7 +71,9 @@ struct BackupSettingsView: View {
     /// Every path that shows the seed, decrypts a backup or replaces the wallet goes through here.
     private func authorizeSeedAccess(reason: String, then action: @escaping () -> Void) {
         Task {
-            if await appState.authorizeSeedAccess(reason: reason) {
+            // LocalAuthentication cancels on backgrounding (systemCancel); this guards a late reply.
+            if await appState.authorizeSeedAccess(reason: reason),
+               SeedAccessPolicy.canOpenSeedScreen(after: lifecyclePhase) {
                 action()
             }
         }
@@ -166,6 +172,7 @@ struct BackupSettingsView: View {
             }
         }
         .closesSeedScreenOnBackground { closeSeedScreens() }
+        .onChange(of: scenePhase, initial: true) { _, phase in lifecyclePhase = AppLifecyclePhase(phase) }
         .alert("Delete Backup?", isPresented: $showingDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {

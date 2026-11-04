@@ -104,7 +104,7 @@ extension SelfCustodyGuidelineItem {
                 title: String(localized: "guideline_master_key_title", defaultValue: "Your Words Are Your Master Key"),
                 description: String(
                     localized: "guideline_master_key_desc",
-                    defaultValue: "The 12 words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
+                    defaultValue: "Your words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
                 )
             ),
             SelfCustodyGuidelineItem(

@@ -105,7 +105,6 @@ struct RevealRecoveryPhraseSheet: View {
         }
         .preferredColorScheme(.dark)
         .interactiveDismissDisabled(true)
-        .closesSeedScreenOnBackground { dismiss() }
     }
 
     private static let stepAnimation = Animation.easeInOut(duration: 0.25)

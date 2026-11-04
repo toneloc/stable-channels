@@ -17,4 +17,10 @@ final class SeedAccessPolicyTests: XCTestCase {
         XCTAssertFalse(SeedAccessPolicy.shouldCloseSeedScreens(for: .inactive))
         XCTAssertFalse(SeedAccessPolicy.shouldCloseSeedScreens(for: .active))
     }
+
+    func testLateAuthReplyOpensSeedScreenOnlyOutsideBackground() {
+        XCTAssertTrue(SeedAccessPolicy.canOpenSeedScreen(after: .active))
+        XCTAssertTrue(SeedAccessPolicy.canOpenSeedScreen(after: .inactive))
+        XCTAssertFalse(SeedAccessPolicy.canOpenSeedScreen(after: .background))
+    }
 }
