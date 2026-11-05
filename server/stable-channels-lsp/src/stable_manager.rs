@@ -1559,8 +1559,20 @@ impl StableChannelManager {
                 format!("{}", sc.user_channel_id) != user_channel_id
             }
         });
-        // A channel is tracked once it becomes usable, so an untracked one is taken as never usable.
-        let was_usable = self.stable_channels.len() < tracked_before;
+        // Reconnect reconciliation can remove a previously usable channel before
+        // its buffered close arrives. Its persisted row survives the soft-close.
+        let was_usable = self.stable_channels.len() < tracked_before
+            || match self.db.load_channel_any_notation(&user_channel_id) {
+                Ok(saved) => saved.is_some(),
+                Err(e) => {
+                    stable_channels::audit::audit_event(
+                        "DB_READ_FAILED",
+                        serde_json::json!({ "op": "load_channel", "context": "handle_channel_closed", "user_channel_id": user_channel_id, "channel_id": channel_id, "error": e.to_string() }),
+                    );
+                    // Preserve the close reason when history cannot be checked.
+                    true
+                },
+            };
         if let Some(t) = target {
             self.pending_splices.remove(&t);
             self.pending_book_updates.remove(&t);
@@ -5124,6 +5136,69 @@ pub(crate) mod tests {
         assert_eq!(closes(OTHER_PEER), 1, "another peer has its own limit");
         assert!(events.iter().any(|(name, data)| name == "CHANNEL_CLOSED" && data["user_channel_id"] == USER_CHANNEL_ID_DECIMAL));
         assert!(mgr.stable_channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn previously_usable_close_survives_reconcile_past_daily_limits() {
+        use crate::record_limits::{RecordKind, NEVER_USABLE_RECORDS_PER_DAY, NEVER_USABLE_RECORDS_PER_PEER};
+        use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReasonKind;
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        for all_peers in [false, true] {
+            let mut mgr = make_manager();
+            let ldk = FakeLdkServer::new(vec![make_channel(CHANNEL_ID_HEX, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, 100_000, 60_000_000, true)]);
+            mgr.handle_channel_ready(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), None, &ldk, 100_000.0).await;
+            assert_eq!(mgr.stable_channels.len(), 1);
+
+            // Reconnect reconciliation runs before buffered close events. The node
+            // already omits the closed channel, leaving only its soft-closed row.
+            ldk.channels.lock().unwrap().clear();
+            mgr.reconcile_from_grpc(&ldk, 100_000.0).await;
+            assert!(mgr.stable_channels.is_empty());
+            assert!(mgr.db.load_all_channels().unwrap().is_empty());
+            assert!(mgr.db.load_channel_any_notation(USER_CHANNEL_ID_DECIMAL).unwrap().is_some());
+
+            let now = crate::revenue::now_secs();
+            let limit = if all_peers { NEVER_USABLE_RECORDS_PER_DAY } else { NEVER_USABLE_RECORDS_PER_PEER };
+            for n in 0..limit {
+                let peer = if all_peers { format!("02{n:064x}") } else { COUNTERPARTY_HEX.to_string() };
+                assert!(mgr.record_limits.allow(&peer, RecordKind::NeverUsable, now));
+            }
+            stable_channels::audit::enable_test_capture();
+            mgr.handle_channel_closed(
+                CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), Some(COUNTERPARTY_HEX.into()), None, 0,
+                Some(ChannelStateChangeReason {
+                    kind: ChannelStateChangeReasonKind::CounterpartyForceClosed as i32,
+                    message: "peer closed during reconnect".into(),
+                    details: None,
+                }),
+            );
+            let events = stable_channels::audit::drain_test_capture();
+            stable_channels::audit::disable_test_capture();
+            let close = events.iter().find(|(name, _)| name == "CHANNEL_CLOSED")
+                .expect("a previously usable channel keeps its close record past either daily limit");
+            assert_eq!(close.1["user_channel_id"], USER_CHANNEL_ID_DECIMAL);
+            assert_eq!(close.1["reason_message"], "peer closed during reconnect");
+        }
+    }
+
+    #[test]
+    fn close_is_preserved_when_channel_history_cannot_be_read() {
+        use crate::record_limits::{RecordKind, NEVER_USABLE_RECORDS_PER_PEER};
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let now = crate::revenue::now_secs();
+        for _ in 0..NEVER_USABLE_RECORDS_PER_PEER {
+            assert!(mgr.record_limits.allow(COUNTERPARTY_HEX, RecordKind::NeverUsable, now));
+        }
+        let conn = rusqlite::Connection::open(mgr.data_dir().join(stable_channels::db::DB_FILENAME)).unwrap();
+        conn.execute_batch("DROP TABLE channels").unwrap();
+
+        stable_channels::audit::enable_test_capture();
+        mgr.handle_channel_closed(CHANNEL_ID_HEX.into(), USER_CHANNEL_ID_DECIMAL.into(), Some(COUNTERPARTY_HEX.into()), None, 0, None);
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        assert!(events.iter().any(|(name, data)| name == "DB_READ_FAILED" && data["context"] == "handle_channel_closed"));
+        assert!(events.iter().any(|(name, data)| name == "CHANNEL_CLOSED" && data["user_channel_id"] == USER_CHANNEL_ID_DECIMAL));
     }
 
     #[tokio::test]
