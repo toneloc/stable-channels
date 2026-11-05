@@ -79,6 +79,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         /**
+         * Whether Move can splice into a channel: it must be ready, with its funding confirmed. A
+         * zero-conf channel is ready before its funding reaches the chain, and a splice of it could
+         * then never be broadcast (#467).
+         */
+        fun isMoveTarget(isChannelReady: Boolean, confirmations: UInt?): Boolean =
+            isChannelReady && (confirmations ?: 0u) > 0u
+
+        /**
          * Set to true right before launching an in-app activity that backgrounds the app (e.g. the
          * log share sheet). [MainActivity] honors this only for a short grace window (see
          * `SHARE_SUPPRESS_WINDOW_MS`): if the app resumes within that window the node stop/restart
@@ -746,6 +754,11 @@ class AppState(private val context: Context) : ViewModel() {
         )
     val hasReadyChannel: StateFlow<Boolean>
         get() = _hasReadyChannel
+
+    /** A ready channel with confirmed funding, which Move can splice into ([isMoveTarget]). */
+    private val _canMoveToChannel = MutableStateFlow(false)
+    val canMoveToChannel: StateFlow<Boolean>
+        get() = _canMoveToChannel
 
     private val _pendingSweepBalanceSats = MutableStateFlow(0L)
     val pendingSweepBalanceSats: StateFlow<Long>
@@ -4269,9 +4282,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val channel =
-            nodeService.channels.find { it.isChannelReady }
+            nodeService.channels.find { isMoveTarget(it.isChannelReady, it.confirmations) }
                 ?: run {
-                    _statusMessage.value = "No ready channel"
+                    _statusMessage.value =
+                        if (nodeService.channels.any { it.isChannelReady }) {
+                            "Move is available once the channel confirms"
+                        } else {
+                            "No ready channel"
+                        }
                     return
                 }
 
@@ -4709,6 +4727,8 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
+        _canMoveToChannel.value =
+            nodeService.channels.any { isMoveTarget(it.isChannelReady, it.confirmations) }
         _spendableOnchainSats.value = spendable
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
