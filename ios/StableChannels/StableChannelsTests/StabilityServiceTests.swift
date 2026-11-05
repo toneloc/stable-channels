@@ -491,6 +491,12 @@ final class StabilityServiceTests: XCTestCase {
         XCTAssertGreaterThan(result.percentFromPar, 1.0)
     }
 
+    func testPercentFromParClampsTheTargetAtTheMinimumStableUSD() {
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: -5, targetUSD: 100), 5, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0), 5_000, accuracy: 1e-9)
+        XCTAssertEqual(StabilizationPolicy.percentFromPar(dollarsFromPar: 0.5, targetUSD: 0.001), 5_000, accuracy: 1e-9)
+    }
+
     // MARK: - spendConsumesLspSurplus
 
     func testSpendCoveredByNativeDoesNotConsumeSurplus() {
@@ -707,11 +713,11 @@ final class StabilityServiceTests: XCTestCase {
     func testDetectOnchainDepositAbsorbsWhenChannelClosing() {
         let appState = AppState()
         appState.isChannelClosing = true
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 105_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 105_000)
     }
 
     @MainActor
@@ -729,11 +735,11 @@ final class StabilityServiceTests: XCTestCase {
             fundingOutpointVout: 0
         )
         appState.isChannelClosing = false
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 105_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 105_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 105_000)
     }
 
     @MainActor
@@ -755,17 +761,527 @@ final class StabilityServiceTests: XCTestCase {
             status: "completed"
         )
         appState.isChannelClosing = false
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         // Sweep of 99,000 sats confirms (1,000 sat mining fee difference)
         appState.onchainBalanceSats = 104_000
 
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 104_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 104_000)
 
         // Verify no duplicate onchain payment row was created
         let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
         let onchainRows = payments.filter { $0.paymentType == "onchain" }
         XCTAssertTrue(onchainRows.isEmpty)
+    }
+
+    // MARK: - Deposit attribution by txid
+
+    private let txA = String(repeating: "a", count: 64)
+    private let txB = String(repeating: "b", count: 64)
+    private let txC = String(repeating: "c", count: 64)
+
+    @MainActor
+    private func makeDepositAppState() throws -> (AppState, DatabaseService) {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: tempDir) }
+        let db = try DatabaseService(dataDir: tempDir)
+        let appState = AppState()
+        appState.databaseService = db
+        appState.transactionLinkService.onchainReceiveAddress = nil
+        appState.depositBaseline.sats = 5000
+        appState.walletInbound = WalletInboundOnchain()
+        appState.depositBaseline.txids = []
+        return (appState, db)
+    }
+
+    /// A balance refresh: the node reports [balance] and lists [wallet] as its inbound on-chain txids,
+    /// with [walletSats] as the amounts it knows for them.
+    @MainActor
+    private func poll(
+        _ appState: AppState,
+        balance: UInt64,
+        wallet: Set<String>,
+        walletSats: [String: Int64] = [:]
+    ) {
+        appState.walletInbound = WalletInboundOnchain(txids: wallet, sats: walletSats)
+        appState.onchainBalanceSats = balance
+        appState.detectOnchainDeposit()
+    }
+
+    @MainActor
+    private func webSocketReceive(_ appState: AppState, txid: String, sats: Int64) {
+        appState.handleWebSocketTransactionDetected(event: .receive(target: "bc1qws", txid: txid, amountSats: sats))
+    }
+
+    /// The explorer confirmed [txid] gone: what the polling service does before reporting it.
+    @MainActor
+    private func explorerDrops(_ appState: AppState, _ db: DatabaseService, txid: String) throws {
+        if let sats = try db.paymentRepo.failPaymentByTxid(txid: txid) {
+            appState.receiveDropped(txid: txid, sats: sats)
+        }
+    }
+
+    private func receivedSats(_ db: DatabaseService) throws -> [UInt64] {
+        try db.paymentRepo.getRecentPayments(limit: 50)
+            .filter { $0.paymentType == "onchain" && $0.direction == "received" && $0.status != "failed" }
+            .map { $0.amountMsat / 1000 }
+            .sorted()
+    }
+
+    @MainActor
+    func testConfirmedSelfSendSpliceAdvancesTheBaselineSoNoDepositIsRecorded() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.priceService.setPriceForTesting(100_000.0)
+        appState.stableChannel.userChannelId = "self-send-chan"
+        appState.saveChannelToDB()
+        appState.transactionLinkService.onchainReceiveAddress = "bc1qown"
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "splice-self-send",
+            paymentType: SplicePaymentType.spliceOut.rawValue,
+            direction: SplicePaymentType.spliceOut.direction,
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "pending",
+            txid: txA,
+            address: "bc1qown"
+        )
+        appState.walletInbound = WalletInboundOnchain(txids: [txA])
+        appState.onchainBalanceSats = 55000
+
+        XCTAssertTrue(appState.completeConfirmedSplice(txid: txA, expectedGeneration: 0))
+
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+        XCTAssertTrue(appState.depositBaseline.counts(txA))
+        XCTAssertEqual(db.paymentRepo.payment(txid: txA)?.status, "completed")
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [], "the splice's own output is not a deposit")
+    }
+
+    @MainActor
+    func testWebSocketThenBalanceRecordsTheDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+    }
+
+    @MainActor
+    func testBalanceThenWebSocketRecordsTheDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        poll(appState, balance: 55000, wallet: [txA])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+    }
+
+    @MainActor
+    func testReceiveCountedDuringACloseIsNotSubtractedFromALaterDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        appState.isChannelClosing = true
+        poll(appState, balance: 55000, wallet: [txA])
+        appState.isChannelClosing = false
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testDepositDeferredBySweepIsRecordedWithoutTheWebSocketReceive() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        appState.isSweeping = true
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(appState.depositBaseline.sats, 5000)
+        appState.isSweeping = false
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testRelaunchBaselineKeepsACountedReceiveOutOfALaterDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        // Relaunch after the balance (55k) and its wallet txids were cached, before detection ran.
+        appState.depositBaseline.sats = 55000
+        appState.depositBaseline.txids = [txA]
+
+        poll(appState, balance: 115_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    /// The stale-lock release frees a lock with no pending splice row, so the sweep must never return
+    /// holding its lock before the row is written: it either saves the row or drops the lock first.
+    @MainActor
+    func testSweepNeverReturnsHoldingTheLockWithoutItsRow() {
+        let appState = AppState()
+
+        appState.sweepToChannel()
+
+        XCTAssertFalse(appState.isSweeping)
+        XCTAssertNil(appState.pendingSplice)
+        XCTAssertEqual(appState.statusMessage, "No ready channel")
+    }
+
+    @MainActor
+    func testLaunchLoadsTheBaselineTxidsCachedWithTheBalance() {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let keys = [
+            AppState.BalanceCacheKey.onchain, AppState.BalanceCacheKey.onchainTxids,
+            OnchainDepositBaselineStore.satsKey, OnchainDepositBaselineStore.txidsKey
+        ]
+        let saved = keys.map { shared?.object(forKey: $0) }
+        defer { zip(keys, saved).forEach { shared?.set($1, forKey: $0) } }
+        // First launch: nothing persisted yet.
+        shared?.removeObject(forKey: OnchainDepositBaselineStore.satsKey)
+        shared?.removeObject(forKey: OnchainDepositBaselineStore.txidsKey)
+        shared?.set(Int64(40000), forKey: AppState.BalanceCacheKey.onchain)
+        shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
+
+        XCTAssertEqual(AppState().depositBaseline.txids, [txA, txB])
+        XCTAssertEqual(AppState().depositBaseline.sats, 40000)
+    }
+
+    /// The balance cache refreshes while detection is deferred during a splice/close; a restart
+    /// must keep the baseline from before the deferral so the deposit is still detected.
+    @MainActor
+    func testRestartKeepsTheBaselineFromBeforeADeferredDeposit() {
+        let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
+        let keys = [
+            AppState.BalanceCacheKey.onchain, AppState.BalanceCacheKey.onchainTxids,
+            OnchainDepositBaselineStore.satsKey, OnchainDepositBaselineStore.txidsKey
+        ]
+        let saved = keys.map { shared?.object(forKey: $0) }
+        defer { zip(keys, saved).forEach { shared?.set($1, forKey: $0) } }
+
+        let before = AppState()
+        before.depositBaseline.advance(to: 40000, wallet: [txA])
+        // A deposit (txB) lands while a splice defers detection; the balance cache still refreshes.
+        shared?.set(Int64(90000), forKey: AppState.BalanceCacheKey.onchain)
+        shared?.set([txA, txB], forKey: AppState.BalanceCacheKey.onchainTxids)
+
+        let relaunched = AppState().depositBaseline
+        XCTAssertEqual(relaunched.sats, 40000)
+        XCTAssertEqual(relaunched.txids, [txA])
+    }
+
+    @MainActor
+    func testOutOfOrderArrivalSubtractsOnlyTheReceiveThatArrived() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        webSocketReceive(appState, txid: txB, sats: 45000)
+
+        poll(appState, balance: 50000, wallet: [txB])
+        poll(appState, balance: 100_000, wallet: [txA, txB])
+
+        XCTAssertEqual(try receivedSats(db), [45000, 50000])
+    }
+
+    @MainActor
+    func testTwoDepositsInOnePollThenWebSocketAreRecordedOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+
+        poll(appState, balance: 85000, wallet: [txA, txB])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        webSocketReceive(appState, txid: txB, sats: 30000)
+
+        XCTAssertEqual(try receivedSats(db), [30000, 50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txB))
+    }
+
+    @MainActor
+    func testReplacedReceiveLeavesItsReplacementToTheBalanceFallback() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        // txA is replaced by txC, which pays the same amount; the wallet only ever sees txC.
+        poll(appState, balance: 55000, wallet: [txC])
+        try explorerDrops(appState, db, txid: txA)
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testReplacementAfterTheBalanceCountedTheOriginalKeepsALiveRow() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The sender fee-bumps txA into txC for the same amount: the balance does not change.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+        XCTAssertEqual(appState.transactionLinkService.lastReceiveTxid, txC)
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+    }
+
+    @MainActor
+    func testReplacementInOneMessageThenPollBeforeNodeSyncRecordsOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The feed reports txC and txA's removal together; a poll runs before the node syncs.
+        webSocketReceive(appState, txid: txC, sats: 50000)
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+        XCTAssertEqual(appState.depositBaseline.sats, 55000)
+    }
+
+    @MainActor
+    func testReplacementReceiveAfterAPreSyncPollRecordsOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+        webSocketReceive(appState, txid: txC, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testEvictedReceiveDoesNotShrinkALaterDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // Evicted with no replacement: the balance falls back once the node syncs.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 5000, wallet: [txA], walletSats: [txA: 50000])
+        poll(appState, balance: 65000, wallet: [txA, txB], walletSats: [txA: 50000, txB: 60000])
+
+        XCTAssertEqual(try receivedSats(db), [60000])
+    }
+
+    @MainActor
+    func testRemovedReceiveStillInTheBalanceIsNotAddedToANewDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The explorer lost txA but the node still holds it when an unrelated deposit lands.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 115_000, wallet: [txA, txB], walletSats: [txA: 50000, txB: 60000])
+        poll(appState, balance: 65000, wallet: [txB], walletSats: [txB: 60000])
+
+        XCTAssertEqual(try receivedSats(db), [60000])
+        XCTAssertEqual(appState.depositBaseline.sats, 65000)
+    }
+
+    @MainActor
+    func testReplacementWhileTheNodeStillListsTheOriginalRecordsOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        // The node lists the replaced txA next to txC, but only txC is in the balance.
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txA, txC], walletSats: [txA: 50000, txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txC)?.status, "pending")
+    }
+
+    @MainActor
+    func testRemovedReceiveComesOffAtTheNodesAmountNotTheFeeds() throws {
+        let (appState, db) = try makeDepositAppState()
+        // The feed overstates txA, and a close moves the baseline without correcting the row.
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+        appState.isChannelClosing = true
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+        appState.isChannelClosing = false
+
+        try explorerDrops(appState, db, txid: txA)
+        poll(appState, balance: 55000, wallet: [txC], walletSats: [txC: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testIdentifiedDepositFallsBackWhenItsTxidHasAFailedRow() throws {
+        let (_, db) = try makeDepositAppState()
+        _ = try db.paymentRepo.recordPayment(
+            paymentId: "onchain_receive_\(txA)",
+            paymentType: "onchain",
+            direction: "received",
+            amountMsat: 50_000_000,
+            amountUSD: nil,
+            btcPrice: nil,
+            counterparty: nil,
+            status: "failed",
+            txid: txA
+        )
+        let recorder = IdentifiedDepositRecorder(
+            txid: txA,
+            databaseService: db,
+            fallback: UnknownAddressDepositRecorder(databaseService: db)
+        )
+
+        let recorded = recorder.record(
+            deposit: DepositRecordInput(
+                depositId: "onchain_deposit_1",
+                depositSats: 50000,
+                amountUSD: nil,
+                btcPrice: nil
+            ),
+            address: nil
+        )
+
+        XCTAssertTrue(recorded)
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testFirstLaunchAfterUpgradeRecordsAWebSocketDepositOnce() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.depositBaseline.txids = nil
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        poll(appState, balance: 55000, wallet: [txA], walletSats: [txA: 50000])
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testLateWebSocketReceiveFindsItsOwnRowNotAnEarlierDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        let txX = String(repeating: "e", count: 64)
+        // Two 50k deposits the WebSocket missed, in separate polls; then txA's event arrives late.
+        poll(appState, balance: 55000, wallet: [txX], walletSats: [txX: 50000])
+        poll(appState, balance: 105_000, wallet: [txX, txA], walletSats: [txX: 50000, txA: 50000])
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertEqual(db.paymentRepo.payment(txid: txX)?.paymentId, "onchain_receive_\(txX)")
+        XCTAssertEqual(db.paymentRepo.payment(txid: txA)?.paymentId, "onchain_receive_\(txA)")
+    }
+
+    @MainActor
+    func testInflatedFeedAmountDoesNotHideARealDepositInTheSameIncrease() throws {
+        let (appState, db) = try makeDepositAppState()
+        // A hostile feed reports txA as 500k; the node says it paid 50k. txB (60k) has no WebSocket event.
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+
+        poll(appState, balance: 115_000, wallet: [txA, txB], walletSats: [txA: 50000, txB: 60000])
+
+        XCTAssertEqual(try receivedSats(db), [50000, 60000])
+    }
+
+    @MainActor
+    func testReceiveTheNodeAlreadyListsUsesTheNodeAmount() throws {
+        let (appState, db) = try makeDepositAppState()
+        appState.walletInbound = WalletInboundOnchain(sats: [txA: 50000])
+
+        webSocketReceive(appState, txid: txA, sats: 500_000)
+
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testBalanceCountedReceiveTakesOverThePlaceholderAndOthersDoNot() throws {
+        let (appState, db) = try makeDepositAppState()
+        poll(appState, balance: 55000, wallet: [txA])
+
+        // txB is not in the baseline, so it gets its own row and leaves the placeholder alone.
+        webSocketReceive(appState, txid: txB, sats: 50000)
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertNil(db.paymentRepo.payment(txid: txA))
+
+        // txA is in the baseline, so it takes over the 50k placeholder.
+        webSocketReceive(appState, txid: txA, sats: 50000)
+        XCTAssertEqual(try receivedSats(db), [50000, 50000])
+        XCTAssertNotNil(db.paymentRepo.payment(txid: txA))
+    }
+
+    @MainActor
+    func testReceiveTheCloseBranchCountedDoesNotShrinkAnEarlierDeposit() throws {
+        let (appState, db) = try makeDepositAppState()
+        // txA (150k) arrives without a WebSocket event: the fallback records it, unidentified.
+        poll(appState, balance: 155_000, wallet: [txA])
+        // txB (40k) lands while a close is in flight: the baseline counts it without a row.
+        appState.isChannelClosing = true
+        poll(appState, balance: 195_000, wallet: [txA, txB])
+        appState.isChannelClosing = false
+
+        webSocketReceive(appState, txid: txB, sats: 40000)
+
+        XCTAssertEqual(try receivedSats(db), [40000, 150_000])
+    }
+
+    @MainActor
+    func testDepositWhoseWriteFailedIsRecordedOnTheNextPoll() throws {
+        let (appState, db) = try makeDepositAppState()
+        try db.rawSQL.execute(
+            """
+            CREATE TRIGGER fail_deposit_insert BEFORE INSERT ON payments
+            BEGIN SELECT RAISE(ABORT, 'forced deposit write failure'); END
+            """
+        )
+
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [])
+        XCTAssertEqual(appState.depositBaseline.sats, 5000)
+
+        try db.rawSQL.execute("DROP TRIGGER fail_deposit_insert")
+        poll(appState, balance: 55000, wallet: [txA])
+        XCTAssertEqual(try receivedSats(db), [50000])
+    }
+
+    @MainActor
+    func testWebSocketReceivePointsThePendingDepositLinkAtItsTxid() throws {
+        let (appState, _) = try makeDepositAppState()
+        appState.transactionLinkService.setReceiveTxid(txC)
+
+        webSocketReceive(appState, txid: txA, sats: 50000)
+
+        XCTAssertEqual(appState.transactionLinkService.lastReceiveTxid, txA)
+    }
+
+    func testInboundOnchainPaymentsSkipFailedAndOutboundOnes() {
+        func payment(_ txid: String, _ direction: PaymentDirection, _ status: PaymentStatus,
+                     msat: UInt64?) -> PaymentDetails {
+            PaymentDetails(
+                id: txid,
+                kind: .onchain(txid: txid, status: .unconfirmed),
+                amountMsat: msat,
+                feePaidMsat: nil,
+                direction: direction,
+                status: status,
+                latestUpdateTimestamp: 0
+            )
+        }
+        let payments = [
+            payment(txA, .inbound, .pending, msat: 50_000_000),
+            payment(txB, .inbound, .failed, msat: 60_000_000),
+            payment(txC, .outbound, .succeeded, msat: 70_000_000),
+            payment(String(repeating: "d", count: 64), .inbound, .succeeded, msat: nil)
+        ]
+
+        let inbound = WalletInboundOnchain(payments)
+        XCTAssertEqual(inbound.txids, [txA, String(repeating: "d", count: 64)])
+        XCTAssertEqual(inbound.sats, [txA: 50000])
     }
 
     @MainActor
@@ -958,23 +1474,23 @@ final class StabilityServiceTests: XCTestCase {
     @MainActor
     func testDetectOnchainDepositDefersWhenSweepingOrSplicePending() {
         let appState = AppState()
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         appState.onchainBalanceSats = 100_000
 
-        // When isSweeping is true, deposit detection defers and prevOnchainSats is NOT advanced
+        // When isSweeping is true, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = true
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_000)
 
-        // When pendingSplice exists, deposit detection defers and prevOnchainSats is NOT advanced
+        // When pendingSplice exists, deposit detection defers and the baseline is NOT advanced
         appState.isSweeping = false
         appState.pendingSplice = PendingSplice(
-            direction: "out",
+            paymentType: .spliceOut,
             amountSats: 20_000,
             address: "tb1qtestaddress"
         )
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 5_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_000)
     }
 
     @MainActor
@@ -985,13 +1501,13 @@ final class StabilityServiceTests: XCTestCase {
         let dbService = try DatabaseService(dataDir: tempDir)
         let appState = AppState()
         appState.databaseService = dbService
-        appState.prevOnchainSats = 5_000
+        appState.depositBaseline.sats = 5_000
         // Increase of only 500 sats (< 1000 sats threshold)
         appState.onchainBalanceSats = 5_500
 
         appState.detectOnchainDeposit()
         // Baseline advances to avoid re-triggering
-        XCTAssertEqual(appState.prevOnchainSats, 5_500)
+        XCTAssertEqual(appState.depositBaseline.sats, 5_500)
 
         // No onchain payment row recorded
         let payments = try dbService.paymentRepo.getRecentPayments(limit: 50)
@@ -1313,12 +1829,12 @@ final class StabilityServiceTests: XCTestCase {
             counterparty: "node-1"
         )
 
-        appState.prevOnchainSats = 0
+        appState.depositBaseline.sats = 0
         appState.onchainBalanceSats = 99_000
 
         // Sweep arrives while channel is closing
         appState.detectOnchainDeposit()
-        XCTAssertEqual(appState.prevOnchainSats, 99_000)
+        XCTAssertEqual(appState.depositBaseline.sats, 99_000)
 
         // Marker must be consumed in database
         let consumed = try dbService.rawSQL.query(
@@ -1378,7 +1894,7 @@ final class StabilityServiceTests: XCTestCase {
 
         _ = StabilityService.updateBalances(
             &sc,
-            channels: [mockChannel],
+            channels: [ChannelSnapshot(mockChannel)],
             onchainBalanceSats: 0,
             price: 100_000.0
         )
@@ -1394,5 +1910,219 @@ final class StabilityServiceTests: XCTestCase {
         // 5. Assert nativeChannelBTC == liveReceiverSats and expectedUSD == 0
         XCTAssertEqual(sc.expectedUSD.amount, 0.0, accuracy: 0.001)
         XCTAssertEqual(sc.nativeChannelBTC.sats, liveReceiverSats)
+    }
+}
+
+// MARK: - Incoming stability allocation (#320)
+
+extension StabilityServiceTests {
+    private func incoming(_ current: Int64, _ expected: Double, _ price: Double, _ amount: Int64) -> Int64? {
+        StabilityAllocation.backingAfterIncomingStability(
+            currentBackingSats: current,
+            expectedUSD: expected,
+            price: price,
+            amountSats: amount
+        )
+    }
+
+    func testIncomingStabilityMatchesRustShortfallAndExcessRules() {
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, 1_000), 10_000)
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, 5_000), 10_000)
+        XCTAssertEqual(incoming(10_000, 10.0, 110_000.0, 1_000), 10_000)
+        XCTAssertEqual(incoming(10_001, 10.0, 100_000.0, 1_000), 10_001)
+    }
+
+    func testIncomingStabilityRejectsInvalidBooksAndUnrepresentableTargets() {
+        for target in [-1.0, Double.nan, Double.infinity, Double.greatestFiniteMagnitude] {
+            XCTAssertNil(incoming(9_000, target, 100_000.0, 500))
+        }
+        XCTAssertNil(incoming(-1, 10.0, 100_000.0, 500))
+        XCTAssertNil(incoming(9_000, 10.0, 100_000.0, 0))
+        XCTAssertNil(incoming(9_000, 10.0, 100_000.0, -1))
+        XCTAssertNil(incoming(0, Double(Int64.max), 100_000_000.0, 1))
+        for price in [0.0, -1.0, Double.nan, Double.infinity] {
+            XCTAssertNil(incoming(9_000, 10.0, price, 500))
+        }
+    }
+
+    func testIncomingStabilityCapsBeforeAddingToAvoidOverflow() {
+        XCTAssertEqual(incoming(9_000, 10.0, 100_000.0, Int64.max), 10_000)
+    }
+
+    func testIncomingStabilityUsesWholeSatsEvenForSubCentTargets() {
+        XCTAssertEqual(incoming(0, 0.0009, 100_000.0, 500), 0)
+        XCTAssertEqual(incoming(0, 0.0099, 100_000.0, 500), 9)
+        XCTAssertEqual(incoming(20, 0.0099, 100_000.0, 500), 20)
+    }
+
+    func testBackingAfterPaymentOnlyCapsIncomingStability() {
+        let cap: (String, String, Int64) -> Int64? = { type, direction, delta in
+            StabilityAllocation.backingAfterPayment(
+                currentBackingSats: 9_000,
+                expectedUSD: 10.0,
+                price: 100_000.0,
+                deltaSats: delta,
+                paymentType: type,
+                direction: direction
+            )
+        }
+        XCTAssertEqual(cap("stability", "received", 5_000), 10_000)
+        // Outgoing sats already moved: keep the floor-at-zero debit clamp.
+        XCTAssertEqual(cap("stability", "sent", -4_000), 5_000)
+        XCTAssertEqual(cap("stability", "sent", -20_000), 0)
+        // A missing receipt price fails the incoming credit so the row is retried.
+        XCTAssertNil(StabilityAllocation.backingAfterPayment(
+            currentBackingSats: 9_000,
+            expectedUSD: 10.0,
+            price: nil,
+            deltaSats: 5_000,
+            paymentType: "stability",
+            direction: "received"
+        ))
+    }
+
+    // MARK: - Outgoing overflow repair (#318)
+
+    func testOverflowRepairDeductsOnlyTheOverflowAndIsIdempotent() throws {
+        let repair = try XCTUnwrap(StabilityService.overflowRepair(
+            expectedUSD: 10.0,
+            backingSats: 10_000,
+            receiverSats: 9_000,
+            price: 100_000.0
+        ))
+        XCTAssertEqual(repair.overflowSats, 1_000)
+        XCTAssertEqual(repair.newExpectedUSD, 9.0, accuracy: 0.000001)
+        XCTAssertEqual(repair.usdDeducted, 1.0, accuracy: 0.000001)
+        XCTAssertNil(StabilityService.overflowRepair(
+            expectedUSD: 9.0,
+            backingSats: 9_000,
+            receiverSats: 9_000,
+            price: 100_000.0
+        ))
+        XCTAssertNil(StabilityService.overflowRepair(
+            expectedUSD: 10.0,
+            backingSats: 10_000,
+            receiverSats: 9_000,
+            price: 0
+        ))
+    }
+
+    func testOverflowRepairReportsOnlyTheTargetDropPastZero() throws {
+        let repair = try XCTUnwrap(StabilityService.overflowRepair(
+            expectedUSD: 1.0,
+            backingSats: 10_000,
+            receiverSats: 5_000,
+            price: 100_000.0
+        ))
+        XCTAssertEqual(repair.newExpectedUSD, 0.0)
+        XCTAssertEqual(repair.usdDeducted, 1.0, accuracy: 0.000001)
+    }
+}
+
+/// Shared unit conversion and price selection that replaced repeated inline formulas.
+final class SharedUnitAndPriceRuleTests: XCTestCase {
+    func testConversionsMatchTheInlineFormulasTheyReplaced() {
+        XCTAssertEqual(BitcoinUnits.usd(sats: UInt64(150_000), price: 60000), 90, accuracy: 1e-9)
+        XCTAssertEqual(BitcoinUnits.usd(msats: UInt64(150_000_000), price: 60000), 90, accuracy: 1e-9)
+        XCTAssertEqual(BitcoinUnits.sats(usd: 90, price: 60000), 150_000, accuracy: 1e-6)
+        XCTAssertEqual(Constants.satsInBTC, 100_000_000)
+    }
+
+    func testFloorTargetSatsRoundsDownAndRejectsUnrepresentableTargets() {
+        XCTAssertEqual(BitcoinUnits.floorTargetSats(usd: 1, price: 3), 33_333_333)
+        XCTAssertEqual(BitcoinUnits.floorTargetSats(usd: 0, price: 50000), 0)
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: 1, price: 0))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: -1, price: 1))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: .infinity, price: 1))
+        XCTAssertNil(BitcoinUnits.floorTargetSats(usd: 1e30, price: 1))
+    }
+
+    func testFirstPositivePriceSkipsZeroNegativeAndNonFinite() {
+        XCTAssertEqual(StabilityService.firstPositivePrice(0, -1, .nan, .infinity, 42, 7), 42)
+        XCTAssertEqual(StabilityService.firstPositivePrice(0, 0), 0)
+    }
+
+    func testReceiptPriceUsesTheAccountingPriceOnlyForStabilityReceipts() {
+        XCTAssertEqual(
+            StabilityService.receiptPrice(isStabilityPayment: true, accountingPrice: 100, bookedPrice: 90), 100
+        )
+        XCTAssertEqual(
+            StabilityService.receiptPrice(isStabilityPayment: false, accountingPrice: 100, bookedPrice: 90), 90
+        )
+    }
+
+    func testReconcileOutgoingReportsTheSameDropAsTheOverflowRepair() {
+        var sc = StableChannel.default
+        sc.expectedUSD = USD(amount: 10)
+        sc.backingSats = 10000
+        sc.stableReceiverBTC = Bitcoin(sats: 9000)
+
+        let deducted = StabilityService.reconcileOutgoing(&sc, price: 100_000)
+
+        XCTAssertEqual(try XCTUnwrap(deducted), 1, accuracy: 1e-9)
+        XCTAssertEqual(sc.expectedUSD.amount, 9, accuracy: 1e-9)
+        XCTAssertEqual(sc.backingSats, 9000)
+        XCTAssertNil(StabilityService.reconcileOutgoing(&sc, price: 100_000), "a retry deducts nothing")
+    }
+
+    func testChainLookupURLsPutTheConfiguredChainFirstWithoutDuplicates() {
+        XCTAssertEqual(
+            Constants.chainLookupURLs(preferred: "https://custom/api"),
+            ["https://custom/api"] + Constants.esploraChainURLs
+        )
+        XCTAssertEqual(Constants.chainLookupURLs(preferred: Constants.primaryChainURL), Constants.esploraChainURLs)
+    }
+
+    // MARK: - settlementPaidUSD
+
+    func testSettlementPaidUSDMatchesFormerInlineExpression() {
+        let cases: [(gap: Double, msat: UInt64, price: Double)] = [
+            (-10.0, 10_000_000, 100_000.0), // amount equals the gap
+            (-10.0, 4_000_000, 100_000.0), // capped amount smaller than the gap
+            (-10.0, 50_000_000, 100_000.0), // amount larger than the gap
+            (10.0, 10_000_000, 100_000.0), // above par: sign dropped
+            (-10.0, 10_000_000, 0.0), // zero price: amount values to 0
+            (-10.0, 10_000_000, -100_000.0), // negative price: not guarded, goes negative
+            (-1_000_000.0, UInt64.max, 100_000.0), // large msat value
+            (.nan, 10_000_000, 100_000.0), // non-finite gap: NaN propagates
+            (-10.0, 10_000_000, .infinity) // non-finite price
+        ]
+        for c in cases {
+            let old = min(abs(c.gap), BitcoinUnits.usd(msats: c.msat, price: c.price))
+            let new = StabilityService.settlementPaidUSD(dollarsFromPar: c.gap, amountMsat: c.msat, price: c.price)
+            XCTAssertEqual(old.bitPattern, new.bitPattern, "\(c)")
+        }
+    }
+
+    func testSettlementPaidUSDCases() {
+        let price = 100_000.0
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: price),
+            10,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 4_000_000, price: price),
+            4,
+            accuracy: 1e-9
+        )
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 50_000_000, price: price),
+            10
+        )
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: 10, amountMsat: 50_000_000, price: price), 10)
+        XCTAssertEqual(StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: 0), 0)
+        XCTAssertEqual(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -1_000_000, amountMsat: UInt64.max, price: price),
+            1_000_000
+        )
+        // Not guarded: a NaN gap propagates, a negative price gives a negative value.
+        XCTAssertTrue(
+            StabilityService.settlementPaidUSD(dollarsFromPar: .nan, amountMsat: 10_000_000, price: price).isNaN
+        )
+        XCTAssertLessThan(
+            StabilityService.settlementPaidUSD(dollarsFromPar: -10, amountMsat: 10_000_000, price: -price),
+            0
+        )
     }
 }

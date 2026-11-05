@@ -72,7 +72,9 @@ final class UserToLSPHandler: PaymentHandler {
         }
 
         let backingSats = channelState.backingSats
-        guard channelState.expectedUSD >= 0.01 else {
+        // A sub-cent target with backing is an unsettled LSP surplus (#322), not "no position":
+        // fall through so the surplus settles as a normal above-par payment.
+        guard channelState.expectedUSD >= StabilizationPolicy.minimumStableUSD || backingSats > 0 else {
             completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
@@ -92,13 +94,14 @@ final class UserToLSPHandler: PaymentHandler {
         }
 
         // Calculate stability payment
-        let stableUSDValue = Double(backingSats) / Constants.satsInBTC * price
+        let stableUSDValue = BitcoinUnits.usd(sats: backingSats, price: price)
         let targetUSD = channelState.expectedUSD
         let dollarsFromPar = stableUSDValue - targetUSD
-        let percentFromPar = targetUSD > 0 ? abs(dollarsFromPar / targetUSD) * 100.0 : 0.0
+        let percentFromPar = StabilizationPolicy.percentFromPar(dollarsFromPar: dollarsFromPar, targetUSD: targetUSD)
 
         // Within threshold - no payment needed
-        guard percentFromPar >= Constants.stabilityThresholdPercent && abs(dollarsFromPar) >= 0.25 else {
+        guard percentFromPar >= StabilizationPolicy.thresholdPercent
+            && abs(dollarsFromPar) >= StabilizationPolicy.thresholdUSD else {
             completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)
             return
         }
@@ -113,7 +116,7 @@ final class UserToLSPHandler: PaymentHandler {
         // sat boundary so the signed amount_msat equals the keysend amount exactly.
         let dollarsAbs = abs(dollarsFromPar)
         let btcAmount = dollarsAbs / price
-        let amountMsat = UInt64(btcAmount * Constants.satsInBTC * 1000) / 1000 * 1000
+        let amountMsat = UInt64(btcAmount * BitcoinUnits.satsPerBTC * 1000) / 1000 * 1000
         let amountSats = amountMsat / 1000
         guard amountSats > 0 else {
             completion(mutator.buildStablePosition(base: baseContent, body: "Position is stable"), nil)

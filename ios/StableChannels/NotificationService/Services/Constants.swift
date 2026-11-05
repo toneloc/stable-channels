@@ -7,8 +7,7 @@ enum Constants {
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let syncMessageType = "SYNC_V1"
-    static let satsInBTC: Double = 100_000_000.0
-    static let stabilityThresholdPercent: Double = 0.1
+    static let satsInBTC = BitcoinUnits.satsPerBTC
     static let primaryChainURL = "https://blockstream.info/api"
     static let fallbackChainURL = "https://mempool.space/api"
 }

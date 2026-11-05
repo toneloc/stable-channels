@@ -56,7 +56,7 @@ final class StabilitySendRepository {
     }
 
     func clearPendingSend() {
-        try? rawSQL.execute("DELETE FROM pending_stability_send WHERE id = 1")
+        try? rawSQL.execute(SharedPaymentSQL.clearPendingStabilitySend)
     }
 
     func isOutgoingStabilityPayment(paymentId: String) throws -> Bool {

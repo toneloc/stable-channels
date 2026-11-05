@@ -126,7 +126,12 @@ struct SendView: View {
                 // Leaving mid-send would surface its result on the wrong step.
                 .disabled(model.isSending)
             case .success:
-                EmptyView()
+                // Done waits for the outcome; Close still leaves while a payment is pending.
+                if model.isLightningPending {
+                    Button(String(localized: "button_close", defaultValue: "Close")) {
+                        dismiss()
+                    }
+                }
             }
         }
     }

@@ -206,6 +206,19 @@ final class DatabaseService {
             )
             """,
             """
+            CREATE TABLE IF NOT EXISTS pending_removal_checks (
+                txid TEXT PRIMARY KEY NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS onchain_deposit_candidates (
+                payment_id TEXT NOT NULL,
+                txid TEXT NOT NULL,
+                PRIMARY KEY (payment_id, txid)
+            )
+            """,
+            """
             CREATE TABLE IF NOT EXISTS onchain_receive_txids (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 address TEXT NOT NULL,
@@ -249,7 +262,7 @@ final class DatabaseService {
             "CREATE INDEX IF NOT EXISTS idx_payments_confirmation_scan ON payments(txid, payment_type, status, confirmations) WHERE txid IS NOT NULL"
         ]
 
-        for sql in statements {
+        for sql in statements + SpliceEventRecorder.createTableStatements {
             try rawSQL.execute(sql)
         }
 
@@ -383,12 +396,80 @@ final class DatabaseService {
             """)
         }
 
+        // One on-chain receive row per txid. Older installs may hold duplicates from the
+        // WebSocket and balance paths, so keep the most advanced row (completed, then not failed,
+        // then most confirmations, then first recorded) before indexing. No other table references payments.id.
+        let hasUniqueReceiveTxidIndex = try !rawSQL.query(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_payments_onchain_receive_txid_unique'"
+        ).isEmpty
+        if !hasUniqueReceiveTxidIndex {
+            let removedDuplicates = try rawSQL.executeReturningChanges("""
+            DELETE FROM payments
+            WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
+              AND id NOT IN (SELECT id FROM (
+                                 SELECT id, ROW_NUMBER() OVER (
+                                     PARTITION BY txid
+                                     ORDER BY status = 'completed' DESC, status = 'failed', confirmations DESC, id
+                                 ) AS rank
+                                 FROM payments
+                                 WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
+                             ) WHERE rank = 1)
+            """)
+            if removedDuplicates > 0 {
+                AuditService.log("DB_DUPLICATE_RECEIVES_REMOVED", data: ["rows": removedDuplicates])
+            }
+            try rawSQL.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_onchain_receive_txid_unique
+            ON payments(txid) WHERE payment_type = 'onchain' AND direction = 'received' AND txid IS NOT NULL
+            """)
+        }
+
         try pruneHistoricalData()
     }
 
     private func pruneHistoricalData() throws {
         let cutoffSeconds = 90 * 86400
         try rawSQL.execute("DELETE FROM price_history WHERE timestamp < strftime('%s', 'now') - \(cutoffSeconds)")
+    }
+
+    // MARK: - Outbound Payment Failure
+
+    /// Records a failed outbound payment on the row its [target] names, through the shared
+    /// statements the notification extension's `recordOutgoingPaymentFailure` runs. [knownTrade] is
+    /// the in-memory trade the payment pays for, if any. Returns whether a trade took the failure,
+    /// and that trade when known.
+    func recordOutgoingPaymentFailure(
+        paymentId: String,
+        target: LightningPaymentFailureTarget,
+        knownTrade: PendingTradePayment?,
+        reasonCode: String?
+    ) -> (tradeFailed: Bool, trade: PendingTradePayment?) {
+        switch target {
+        case .trade:
+            // Signed results and already-paid fees are protected by the row update itself.
+            if let knownTrade {
+                _ = try? channelRepo.markTradeSendFailed(tradeDbId: knownTrade.tradeDbId, reasonCode: reasonCode)
+            } else {
+                _ = try? channelRepo.markTradeSendFailed(paymentId: paymentId, reasonCode: reasonCode)
+            }
+            return (true, knownTrade)
+        case .unattachedTrade(let amountMsat):
+            if let trade = try? channelRepo.failUnattachedPreparedTrade(
+                paymentId: paymentId,
+                amountMsat: amountMsat,
+                reasonCode: reasonCode
+            ) {
+                return (true, trade)
+            }
+        case .stabilitySend:
+            // No sats moved, so there is no row to fail; unblock the next send (as on Android).
+            stabilityRepo.clearPendingSend()
+            return (false, nil)
+        case .payment:
+            break
+        }
+        try? paymentRepo.updatePaymentStatus(paymentId: paymentId, status: "failed")
+        return (false, nil)
     }
 
     // MARK: - Transaction & SPV Header Delegations

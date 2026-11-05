@@ -75,6 +75,8 @@ object Constants {
     const val ESTIMATED_SPLICE_OUT_VBYTES: Long = 180L
     const val MIN_FEE_RATE_SAT_VB: Double = 1.0
     const val MAX_FEE_RATE_SAT_VB: Double = 10_000.0
+    /** Rate for estimates before a real rate loads; sends wait for a real rate. */
+    const val PLACEHOLDER_FEE_RATE_SAT_VB: Double = 10.0
     const val DEFAULT_CHANNEL_LIFETIME: Int = 2016
     const val MAX_PAYMENT_SIZE_MSAT: Long = 100_000_000_000L
     const val CHANNEL_OVER_PROVISIONING_PPM: Int = 1_000_000

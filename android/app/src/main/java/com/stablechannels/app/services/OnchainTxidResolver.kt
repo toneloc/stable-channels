@@ -16,11 +16,14 @@ object OnchainTxidResolver {
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
+    /** A transaction paying the resolved address, and the sats it paid to it. */
+    data class Resolved(val txid: String, val sats: Long)
+
     /**
      * Polls the block explorer for a transaction hitting the specified address. Searches both
      * mempool and chain endpoints. Retries with exponential backoff.
      */
-    suspend fun resolve(address: String, chainUrl: String): String? {
+    suspend fun resolve(address: String, chainUrl: String): Resolved? {
         val normalizedAddress = com.stablechannels.app.util.QRCodeUtils.normalizeAddress(address)
         return withContext(Dispatchers.IO) {
             val backoffs = listOf(2L, 8L, 30L, 60L, 120L, 300L)
@@ -47,7 +50,13 @@ object OnchainTxidResolver {
                                         val firstTx = jsonArray.getJSONObject(0)
                                         val txid = firstTx.optString("txid")
                                         if (txid.isNotBlank()) {
-                                            return@withContext txid
+                                            return@withContext Resolved(
+                                                txid,
+                                                MissedReceiveRecovery.satsPaidTo(
+                                                    firstTx,
+                                                    normalizedAddress,
+                                                ),
+                                            )
                                         }
                                     }
                                 }
