@@ -67,7 +67,7 @@ struct RevealQuizSecretPhraseView: View {
                             .fill(Color(uiColor: .secondarySystemGroupedBackground))
                             .overlay(
                                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    .stroke(Color.revealHairline, lineWidth: 1)
                             )
 
                         // 3 Equal-Sized Boxes Grid Layout
@@ -76,12 +76,12 @@ struct RevealQuizSecretPhraseView: View {
                                 HStack(spacing: 4) {
                                     Text("\(index + 1).")
                                         .font(.system(.caption, design: .monospaced).bold())
-                                        .foregroundStyle(Color(white: 0.5))
+                                        .foregroundStyle(.secondary)
                                         .fixedSize()
 
                                     Text(isRevealed ? word : "•••••")
                                         .font(.system(.footnote, design: .monospaced).weight(.medium))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(Color.primary)
                                         .lineLimit(1)
                                         .minimumScaleFactor(0.8)
                                 }
@@ -89,11 +89,11 @@ struct RevealQuizSecretPhraseView: View {
                                 .padding(.vertical, 4)
                                 .frame(minHeight: 38)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.black)
+                                .background(Color(uiColor: .systemGroupedBackground))
                                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                                        .stroke(Color.revealHairline, lineWidth: 1)
                                 )
                                 .accessibilityElement(children: .combine)
                             }
@@ -115,14 +115,14 @@ struct RevealQuizSecretPhraseView: View {
                                 VStack(spacing: 12) {
                                     Image(systemName: "eye.slash")
                                         .font(.largeTitle.weight(.medium))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(Color.primary)
 
                                     Text(String(
                                         localized: "reveal_phrase_tap_to_reveal",
                                         defaultValue: "Tap to reveal"
                                     ))
                                     .font(.headline.weight(.bold))
-                                    .foregroundStyle(.white)
+                                    .foregroundStyle(Color.primary)
 
                                     Text(String(
                                         localized: "reveal_phrase_tap_to_reveal_hint",
@@ -134,7 +134,7 @@ struct RevealQuizSecretPhraseView: View {
                                     .padding(.horizontal, 24)
                                 }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background(Color.black.opacity(0.55))
+                                .background(Color.revealVeil)
                                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                             }
                             .buttonStyle(.plain)
@@ -153,18 +153,18 @@ struct RevealQuizSecretPhraseView: View {
                                 HStack(spacing: 8) {
                                     Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
                                         .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(copiedSeed ? Color.green : Color.white)
+                                        .foregroundStyle(copiedSeed ? Color.green : Color.primary)
                                         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: copiedSeed)
 
                                     Text(String(localized: "button_copy_seed", defaultValue: "Copy Seed"))
                                         .font(.subheadline.weight(.semibold))
-                                        .foregroundStyle(.white)
+                                        .foregroundStyle(Color.primary)
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 48)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                                 .clipShape(Capsule())
                                 .overlay(
-                                    Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    Capsule().stroke(Color.revealHairline, lineWidth: 1)
                                 )
                             }
 
@@ -182,12 +182,12 @@ struct RevealQuizSecretPhraseView: View {
                                     Text(String(localized: "button_hide_seed", defaultValue: "Hide Seed"))
                                         .font(.subheadline.weight(.semibold))
                                 }
-                                .foregroundStyle(.white)
+                                .foregroundStyle(Color.primary)
                                 .frame(maxWidth: .infinity, minHeight: 48)
                                 .background(Color(uiColor: .secondarySystemGroupedBackground))
                                 .clipShape(Capsule())
                                 .overlay(
-                                    Capsule().stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    Capsule().stroke(Color.revealHairline, lineWidth: 1)
                                 )
                             }
                         }
@@ -203,9 +203,9 @@ struct RevealQuizSecretPhraseView: View {
             Button(action: onDone) {
                 Text(String(localized: "button_done", defaultValue: "Done"))
                     .font(.headline)
-                    .foregroundStyle(.black)
+                    .foregroundStyle(Color.revealButtonLabel)
                     .frame(maxWidth: .infinity, minHeight: 52)
-                    .background(Color.white)
+                    .background(Color.revealButtonFill)
                     .clipShape(Capsule())
             }
             .padding(.horizontal, 24)

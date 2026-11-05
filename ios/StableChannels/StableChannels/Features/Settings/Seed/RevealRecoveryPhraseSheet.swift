@@ -13,7 +13,7 @@ struct RevealRecoveryPhraseSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     // Content step views
@@ -97,7 +97,7 @@ struct RevealRecoveryPhraseSheet: View {
                     } label: {
                         Image(systemName: "chevron.left")
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.white)
+                            .foregroundStyle(.primary)
                     }
                     .accessibilityLabel(viewModel.canGoBack
                         ? String(localized: "button_back", defaultValue: "Back")
@@ -108,7 +108,6 @@ struct RevealRecoveryPhraseSheet: View {
                 RevealQuizLearnMoreSheet()
             }
         }
-        .preferredColorScheme(.dark)
         .interactiveDismissDisabled(true)
     }
 

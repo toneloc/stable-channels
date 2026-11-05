@@ -9,7 +9,7 @@ struct RevealQuizLearnMoreSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Color.black.ignoresSafeArea()
+                Color(uiColor: .systemGroupedBackground).ignoresSafeArea()
 
                 VStack(spacing: 0) {
                     ScrollView(showsIndicators: false) {
@@ -21,7 +21,7 @@ struct RevealQuizLearnMoreSheet: View {
                                     defaultValue: "Self-Custody Guidelines"
                                 ))
                                 .font(.title.bold())
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.primary)
 
                                 Text(
                                     String(
@@ -30,15 +30,13 @@ struct RevealQuizLearnMoreSheet: View {
                                     )
                                 )
                                 .font(.subheadline)
-                                .foregroundStyle(Color(uiColor: .lightGray))
+                                .foregroundStyle(.secondary)
                                 .lineSpacing(4)
                             }
                             .padding(.top, 12)
 
                             // Subtle Divider
-                            Rectangle()
-                                .fill(Color.white.opacity(0.1))
-                                .frame(height: 1)
+                            Divider()
 
                             // Pure Editorial Sections (No Boxes)
                             VStack(alignment: .leading, spacing: 28) {
@@ -46,11 +44,11 @@ struct RevealQuizLearnMoreSheet: View {
                                     VStack(alignment: .leading, spacing: 8) {
                                         Text(item.title)
                                             .font(.headline)
-                                            .foregroundStyle(.white)
+                                            .foregroundStyle(.primary)
 
                                         Text(item.description)
                                             .font(.subheadline)
-                                            .foregroundStyle(Color(white: 0.72))
+                                            .foregroundStyle(.secondary)
                                             .lineSpacing(4.5)
                                     }
                                 }
@@ -66,9 +64,9 @@ struct RevealQuizLearnMoreSheet: View {
                     } label: {
                         Text(String(localized: "button_done", defaultValue: "Done"))
                             .font(.headline)
-                            .foregroundStyle(.black)
+                            .foregroundStyle(Color.revealButtonLabel)
                             .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(Color.white)
+                            .background(Color.revealButtonFill)
                             .clipShape(Capsule())
                     }
                     .padding(.horizontal, 20)
@@ -89,6 +87,5 @@ struct RevealQuizLearnMoreSheet: View {
                 }
             }
         }
-        .preferredColorScheme(.dark)
     }
 }

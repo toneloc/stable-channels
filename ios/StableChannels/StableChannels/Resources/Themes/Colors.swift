@@ -9,6 +9,16 @@ extension Color {
     static let deepSendNavy = Color(red: 0.05, green: 0.22, blue: 0.55)
 }
 
+/// Recovery phrase reveal tones; they invert with the system appearance.
+extension Color {
+    /// Filled call to action: white in dark mode, black in light mode.
+    static let revealButtonFill = Color.primary
+    static let revealButtonLabel = Color(uiColor: .systemBackground)
+    static let revealHairline = Color.primary.opacity(0.1)
+    /// Covers the blurred words until tapped.
+    static let revealVeil = Color(uiColor: .systemGroupedBackground).opacity(0.55)
+}
+
 extension ShapeStyle where Self == Color {
     static var trendPositive: Color { Color.trendPositive }
     static var trendNegative: Color { Color.trendNegative }

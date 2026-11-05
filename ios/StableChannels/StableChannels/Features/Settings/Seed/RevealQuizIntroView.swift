@@ -23,9 +23,9 @@ struct RevealQuizIntroView: View {
                 Button(action: onGetStarted) {
                     Text(String(localized: "reveal_quiz_get_started", defaultValue: "Get started"))
                         .font(.headline)
-                        .foregroundStyle(.black)
+                        .foregroundStyle(Color.revealButtonLabel)
                         .frame(maxWidth: .infinity, minHeight: 52)
-                        .background(Color.white)
+                        .background(Color.revealButtonFill)
                         .clipShape(Capsule())
                 }
 

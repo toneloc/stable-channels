@@ -137,7 +137,7 @@ struct RevealQuizPortalIllustration: View {
 
                 Image(systemName: "sparkle")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.75))
+                    .foregroundStyle(Color.primary.opacity(0.75))
                     .offset(x: -54, y: 32)
 
                 Image(systemName: "circle.grid.2x2.fill")

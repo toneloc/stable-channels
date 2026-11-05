@@ -58,9 +58,9 @@ struct RevealQuizFeedbackView: View {
                         ? String(localized: "button_continue", defaultValue: "Continue")
                         : String(localized: "button_try_again", defaultValue: "Try again"))
                         .font(.headline)
-                        .foregroundStyle(.black)
+                        .foregroundStyle(Color.revealButtonLabel)
                         .frame(maxWidth: .infinity, minHeight: 52)
-                        .background(Color.white)
+                        .background(Color.revealButtonFill)
                         .clipShape(Capsule())
                 }
 
