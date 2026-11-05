@@ -7,7 +7,8 @@ final class SendChannelSpendPolicyTests: XCTestCase {
     private func createChannel(
         id: String,
         outboundSats: UInt64,
-        isReady: Bool = true
+        isReady: Bool = true,
+        confirmations: UInt32 = 6
     ) -> ChannelDetails {
         ChannelDetails(
             channelId: id,
@@ -24,7 +25,7 @@ final class SendChannelSpendPolicyTests: XCTestCase {
             outboundCapacityMsat: outboundSats * 1_000,
             inboundCapacityMsat: 100_000_000,
             confirmationsRequired: 1,
-            confirmations: 6,
+            confirmations: confirmations,
             isOutbound: false,
             isChannelReady: isReady,
             isUsable: isReady,
@@ -51,6 +52,16 @@ final class SendChannelSpendPolicyTests: XCTestCase {
             ),
             channelShutdownState: nil
         )
+    }
+
+    func testMoveUsesAReadyChannelOnlyOnceItsFundingConfirms() {
+        // A zero-conf channel is ready before its funding confirms (#467).
+        let unconfirmed = createChannel(id: "unconfirmed", outboundSats: 1_000, confirmations: 0)
+        let notReady = createChannel(id: "not-ready", outboundSats: 1_000, isReady: false)
+        let confirmed = createChannel(id: "confirmed", outboundSats: 1_000, confirmations: 1)
+
+        XCTAssertNil(AppState.moveChannel(in: [unconfirmed, notReady]))
+        XCTAssertEqual(AppState.moveChannel(in: [unconfirmed, confirmed])?.channelId, "confirmed")
     }
 
     func testAvailableSpendableSats_lightningAggregatesChannels() throws {

@@ -484,6 +484,37 @@ final class SpliceFailureRecoveryTests: XCTestCase {
         XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
     }
 
+    func testClosedChannelFailsItsSpliceThatWasNeverBroadcast() async throws {
+        app = makeApp(.notFound)
+        try beginNegotiatedSplice()
+        let closed = try XCTUnwrap(db.spliceRepo.getPendingSpliceTxid(userChannelId: "7", channelId: "channel"))
+
+        app.checkSpliceOfClosedChannel(txid: closed, channelId: "channel", userChannelId: "7")
+        await app.retryPendingSpliceFailureChecks()
+
+        XCTAssertEqual(try status(txid), "failed")
+        XCTAssertTrue(try db.spliceRepo.pendingFailureChecks().isEmpty)
+        XCTAssertFalse(app.isSweeping)
+    }
+
+    func testClosedChannelKeepsItsBroadcastSplice() async throws {
+        app = makeApp(.exists)
+        try beginNegotiatedSplice()
+
+        app.checkSpliceOfClosedChannel(txid: txid, channelId: "channel", userChannelId: "7")
+        await app.retryPendingSpliceFailureChecks()
+
+        XCTAssertEqual(try status(txid), "pending")
+        XCTAssertTrue(app.isSweeping)
+    }
+
+    func testPendingSpliceIsFoundOnlyOnItsChannel() throws {
+        try beginNegotiatedSplice()
+
+        XCTAssertNil(try db.spliceRepo.getPendingSpliceTxid(userChannelId: "8", channelId: "other"))
+        XCTAssertEqual(try db.spliceRepo.getPendingSpliceTxid(userChannelId: "7", channelId: "channel"), txid)
+    }
+
     func testFinalizationFailureRetainsRecoveryObligation() async throws {
         app = makeApp(.notFound)
         try beginNegotiatedSplice()

@@ -95,6 +95,8 @@ enum HomeOnchainRows {
         var onchainBalanceSats: UInt64 = 0
         var spendableOnchainSats: UInt64 = 0
         var hasReadyChannel = false
+        /// A ready channel whose funding has confirmed: Move can splice into it (#467).
+        var canMoveToChannel = false
         var isSweeping = false
         var spliceTxid: String?
         var pendingSplice: PendingSplice?
@@ -134,7 +136,7 @@ enum HomeOnchainRows {
                 txid: closeTxid
             )]
                 + receives
-        } else if inputs.hasReadyChannel && inputs.spendableOnchainSats > 0 {
+        } else if inputs.canMoveToChannel && inputs.spendableOnchainSats > 0 {
             if receives.isEmpty {
                 card.moveButton = .plain
             } else {
@@ -156,9 +158,10 @@ enum HomeOnchainRows {
             }
             card.showsActivationHint = !inputs.hasReadyChannel
         } else {
-            // Confirmed funds without a channel; a newer deposit can still be confirming beside them.
+            // Confirmed funds and no channel to move them into yet; a newer deposit can still be
+            // confirming beside them.
             card.rows = receives
-            card.showsActivationHint = true
+            card.showsActivationHint = !inputs.hasReadyChannel
         }
         return card
     }

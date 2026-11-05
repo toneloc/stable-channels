@@ -43,9 +43,11 @@ class SpliceBroadcastChecker(
             var anyReached = false
             for (baseUrl in urls) {
                 try {
+                    // Not /status: esplora answers it with 200 even for a txid it has never seen
+                    // (#467).
                     val request =
                         Request.Builder()
-                            .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/status")
+                            .url("${baseUrl.trimEnd('/')}/tx/$normalizedTxid/hex")
                             .build()
                     httpClient.newCall(request).execute().use { response ->
                         anyReached = true
