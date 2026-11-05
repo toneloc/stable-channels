@@ -42,6 +42,18 @@ data class ClosedChannelFunds(
 
         private fun count(n: Int, unit: String) = if (n == 1) "1 $unit" else "$n ${unit}s"
 
+        /** LDK's funds when it tracks a close, else what the on-chain recovery found (#364). */
+        fun orRecovered(ldk: ClosedChannelFunds?, recoveredSats: Long): ClosedChannelFunds? =
+            ldk ?: recoveredSats.takeIf { it > 0 }?.let { ClosedChannelFunds(it, null) }
+
+        /**
+         * Whether LDK still handles a close itself. Its sweep counts until it confirms, though the
+         * card leaves it out once it is broadcast.
+         */
+        fun ldkHandlesClose(ldk: ClosedChannelFunds?, pendingSweeps: List<PendingSweepBalance>) =
+            ldk != null ||
+                pendingSweeps.any { it is PendingSweepBalance.BroadcastAwaitingConfirmation }
+
         /**
          * Sweeps LDK has not broadcast yet. A broadcast sweep is left out, as the wallet counts it
          * once it sees the tx. LDK re-signs an unconfirmed sweep each block to a new wallet

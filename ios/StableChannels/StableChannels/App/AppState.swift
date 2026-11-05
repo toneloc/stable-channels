@@ -261,6 +261,10 @@ class AppState {
     var pendingSweepBalanceSats: UInt64 = 0
     /// LDK's funds of closed channels, from the last refresh.
     var ldkClosedChannelFunds: ClosedChannelFunds?
+    // Funds of a channel the LSP force-closed after this app lost its channel data (#364).
+    @ObservationIgnored let toRemoteRecovery = ToRemoteRecovery(chainURLs: Constants.esploraChainURLs)
+    private var toRemotePendingSats: UInt64 = 0
+    @ObservationIgnored private var toRemoteRecoveryTask: Task<Void, Never>?
     /// Channels closed cooperatively, which the closed channel card leaves out (#358).
     private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
@@ -324,12 +328,16 @@ class AppState {
         )
     }
 
-    /// What the total leaves out of LDK's funds of closed channels, for the Home card.
+    /// What the total leaves out of LDK's funds of closed channels, or else what the on-chain recovery
+    /// found, for the Home card.
     var closedChannelFunds: ClosedChannelFunds? {
-        BalanceCalculator.closedChannelFundsLeftOut(
-            ldkClosedChannelFunds,
-            lightning: lightningBalanceSats,
-            channelState: balanceChannelState
+        ClosedChannelFunds.orRecovered(
+            BalanceCalculator.closedChannelFundsLeftOut(
+                ldkClosedChannelFunds,
+                lightning: lightningBalanceSats,
+                channelState: balanceChannelState
+            ),
+            recoveredSats: toRemotePendingSats
         )
     }
 
@@ -779,6 +787,8 @@ class AppState {
         txidResolutionService.cancelAllLaunchers()
         nodeService.stop()
 
+        // Kept for the recovery below: the reset clears it.
+        let lostFundingTxid = fundingTxid
         resetInMemoryWalletState()
         dropDatabaseServices()
         wipeWalletPersistence()
@@ -790,6 +800,11 @@ class AppState {
                 await backfillHourlyPrices()
                 await backfillDailyPrices()
             }
+            // LDK starts with no channel data, so the LSP's close of the saved funding txid's channel
+            // is looked for on chain instead (#364). Set up before the node starts, so a start that
+            // fails still finds it on the next one. When the LSP said there is no channel, one check
+            // covers a close that already happened.
+            await toRemoteRecovery.startAfterRestore(fundingTxid: lostFundingTxid, repeats: acknowledgeForceClose)
             try await startNodeWithFailover(mnemonic: words)
 
             let nodeId = nodeService.nodeId
@@ -848,6 +863,7 @@ class AppState {
         spendableOnchainSats = 0
         pendingSweepBalanceSats = 0
         ldkClosedChannelFunds = nil
+        toRemotePendingSats = 0
         sendGeneration += 1
         pendingOutboundSend = BalanceCalculator.PendingOutboundSend()
         transactionLinkService.onchainReceiveAddress = nil
@@ -2732,6 +2748,13 @@ class AppState {
             stableChannel.stableReceiverUSD = .zero
             stableChannel.channelId = ""
             stableChannel.userChannelId = ""
+            // If LDK can't claim this close (lost or stale channel data, #348), the funds are found
+            // by what spent the funding tx (#364). Skipped while LDK handles the close itself.
+            if let closedFunding = fundingTxid {
+                Task {
+                    await toRemoteRecovery.start(fundingTxid: closedFunding, fundingVout: nil)
+                }
+            }
             // Stale after close: would otherwise link to the old channel's funding tx.
             fundingTxid = nil
             UserDefaults(suiteName: Constants.appGroupIdentifier)?
@@ -4242,6 +4265,70 @@ class AppState {
         return try await confirmationPollingService.refresh()
     }
 
+    /// Looks on chain for funds of a channel LDK no longer knows (#364).
+    private func runToRemoteRecovery(ldkHandlesClose: Bool) {
+        guard toRemoteRecoveryTask == nil else { return }
+        let savedFunding = fundingTxid
+        let ldkHasChannels = !nodeService.channels.isEmpty
+        toRemoteRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            defer { toRemoteRecoveryTask = nil }
+            let recovery = toRemoteRecovery
+            let mayRun = await recovery.onRefresh(
+                savedFundingTxid: savedFunding,
+                ldkHasChannels: ldkHasChannels,
+                ldkHandlesClose: ldkHandlesClose
+            )
+            if mayRun, let seed = walletSeed() {
+                let nodeService = nodeService
+                let feeRateService = feeRateService
+                await recovery.run(
+                    seed: seed,
+                    destination: { await MainActor.run { try? nodeService.newOnchainAddress() } },
+                    feeRateSatVb: { await UInt64(max(feeRateService.currentRate(), 1).rounded(.up)) },
+                    onSwept: { [weak self] txid, sats, address in
+                        await self?.recordRecoveredClose(txid: txid, sats: sats, address: address)
+                    }
+                )
+            }
+            // Also when recovery may not run, so a reset by a restore clears the card.
+            toRemotePendingSats = await recovery.pendingSats
+        }
+    }
+
+    /// LDK never saw this channel close, so nothing else records it in History. The row also lets
+    /// detectOnchainDeposit() count the sweep as the close's funds, not a new deposit.
+    private func recordRecoveredClose(txid: String, sats: UInt64, address: String) {
+        let price = btcPrice
+        do {
+            try databaseService?.paymentRepo.recordPayment(
+                paymentId: txid,
+                paymentType: "channel_close",
+                direction: "received",
+                amountMsat: sats * 1000,
+                amountUSD: price > 0 ? Double(sats) / Double(Constants.satsInBTC) * price : nil,
+                btcPrice: price > 0 ? price : nil,
+                counterparty: nil,
+                status: "pending",
+                txid: txid,
+                address: address
+            )
+        } catch {
+            AuditService.log("TO_REMOTE_PAYMENT_ROW_FAILED", data: [
+                "txid": txid,
+                "error": "\(error)"
+            ])
+        }
+    }
+
+    /// The 64-byte wallet seed: from the mnemonic, or the keys_seed file of wallets made before
+    /// mnemonics.
+    private func walletSeed() -> Data? {
+        if let words = nodeService.savedMnemonic { return ToRemoteKeys.bip39Seed(words) }
+        let data = try? Data(contentsOf: Constants.userDataDir.appendingPathComponent("keys_seed"))
+        return data?.count == 64 ? data : nil
+    }
+
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
@@ -4338,6 +4425,10 @@ class AppState {
             ),
             currentHeight: nodeService.node?.status().currentBestBlock.height ?? 0
         )
+        runToRemoteRecovery(ldkHandlesClose: ClosedChannelFunds.ldkHandlesClose(
+            ldkClosedChannelFunds,
+            pendingSweeps: balances.pendingBalancesFromChannelClosures
+        ))
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {

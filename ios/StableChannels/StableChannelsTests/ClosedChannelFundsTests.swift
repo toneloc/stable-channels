@@ -262,6 +262,41 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertEqual(ClosedChannelFunds.unbroadcastSweepSats(sweeps), 39000)
     }
 
+    /// Case B funds show only when LDK tracks no close itself.
+    func testLdkFundsComeBeforeRecoveredFunds() {
+        let ldk = ClosedChannelFunds(amountSats: 50000, blocksLeft: 3)
+        XCTAssertEqual(ClosedChannelFunds.orRecovered(ldk, recoveredSats: 94467), ldk)
+        XCTAssertEqual(
+            ClosedChannelFunds.orRecovered(nil, recoveredSats: 94467),
+            ClosedChannelFunds(amountSats: 94467, blocksLeft: nil)
+        )
+        XCTAssertNil(ClosedChannelFunds.orRecovered(nil, recoveredSats: 0))
+    }
+
+    /// Recovery waits for LDK's own sweep to confirm, even once the card leaves it out.
+    func testLdkHandlesACloseUntilItsSweepConfirms() {
+        let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(
+            channelId: "closed",
+            latestBroadcastHeight: 900_002,
+            latestSpendingTxid: "sweep",
+            amountSatoshis: 49800
+        )
+        XCTAssertNil(from(sweeps: [sweep]))
+        XCTAssertTrue(ClosedChannelFunds.ldkHandlesClose(nil, pendingSweeps: [sweep]))
+        XCTAssertTrue(ClosedChannelFunds.ldkHandlesClose(
+            ClosedChannelFunds(amountSats: 50000, blocksLeft: nil),
+            pendingSweeps: []
+        ))
+        let confirmed = PendingSweepBalance.awaitingThresholdConfirmations(
+            channelId: "closed",
+            latestSpendingTxid: "sweep",
+            confirmationHash: "block",
+            confirmationHeight: 900_003,
+            amountSatoshis: 49800
+        )
+        XCTAssertFalse(ClosedChannelFunds.ldkHandlesClose(nil, pendingSweeps: [confirmed]))
+    }
+
     func testTheLastOfSeveralUnlocksIsShown() {
         let funds = from([awaiting(30000, 900_010, .holderForceClosed), awaiting(20000, 900_144, .holderForceClosed)])
         XCTAssertEqual(funds, ClosedChannelFunds(amountSats: 50000, blocksLeft: 144))

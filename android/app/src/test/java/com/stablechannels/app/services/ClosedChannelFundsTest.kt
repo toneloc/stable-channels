@@ -331,6 +331,36 @@ class ClosedChannelFundsTest {
         assertNull(from(listOf(awaiting(50_000, 900_001, BalanceSource.COOP_CLOSE))))
     }
 
+    /** Case B funds show only when LDK tracks no close itself. */
+    @Test
+    fun ldkFundsComeBeforeRecoveredFunds() {
+        val ldk = ClosedChannelFunds(50_000, 3)
+        assertEquals(ldk, ClosedChannelFunds.orRecovered(ldk, 94_467))
+        assertEquals(ClosedChannelFunds(94_467, null), ClosedChannelFunds.orRecovered(null, 94_467))
+        assertNull(ClosedChannelFunds.orRecovered(null, 0))
+    }
+
+    /** Recovery waits for LDK's own sweep to confirm, even once the card leaves it out. */
+    @Test
+    fun ldkHandlesACloseUntilItsSweepConfirms() {
+        val sweep =
+            PendingSweepBalance.BroadcastAwaitingConfirmation("closed", 900_002u, "sweep", 49_800uL)
+        assertNull(from(sweeps = listOf(sweep)))
+        assertTrue(ClosedChannelFunds.ldkHandlesClose(null, listOf(sweep)))
+        assertTrue(
+            ClosedChannelFunds.ldkHandlesClose(ClosedChannelFunds(50_000, null), emptyList())
+        )
+        val confirmed =
+            PendingSweepBalance.AwaitingThresholdConfirmations(
+                "closed",
+                "sweep",
+                "block",
+                900_003u,
+                49_800uL,
+            )
+        assertFalse(ClosedChannelFunds.ldkHandlesClose(null, listOf(confirmed)))
+    }
+
     @Test
     fun theLastOfSeveralUnlocksIsShown() {
         val funds =

@@ -21,6 +21,15 @@ struct ClosedChannelFunds: Equatable {
         amountSats > sweepSats ? ClosedChannelFunds(amountSats: amountSats - sweepSats, blocksLeft: blocksLeft) : nil
     }
 
+    /// Whether LDK still handles a close itself. Its sweep counts until it confirms, though the card
+    /// leaves it out once it is broadcast.
+    static func ldkHandlesClose(_ ldk: ClosedChannelFunds?, pendingSweeps: [PendingSweepBalance]) -> Bool {
+        ldk != nil || pendingSweeps.contains {
+            if case .broadcastAwaitingConfirmation = $0 { return true }
+            return false
+        }
+    }
+
     /// Sweeps LDK has not broadcast yet. A broadcast sweep is left out, as the wallet counts it once it
     /// sees the tx. LDK re-signs an unconfirmed sweep each block to a new wallet address, so its latest
     /// txid is often not the one the mempool and the wallet have.
@@ -99,6 +108,11 @@ struct ClosedChannelFunds: Equatable {
 
     private static func count(_ n: UInt32, _ unit: String) -> String {
         n == 1 ? "1 \(unit)" : "\(n) \(unit)s"
+    }
+
+    /// LDK's funds when it tracks a close, else what the on-chain recovery found (#364).
+    static func orRecovered(_ ldk: ClosedChannelFunds?, recoveredSats: UInt64) -> ClosedChannelFunds? {
+        ldk ?? (recoveredSats > 0 ? ClosedChannelFunds(amountSats: recoveredSats, blocksLeft: nil) : nil)
     }
 
     func message(btcPrice: Double) -> String {
