@@ -4671,19 +4671,19 @@
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "عرض الكلمات (Seed)"
+            "value" : "إظهار عبارة الاسترداد السرية"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "সীড শব্দগুলো দেখুন"
+            "value" : "গোপন সীড ফ্রেজ দেখান"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Seed-Wörter anzeigen"
+            "value" : "Geheime Seed-Phrase anzeigen"
           }
         },
         "en" : {
@@ -4695,43 +4695,43 @@
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ver palabras de la semilla"
+            "value" : "Mostrar la frase semilla secreta"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Afficher les mots de la graine"
+            "value" : "Afficher la phrase de récupération secrète"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "सीड शब्द देखें"
+            "value" : "गुप्त सीड वाक्यांश दिखाएं"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "シードの単語を表示"
+            "value" : "秘密のシードフレーズを表示"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ver palavras da semente"
+            "value" : "Revelar frase de recuperação secreta"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Посмотреть seed-фразу"
+            "value" : "Показать секретную seed-фразу"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "查看助记词"
+            "value" : "显示秘密助记词"
           }
         }
       }

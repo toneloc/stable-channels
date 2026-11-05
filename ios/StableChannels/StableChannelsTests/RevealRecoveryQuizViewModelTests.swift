@@ -192,7 +192,10 @@ final class RevealRecoveryQuizViewModelTests: XCTestCase {
     func testEntryButtonStaysTranslated() throws {
         let dePath = try XCTUnwrap(Bundle.main.path(forResource: "de", ofType: "lproj"))
         let de = try XCTUnwrap(Bundle(path: dePath))
-        XCTAssertEqual(de.localizedString(forKey: "button_view_seed", value: nil, table: nil), "Seed-Wörter anzeigen")
+        XCTAssertEqual(
+            de.localizedString(forKey: "button_view_seed", value: nil, table: nil),
+            "Geheime Seed-Phrase anzeigen"
+        )
     }
 
     func testGoBackFromIntroIsNoOp() {
