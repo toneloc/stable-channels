@@ -14,7 +14,8 @@ use stable_channels::db::Database;
 use tokio::time::interval;
 use tracing::warn;
 
-use crate::stable_manager::LdkServerCalls;
+use crate::record_limits::{RecordKind, RecordLimits};
+use crate::stable_manager::{LdkServerCalls, StableChannelManager};
 use crate::state::AppState;
 
 const POLL_SECS: u64 = 30;
@@ -41,8 +42,12 @@ async fn run(state: AppState) {
             Ok(r) => r.channels,
             Err(e) => { warn!("[observability] list_channels failed: {}", e); continue; }
         };
-        poll_peers(&state, &channels, &mut peer_prev, &mut peer_first_run).await;
-        shutdown_prev = record_shutdown_stages(&shutdown_prev, &channels);
+        let (peer_changes, cp_uids) = poll_peers(&state, &channels, &mut peer_prev, &mut peer_first_run).await;
+        let (shutdowns, next) = shutdown_audit_data(&shutdown_prev, &channels);
+        shutdown_prev = next;
+        // Decided under the manager lock and written after it is released.
+        let records = keep_observed_records(&mut *state.stable_manager.lock().await, peer_changes, shutdowns, crate::revenue::now_secs());
+        write_observed_records(records, &cp_uids);
         record_onchain_channel_txs(ldk, &state.db, &channels, &mut onchain_pending).await;
     }
 }
@@ -169,18 +174,6 @@ fn record_onchain_payment(
     Ok(())
 }
 
-/// Audit every shutdown-stage change and return the next in-memory baseline; the per-stage dedup key keeps restarts from repeating a stage.
-pub(crate) fn record_shutdown_stages(
-    prev: &HashMap<String, String>,
-    channels: &[Channel],
-) -> HashMap<String, String> {
-    let (events, next) = shutdown_audit_data(prev, channels);
-    for data in events {
-        stable_channels::audit::audit_event("CHANNEL_SHUTDOWN_STATE_CHANGED", data);
-    }
-    next
-}
-
 /// Pure: rows for channels whose shutdown stage changed since `prev` (an unseen channel emits only if already shutting down) plus the next baseline.
 pub fn shutdown_audit_data(
     prev: &HashMap<String, String>,
@@ -293,16 +286,87 @@ pub fn peer_transitions(
     out
 }
 
+/// Connection changes, shutdown stages and limit reports to record from one poll.
+#[derive(Debug, Default)]
+pub(crate) struct ObservedRecords {
+    pub(crate) connections: Vec<(String, bool)>,
+    pub(crate) shutdowns: Vec<Value>,
+    pub(crate) reports: Vec<crate::record_limits::LimitedDay>,
+}
+
+/// The records of one poll to write; until the channel list has loaded every channel looks unused, so all are kept.
+pub(crate) fn keep_observed_records(
+    mgr: &mut StableChannelManager,
+    connections: Vec<(String, bool)>,
+    shutdowns: Vec<Value>,
+    now: i64,
+) -> ObservedRecords {
+    if !mgr.is_hydrated() {
+        return ObservedRecords { connections, shutdowns, reports: Vec::new() };
+    }
+    let (usable_peers, usable_channels) = mgr.usable_channels();
+    limit_observed_records(&mut mgr.record_limits, &usable_peers, &usable_channels, connections, shutdowns, now)
+}
+
+/// Keep the connection changes and shutdown stages within the daily limits, and take the ended days to report.
+fn limit_observed_records(
+    limits: &mut RecordLimits,
+    usable_peers: &HashSet<String>,
+    usable_channels: &HashSet<String>,
+    connections: Vec<(String, bool)>,
+    shutdowns: Vec<Value>,
+    now: i64,
+) -> ObservedRecords {
+    // A peer without a usable channel shares the never-usable limits.
+    let connections = connections
+        .into_iter()
+        .filter(|(node, _)| {
+            let kind = match usable_peers.contains(&node.to_ascii_lowercase()) {
+                true => RecordKind::Connection,
+                false => RecordKind::NeverUsable,
+            };
+            limits.allow(node, kind, now)
+        })
+        .collect();
+    // Every stage of a channel that became usable is recorded.
+    let shutdowns = shutdowns
+        .into_iter()
+        .filter(|data| {
+            usable_channels.contains(data["user_channel_id"].as_str().unwrap_or_default())
+                || limits.allow(data["counterparty_node_id"].as_str().unwrap_or_default(), RecordKind::NeverUsable, now)
+        })
+        .collect();
+    ObservedRecords { connections, shutdowns, reports: limits.take_ended(now) }
+}
+
+/// Write the records kept from one poll.
+pub(crate) fn write_observed_records(records: ObservedRecords, cp_uids: &HashMap<String, Vec<String>>) {
+    for (node, connected) in records.connections {
+        stable_channels::audit::audit_event(
+            if connected { "PEER_CONNECTED" } else { "PEER_DISCONNECTED" },
+            crate::geoip::peer_event_detail(&node, cp_uids.get(&node)),
+        );
+    }
+    // The per-stage dedup key keeps a restart from recording a stage twice.
+    for data in records.shutdowns {
+        stable_channels::audit::audit_event("CHANNEL_SHUTDOWN_STATE_CHANGED", data);
+    }
+    for day in records.reports {
+        stable_channels::audit::audit_event("PEER_RECORDS_LIMITED", crate::record_limits::limited_day_record(&day));
+    }
+}
+
+/// Poll peer connections and return the counterparties' changes since the last poll, with each one's user_channel_ids.
 async fn poll_peers(
     state: &AppState,
     channels: &[Channel],
     prev: &mut HashMap<String, bool>,
     first_run: &mut bool,
-) {
+) -> (Vec<(String, bool)>, HashMap<String, Vec<String>>) {
     let ldk: &dyn LdkServerCalls = state.ldk_server.as_ref();
     let peers = match ldk.list_peers(ListPeersRequest {}).await {
         Ok(r) => r.peers,
-        Err(e) => { warn!("[observability] list_peers failed: {}", e); return; }
+        Err(e) => { warn!("[observability] list_peers failed: {}", e); return Default::default(); }
     };
     // counterparty node_id -> its user_channel_ids
     let mut cp_uids: HashMap<String, Vec<String>> = HashMap::new();
@@ -332,20 +396,89 @@ async fn poll_peers(
         crate::geoip::record_sightings(&state.db, state.geoip.as_ref(), &sightings, &stable_nodes, now);
     }
     crate::geoip::prune(&state.db, state.geoip_record_ips, now - state.geoip_retention_secs);
-    for (node, connected) in peer_transitions(prev, &current, *first_run) {
-        stable_channels::audit::audit_event(
-            if connected { "PEER_CONNECTED" } else { "PEER_DISCONNECTED" },
-            crate::geoip::peer_event_detail(&node, cp_uids.get(&node)),
-        );
-    }
+    let transitions = peer_transitions(prev, &current, *first_run);
     *prev = current;
     *first_run = false;
+    (transitions, cp_uids)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    const USABLE: &str = "02465ed5be53d04fde66c9418ff14a5f2267723810176c9212b722e542dc1afb1b";
+    const UNUSABLE: &str = "0380ba01cf1f8232298198ce1c6da12a7bd159656e79cbc22a5dfbea62ab1aef4b";
+    const NOON: i64 = 1_761_652_800;
+
+    fn shutdown_of(uid: &str, peer: &str) -> Value {
+        serde_json::json!({"user_channel_id": uid, "counterparty_node_id": peer, "shutdown_state": "SHUTDOWN_INITIATED"})
+    }
+
+    #[test]
+    fn connection_changes_are_limited_by_whether_the_peer_has_a_usable_channel() {
+        use crate::record_limits::{CONNECTION_RECORDS_PER_PEER, NEVER_USABLE_RECORDS_PER_PEER};
+        let mut limits = RecordLimits::default();
+        let usable_peers = HashSet::from([USABLE.to_string()]);
+        let mut kept = (0, 0);
+        for n in 0..CONNECTION_RECORDS_PER_PEER + 2 {
+            let changes = vec![(USABLE.to_string(), n % 2 == 0), (UNUSABLE.to_string(), n % 2 == 0)];
+            let records = limit_observed_records(&mut limits, &usable_peers, &HashSet::new(), changes, Vec::new(), NOON);
+            kept.0 += records.connections.iter().filter(|(node, _)| node == USABLE).count();
+            kept.1 += records.connections.iter().filter(|(node, _)| node == UNUSABLE).count();
+        }
+        assert_eq!(kept, (CONNECTION_RECORDS_PER_PEER as usize, NEVER_USABLE_RECORDS_PER_PEER as usize));
+        let reports = limit_observed_records(&mut limits, &usable_peers, &HashSet::new(), Vec::new(), Vec::new(), NOON + 43_200).reports;
+        assert_eq!(reports.iter().map(|day| (day.peer.clone().unwrap(), day.not_recorded)).collect::<Vec<_>>(), [
+            (USABLE.to_string(), 2),
+            (UNUSABLE.to_string(), CONNECTION_RECORDS_PER_PEER + 2 - NEVER_USABLE_RECORDS_PER_PEER),
+        ]);
+    }
+
+    #[test]
+    fn every_shutdown_stage_of_a_usable_channel_is_kept_and_others_count_as_never_usable() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
+        let mut limits = RecordLimits::default();
+        let usable_channels = HashSet::from(["7".to_string()]);
+        let shutdowns: Vec<Value> = (0..NEVER_USABLE_RECORDS_PER_PEER + 3)
+            .flat_map(|n| [shutdown_of("7", USABLE), shutdown_of(&(1_000 + n).to_string(), UNUSABLE)])
+            .collect();
+        let kept = limit_observed_records(&mut limits, &HashSet::new(), &usable_channels, Vec::new(), shutdowns, NOON).shutdowns;
+        assert_eq!(kept.iter().filter(|data| data["user_channel_id"] == "7").count(), NEVER_USABLE_RECORDS_PER_PEER as usize + 3);
+        assert_eq!(kept.iter().filter(|data| data["counterparty_node_id"] == UNUSABLE).count(), NEVER_USABLE_RECORDS_PER_PEER as usize);
+    }
+
+    #[test]
+    fn before_the_channel_list_loads_every_record_is_kept() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
+        use crate::stable_manager::StableChannelManager;
+        let dir = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(Database::open(dir.path()).unwrap());
+        let changes = || (0..NEVER_USABLE_RECORDS_PER_PEER + 2).map(|n| (UNUSABLE.to_string(), n % 2 == 0)).collect::<Vec<_>>();
+        let mut starting = StableChannelManager::new(db.clone(), dir.path().to_path_buf());
+        assert_eq!(keep_observed_records(&mut starting, changes(), Vec::new(), NOON).connections.len(), NEVER_USABLE_RECORDS_PER_PEER as usize + 2);
+        let mut running = crate::stable_manager::tests::make_manager();
+        assert_eq!(keep_observed_records(&mut running, changes(), Vec::new(), NOON).connections.len(), NEVER_USABLE_RECORDS_PER_PEER as usize);
+    }
+
+    #[test]
+    fn kept_records_and_reports_are_written_to_the_ledger_stream() {
+        use crate::stable_manager::tests::AUDIT_TEST_GUARD;
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let report = crate::record_limits::LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4 };
+        let records = ObservedRecords {
+            connections: vec![(USABLE.to_string(), true), (USABLE.to_string(), false)],
+            shutdowns: vec![shutdown_of("7", USABLE)],
+            reports: vec![report],
+        };
+        stable_channels::audit::enable_test_capture();
+        write_observed_records(records, &HashMap::from([(USABLE.to_string(), vec!["7".to_string()])]));
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["PEER_CONNECTED", "PEER_DISCONNECTED", "CHANNEL_SHUTDOWN_STATE_CHANGED", "PEER_RECORDS_LIMITED"]);
+        assert_eq!(events[3].1["not_recorded"], 4);
+    }
 
     #[test]
     fn sweep_transitions_detects_enter_advance_and_swept() {

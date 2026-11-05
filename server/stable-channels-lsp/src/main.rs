@@ -11,6 +11,7 @@ mod observability;
 mod price_task;
 mod payment_filter;
 mod push;
+mod record_limits;
 mod revenue;
 mod stability_tick;
 mod stable_manager;

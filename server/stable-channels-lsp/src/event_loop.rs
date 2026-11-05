@@ -394,6 +394,11 @@ async fn dispatch(
     outcome
 }
 
+/// Whether a record of a channel that hasn't become usable may be written for its peer today.
+fn allow_channel_record(mgr: &mut StableChannelManager, peer: Option<&str>) -> bool {
+    mgr.record_limits.allow(peer.unwrap_or_default(), crate::record_limits::RecordKind::NeverUsable, crate::revenue::now_secs())
+}
+
 pub(crate) async fn dispatch_event(
     event: Option<EventVariant>,
     mgr: &mut crate::stable_manager::StableChannelManager,
@@ -422,28 +427,33 @@ pub(crate) async fn dispatch_event(
                     e.reason.clone(),
                 );
             } else if e.state == ChannelState::Pending as i32 {
-                stable_channels::audit::audit_event(
-                    "CHANNEL_PENDING",
-                    crate::channel_audit::pending_audit_data(
-                        &e.channel_id,
-                        &e.user_channel_id,
-                        e.counterparty_node_id.as_deref(),
-                        e.funding_txo.as_deref(),
-                        e.former_temporary_channel_id.as_deref(),
-                    ),
-                );
+                // Whether the channel will become usable isn't known yet, so every opening counts toward the peer's daily limit.
+                if allow_channel_record(mgr, e.counterparty_node_id.as_deref()) {
+                    stable_channels::audit::audit_event(
+                        "CHANNEL_PENDING",
+                        crate::channel_audit::pending_audit_data(
+                            &e.channel_id,
+                            &e.user_channel_id,
+                            e.counterparty_node_id.as_deref(),
+                            e.funding_txo.as_deref(),
+                            e.former_temporary_channel_id.as_deref(),
+                        ),
+                    );
+                }
             } else if e.state == ChannelState::OpenFailed as i32 {
-                stable_channels::audit::audit_event(
-                    "CHANNEL_OPEN_FAILED",
-                    crate::channel_close::close_audit_data(
-                        &e.channel_id,
-                        &e.user_channel_id,
-                        e.counterparty_node_id.as_deref(),
-                        e.funding_txo.as_deref(),
-                        e.closure_initiator,
-                        e.reason.as_ref(),
-                    ),
-                );
+                if allow_channel_record(mgr, e.counterparty_node_id.as_deref()) {
+                    stable_channels::audit::audit_event(
+                        "CHANNEL_OPEN_FAILED",
+                        crate::channel_close::close_audit_data(
+                            &e.channel_id,
+                            &e.user_channel_id,
+                            e.counterparty_node_id.as_deref(),
+                            e.funding_txo.as_deref(),
+                            e.closure_initiator,
+                            e.reason.as_ref(),
+                        ),
+                    );
+                }
             } else {
                 stable_channels::audit::audit_event(
                     "CHANNEL_STATE_UNKNOWN",
@@ -768,6 +778,35 @@ mod tests {
         assert!(!active.load(Ordering::Acquire));
         assert!(!health.checkpoint(&db, 90_006_000, active.load(Ordering::Acquire), events.is_empty()).unwrap());
         assert_eq!(db.begin_event_stream_gap(90_007_000).unwrap(), gap);
+    }
+
+    #[tokio::test]
+    async fn channel_openings_and_failed_opens_share_the_peers_daily_limit() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
+        use crate::stable_manager::tests::{make_manager, FakeLdkServer, AUDIT_TEST_GUARD, COUNTERPARTY_HEX};
+        use ldk_server_client::ldk_server_grpc::events::ChannelStateChanged;
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let mut mgr = make_manager();
+        let dir = tempfile::tempdir().unwrap();
+        let db = stable_channels::db::Database::open(dir.path()).unwrap();
+        let ldk = FakeLdkServer::new(vec![]);
+        stable_channels::audit::enable_test_capture();
+        for n in 0..NEVER_USABLE_RECORDS_PER_PEER + 1 {
+            let state = if n % 2 == 0 { ChannelState::Pending } else { ChannelState::OpenFailed };
+            let event = ChannelStateChanged {
+                channel_id: format!("{n:064x}"),
+                user_channel_id: (u128::from(n) * 1_000_003 + 274_877_906_944).to_string(),
+                counterparty_node_id: Some(COUNTERPARTY_HEX.to_string()),
+                state: state as i32,
+                funding_txo: Some(format!("{}:0", "ab".repeat(32))),
+                ..Default::default()
+            };
+            dispatch_event(Some(EventVariant::ChannelStateChanged(event)), &mut mgr, &db, &ldk, 100_000.0).await;
+        }
+        let events = stable_channels::audit::drain_test_capture();
+        stable_channels::audit::disable_test_capture();
+        let recorded = events.iter().filter(|(name, _)| name == "CHANNEL_PENDING" || name == "CHANNEL_OPEN_FAILED").count();
+        assert_eq!(recorded, NEVER_USABLE_RECORDS_PER_PEER as usize);
     }
 
     #[tokio::test]

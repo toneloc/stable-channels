@@ -1012,6 +1012,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "PEER_CONNECTED",
     "PEER_DISCONNECTED",
     "PEER_RECONSTRUCTED",
+    "PEER_RECORDS_LIMITED",
     // Ledger completeness markers.
     "EVENT_STREAM_GAP_STARTED",
     "EVENT_STREAM_GAP_CLOSED",
