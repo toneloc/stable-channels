@@ -10633,6 +10633,50 @@
         }
       }
     },
+    "info_closed_channel_keep_app" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep the app installed until it arrives."
+          }
+        }
+      }
+    },
+    "info_closed_channel_moves" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It moves to your onchain wallet automatically, which can take about a day."
+          }
+        }
+      }
+    },
+    "info_closed_channel_safe" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ is safe on the Bitcoin blockchain."
+          }
+        }
+      }
+    },
+    "info_closed_channel_unlocks" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It unlocks in %@, then moves to your onchain wallet automatically."
+          }
+        }
+      }
+    },
     "info_custom_lsp" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
