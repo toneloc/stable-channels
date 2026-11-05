@@ -2,11 +2,11 @@ import SwiftUI
 
 struct BackupSettingsView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.scenePhase) private var scenePhase
     let backupService: any BackupServiceProtocol
 
     // MARK: - UI State
 
-    @State private var showSeedWords = false
     @State private var showRestore = false
     @State private var restoreMnemonic = ""
     @State private var restoreSourceIsCloud = false
@@ -24,6 +24,9 @@ struct BackupSettingsView: View {
     @State private var isImportingSeed = false
     @State private var showingOverwriteAlert = false
     @State private var isCheckingRemote = false
+    @State private var showingRevealPhraseSheet = false
+    /// Mirrors `scenePhase` in state: the auth task reads it after an await, when an environment copy would be stale.
+    @State private var lifecyclePhase = AppLifecyclePhase.active
 
     // MARK: - Computed Properties
 
@@ -44,6 +47,17 @@ struct BackupSettingsView: View {
         isWordFieldsReadOnly = false
     }
 
+    /// Closes every sheet holding the phrase or backup secrets and clears the phrase from memory.
+    /// A restore already running keeps its own copy of the phrase and finishes in AppState.
+    private func closeSeedScreens() {
+        cancelRestore()
+        isImportingSeed = false
+        showingRestoreSheet = false
+        showingImportSheet = false
+        showingExportSheet = false
+        showingRevealPhraseSheet = false
+    }
+
     private func importMnemonic(_ mnemonic: String, fromCloud: Bool = false) {
         isImportingSeed = true
         restoreSourceIsCloud = fromCloud
@@ -52,6 +66,17 @@ struct BackupSettingsView: View {
         isWordFieldsReadOnly = true
         restoreMnemonic = mnemonic
         showRestore = true
+    }
+
+    /// Every path that shows the seed, decrypts a backup or replaces the wallet goes through here.
+    private func authorizeSeedAccess(reason: String, then action: @escaping () -> Void) {
+        Task {
+            // LocalAuthentication cancels on backgrounding (systemCancel); this guards a late reply.
+            if await appState.authorizeSeedAccess(reason: reason),
+               SeedAccessPolicy.canOpenSeedScreen(after: lifecyclePhase) {
+                action()
+            }
+        }
     }
 
     private func backupNow() async {
@@ -124,6 +149,8 @@ struct BackupSettingsView: View {
         }
         .sheet(isPresented: $showingRestoreSheet) {
             RestoreBackupSheet(backupService: backupService) { mnemonic in
+                // A download that lands after the sheet closed must not reopen the phrase.
+                guard showingRestoreSheet else { return }
                 importMnemonic(mnemonic, fromCloud: true)
             }
         }
@@ -132,9 +159,20 @@ struct BackupSettingsView: View {
         }
         .sheet(isPresented: $showingImportSheet) {
             ImportSheet { mnemonic in
+                guard showingImportSheet else { return }
                 importMnemonic(mnemonic)
             }
         }
+        .fullScreenCover(isPresented: $showingRevealPhraseSheet) {
+            if appState.nodeService.savedMnemonic?.isEmpty == false {
+                RevealRecoveryPhraseSheet { appState.nodeService.savedMnemonic }
+            } else {
+                // No saved phrase: close at once rather than leave an empty cover with no way out.
+                Color.clear.onAppear { showingRevealPhraseSheet = false }
+            }
+        }
+        .closesSeedScreenOnBackground { closeSeedScreens() }
+        .onChange(of: scenePhase, initial: true) { _, phase in lifecyclePhase = AppLifecyclePhase(phase) }
         .alert("Delete Backup?", isPresented: $showingDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
@@ -153,14 +191,17 @@ struct BackupSettingsView: View {
     private var seedSection: some View {
         Section {
             Button {
-                showSeedWords.toggle()
+                authorizeSeedAccess(reason: "Authenticate to reveal your Secret Recovery Phrase") {
+                    showingRevealPhraseSheet = true
+                }
             } label: {
                 HStack {
-                    Image(systemName: showSeedWords ? "eye.slash.fill" : "eye.fill")
+                    Image(systemName: "eye.fill")
                         .foregroundStyle(Color.stablePrimary)
-                    Text(showSeedWords
-                        ? String(localized: "button_hide_seed", defaultValue: "Hide Seed Words")
-                        : String(localized: "button_view_seed", defaultValue: "View Seed Words"))
+                    Text(String(
+                        localized: "button_view_seed",
+                        defaultValue: "Reveal Secret Recovery Phrase"
+                    ))
                     Spacer()
                     Image(systemName: "chevron.right")
                         .font(.caption)
@@ -168,10 +209,7 @@ struct BackupSettingsView: View {
                 }
             }
             .foregroundStyle(.primary)
-
-            if showSeedWords, let words = appState.nodeService.savedMnemonic, !words.isEmpty {
-                SeedDisplayView(words: words)
-            }
+            .disabled(appState.nodeService.savedMnemonic?.isEmpty ?? true)
         } header: {
             Text(String(localized: "section_backup_seed", defaultValue: "Backup"))
         } footer: {
@@ -185,7 +223,9 @@ struct BackupSettingsView: View {
     private var restoreSection: some View {
         Section {
             Button {
-                showRestore = true
+                authorizeSeedAccess(reason: "Authenticate to restore from a recovery phrase") {
+                    showRestore = true
+                }
             } label: {
                 HStack {
                     Image(systemName: "arrow.uturn.backward.circle.fill")
@@ -218,14 +258,26 @@ struct BackupSettingsView: View {
         BackupSettingsICloudSection(
             backupService: backupService,
             showingBackupPrompt: $showingBackupPrompt,
-            showingExportSheet: $showingExportSheet,
-            showingImportSheet: $showingImportSheet,
             showingDeleteConfirmation: $showingDeleteConfirmation,
-            showingRestoreSheet: $showingRestoreSheet,
             showBackupSuccess: $showBackupSuccess,
             backupError: $backupError,
             isCheckingRemote: $isCheckingRemote,
-            onBackupNow: { await backupNow() }
+            onBackupNow: { await backupNow() },
+            onRestoreFromCloud: {
+                authorizeSeedAccess(reason: "Authenticate to restore your backup") {
+                    showingRestoreSheet = true
+                }
+            },
+            onExportToFiles: {
+                authorizeSeedAccess(reason: "Authenticate to export your backup") {
+                    showingExportSheet = true
+                }
+            },
+            onImportFromFile: {
+                authorizeSeedAccess(reason: "Authenticate to import a backup") {
+                    showingImportSheet = true
+                }
+            }
         )
     }
 }

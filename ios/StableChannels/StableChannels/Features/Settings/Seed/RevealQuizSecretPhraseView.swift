@@ -1,0 +1,236 @@
+import SwiftUI
+
+// MARK: - Secret Phrase Revealed View (with In-Place Blur & Tap-to-Reveal)
+
+struct RevealQuizSecretPhraseView: View {
+    let mnemonic: String
+    let onDone: () -> Void
+    var clipboard: SecureClipboard = SystemSecureClipboard()
+
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var isRevealed: Bool = false
+    @State private var copiedSeed = false
+    @State private var showCopyWarning = false
+    @State private var clipboardFadeTask: Task<Void, Never>?
+
+    private var wordList: [String] {
+        mnemonic.split(separator: " ").map(String.init)
+    }
+
+    /// Fewer columns as text grows, so the longest (8-letter) words never truncate.
+    private var columns: [GridItem] {
+        let count = dynamicTypeSize.isAccessibilitySize ? 1 : (dynamicTypeSize > .large ? 2 : 3)
+        return Array(repeating: GridItem(.flexible(), spacing: 8), count: count)
+    }
+
+    private func copySeedToClipboard() {
+        clipboardFadeTask?.cancel()
+
+        clipboard.copy(mnemonic)
+
+        let generator = UINotificationFeedbackGenerator()
+        generator.notificationOccurred(.success)
+
+        withAnimation(.easeInOut(duration: 0.2)) {
+            copiedSeed = true
+        }
+
+        clipboardFadeTask = Task {
+            try? await Task.sleep(for: .seconds(2.5))
+            withAnimation(.easeInOut(duration: 0.2)) {
+                self.copiedSeed = false
+            }
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 16) {
+                    // Header Subtitle
+                    Text(String(
+                        localized: "reveal_phrase_header",
+                        defaultValue: "Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone."
+                    ))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                    .padding(.top, 12)
+                    .lineSpacing(3)
+
+                    // Seed Grid Area with In-Place Blur & Tap to Reveal Overlay
+                    ZStack {
+                        // Background Obsidian Container
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color(uiColor: .secondarySystemGroupedBackground))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .stroke(Color.revealHairline, lineWidth: 1)
+                            )
+
+                        // 3 Equal-Sized Boxes Grid Layout
+                        LazyVGrid(columns: columns, spacing: 8) {
+                            ForEach(Array(wordList.enumerated()), id: \.offset) { index, word in
+                                HStack(spacing: 4) {
+                                    Text("\(index + 1).")
+                                        .font(.system(.caption, design: .monospaced).bold())
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize()
+
+                                    Text(isRevealed ? word : "•••••")
+                                        .font(.system(.footnote, design: .monospaced).weight(.medium))
+                                        .foregroundStyle(Color.primary)
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .frame(minHeight: 38)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(uiColor: .systemGroupedBackground))
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .stroke(Color.revealHairline, lineWidth: 1)
+                                )
+                                .accessibilityElement(children: .combine)
+                            }
+                        }
+                        .padding(14)
+                        .blur(radius: isRevealed ? 0 : 16)
+                        .allowsHitTesting(isRevealed)
+                        .accessibilityHidden(!isRevealed)
+
+                        // Tap to Reveal Privacy Shield Overlay
+                        if !isRevealed {
+                            Button {
+                                let generator = UIImpactFeedbackGenerator(style: .medium)
+                                generator.impactOccurred()
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                    isRevealed = true
+                                }
+                            } label: {
+                                VStack(spacing: 12) {
+                                    Image(systemName: "eye.slash")
+                                        .font(.largeTitle.weight(.medium))
+                                        .foregroundStyle(Color.primary)
+
+                                    Text(String(
+                                        localized: "reveal_phrase_tap_to_reveal",
+                                        defaultValue: "Tap to reveal"
+                                    ))
+                                    .font(.headline.weight(.bold))
+                                    .foregroundStyle(Color.primary)
+
+                                    Text(String(
+                                        localized: "reveal_phrase_tap_to_reveal_hint",
+                                        defaultValue: "Make sure no one is watching your screen."
+                                    ))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 24)
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(Color.revealVeil)
+                                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .transition(.opacity)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    // Below Grid Actions (Symmetric Copy on Left, Hide on Right)
+                    if isRevealed {
+                        HStack(spacing: 12) {
+                            // Left: Copy Button
+                            Button {
+                                showCopyWarning = true
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: copiedSeed ? "checkmark" : "doc.on.doc")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(copiedSeed ? Color.green : Color.primary)
+                                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: copiedSeed)
+
+                                    Text(String(localized: "button_copy_seed", defaultValue: "Copy Seed"))
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(Color.primary)
+                                }
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().stroke(Color.revealHairline, lineWidth: 1)
+                                )
+                            }
+
+                            // Right: Hide Button
+                            Button {
+                                let generator = UIImpactFeedbackGenerator(style: .medium)
+                                generator.impactOccurred()
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                                    isRevealed = false
+                                }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "eye.slash.fill")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(String(localized: "button_hide_seed", defaultValue: "Hide Seed"))
+                                        .font(.subheadline.weight(.semibold))
+                                }
+                                .foregroundStyle(Color.primary)
+                                .frame(maxWidth: .infinity, minHeight: 48)
+                                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().stroke(Color.revealHairline, lineWidth: 1)
+                                )
+                            }
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                        .transition(.opacity)
+                    }
+                }
+                .padding(.bottom, 24)
+            }
+
+            // Dismiss Done Button pinned to bottom
+            Button(action: onDone) {
+                Text(String(localized: "button_done", defaultValue: "Done"))
+                    .font(.headline)
+                    .foregroundStyle(Color.revealButtonLabel)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .background(Color.revealButtonFill)
+                    .clipShape(Capsule())
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+        }
+        .alert(
+            String(localized: "reveal_phrase_copy_title", defaultValue: "Copy Secret Recovery Phrase?"),
+            isPresented: $showCopyWarning
+        ) {
+            Button(String(localized: "reveal_phrase_copy_confirm", defaultValue: "Copy to Clipboard")) {
+                copySeedToClipboard()
+            }
+            Button(String(localized: "button_cancel", defaultValue: "Cancel"), role: .cancel) {}
+        } message: {
+            Text(String(
+                localized: "reveal_phrase_copy_warning",
+                defaultValue: "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in \(Int(SeedConstants.clipboardClearSeconds)) seconds."
+            ))
+        }
+        // Re-blur before the app-switcher snapshot; the app privacy overlay sits below this full-screen cover.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { isRevealed = false }
+        }
+        .onDisappear {
+            clipboardFadeTask?.cancel()
+        }
+    }
+}
