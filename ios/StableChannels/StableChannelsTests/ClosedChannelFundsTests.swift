@@ -273,6 +273,12 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertNil(ClosedChannelFunds.orRecovered(nil, recoveredSats: 0))
     }
 
+    func testForceCloseConfirmation() {
+        XCTAssertTrue(ForceCloseConfirmation.isConfirmed(" FORCE CLOSE "))
+        XCTAssertFalse(ForceCloseConfirmation.isConfirmed("force close"))
+        XCTAssertFalse(ForceCloseConfirmation.isConfirmed("FORCE"))
+    }
+
     /// Recovery waits for LDK's own sweep to confirm, even once the card leaves it out.
     func testLdkHandlesACloseUntilItsSweepConfirms() {
         let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(

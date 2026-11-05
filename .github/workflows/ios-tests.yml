@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - "ios/**"
+      - "mobile/force-close/**"
       - ".github/workflows/ios-tests.yml"
   push:
     branches: [main]
     paths:
       - "ios/**"
+      - "mobile/force-close/**"
       - ".github/workflows/ios-tests.yml"
 
 permissions:
@@ -22,7 +24,7 @@ jobs:
   test:
     name: iOS Unit Tests
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
 
@@ -31,6 +33,11 @@ jobs:
           sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version
           xcrun simctl list devices available
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build sc-force-close (framework and Swift bindings)
+        run: mobile/force-close/build-ios.sh
 
       - name: Resolve Swift packages
         shell: bash

@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import LDKNode
+import SCForceClose
 import SQLite3
 
 private enum SyncMessageHandlingResult {
@@ -265,6 +266,12 @@ class AppState {
     @ObservationIgnored let toRemoteRecovery = ToRemoteRecovery(chainURLs: Constants.esploraChainURLs)
     private var toRemotePendingSats: UInt64 = 0
     @ObservationIgnored private var toRemoteRecoveryTask: Task<Void, Never>?
+    // The app's own close of a channel the user force closed (#456).
+    @ObservationIgnored let ownForceClose = OwnForceClose(chainURLs: Constants.esploraChainURLs)
+    @ObservationIgnored private var ownForceCloseTask: Task<Void, Never>?
+    /// True while buildOwnForceClose has the node stopped.
+    @ObservationIgnored private var ownForceCloseBuilding = false
+    var ownForceCloseState: OwnForceClose.State?
     /// Channels closed cooperatively, which the closed channel card leaves out (#358).
     private static let coopClosedChannelIdsKey = "coop_closed_channel_ids"
 
@@ -1463,6 +1470,11 @@ class AppState {
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
         guard case .wallet = phase else { return }
+        // buildOwnForceClose has the node stopped and starts it again itself.
+        if ownForceCloseBuilding {
+            cancelBackgroundStop()
+            return
+        }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
         cancelBackgroundStop()
@@ -2641,7 +2653,8 @@ class AppState {
         userChannelId: UserChannelId,
         counterpartyNodeId: PublicKey,
         fundingOutpointTxid: String,
-        fundingOutpointVout: UInt32
+        fundingOutpointVout: UInt32,
+        force: Bool = false
     ) async throws {
         // Snapshot here: AppState globals could be wrong for rapid re-tap or multi-channel
         let balanceSats = stableChannel.stableReceiverBTC.sats
@@ -2652,6 +2665,7 @@ class AppState {
         let counterparty: String? = stableChannel.counterparty.isEmpty
             ? nil
             : stableChannel.counterparty
+        let channelId = nodeService.channels.first { $0.userChannelId == userChannelId }?.channelId
 
         try await nodeService.requestChannelClose(
             userChannelId: userChannelId,
@@ -2661,8 +2675,21 @@ class AppState {
             balanceSats: balanceSats,
             balanceUsd: balanceUSD,
             btcPrice: OnchainAmount.storedPrice(price),
-            counterparty: counterparty
+            counterparty: counterparty,
+            force: force
         )
+        guard force else { return }
+        guard let channelId else {
+            AuditService.log("OWN_FORCE_CLOSE_NO_CHANNEL", data: ["user_channel_id": "\(userChannelId)"])
+            return
+        }
+        await ownForceClose.start(
+            channelId: "\(channelId)",
+            paymentId: "close-\(userChannelId)",
+            fundingTxid: fundingOutpointTxid,
+            fundingVout: fundingOutpointVout
+        )
+        runOwnForceClose()
     }
 
     private func closureReasonData(_ reason: ClosureReason?) -> [String: Any] {
@@ -4329,6 +4356,74 @@ class AppState {
         return data?.count == 64 ? data : nil
     }
 
+    /// Our own close of a channel the user force closed (#456), when a step of it is due.
+    private func runOwnForceClose() {
+        guard ownForceCloseTask == nil, nodeService.isRunning,
+              UIApplication.shared.applicationState != .background else { return }
+        ownForceCloseTask = Task { [weak self] in
+            guard let self else { return }
+            defer { ownForceCloseTask = nil }
+            let ownForceClose = ownForceClose
+            if await ownForceClose.isDue {
+                let message = await ownForceClose.step(
+                    build: { [weak self] channelId in
+                        guard let self else { throw CancellationError() }
+                        // Read only to build the close, not on every step while it is followed.
+                        guard let seed = await walletSeed() else { throw ForceCloseError.InvalidSeed }
+                        return try await buildOwnForceClose(channelId: channelId, seed: seed)
+                    },
+                    onConfirmed: { [weak self] paymentId, closeTxid in
+                        await self?.ownCloseConfirmed(paymentId: paymentId, closeTxid: closeTxid)
+                    }
+                )
+                if let message { statusMessage = message }
+            }
+            ownForceCloseState = await ownForceClose.state
+        }
+    }
+
+    /// Builds our close of `channelId` from the node's stored data. The node is stopped meanwhile, as
+    /// ldk-node and the app each have their own SQLite, and two in one process must not use the same
+    /// file at once. The wallet dir lock stays held, so the NSE starts no node meanwhile.
+    private func buildOwnForceClose(channelId: String, seed: Data) async throws -> ForceCloseTransactions {
+        nodeFlowInProgress = true
+        defer { finishNodeFlow() }
+        ownForceCloseBuilding = true
+        defer { ownForceCloseBuilding = false }
+        stabilityTimer?.cancel()
+        stabilityTimer = nil
+        heartbeatTimer?.cancel()
+        heartbeatTimer = nil
+        mempoolWebSocketService.disconnect()
+        nodeService.stop()
+        let dataDir = Constants.userDataDir
+        let built = await Task.detached {
+            Result { try OwnForceClose.build(dataDir: dataDir, channelId: channelId, seed: seed) }
+        }.value
+        do {
+            try await startNodeWithFailover()
+            refreshBalances()
+            mempoolWebSocketService.connect()
+            startStabilityTimer()
+        } catch {
+            AuditService.log("OWN_FORCE_CLOSE_RESTART_FAILED", data: ["error": "\(error)"])
+            // finishNodeFlow then starts the node the usual way, with its failure handling.
+            pendingOnlineRetry = true
+        }
+        // A background stop that came meanwhile found the node stopped and did nothing.
+        if UIApplication.shared.applicationState == .background { stopNodeForBackground() }
+        return try built.get()
+    }
+
+    /// The close row may hold our close while the LSP's replaced it and confirmed.
+    private func ownCloseConfirmed(paymentId: String, closeTxid: String) {
+        guard let repo = databaseService?.paymentRepo else { return }
+        let recorded = repo.payment(paymentId: paymentId)?.txid
+        guard (try? repo.replaceChannelCloseTxid(paymentId: paymentId, txid: closeTxid)) == true else { return }
+        if transactionLinkService.lastCloseTxid == recorded { transactionLinkService.setCloseTxid(closeTxid) }
+        Task { await confirmationPollingService?.pollOnce() }
+    }
+
     func refreshBalances() {
         nodeService.refreshChannels()
         guard let balances = nodeService.balances() else { return }
@@ -4429,6 +4524,7 @@ class AppState {
             ldkClosedChannelFunds,
             pendingSweeps: balances.pendingBalancesFromChannelClosures
         ))
+        runOwnForceClose()
 
         // Clear closing flag once lightning balance fully resolves
         if isChannelClosing && lightning == 0 {

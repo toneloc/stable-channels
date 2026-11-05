@@ -2014,6 +2014,26 @@ class DatabaseService(context: Context) :
         ) > 0
     }
 
+    /**
+     * Points a channel close row at the close that confirmed, when another close replaced the one
+     * it recorded (#456). Explorers report any txid they don't know as unconfirmed, so the row
+     * would stay at 0 confirmations. Returns whether it wrote.
+     */
+    fun replaceChannelCloseTxid(paymentId: String, txid: String): Boolean {
+        val cv =
+            ContentValues().apply {
+                put("txid", txid)
+                put("confirmations", 0)
+            }
+        return writableDatabase.update(
+            "payments",
+            cv,
+            "payment_id = ? AND payment_type = 'channel_close' AND (txid IS NULL OR txid != ?) " +
+                "AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.txid = ?)",
+            arrayOf(paymentId, txid, txid),
+        ) > 0
+    }
+
     fun updatePaymentStatus(paymentId: String, status: String, feeMsat: Long = 0) {
         val cv =
             ContentValues().apply {
