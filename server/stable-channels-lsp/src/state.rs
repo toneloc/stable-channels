@@ -33,6 +33,8 @@ pub struct AppState {
     pub geoip_retention_secs: i64,
     /// Revenue snapshot rebuilt off the request path.
     pub revenue: Arc<crate::revenue::RevenueStore>,
+    /// State of the unauthenticated /api/funding-outpoints route: the LSP's node id, a channel list cache, per-node budgets.
+    pub funding_outpoints: Arc<crate::handlers::funding_outpoints::RouteState>,
     /// LDK Server's log file path, resolved at daemon startup. None if not configured.
     pub ldk_log_file: Option<PathBuf>,
     /// Compatibility field: durable stream-gap boundary loaded at startup, NOT newest ledger

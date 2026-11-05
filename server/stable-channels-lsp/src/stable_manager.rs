@@ -8,7 +8,8 @@ use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::error::LdkServerError;
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, GetForwardedPaymentTrackingModeRequest,
-    GetForwardedPaymentTrackingModeResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
+    GetForwardedPaymentTrackingModeResponse, GetNodeInfoRequest, GetNodeInfoResponse,
+    GetPaymentDetailsRequest, GetPaymentDetailsResponse,
     ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
     ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
     ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
@@ -244,6 +245,12 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<GetForwardedPaymentTrackingModeResponse, LdkServerError> {
         Ok(GetForwardedPaymentTrackingModeResponse::default())
     }
+    async fn get_node_info(
+        &self,
+        _req: GetNodeInfoRequest,
+    ) -> Result<GetNodeInfoResponse, LdkServerError> {
+        Ok(GetNodeInfoResponse::default())
+    }
 }
 
 #[async_trait]
@@ -271,6 +278,12 @@ impl LdkServerCalls for LdkServerClient {
         req: VerifySignatureRequest,
     ) -> Result<VerifySignatureResponse, LdkServerError> {
         LdkServerClient::verify_signature(self, req).await
+    }
+    async fn get_node_info(
+        &self,
+        req: GetNodeInfoRequest,
+    ) -> Result<GetNodeInfoResponse, LdkServerError> {
+        LdkServerClient::get_node_info(self, req).await
     }
     async fn list_forwarded_payments(
         &self,
