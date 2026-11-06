@@ -647,13 +647,26 @@ fun SendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         if (hasChannel) lightningSats else spendableOnchainSats
                                     (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                                 } else {
-                                    val sc = appState.stableChannel.value
-                                    if (sc.expectedUSD.amount > 0.0) {
-                                        sc.expectedUSD.amount
-                                    } else {
-                                        val maxSats = maxOf(lightningSats, spendableOnchainSats)
-                                        (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                                    // The send turns USD into sats at the accounting price, so the
+                                    // max uses it too, or the sats sent could go over it.
+                                    val accountingPrice =
+                                        appState.priceService.currentAccountingPrice()
+                                    if (accountingPrice <= 0.0) {
+                                        error = UNTRUSTED_PRICE_MESSAGE
+                                        return@NeutralTextButton
                                     }
+                                    // The whole channel balance, stable and native BTC, less the
+                                    // routing fee ceiling, as on iOS.
+                                    val outboundSats =
+                                        appState.nodeService.channels
+                                            .filter { it.isChannelReady }
+                                            .takeIf { it.isNotEmpty() }
+                                            ?.sumOf { it.outboundCapacityMsat.toLong() }
+                                            ?.div(1000)
+                                    SendMax.usd(
+                                        SendMax.lightningSats(lightningSats, outboundSats),
+                                        accountingPrice,
+                                    )
                                 }
                             amountUSDStr = String.format(java.util.Locale.US, "%.2f", maxUSD)
                             isSendMax = true
