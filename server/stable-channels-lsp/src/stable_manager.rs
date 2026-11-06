@@ -5,14 +5,15 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ldk_server_client::client::LdkServerClient;
-use ldk_server_client::error::LdkServerError;
+use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
 use ldk_server_client::ldk_server_grpc::api::{
     GetBalancesRequest, GetBalancesResponse, GetForwardedPaymentTrackingModeRequest,
     GetForwardedPaymentTrackingModeResponse, GetPaymentDetailsRequest, GetPaymentDetailsResponse,
     ListChannelsRequest, ListChannelsResponse, ListForwardedPaymentsRequest,
     ListForwardedPaymentsResponse, ListPeersRequest, ListPeersResponse, ListPaymentsRequest,
-    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpontaneousSendRequest,
-    SpontaneousSendResponse, VerifySignatureRequest, VerifySignatureResponse,
+    ListPaymentsResponse, SignMessageRequest, SignMessageResponse, SpliceInRequest,
+    SpliceInResponse, SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest,
+    VerifySignatureResponse,
 };
 use ldk_server_client::ldk_server_grpc::events::ChannelStateChangeReason;
 use ldk_server_client::ldk_server_grpc::types::{Channel, CustomTlvRecord, PaymentStatus};
@@ -49,7 +50,7 @@ fn sync_retry_delay_secs(attempts: u64) -> u64 {
 /// Return each peer's own spendable-plus-reserve balance from the fields LDK exposes for that
 /// peer. `channel_value - local_balance` is not the remote balance: on outbound channels it also
 /// assigns the funder's current commitment fee to the remote peer.
-fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
+pub(crate) fn channel_peer_balances(channel: &Channel) -> (u64, u64) {
     let local_sats = (channel.outbound_capacity_msat / 1000)
         .saturating_add(channel.unspendable_punishment_reserve.unwrap_or(0));
     let remote_sats = (channel.inbound_capacity_msat / 1000)
@@ -244,6 +245,13 @@ pub trait LdkServerCalls: Send + Sync {
     ) -> Result<GetForwardedPaymentTrackingModeResponse, LdkServerError> {
         Ok(GetForwardedPaymentTrackingModeResponse::default())
     }
+    /// Splice on-chain funds into a channel. The node answers once it has sent `splice_init`; the negotiation itself reports through events.
+    async fn splice_in(
+        &self,
+        _req: SpliceInRequest,
+    ) -> Result<SpliceInResponse, LdkServerError> {
+        Err(LdkServerError::new(LdkServerErrorCode::InternalError, "splice_in is not available on this node client"))
+    }
 }
 
 #[async_trait]
@@ -307,6 +315,9 @@ impl LdkServerCalls for LdkServerClient {
         req: GetForwardedPaymentTrackingModeRequest,
     ) -> Result<GetForwardedPaymentTrackingModeResponse, LdkServerError> {
         LdkServerClient::get_forwarded_payment_tracking_mode(self, req).await
+    }
+    async fn splice_in(&self, req: SpliceInRequest) -> Result<SpliceInResponse, LdkServerError> {
+        LdkServerClient::splice_in(self, req).await
     }
 }
 
@@ -4667,6 +4678,12 @@ pub(crate) mod tests {
         pub sends_unanswered: AtomicUsize,
         /// How many more sends go out but the node fails to store their record, as LDK Node does when its store write fails after the dispatch.
         pub sends_unrecorded: AtomicUsize,
+        /// Every splice-in the node accepted.
+        pub splice_ins: StdMutex<Vec<SpliceInRequest>>,
+        /// The error the node answers every splice-in with, when set.
+        pub splice_in_error: StdMutex<Option<(LdkServerErrorCode, String)>>,
+        /// Confirmed on-chain sats the node reports as spendable.
+        pub spendable_onchain_sats: std::sync::atomic::AtomicU64,
     }
 
     /// Use up one of a counter's remaining failures; false once none are left.
@@ -4704,6 +4721,9 @@ pub(crate) mod tests {
                 sends_refused: AtomicUsize::new(0),
                 sends_unanswered: AtomicUsize::new(0),
                 sends_unrecorded: AtomicUsize::new(0),
+                splice_ins: StdMutex::new(Vec::new()),
+                splice_in_error: StdMutex::new(None),
+                spendable_onchain_sats: std::sync::atomic::AtomicU64::new(0),
             }
         }
         pub fn like_ldk_node(mut self) -> Self {
@@ -4745,6 +4765,13 @@ pub(crate) mod tests {
             Ok(ListChannelsResponse {
                 channels: self.channels.lock().unwrap().clone(),
             })
+        }
+        async fn splice_in(&self, req: SpliceInRequest) -> Result<SpliceInResponse, LdkServerError> {
+            if let Some((code, message)) = self.splice_in_error.lock().unwrap().clone() {
+                return Err(LdkServerError::new(code, message));
+            }
+            self.splice_ins.lock().unwrap().push(req);
+            Ok(SpliceInResponse {})
         }
         async fn spontaneous_send(
             &self,
@@ -4845,6 +4872,7 @@ pub(crate) mod tests {
             Ok(GetBalancesResponse {
                 pending_balances_from_channel_closures: self.sweeps.lock().unwrap().clone(),
                 lightning_balances,
+                spendable_onchain_balance_sats: self.spendable_onchain_sats.load(Ordering::SeqCst),
                 ..Default::default()
             })
         }
