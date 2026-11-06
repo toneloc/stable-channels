@@ -57,24 +57,10 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
     val enteredUSD = amountUSDStr.toDoubleOrNull() ?: 0.0
     val satsFromUSD = accountingSatsFromUSD(enteredUSD, accountingBtcPrice) ?: 0L
 
-    val lightningSats by appState.lightningBalanceSats.collectAsState()
-
     val hasChannel = appState.nodeService.channels.any { it.isChannelReady }
-    // With a channel, Max splices out of it like a typed amount, not out of the on-chain wallet.
-    fun spliceOutMaxSats() =
-        SendMax.spliceOutSats(
-            lightningSats,
-            appState.nodeService.channels
-                .filter { it.isChannelReady }
-                .maxOfOrNull { it.outboundCapacityMsat.toLong() / 1000 } ?: 0,
-            feeRateSatVb ?: 2L,
-        )
     val feeVbytes =
-        when {
-            hasChannel -> Constants.ESTIMATED_SPLICE_OUT_VBYTES
-            sendAll -> Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES
-            else -> Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
-        }
+        if (sendAll) Constants.ESTIMATED_ONCHAIN_SEND_ALL_VBYTES
+        else Constants.ESTIMATED_ONCHAIN_SEND_VBYTES
     val feeEstimateText =
         feeRateSatVb?.let { rate ->
             val feeSats = rate * feeVbytes
@@ -174,7 +160,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
             Spacer(Modifier.weight(1f))
             DoneButton(onClick = onDismiss)
         } else {
-            if (hasChannel) {
+            if (hasChannel && !sendAll) {
                 Card(
                     colors =
                         CardDefaults.cardColors(
@@ -300,21 +286,20 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                     )
                 }
             } else {
-                val maxSats = if (hasChannel) spliceOutMaxSats() else onchainSats
-                val maxUSD = (maxSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
+                val onchainUSD = (onchainSats.toDouble() / Constants.SATS_IN_BTC) * btcPrice
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
-                        text = maxUSD.usdFormatted(),
+                        text = onchainUSD.usdFormatted(),
                         fontSize = 44.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,
                     )
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        text = maxSats.btcSpacedFormatted() + " BTC",
+                        text = onchainSats.btcSpacedFormatted() + " BTC",
                         fontSize = 14.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
@@ -376,7 +361,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                         QRCodeUtils.stripUriPrefix(address)
                                     )
                                 val price = btcPrice
-                                if (sendAll && !hasChannel) {
+                                if (sendAll) {
                                     val txid = appState.nodeService.sendAllOnchain(addr)
                                     val sendSats = onchainSats
                                     appState.onchainSendBroadcasted(
@@ -403,23 +388,19 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                                     result = "All funds sent successfully."
                                     successTxid = txid
                                 } else {
+                                    val usd =
+                                        amountUSDStr.toDoubleOrNull()
+                                            ?: throw Exception("Enter amount")
                                     // Money movement converts USD at the trusted accounting price,
                                     // never the raw display price (iOS parity). The same captured
                                     // price is recorded so history reflects the rate actually used.
                                     val accountingPrice =
                                         appState.priceService.currentAccountingPrice()
                                     val sats =
-                                        if (sendAll) {
-                                            spliceOutMaxSats()
-                                        } else {
-                                            val usd =
-                                                amountUSDStr.toDoubleOrNull()
-                                                    ?: throw Exception("Enter amount")
-                                            accountingSatsFromUSD(usd, accountingPrice)
-                                                ?: throw Exception(
-                                                    "A trusted BTC/USD price is required"
-                                                )
-                                        }
+                                        accountingSatsFromUSD(usd, accountingPrice)
+                                            ?: throw Exception(
+                                                "A trusted BTC/USD price is required"
+                                            )
                                     if (hasChannel) {
                                         val sc = appState.stableChannel.value
                                         appState.beginSpliceOut(sats, addr, accountingPrice)
@@ -473,10 +454,7 @@ fun OnChainSendScreen(appState: AppState, onDismiss: () -> Unit) {
                         isSending = false
                     }
                 },
-                enabled =
-                    !isSending &&
-                        address.isNotBlank() &&
-                        if (sendAll) !hasChannel || spliceOutMaxSats() > 0 else satsFromUSD > 0,
+                enabled = !isSending && address.isNotBlank() && (sendAll || satsFromUSD > 0),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 if (isSending) CircularProgressIndicator(Modifier.size(20.dp)) else Text("Send")
