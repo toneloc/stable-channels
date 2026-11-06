@@ -2,10 +2,10 @@ use dioxus::prelude::*;
 
 use std::collections::HashMap;
 
-use sc_rest_client::sc_protos::stable::StableChannelInfo;
+use sc_rest_client::sc_protos::stable::{QueuedSpliceInfo, StableChannelInfo};
 
 use crate::actions;
-use crate::format::{format_sats, format_usd, unit_label};
+use crate::format::{ago, format_sats, format_usd, unit_label};
 use crate::health::{has_stable_position, settle_threshold_usd, settlement, stable_drift, Drift, Settlement};
 use crate::state::{AppCtx, ChannelSortColumn, ChannelStatusFilter, Dialog, Drawer, Op};
 use crate::ui::widgets::{
@@ -53,7 +53,8 @@ const HELP_CLTV_EXPIRY_DELTA: &str =
 	"Extra blocks this channel requires on forwarded HTLCs so there is time to resolve them on-chain if needed.";
 const HELP_CLOSE_CHANNEL: &str =
 	"Cooperatively close the channel when possible and return funds on-chain after confirmation.";
-const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it.";
+const HELP_SPLICE_IN: &str = "Add on-chain funds to an existing channel without closing and reopening it. The daemon queues it, wakes the phone by push, and runs the splice once the channel is usable; the row below shows where it got to.";
+const HELP_QUEUED_SPLICES: &str = "Splice-ins queued for the phone. A call the node has not answered stays pending: no second call and no new request go out until it locks, the node drops it, or you release it after checking the node.";
 const HELP_SPLICE_OUT: &str = "Move funds from a channel to an on-chain address without fully closing the channel.";
 const HELP_ONCHAIN_ADDRESS: &str =
 	"The Bitcoin address for the current network. Verify it belongs to the intended recipient and network before sending.";
@@ -189,6 +190,7 @@ pub fn Channels() -> Element {
 		})
 		.unwrap_or_default();
 	let splicing = splicing_channels(&data);
+	let queued: Vec<QueuedSpliceInfo> = data.queued_splices.as_ref().map(|q| q.splices.clone()).unwrap_or_default();
 	let rows: Option<Vec<ChannelRow>> = data.channels.as_ref().map(|resp| {
 		resp.channels
 			.iter()
@@ -281,6 +283,9 @@ pub fn Channels() -> Element {
 			Stat { title: "Outbound", help: HELP_OUTBOUND, value: ctx.fmt_msat(outbound), sub: "Can send" }
 			Stat { title: "Inbound", help: HELP_INBOUND, value: ctx.fmt_msat(inbound), sub: "Can receive" }
 		}
+		if !queued.is_empty() {
+			QueuedSplices { rows: queued }
+		}
 		Card { class: "flush",
 			div { class: "toolbar",
 				div { class: "search",
@@ -329,6 +334,76 @@ pub fn Channels() -> Element {
 						tbody {
 							for ch in view_rows {
 								ChannelRowView { key: "{ch.user_channel_id}-{ch.channel_id}", row: ch }
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+/// The pill tone for a queued splice's status.
+fn queued_splice_tone(status: &str) -> &'static str {
+	match status {
+		"locked" => "success",
+		"failed" | "stalled" => "danger",
+		"cancelled" => "muted",
+		_ => "accent",
+	}
+}
+
+#[component]
+fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
+	let ctx = use_context::<AppCtx>();
+	let now = *ctx.now.read();
+	let busy = ctx.busy(Op::CancelQueuedSplice);
+	rsx! {
+		Card { title: "Queued splice-ins", help: HELP_QUEUED_SPLICES, class: "flush",
+			div { class: "table-wrap",
+				table { class: "table",
+					thead {
+						tr {
+							Th { label: "Peer" }
+							Th { label: "Amount", class: "right" }
+							Th { label: "Status" }
+							Th { label: "Note" }
+							Th { label: "Updated" }
+							th { "" }
+						}
+					}
+					tbody {
+						for row in rows {
+							{
+								let uid = row.user_channel_id.clone();
+								let uid_force = row.user_channel_id.clone();
+								let tone = queued_splice_tone(&row.status);
+								let note = if !row.last_error.is_empty() { row.last_error.clone() } else { row.wake_note.clone() };
+								let open = !matches!(row.status.as_str(), "locked" | "cancelled");
+								let updated = ago(row.updated_at.max(0) as u64, now);
+								rsx! {
+									tr { key: "{row.user_channel_id}",
+										td { Peer { node_id: row.counterparty_node_id.clone() } }
+										td { class: "right", Amount { msat: row.amount_sats.saturating_mul(1_000) } }
+										td {
+											Pill { tone, "{row.status}" }
+											if row.attempts > 0 { " · " span { class: "muted", "{row.attempts} failed" } }
+											if row.pending_on_node { " · " Pill { tone: "warning", "pending on node" } }
+										}
+										td { class: "muted", style: "max-width: 420px; white-space: normal;", "{note}" }
+										td { class: "muted", "{updated}" }
+										td { class: "right",
+											if open {
+												button { class: "btn sm ghost", disabled: busy, onclick: move |_| actions::cancel_queued_splice(ctx, uid.clone(), false), "Cancel" }
+											}
+											if row.pending_on_node {
+												" "
+												button { class: "btn sm danger", disabled: busy, title: "Only after checking that the node holds no splice for this channel",
+													onclick: move |_| actions::cancel_queued_splice(ctx, uid_force.clone(), true), "Release" }
+											}
+										}
+									}
+								}
 							}
 						}
 					}
@@ -822,14 +897,14 @@ pub fn SpliceInDialog() -> Element {
 	rsx! {
 		Modal {
 			title: "Splice In",
-			sub: "Add funds to an existing channel",
+			sub: "Queue funds to add to a channel; the phone is woken by push",
 			icon: rsx! { Bubble { icon: "merge", tone: "green" } },
 			onclose: move |_| cancel(),
 			footer: rsx! {
 				button { class: "btn ghost", onclick: move |_| cancel(), "Cancel" }
 				button { class: "btn primary", disabled: pending, onclick: move |_| actions::splice_in(ctx),
 					if pending { Spinner {} }
-					"Splice In"
+					"Queue splice-in"
 				}
 			},
 			div { class: "notice", Icon { name: "info", size: 16 } "{HELP_SPLICE_IN}" }

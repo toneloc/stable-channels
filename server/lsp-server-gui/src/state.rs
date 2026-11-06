@@ -11,7 +11,8 @@ use sc_rest_client::ldk_server_grpc::api::{
 };
 use sc_rest_client::sc_protos::revenue::{GetRevenueResponse, RevenueItem};
 use sc_rest_client::sc_protos::stable::{
-	GetPriceResponse, ListChannelLedgerEventsResponse, ListStableChannelsResponse, LogResponse,
+	GetPriceResponse, ListChannelLedgerEventsResponse, ListQueuedSplicesResponse,
+	ListStableChannelsResponse, LogResponse,
 };
 
 use crate::config::{ChainSourceConfig, ChainSourceType};
@@ -564,6 +565,8 @@ pub struct Data {
 	pub forwarded_payments_page_token: Option<String>,
 	pub payment_details: Option<GetPaymentDetailsResponse>,
 	pub stable_channels: Option<ListStableChannelsResponse>,
+	/// Every channel's queued LSP splice-in and where it got to; None until the daemon answered.
+	pub queued_splices: Option<ListQueuedSplicesResponse>,
 	/// payment_id (hex) -> settlement classification, fetched alongside payments.
 	pub settlement_kinds: Option<HashMap<String, SettlementKind>>,
 	pub ldk_log: Option<LogResponse>,
@@ -767,6 +770,8 @@ pub enum Op {
 	ExportPathfindingScores,
 	GetPrice,
 	ListStableChannels,
+	ListQueuedSplices,
+	CancelQueuedSplice,
 	EditStableChannel,
 	ReleaseStabilityPayment,
 	ListSettlementPayments,

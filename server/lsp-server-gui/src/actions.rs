@@ -14,18 +14,18 @@ use sc_rest_client::ldk_server_grpc::api::{
 	GraphGetChannelRequest, GraphGetNodeRequest, GraphListChannelsRequest, GraphListNodesRequest,
 	ListChannelsRequest, ListForwardedPaymentsRequest, ListPaymentsRequest, ListPaymentsResponse,
 	ListPeersRequest, OnchainReceiveRequest, OnchainSendRequest, OpenChannelRequest,
-	SignMessageRequest, SpliceInRequest, SpliceOutRequest, SpontaneousSendRequest,
+	SignMessageRequest, SpliceOutRequest, SpontaneousSendRequest,
 	UpdateChannelConfigRequest, VerifySignatureRequest, AllFunds, onchain_send_request, open_channel_request,
-	splice_in_request,
 };
 use sc_rest_client::ldk_server_grpc::types::{
 	bolt11_invoice_description, Bolt11InvoiceDescription, ChannelConfig,
 };
 use sc_rest_client::sc_protos::revenue::{GetRevenueRequest, RefundTradeFeeRequest};
 use sc_rest_client::sc_protos::stable::{
-	EditStableChannelRequest, GetPriceRequest, ListChannelLedgerEventsRequest,
-	ListChannelLedgerEventsResponse, ListSettlementPaymentsRequest, ListStableChannelsRequest,
-	LogRequest, ReleaseStabilityPaymentRequest,
+	CancelQueuedSpliceRequest, EditStableChannelRequest, GetPriceRequest,
+	ListChannelLedgerEventsRequest, ListChannelLedgerEventsResponse, ListQueuedSplicesRequest,
+	ListSettlementPaymentsRequest, ListStableChannelsRequest, LogRequest, QueueSpliceInRequest,
+	ReleaseStabilityPaymentRequest,
 };
 
 use crate::ledger::{checked_next_cursor, merge_ledger_events};
@@ -1013,24 +1013,66 @@ pub fn splice_in(ctx: AppCtx) {
 		ctx.error(CHANNEL_IDS_REQUIRED);
 		return;
 	};
+	// The daemon queues the splice, wakes the phone by push and runs it once the channel is usable.
 	run(
 		ctx,
 		Op::SpliceIn,
 		async move {
 			client
-				.splice_in(SpliceInRequest {
+				.queue_splice_in(QueueSpliceInRequest {
 					user_channel_id,
 					counterparty_node_id,
-					amount: Some(splice_in_request::Amount::SpliceAmountSats(splice_amount_sats)),
+					amount_sats: splice_amount_sats,
 				})
 				.await
 		},
-		|ctx, _v| {
-			ctx.success("Splice-in initiated");
-			let mut forms = ctx.forms;
-			forms.write().splice_in = Default::default();
-			close_dialog(ctx);
+		|ctx, v| {
+			if v.ok {
+				ctx.success(v.status);
+				let mut forms = ctx.forms;
+				forms.write().splice_in = Default::default();
+				close_dialog(ctx);
+			} else {
+				ctx.error(v.status);
+			}
+			fetch_queued_splices(ctx);
 			fetch_channels(ctx);
+		},
+	);
+}
+
+/// Every channel's queued splice-in. An older daemon without the route leaves the list as it was.
+pub fn fetch_queued_splices(ctx: AppCtx) {
+	let Some(client) = client(ctx) else { return };
+	run_with(
+		ctx,
+		Op::ListQueuedSplices,
+		async move { client.list_queued_splices(ListQueuedSplicesRequest {}).await },
+		|ctx, v| {
+			let mut data = ctx.data;
+			data.write().queued_splices = Some(v);
+		},
+		|_ctx, _e| {},
+	);
+}
+
+/// Cancel a channel's queued splice-in; `force` also releases a call the node never answered.
+pub fn cancel_queued_splice(ctx: AppCtx, user_channel_id: String, force: bool) {
+	if busy(ctx, Op::CancelQueuedSplice) {
+		return;
+	}
+	let Some(client) = client(ctx) else { return };
+	run(
+		ctx,
+		Op::CancelQueuedSplice,
+		async move { client.cancel_queued_splice(CancelQueuedSpliceRequest { user_channel_id, force }).await },
+		|ctx, v| {
+			if v.ok {
+				ctx.success(v.status);
+			} else {
+				ctx.error(v.status);
+			}
+			fetch_queued_splices(ctx);
 		},
 	);
 }
@@ -1510,6 +1552,7 @@ pub fn refresh_visible(ctx: AppCtx) {
 		ActiveTab::Channels => {
 			fetch_channels(ctx);
 			fetch_stable_channels(ctx);
+			fetch_queued_splices(ctx);
 			// The "Splicing" pill reads the feed.
 			if ctx.data.peek().activity_pages <= 1 {
 				fetch_activity_feed(ctx, false);
