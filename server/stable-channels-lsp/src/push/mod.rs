@@ -95,6 +95,18 @@ impl PushService {
         tokens::save_token(&self.data_dir, token, platform, node_id, environment);
     }
 
+    /// Whether a device token is registered for this node, so a push can reach it at all.
+    pub fn has_token(&self, node_id: &str) -> bool {
+        tokens::load_token_for_node(&self.data_dir, node_id).is_some()
+    }
+
+    /// Act as if every cooldown and backoff had run out.
+    #[cfg(test)]
+    pub(crate) fn forget_cooldowns(&mut self) {
+        self.last_push_sent.clear();
+        self.last_push_failed.clear();
+    }
+
     /// Whether a push to this node may be sent now: no accepted push inside the cooldown, and no
     /// failed or still-outstanding one inside the backoff.
     pub fn should_notify(&self, node_id: &str) -> bool {
