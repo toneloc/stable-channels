@@ -39,12 +39,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.lightningdevkit.ldknode.*
+import uniffi.sc_force_close.ForceCloseTransactions
 
 enum class Phase {
     LOADING,
@@ -60,6 +63,8 @@ private class RetryableSyncException(message: String) : Exception(message)
 class AppState(private val context: Context) : ViewModel() {
 
     companion object {
+        private const val COOP_CLOSED_IDS = "ids"
+
         /**
          * Whether resuming a pending splice confirmation on this call should skip bumping
          * [spliceGeneration]. True only when this process is already actively monitoring the exact
@@ -115,6 +120,25 @@ class AppState(private val context: Context) : ViewModel() {
                 else -> lightning + onchain
             }
         }
+
+        /**
+         * The funds of closed channels that [calculateTotalBalance] leaves out, for the Home card,
+         * so no amount shows twice. LDK's lightning balance includes them, and the total counts the
+         * sweeps LDK has not broadcast when there is no channel.
+         */
+        fun closedChannelFundsLeftOut(
+            funds: ClosedChannelFunds?,
+            lightning: Long,
+            channelState: ChannelState,
+        ): ClosedChannelFunds? =
+            when {
+                funds == null -> null
+                channelState.isChannelClosing -> funds
+                channelState.isOpeningChannel -> if (lightning > 0) funds.sweepsOnly() else funds
+                channelState.isSweeping -> funds.sweepsOnly()
+                !channelState.hasReady && !channelState.hasAnyChannel -> funds.withoutSweeps()
+                else -> funds.sweepsOnly()
+            }
 
         fun calculateTotalBalance(
             lightning: Long,
@@ -804,6 +828,7 @@ class AppState(private val context: Context) : ViewModel() {
             sendGeneration++
             pendingOutboundSend = PendingOutboundSend()
         }
+        _closedChannelFunds.value = null
         BalanceCacheKey.clearAll(context)
     }
 
@@ -814,6 +839,16 @@ class AppState(private val context: Context) : ViewModel() {
                 .getLong(BalanceCacheKey.SPENDABLE, 0L)
         )
     val spendableOnchainSats: StateFlow<Long> = _spendableOnchainSats
+
+    private val _closedChannelFunds = MutableStateFlow<ClosedChannelFunds?>(null)
+    val closedChannelFunds: StateFlow<ClosedChannelFunds?> = _closedChannelFunds
+    @Volatile private var ldkClosedChannelFunds: ClosedChannelFunds? = null
+    // The part of it the total leaves out, which the card shows.
+    @Volatile private var ldkFundsLeftOut: ClosedChannelFunds? = null
+
+    /** Channels closed cooperatively, which the closed channel card leaves out (#358). */
+    private val coopClosedChannels
+        get() = context.getSharedPreferences("coop_closed_channels", Context.MODE_PRIVATE)
 
     private val pendingLock = Any()
 
@@ -1090,6 +1125,69 @@ class AppState(private val context: Context) : ViewModel() {
             .callTimeout(6, TimeUnit.SECONDS)
             .build()
     private val spliceBroadcastChecker = SpliceBroadcastChecker(httpClient)
+
+    // Funds of a channel the LSP force-closed after this app lost its channel data (#364).
+    private val toRemoteRecovery =
+        ToRemoteRecovery(
+            http = httpClient,
+            chainUrls = {
+                listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL)
+                    .distinct()
+            },
+            loadState = {
+                context
+                    .getSharedPreferences("to_remote_recovery", Context.MODE_PRIVATE)
+                    .getString("state", null)
+            },
+            saveState = {
+                context
+                    .getSharedPreferences("to_remote_recovery", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("state", it)
+                    .apply()
+            },
+            // LDK never saw this channel close, so no ChannelClosed event records it. Pending, so
+            // detectOnchainDeposit() takes the sweep as the close's funds, not a new deposit.
+            onSwept = { txid, sats, address ->
+                val price = priceService.currentPrice.value
+                databaseService?.recordPayment(
+                    paymentId = txid,
+                    paymentType = "channel_close",
+                    direction = "received",
+                    amountMsat = sats * 1000,
+                    amountUSD =
+                        if (price > 0) (sats.toDouble() / Constants.SATS_IN_BTC) * price else null,
+                    btcPrice = if (price > 0) price else null,
+                    status = "pending",
+                    txid = txid,
+                    address = address,
+                )
+                notifyPaymentRecorded()
+            },
+        )
+    private var toRemoteKeys: Pair<String, ToRemoteKeys>? = null
+
+    // The app's own close of a channel the user force closed (#456).
+    private val ownForceClose =
+        OwnForceClose(
+            http = httpClient,
+            chainUrls = { listOf(Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL) },
+            loadState = {
+                context
+                    .getSharedPreferences("own_force_close", Context.MODE_PRIVATE)
+                    .getString("state", null)
+            },
+            saveState = {
+                context
+                    .getSharedPreferences("own_force_close", Context.MODE_PRIVATE)
+                    .edit()
+                    .putString("state", it)
+                    .apply()
+            },
+        )
+    val ownForceCloseState: StateFlow<OwnForceClose.State?> = ownForceClose.state
+    /** Held while [buildOwnForceClose] has the node stopped, until it has started it again. */
+    private val ownForceCloseBuild = Mutex()
     private val paymentConfirmationPass =
         PaymentConfirmationPass(
             httpClient = httpClient,
@@ -1487,6 +1585,8 @@ class AppState(private val context: Context) : ViewModel() {
                 return@launch
             }
             cancelBackgroundStopAndAwait()
+            // A build of our own close has the node stopped and starts it again (#456).
+            ownForceCloseBuild.withLock {}
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()
@@ -1903,6 +2003,95 @@ class AppState(private val context: Context) : ViewModel() {
             ),
         )
     }
+
+    /**
+     * The emergency close (#363): a normal close while the LSP is online, unless [closeStarted], a
+     * normal close that has not finished. Otherwise a force close, which the app broadcasts itself
+     * (#456): ldk-node leaves the close of a channel with the trusted LSP to the LSP.
+     */
+    suspend fun emergencyCloseChannel(channel: ChannelDetails, closeStarted: Boolean) {
+        val lspOnline =
+            nodeService.node?.listPeers()?.any {
+                it.nodeId == channel.counterpartyNodeId && it.isConnected
+            } == true
+        val force = closeStarted || !lspOnline
+        AuditService.log(
+            "CHANNEL_CLOSE_REQUESTED",
+            mapOf(
+                "user_channel_id" to channel.userChannelId,
+                "force" to force,
+                "lsp_online" to lspOnline,
+            ),
+        )
+        if (!force) {
+            setStatus("Closing channel...")
+            nodeService.closeChannel(channel.userChannelId, channel.counterpartyNodeId)
+            return
+        }
+        setStatus("Force closing channel...")
+        nodeService.forceCloseChannel(channel.userChannelId, channel.counterpartyNodeId)
+        val funding = channel.fundingTxo
+        if (funding == null) {
+            AuditService.log(
+                "OWN_FORCE_CLOSE_NO_OUTPOINT",
+                mapOf("user_channel_id" to channel.userChannelId),
+            )
+            return
+        }
+        ownForceClose.start(channel.channelId, funding.txid, funding.vout.toInt())
+        runOwnForceClose()
+    }
+
+    private suspend fun runOwnForceClose() {
+        if (isInBackground || !nodeService.isRunning) return
+        ownForceClose.step(::buildOwnForceClose, ::ownCloseConfirmed)?.let { setStatus(it) }
+    }
+
+    /** The close row may hold our close while the LSP's replaced it and confirmed. */
+    private fun ownCloseConfirmed(channelId: String, closeTxid: String) {
+        val db = databaseService ?: return
+        val recorded = db.getPaymentTxid(channelId)
+        if (db.replaceChannelCloseTxid(channelId, closeTxid)) {
+            if (_lastCloseTxid.value == recorded) setLastCloseTxid(closeTxid)
+            notifyPaymentRecorded()
+        }
+    }
+
+    /**
+     * Builds the app's own close from the node's data while the node is stopped, then starts the
+     * node again as after an LSP switch. The heartbeat keeps going, so a stability push meanwhile
+     * leaves the node to the app instead of starting the stability service on it.
+     */
+    private suspend fun buildOwnForceClose(channelId: String): ForceCloseTransactions =
+        ownForceCloseBuild.withLock {
+            stabilityJob?.cancelAndJoin()
+            val seed = nodeService.walletSeed()
+            nodeService.stop()
+            try {
+                if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
+                    throw OwnForceClose.NodeBusy(
+                        "node data owned by ${LdkNodeOwner.currentOwner()}"
+                    )
+                }
+                try {
+                    OwnForceClose.build(Constants.userDataDir(context), channelId, seed)
+                } finally {
+                    LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+                }
+            } finally {
+                try {
+                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    refreshBalances()
+                    ensureLSPConnected()
+                    startStabilityTimer()
+                } catch (e: Exception) {
+                    Log.e("AppState", "Node restart after building the close failed", e)
+                    handleNodeStartFailure(e, "Restart failed")
+                }
+                // A background stop that came meanwhile found the node stopped.
+                if (isInBackground && nodeService.isRunning) launchBackgroundStop()
+            }
+        }
 
     private fun handleEvent(event: Event) {
         when (event) {
@@ -3424,6 +3613,10 @@ class AppState(private val context: Context) : ViewModel() {
         counterpartyNodeId: String?,
         reason: ClosureReason?,
     ) {
+        if (ClosedChannelFunds.isCooperative(reason)) {
+            val ids = coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty()
+            coopClosedChannels.edit().putStringSet(COOP_CLOSED_IDS, ids + channelId).apply()
+        }
         val sc = _stableChannel.value
         if (
             sc.channelId == channelId ||
@@ -4354,6 +4547,52 @@ class AppState(private val context: Context) : ViewModel() {
     /** Blocking fee-rate lookup for pre-send UI estimates. Call from Dispatchers.IO. */
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
 
+    /**
+     * Stops the node and restores the wallet from [mnemonic], picking the explorer the way a normal
+     * start does. The app first stops sending its own close of the old channel (#456), once a step
+     * of it ends, as the step's build restarts the node. LDK starts with no channel data, so the
+     * LSP's close of the saved funding txid's channel is looked for on chain instead (#364). That
+     * is set up first, so a start that fails still finds it on the next one. [channelMayExist] is
+     * false when the LSP said there is no channel: one check then covers a close that already
+     * happened.
+     */
+    suspend fun startRestoredNode(mnemonic: String, channelMayExist: Boolean) {
+        ownForceClose.clear()
+        nodeService.stop()
+        toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
+        chainUrl = resolveChainUrl()
+        nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+    }
+
+    private fun publishClosedChannelFunds() {
+        _closedChannelFunds.value =
+            ClosedChannelFunds.orRecovered(ldkFundsLeftOut, toRemoteRecovery.pendingSats)
+    }
+
+    /** Keys from the wallet seed, or from the keys_seed file of wallets made before mnemonics. */
+    @Synchronized
+    private fun toRemoteKeys(): ToRemoteKeys? {
+        // None while the node is stopped. A restore stops it before it resets the recovery, and
+        // start() saves the restored mnemonic before the node runs, so a run after the reset never
+        // gets the replaced wallet's keys.
+        if (!nodeService.isRunning) return null
+        val words = nodeService.savedMnemonic
+        val source = words ?: "keys_seed"
+        toRemoteKeys?.let { if (it.first == source) return it.second }
+        val keys =
+            if (words != null) {
+                ToRemoteKeys.fromMnemonic(words)
+            } else {
+                File(Constants.userDataDir(context), "keys_seed")
+                    .takeIf { it.exists() }
+                    ?.readBytes()
+                    ?.takeIf { it.size == 64 }
+                    ?.let { ToRemoteKeys.fromSeed(it) }
+            } ?: return null
+        toRemoteKeys = source to keys
+        return keys
+    }
+
     /** Test Blockstream connectivity; fall back to mempool.space if unreachable. */
     private suspend fun resolveChainUrl(): String {
         return withContext(Dispatchers.IO) {
@@ -4668,24 +4907,47 @@ class AppState(private val context: Context) : ViewModel() {
                 _stableChannel.update { it.copy(counterparty = liveCounterparty) }
             }
         }
-        // Pending sweep: count PendingBroadcast and BroadcastAwaitingConfirmation
-        // These funds are NOT yet in total_onchain_balance_sats
-        var sweepSats = 0L
-        for (pending in balances.pendingBalancesFromChannelClosures) {
-            when (pending) {
-                is PendingSweepBalance.PendingBroadcast ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                is PendingSweepBalance.BroadcastAwaitingConfirmation ->
-                    sweepSats += pending.amountSatoshis.toLong()
-                else -> {}
-            }
-        }
+        // Not in total_onchain_balance_sats yet. A broadcast sweep is, once the wallet syncs.
+        val sweepSats =
+            ClosedChannelFunds.unbroadcastSweepSats(balances.pendingBalancesFromChannelClosures)
         _pendingSweepBalanceSats.value = sweepSats
 
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
         _spendableOnchainSats.value = spendable
+        ldkClosedChannelFunds =
+            ClosedChannelFunds.from(
+                lightningBalances = balances.lightningBalances,
+                pendingSweeps = balances.pendingBalancesFromChannelClosures,
+                openChannelIds = nodeService.channels.map { it.channelId }.toSet(),
+                coopClosedChannelIds =
+                    coopClosedChannels.getStringSet(COOP_CLOSED_IDS, null).orEmpty(),
+                currentHeight = nodeService.node?.status()?.currentBestBlock?.height?.toInt() ?: 0,
+            )
+        // Funds of a channel LDK no longer knows, found on chain (#364).
+        if (
+            toRemoteRecovery.onRefresh(
+                savedFundingTxid = fundingTxid,
+                savedFundingVout = fundingVout,
+                ldkHasChannels = nodeService.channels.isNotEmpty(),
+                ldkHandlesClose =
+                    ClosedChannelFunds.ldkHandlesClose(
+                        ldkClosedChannelFunds,
+                        balances.pendingBalancesFromChannelClosures,
+                    ),
+            )
+        ) {
+            viewModelScope.launch(Dispatchers.IO) {
+                toRemoteRecovery.run(
+                    keys = ::toRemoteKeys,
+                    destination = { runCatching { nodeService.newOnchainAddress() }.getOrNull() },
+                    feeRateSatVb = ::fetchFeeRate,
+                )
+                publishClosedChannelFunds()
+            }
+        }
+        if (ownForceClose.isDue) viewModelScope.launch(Dispatchers.IO) { runOwnForceClose() }
 
         // lastCloseTxid labels the Home card "Channel closing..." until the close's own funds
         // confirm. Check this close's confirmations specifically, not aggregate spendable
@@ -4711,18 +4973,23 @@ class AppState(private val context: Context) : ViewModel() {
             isChannelClosing = false
         }
 
-        val hasAnyChannel = nodeService.channels.isNotEmpty()
+        val channelState =
+            ChannelState(
+                hasReady = hasReady,
+                hasAnyChannel = nodeService.channels.isNotEmpty(),
+                isChannelClosing = isChannelClosing,
+                isOpeningChannel = isOpeningChannel,
+                isSweeping = isSweeping,
+            )
         _totalBalanceSats.value =
             calculateTotalBalance(
                 lightning = lightning,
                 onchain = onchain,
-                hasReady = hasReady,
-                isChannelClosing = isChannelClosing,
-                isSweeping = isSweeping,
                 pendingSweep = sweepSats,
-                isOpeningChannel = isOpeningChannel,
-                hasAnyChannel = hasAnyChannel,
+                channelState = channelState,
             )
+        ldkFundsLeftOut = closedChannelFundsLeftOut(ldkClosedChannelFunds, lightning, channelState)
+        publishClosedChannelFunds()
 
         // Calculate native sats (lightning minus stable portion) for slider position
         // On-chain funds excluded — they're not in the channel yet

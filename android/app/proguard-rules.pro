@@ -1,12 +1,19 @@
 # LDK Node — bindings are invoked reflectively through JNA; keep everything
 -keep class org.lightningdevkit.ldknode.** { *; }
 
+# sc-force-close (the app's own force close, #456) — the same kind of JNA bindings
+-keep class uniffi.sc_force_close.** { *; }
+
 # JNA — loads libldk_node.so; relies on reflection over Structure/Callback types
 -keep class com.sun.jna.** { *; }
 -keepclassmembers class * extends com.sun.jna.Structure { *; }
 -keep class * implements com.sun.jna.Library { *; }
 -keep class * implements com.sun.jna.Callback { *; }
 -dontwarn java.awt.**
+
+# secp256k1-kmp (to_remote recovery, #364) finds its JNI loader by name at runtime, and the JNI code
+# looks up its Java classes by name.
+-keep class fr.acinq.secp256k1.** { *; }
 
 # Kotlin Serialization
 -keepattributes *Annotation*, InnerClasses

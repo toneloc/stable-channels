@@ -122,6 +122,11 @@ dependencies {
     // QR code scanning
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
+    // Keys and signing to move funds a force close left on chain after the channel data is lost
+    // (#364). Same libraries as Phoenix; secp256k1-kmp 0.19+ ships 16 KB page aligned libraries.
+    implementation("fr.acinq.bitcoin:bitcoin-kmp-jvm:0.26.0")
+    implementation("fr.acinq.secp256k1:secp256k1-kmp-jni-android:0.19.0")
+
     // OkHttp for network calls
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
@@ -153,4 +158,21 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation("fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.19.0")
 }
+
+// The app's own force close (#456) uses a Rust library that is built, not committed.
+val forceCloseFiles =
+    listOf(
+        file("src/main/jniLibs/arm64-v8a/libsc_force_close.so"),
+        file("src/main/java/uniffi/sc_force_close/sc_force_close.kt"),
+    )
+val checkForceCloseLibrary by
+    tasks.registering {
+        doLast {
+            check(forceCloseFiles.all { it.exists() }) {
+                "Run mobile/force-close/build-android.sh first: it builds the force close library."
+            }
+        }
+    }
+tasks.named("preBuild") { dependsOn(checkForceCloseLibrary) }

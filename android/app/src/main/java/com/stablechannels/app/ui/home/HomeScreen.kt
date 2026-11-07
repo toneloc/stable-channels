@@ -72,6 +72,8 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val isChannelClosing by appState.isChannelClosingFlow.collectAsState()
     val isOnline by appState.isOnline.collectAsState()
     val isOpeningChannel by appState.isOpeningChannelFlow.collectAsState()
+    val closedChannelFunds by appState.closedChannelFunds.collectAsState()
+    val ownForceClose by appState.ownForceCloseState.collectAsState()
 
     var showSend by remember { mutableStateOf(false) }
     var selectedTrade by remember { mutableStateOf<TradeRecord?>(null) }
@@ -242,6 +244,21 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
                 Spacer(Modifier.height(8.dp))
             }
+
+            // Funds of a closed channel the total leaves out, until they reach the wallet
+            closedChannelFunds?.let { funds ->
+                ClosedChannelFundsCard(funds, btcPrice)
+                Spacer(Modifier.height(12.dp))
+            }
+
+            // The app's own close of a channel, while it is slow to confirm (#456)
+            ownForceClose
+                ?.takeIf { it.isSlow(System.currentTimeMillis()) }
+                ?.closeTxid
+                ?.let {
+                    OwnForceCloseCard(it)
+                    Spacer(Modifier.height(12.dp))
+                }
 
             // On-chain section
             // Stays visible after the balance hits zero while a send or splice is still confirming
