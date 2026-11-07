@@ -777,6 +777,13 @@ class AppState {
             statusMessage = "Restoring wallet..."
         }
 
+        // The app stops sending its own close of the old channel (#456), once a step in progress ends:
+        // its build stops and restarts the node, and ends the node flow this restore marked.
+        await ownForceClose.clear()
+        if let ownForceCloseTask { await ownForceCloseTask.value }
+        ownForceCloseState = nil
+        nodeFlowInProgress = true
+
         cancelBackgroundStop()
 
         // Own the wallet dir before stopping/wiping: restore can be reached

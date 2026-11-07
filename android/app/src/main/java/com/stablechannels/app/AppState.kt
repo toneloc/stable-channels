@@ -39,6 +39,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -1184,6 +1186,8 @@ class AppState(private val context: Context) : ViewModel() {
             },
         )
     val ownForceCloseState: StateFlow<OwnForceClose.State?> = ownForceClose.state
+    /** Held while [buildOwnForceClose] has the node stopped, until it has started it again. */
+    private val ownForceCloseBuild = Mutex()
     private val paymentConfirmationPass =
         PaymentConfirmationPass(
             httpClient = httpClient,
@@ -1581,6 +1585,8 @@ class AppState(private val context: Context) : ViewModel() {
                 return@launch
             }
             cancelBackgroundStopAndAwait()
+            // A build of our own close has the node stopped and starts it again (#456).
+            ownForceCloseBuild.withLock {}
             if (nodeService.isRunning) {
                 Log.d("AppState", "Node still running (grace period), reconnecting")
                 loadChannelFromDB()
@@ -2049,33 +2055,34 @@ class AppState(private val context: Context) : ViewModel() {
      * node again as after an LSP switch. The heartbeat keeps going, so a stability push meanwhile
      * leaves the node to the app instead of starting the stability service on it.
      */
-    private suspend fun buildOwnForceClose(channelId: String): ForceCloseTransactions {
-        stabilityJob?.cancelAndJoin()
-        val seed = nodeService.walletSeed()
-        nodeService.stop()
-        try {
-            check(LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
-                "node data owned by ${LdkNodeOwner.currentOwner()}"
-            }
+    private suspend fun buildOwnForceClose(channelId: String): ForceCloseTransactions =
+        ownForceCloseBuild.withLock {
+            stabilityJob?.cancelAndJoin()
+            val seed = nodeService.walletSeed()
+            nodeService.stop()
             try {
-                return OwnForceClose.build(Constants.userDataDir(context), channelId, seed)
+                check(LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
+                    "node data owned by ${LdkNodeOwner.currentOwner()}"
+                }
+                try {
+                    OwnForceClose.build(Constants.userDataDir(context), channelId, seed)
+                } finally {
+                    LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+                }
             } finally {
-                LdkNodeOwner.release(LdkNodeOwner.MAIN_APP)
+                try {
+                    nodeService.start(Network.BITCOIN, chainUrl, null)
+                    refreshBalances()
+                    ensureLSPConnected()
+                    startStabilityTimer()
+                } catch (e: Exception) {
+                    Log.e("AppState", "Node restart after building the close failed", e)
+                    handleNodeStartFailure(e, "Restart failed")
+                }
+                // A background stop that came meanwhile found the node stopped.
+                if (isInBackground && nodeService.isRunning) launchBackgroundStop()
             }
-        } finally {
-            try {
-                nodeService.start(Network.BITCOIN, chainUrl, null)
-                refreshBalances()
-                ensureLSPConnected()
-                startStabilityTimer()
-            } catch (e: Exception) {
-                Log.e("AppState", "Node restart after building the close failed", e)
-                handleNodeStartFailure(e, "Restart failed")
-            }
-            // A background stop that came meanwhile found the node stopped.
-            if (isInBackground && nodeService.isRunning) launchBackgroundStop()
         }
-    }
 
     private fun handleEvent(event: Event) {
         when (event) {
@@ -4532,13 +4539,17 @@ class AppState(private val context: Context) : ViewModel() {
     fun currentFeeRateSatVb(): Long? = fetchFeeRate()
 
     /**
-     * Restores the wallet from [mnemonic], picking the explorer the way a normal start does. LDK
-     * starts with no channel data, so the LSP's close of the saved funding txid's channel is looked
-     * for on chain instead (#364). That is set up first, so a start that fails still finds it on
-     * the next one. [channelMayExist] is false when the LSP said there is no channel: one check
-     * then covers a close that already happened.
+     * Stops the node and restores the wallet from [mnemonic], picking the explorer the way a normal
+     * start does. The app first stops sending its own close of the old channel (#456), once a step
+     * of it ends, as the step's build restarts the node. LDK starts with no channel data, so the
+     * LSP's close of the saved funding txid's channel is looked for on chain instead (#364). That
+     * is set up first, so a start that fails still finds it on the next one. [channelMayExist] is
+     * false when the LSP said there is no channel: one check then covers a close that already
+     * happened.
      */
     suspend fun startRestoredNode(mnemonic: String, channelMayExist: Boolean) {
+        ownForceClose.clear()
+        nodeService.stop()
         toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
         chainUrl = resolveChainUrl()
         nodeService.start(Network.BITCOIN, chainUrl, mnemonic)

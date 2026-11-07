@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -75,6 +76,13 @@ class OwnForceClose(
         val at = now()
         save(State(channelId, fundingTxid, fundingVout, at))
     }
+
+    /**
+     * Stops following the close once a step in progress ends. A restore from seed calls this: the
+     * restored node lacks the channel data to sweep what our close pays us, while the recovery
+     * sweeps the LSP's close (#364).
+     */
+    suspend fun clear() = running.withLock { save(null) }
 
     /**
      * One step. [build] builds the channel's close, with the node stopped. [onConfirmed] gets the

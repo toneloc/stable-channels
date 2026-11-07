@@ -83,6 +83,13 @@ actor OwnForceClose {
         ))
     }
 
+    /// Stops following the close. A restore from seed calls this: the restored node lacks the channel
+    /// data to sweep what our close pays us, while the recovery sweeps the LSP's close (#364). A step
+    /// in progress saves nothing after this.
+    func clear() {
+        save(nil)
+    }
+
     /// One step. `build` builds the channel's close, with the node stopped.
     /// `onConfirmed` gets the close's payment row and the close that confirmed: ours or the LSP's.
     /// Returns a message for the user, or nil when there is nothing new to tell.

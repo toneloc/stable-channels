@@ -5,7 +5,11 @@ import java.io.File
 import java.nio.file.Files
 import java.util.Collections
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -14,6 +18,7 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -370,6 +375,53 @@ class OwnForceCloseTest {
         val state = forceClose.state.value!!
         assertEquals("ch2", state.channelId)
         assertNull(state.closeHex)
+    }
+
+    @Test
+    fun clearStopsFollowingTheClose() {
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        forceClose.runNow()
+
+        runBlocking { forceClose.clear() }
+        clock += OwnForceClose.RETRY_MS
+
+        assertNull(forceClose.state.value)
+        assertNull(saved)
+        assertFalse(forceClose.isDue)
+        assertNull(forceClose.runNow())
+        assertEquals(1, builds)
+        assertEquals(listOf("c1hex", "b1hex"), posted)
+    }
+
+    @Test
+    fun clearWaitsForAStepInProgress() {
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        val building = CompletableDeferred<Unit>()
+        val built = CompletableDeferred<Unit>()
+
+        runBlocking {
+            val step = launch {
+                forceClose.step(
+                    build = {
+                        building.complete(Unit)
+                        built.await()
+                        close
+                    }
+                )
+            }
+            building.await()
+            val clear = launch { forceClose.clear() }
+            yield()
+            // The build starts the node again, which a restore must not run into.
+            assertFalse(clear.isCompleted)
+            built.complete(Unit)
+            joinAll(step, clear)
+        }
+
+        assertNull(forceClose.state.value)
+        assertNull(saved)
     }
 
     @Test

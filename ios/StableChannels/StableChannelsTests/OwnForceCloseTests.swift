@@ -402,6 +402,42 @@ final class OwnForceCloseTests: XCTestCase {
         XCTAssertNil(state?.closeHex)
     }
 
+    func testAClearStopsFollowingTheClose() async {
+        let forceClose = ownForceClose()
+        await start(forceClose)
+        await runNow(forceClose)
+
+        await forceClose.clear()
+        clock.now += OwnForceClose.retrySeconds
+
+        let state = await forceClose.state
+        XCTAssertNil(state)
+        XCTAssertNil(defaults.data(forKey: "own_force_close"))
+        let isDue = await forceClose.isDue
+        XCTAssertFalse(isDue)
+        let message = await runNow(forceClose)
+        XCTAssertNil(message)
+        XCTAssertEqual(events.builds, 1)
+        XCTAssertEqual(posted, ["c1hex", "b1hex"])
+    }
+
+    func testAStepInProgressSavesNothingAfterAClear() async {
+        let forceClose = ownForceClose()
+        await start(forceClose)
+        let close = close
+
+        // The restore lands while the step builds the close.
+        await forceClose.step(build: { _ in
+            await forceClose.clear()
+            return close
+        })
+
+        let state = await forceClose.state
+        XCTAssertNil(state)
+        XCTAssertNil(defaults.data(forKey: "own_force_close"))
+        XCTAssertEqual(posted, [])
+    }
+
     func testKeepsTheBuiltCloseAcrossRestarts() async {
         let first = ownForceClose()
         await start(first)

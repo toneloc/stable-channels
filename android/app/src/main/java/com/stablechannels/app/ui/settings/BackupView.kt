@@ -56,7 +56,6 @@ fun BackupView(appState: AppState) {
         restoreError = null
         scope.launch(Dispatchers.IO) {
             try {
-                appState.nodeService.stop()
                 appState.startRestoredNode(input, channelMayExist)
                 withContext(Dispatchers.Main) {
                     isRestoring = false
