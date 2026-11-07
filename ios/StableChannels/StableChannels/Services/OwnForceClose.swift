@@ -103,6 +103,8 @@ actor OwnForceClose {
         running = true
         defer { running = false }
         let spend = await fundingSpend(state)
+        // A restore's clear, or a new close, during the explorer round: nothing more to build or send.
+        guard self.state == state else { return nil }
         if let spend, spend.confirmed {
             // One explorer's word, with another silent, ends the follow-up only once repeated.
             if !spend.allAnswered, state.confirmedTxid != spend.txid {
@@ -207,8 +209,8 @@ actor OwnForceClose {
 
     /// What the explorers that answer see. `txid` is a close one of them has. Our close goes to
     /// `unspentAt`, those that see the funding output unspent, which does no harm if it is spent. A close
-    /// counts as confirmed only when all of them see it confirmed. `allAnswered` is whether every explorer
-    /// answered.
+    /// counts as confirmed only when all of them see the same close, by its txid, confirmed. `allAnswered`
+    /// is whether every explorer answered.
     private struct Spend {
         let txid: String?
         let confirmed: Bool
@@ -224,7 +226,8 @@ actor OwnForceClose {
         guard let first = answers.first?.outspend else { return nil }
         return Spend(
             txid: answers.lazy.compactMap(\.outspend.txid).first,
-            confirmed: answers.allSatisfy { $0.outspend.confirmed && $0.outspend.txid == first.txid },
+            confirmed: first.txid != nil
+                && answers.allSatisfy { $0.outspend.confirmed && $0.outspend.txid == first.txid },
             unspentAt: answers.filter { $0.outspend.txid == nil }.map(\.base),
             allAnswered: answers.count == chainURLs.count
         )

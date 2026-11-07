@@ -14,6 +14,8 @@ private final class OwnForceCloseMockURLProtocol: URLProtocol {
     static var postedHosts: [String] = []
     static var postStatus = 200
     static var rejectingHosts: Set<String> = []
+    /// Runs when an explorer is asked what spends the funding output, before it answers.
+    static var onOutspend: (() -> Void)?
     /// Requests arrive on URLSession threads, hence the lock.
     static let lock = NSLock()
 
@@ -24,6 +26,7 @@ private final class OwnForceCloseMockURLProtocol: URLProtocol {
         let url = request.url!
         var status = 200
         var body = ""
+        var hook: (() -> Void)?
         Self.lock.lock()
         if request.httpMethod == "POST" {
             let data = request.httpBody ?? request.httpBodyStream.map(Self.read) ?? Data()
@@ -39,6 +42,7 @@ private final class OwnForceCloseMockURLProtocol: URLProtocol {
         } else if url.path.hasSuffix("/outspend/1"),
                   let outspend = url.host == "other.test" ? Self.otherOutspend : Self.outspend {
             body = outspend
+            hook = Self.onOutspend
         } else if url.path.hasSuffix("/hex") {
             status = Self.hasFunding ? 200 : 404
             body = Self.hasFunding ? "0200" : "Transaction not found"
@@ -46,6 +50,7 @@ private final class OwnForceCloseMockURLProtocol: URLProtocol {
             status = 503
         }
         Self.lock.unlock()
+        hook?()
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
@@ -102,6 +107,7 @@ final class OwnForceCloseTests: XCTestCase {
         OwnForceCloseMockURLProtocol.postedHosts = []
         OwnForceCloseMockURLProtocol.postStatus = 200
         OwnForceCloseMockURLProtocol.rejectingHosts = []
+        OwnForceCloseMockURLProtocol.onOutspend = nil
         defaults = UserDefaults(suiteName: "OwnForceCloseTests-\(UUID().uuidString)")
     }
 
@@ -483,6 +489,40 @@ final class OwnForceCloseTests: XCTestCase {
         XCTAssertNil(state)
         XCTAssertNil(defaults.data(forKey: "own_force_close"))
         XCTAssertEqual(posted, [])
+    }
+
+    func testAClearDuringTheExplorerRoundSendsNothing() async {
+        let forceClose = ownForceClose()
+        await start(forceClose)
+        await runNow(forceClose)
+        clock.now += OwnForceClose.retrySeconds
+        // The restore lands while the explorers are asked about the channel.
+        OwnForceCloseMockURLProtocol.onOutspend = {
+            let cleared = DispatchSemaphore(value: 0)
+            Task {
+                await forceClose.clear()
+                cleared.signal()
+            }
+            cleared.wait()
+        }
+
+        await runNow(forceClose)
+
+        XCTAssertEqual(posted, ["c1hex", "b1hex"])
+        let state = await forceClose.state
+        XCTAssertNil(state)
+    }
+
+    func testAConfirmedCloseWithoutATxidEndsNothing() async {
+        OwnForceCloseMockURLProtocol.outspend = "{\"spent\":true,\"vin\":0,\"status\":{\"confirmed\":true}}"
+        let forceClose = ownForceClose()
+        await start(forceClose)
+
+        await runNow(forceClose)
+
+        XCTAssertEqual(events.confirmed, [])
+        let nextAt = await forceClose.state?.nextAt
+        XCTAssertEqual(nextAt, clock.now + OwnForceClose.checkSeconds)
     }
 
     func testKeepsTheBuiltCloseAcrossRestarts() async {

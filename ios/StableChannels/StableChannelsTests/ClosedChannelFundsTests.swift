@@ -279,6 +279,64 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertFalse(ForceCloseConfirmation.isConfirmed("FORCE"))
     }
 
+    func testEmergencyCloseTriesANormalCloseOnlyWhileTheLspIsOnlineAndNoCloseIsUnderWay() {
+        let forces = { (started: Bool, online: Bool, state: ChannelShutdownState?) in
+            EmergencyClose.forcesAtOnce(closeStarted: started, lspOnline: online, shutdownState: state)
+        }
+        XCTAssertFalse(forces(false, true, .notShuttingDown))
+        XCTAssertFalse(forces(false, true, nil))
+        XCTAssertTrue(forces(true, true, .notShuttingDown))
+        XCTAssertTrue(forces(false, false, .notShuttingDown))
+        // A close under way, after a restart or started by the LSP, which this session never saw.
+        for state in [ChannelShutdownState.shutdownInitiated, .resolvingHtlCs, .negotiatingClosingFee] {
+            XCTAssertTrue(forces(false, true, state))
+        }
+    }
+
+    private struct Refused: Error {}
+
+    func testEmergencyCloseKeepsANormalCloseThatLdkTakes() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: false,
+            close: { calls.append("close") },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertFalse(forced)
+        XCTAssertEqual(calls, ["close"])
+    }
+
+    func testEmergencyCloseForcesANormalCloseThatLdkRefuses() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: false,
+            close: {
+                calls.append("close")
+                throw Refused()
+            },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertTrue(forced)
+        XCTAssertEqual(calls, ["close", "force close"])
+    }
+
+    func testEmergencyCloseForcesWithoutANormalCloseWhenToldTo() async throws {
+        var calls: [String] = []
+
+        let forced = try await EmergencyClose.closeChannel(
+            force: true,
+            close: { calls.append("close") },
+            forceClose: { calls.append("force close") }
+        )
+
+        XCTAssertTrue(forced)
+        XCTAssertEqual(calls, ["force close"])
+    }
+
     /// Recovery waits for LDK's own sweep to confirm, even once the card leaves it out.
     func testLdkHandlesACloseUntilItsSweepConfirms() {
         let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(

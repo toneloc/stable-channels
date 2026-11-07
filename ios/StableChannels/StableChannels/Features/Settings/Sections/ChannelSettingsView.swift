@@ -236,18 +236,36 @@ struct ChannelSettingsView: View {
         appState.isChannelClosing = true
         Task { @MainActor in
             do {
-                // The emergency close (#363) is a normal close while the LSP is online, unless a
-                // normal close already started; otherwise a force close.
-                let lspOnline = appState.nodeService.node?.listPeers().contains {
-                    $0.nodeId == channel.counterpartyNodeId && $0.isConnected
-                } ?? false
-                try await appState.requestChannelClose(
-                    userChannelId: channel.userChannelId,
-                    counterpartyNodeId: channel.counterpartyNodeId,
-                    fundingOutpointTxid: "\(outpoint.txid)",
-                    fundingOutpointVout: outpoint.vout,
-                    force: emergency && (closeStarted || !lspOnline)
-                )
+                let request = { (force: Bool) in
+                    try await appState.requestChannelClose(
+                        userChannelId: channel.userChannelId,
+                        counterpartyNodeId: channel.counterpartyNodeId,
+                        fundingOutpointTxid: "\(outpoint.txid)",
+                        fundingOutpointVout: outpoint.vout,
+                        force: force
+                    )
+                }
+                if emergency {
+                    // The emergency close (#363), as EmergencyClose decides. LDK knows of a close under
+                    // way also after a restart, or when the LSP started it.
+                    let node = appState.nodeService.node
+                    let lspOnline = node?.listPeers().contains {
+                        $0.nodeId == channel.counterpartyNodeId && $0.isConnected
+                    } ?? false
+                    let shutdownState = node?.listChannels()
+                        .first { $0.userChannelId == channel.userChannelId }?.channelShutdownState
+                    try await EmergencyClose.closeChannel(
+                        force: EmergencyClose.forcesAtOnce(
+                            closeStarted: closeStarted,
+                            lspOnline: lspOnline,
+                            shutdownState: shutdownState
+                        ),
+                        close: { try await request(false) },
+                        forceClose: { try await request(true) }
+                    )
+                } else {
+                    try await request(false)
+                }
             } catch {
                 appState.statusMessage = "Close channel failed: \(error.localizedDescription)"
                 appState.isChannelClosing = false

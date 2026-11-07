@@ -334,6 +334,39 @@ class OwnForceCloseTest {
     }
 
     @Test
+    fun stopsWhenTheNodeStaysBusy() {
+        buildError = OwnForceClose.NodeBusy("node data owned by stability-service")
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        repeat(OwnForceClose.MAX_BUSY_BUILDS + OwnForceClose.MAX_BUILD_FAILURES - 1) {
+            assertEquals("Close not created yet. Retrying in 10 minutes.", forceClose.runNow())
+            clock += OwnForceClose.RETRY_MS
+        }
+
+        val message = forceClose.runNow()
+
+        assertEquals(
+            "Close could not be created. Funds arrive once the provider closes the channel.",
+            message,
+        )
+        assertEquals(OwnForceClose.MAX_BUSY_BUILDS + OwnForceClose.MAX_BUILD_FAILURES, builds)
+        assertNull(forceClose.state.value)
+        assertNull(saved)
+    }
+
+    @Test
+    fun aConfirmedCloseWithoutATxidEndsNothing() {
+        outspend = MockResponse().setBody("""{"spent":true,"vin":0,"status":{"confirmed":true}}""")
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+
+        forceClose.runNow()
+
+        assertEquals(emptyList<Pair<String, String>>(), confirmed)
+        assertEquals(clock + OwnForceClose.CHECK_MS, forceClose.state.value!!.nextAt)
+    }
+
+    @Test
     fun sendsOurCloseToTheExplorersThatSeeTheFundingUnspent() {
         useOther = true
         otherOutspend =

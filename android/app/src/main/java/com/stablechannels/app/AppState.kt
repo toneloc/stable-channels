@@ -2005,31 +2005,53 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /**
-     * The emergency close (#363): a normal close while the LSP is online, unless [closeStarted], a
-     * normal close that has not finished. Otherwise a force close, which the app broadcasts itself
-     * (#456): ldk-node leaves the close of a channel with the trusted LSP to the LSP.
+     * The emergency close (#363), as [EmergencyClose] decides. [closeStarted] is a normal close
+     * this session started. The app broadcasts a force close itself (#456): ldk-node leaves the
+     * close of a channel with the trusted LSP to the LSP.
      */
     suspend fun emergencyCloseChannel(channel: ChannelDetails, closeStarted: Boolean) {
+        val node = nodeService.node
         val lspOnline =
-            nodeService.node?.listPeers()?.any {
-                it.nodeId == channel.counterpartyNodeId && it.isConnected
-            } == true
-        val force = closeStarted || !lspOnline
+            node?.listPeers()?.any { it.nodeId == channel.counterpartyNodeId && it.isConnected } ==
+                true
+        // LDK knows of a close under way also after a restart, or when the LSP started it.
+        val shutdownState =
+            node
+                ?.listChannels()
+                ?.firstOrNull { it.userChannelId == channel.userChannelId }
+                ?.channelShutdownState
+        val force = EmergencyClose.forcesAtOnce(closeStarted, lspOnline, shutdownState)
         AuditService.log(
             "CHANNEL_CLOSE_REQUESTED",
             mapOf(
                 "user_channel_id" to channel.userChannelId,
                 "force" to force,
                 "lsp_online" to lspOnline,
+                "shutdown_state" to shutdownState?.name,
             ),
         )
-        if (!force) {
-            setStatus("Closing channel...")
-            nodeService.closeChannel(channel.userChannelId, channel.counterpartyNodeId)
-            return
-        }
-        setStatus("Force closing channel...")
-        nodeService.forceCloseChannel(channel.userChannelId, channel.counterpartyNodeId)
+        val forced =
+            EmergencyClose.closeChannel(
+                force,
+                close = {
+                    setStatus("Closing channel...")
+                    nodeService.closeChannel(channel.userChannelId, channel.counterpartyNodeId)
+                },
+                forceClose = {
+                    setStatus("Force closing channel...")
+                    nodeService.forceCloseChannel(channel.userChannelId, channel.counterpartyNodeId)
+                },
+                onRefused = { e ->
+                    AuditService.log(
+                        "CHANNEL_CLOSE_REQUEST_FAILED",
+                        mapOf(
+                            "user_channel_id" to channel.userChannelId,
+                            "error" to (e.message ?: e.javaClass.simpleName),
+                        ),
+                    )
+                },
+            )
+        if (!forced) return
         val funding = channel.fundingTxo
         if (funding == null) {
             AuditService.log(

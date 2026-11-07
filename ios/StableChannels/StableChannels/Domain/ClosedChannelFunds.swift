@@ -150,3 +150,32 @@ enum ForceCloseConfirmation {
         input.trimmingCharacters(in: .whitespaces) == phrase
     }
 }
+
+/// The emergency close (#363): a normal close while the LSP is online, otherwise a force close. LDK
+/// refuses a normal close while one is under way, also after a restart or when the LSP started it, so a
+/// close under way is forced, as is a normal close that LDK refuses.
+enum EmergencyClose {
+    /// Whether to force close without trying a normal close first.
+    static func forcesAtOnce(closeStarted: Bool, lspOnline: Bool, shutdownState: ChannelShutdownState?) -> Bool {
+        closeStarted || !lspOnline || (shutdownState.map { $0 != .notShuttingDown } ?? false)
+    }
+
+    /// Runs `close`, or `forceClose` when `force` or when `close` throws. Returns whether it force closed.
+    @discardableResult
+    static func closeChannel(
+        force: Bool,
+        close: () async throws -> Void,
+        forceClose: () async throws -> Void
+    ) async throws -> Bool {
+        if !force {
+            do {
+                try await close()
+                return false
+            } catch {
+                // NodeService logs the refusal.
+            }
+        }
+        try await forceClose()
+        return true
+    }
+}

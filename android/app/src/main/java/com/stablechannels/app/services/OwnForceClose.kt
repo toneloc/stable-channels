@@ -29,8 +29,8 @@ import uniffi.sc_force_close.buildForceClose
  * broadcasts both to the explorers that don't have a close of the channel, again every [RETRY_MS].
  * The LSP's close can still replace ours in the mempool when it comes back, as it can pay a higher
  * fee from its wallet. After [MAX_BUILD_FAILURES] failed builds the app stops, as building stops
- * the node each time; the LSP's close still frees the funds. A build that finds the node data in
- * use ([NodeBusy]) does not count.
+ * the node each time; the LSP's close still frees the funds. Builds that find the node data in use
+ * ([NodeBusy]) count only after [MAX_BUSY_BUILDS] of them.
  */
 class OwnForceClose(
     private val http: OkHttpClient,
@@ -58,6 +58,8 @@ class OwnForceClose(
         val seenAt: Long? = null,
         /** A close seen confirmed while an explorer was silent; a later step must see it too. */
         val confirmedTxid: String? = null,
+        /** Builds that found the node data in use and did not count as failed. */
+        val busyBuilds: Int = 0,
     ) {
         /** Our close is in a mempool, unconfirmed [SLOW_MS] after an explorer first showed it. */
         fun isSlow(now: Long): Boolean =
@@ -147,7 +149,9 @@ class OwnForceClose(
     }
 
     private fun buildFailed(current: State, e: Exception): String {
-        val failures = current.buildFailures + if (e is NodeBusy) 0 else 1
+        // Each build stops the node, so a node that stays busy ends the follow-up too.
+        val busy = e is NodeBusy && current.busyBuilds < MAX_BUSY_BUILDS
+        val failures = current.buildFailures + if (busy) 0 else 1
         log(
             "OWN_FORCE_CLOSE_FAILED",
             mapOf(
@@ -160,7 +164,14 @@ class OwnForceClose(
             save(current, null)
             return "Close could not be created. Funds arrive once the provider closes the channel."
         }
-        save(current, current.copy(buildFailures = failures, nextAt = now() + RETRY_MS))
+        save(
+            current,
+            current.copy(
+                buildFailures = failures,
+                busyBuilds = current.busyBuilds + if (busy) 1 else 0,
+                nextAt = now() + RETRY_MS,
+            ),
+        )
         return "Close not created yet. Retrying in 10 minutes."
     }
 
@@ -213,8 +224,8 @@ class OwnForceClose(
     /**
      * What the explorers that answer see. [txid] is a close one of them has. Our close goes to
      * [unspentAt], those that see the funding output unspent, which does no harm if it is spent. A
-     * close counts as confirmed only when all of them see it confirmed. [allAnswered] is whether
-     * every explorer answered.
+     * close counts as confirmed only when all of them see the same close, by its txid, confirmed.
+     * [allAnswered] is whether every explorer answered.
      */
     private data class Spend(
         val txid: String?,
@@ -229,7 +240,9 @@ class OwnForceClose(
         val first = answers.firstOrNull()?.second ?: return null
         return Spend(
             txid = answers.firstNotNullOfOrNull { it.second.txid },
-            confirmed = answers.all { it.second.confirmed && it.second.txid == first.txid },
+            confirmed =
+                first.txid != null &&
+                    answers.all { it.second.confirmed && it.second.txid == first.txid },
             unspentAt = answers.filter { it.second.txid == null }.map { it.first },
             allAnswered = answers.size == urls.size,
         )
@@ -279,6 +292,8 @@ class OwnForceClose(
         const val RETRY_MS = 10 * 60 * 1000L
         const val SLOW_MS = 60 * 60 * 1000L
         const val MAX_BUILD_FAILURES = 3
+        /** About an hour of retries. */
+        const val MAX_BUSY_BUILDS = 6
         private const val ERROR = "error: "
 
         /**
