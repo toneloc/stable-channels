@@ -24,6 +24,8 @@ pub struct AppState {
     pub db: Arc<Database>,
     /// Push notification service. Wrapped in a tokio mutex because `notify` mutates the cooldown map.
     pub push: Arc<Mutex<PushService>>,
+    /// Wallet push registrations, stored only for nodes with a channel; kept apart from `push` so registrations and the tick never wait on a send.
+    pub push_registrations: Arc<crate::push::registrations::Registrations>,
     /// In-memory + sqlite-backed stable channel manager.
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
     /// Offline IP-to-country lookup for stable counterparties' connection history.

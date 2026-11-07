@@ -1176,6 +1176,11 @@ impl StableChannelManager {
         self.hydrated
     }
 
+    /// The node ids, in lowercase hex, of every peer with a loaded channel; None until the list has loaded.
+    pub fn channel_peer_ids(&self) -> Option<std::collections::HashSet<String>> {
+        self.hydrated.then(|| self.stable_channels.iter().map(|sc| sc.counterparty.to_string().to_ascii_lowercase()).collect())
+    }
+
     /// Validate, patch expected_usd/note (Some sets, None keeps prior, both-None-no-prior rejected), persist, and update the cache.
     pub async fn edit_stable_channel(
         &mut self,
@@ -5046,6 +5051,14 @@ pub(crate) mod tests {
         assert!(mgr.hydrated);
         assert_eq!(mgr.stable_channels.len(), 2, "a list that is not empty is not proof it was loaded");
         assert!(mgr.stable_channels.iter().any(|sc| sc.expected_usd.0 == 50.0 && sc.backing_sats == 50_000));
+    }
+
+    #[tokio::test]
+    async fn channel_peers_are_known_only_once_the_list_has_loaded() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        assert_eq!(mgr.channel_peer_ids(), None, "an unloaded list says nothing about who has a channel");
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+        assert_eq!(mgr.channel_peer_ids(), Some(std::collections::HashSet::from([COUNTERPARTY_HEX.to_owned()])));
     }
 
     #[tokio::test]

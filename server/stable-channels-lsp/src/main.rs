@@ -150,6 +150,7 @@ async fn main() -> Result<()> {
         network: cfg.node.network.clone(),
         db: db_arc,
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
+        push_registrations: Arc::new(crate::push::registrations::Registrations::new(&data_dir)),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         geoip: geoip::load(cfg.geoip.country_db.as_deref()),
         geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
@@ -171,15 +172,17 @@ async fn main() -> Result<()> {
             let ldk: &dyn crate::stable_manager::LdkServerCalls = state.ldk_server.as_ref();
             let mut retry = Duration::from_secs(1);
             loop {
-                let hydrated = {
+                let peers = {
                     let mut mgr = state.stable_manager.lock().await;
                     if !mgr.is_hydrated() {
                         let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
                         mgr.reconcile_from_grpc(ldk, btc_price).await;
                     }
-                    mgr.is_hydrated()
+                    mgr.channel_peer_ids()
                 };
-                if hydrated {
+                if peers.is_some() {
+                    // Registrations held since start are stored now rather than at the first tick after the load.
+                    crate::stability_tick::share_channel_peers(&state, peers);
                     break;
                 }
                 tracing::warn!("startup reconcile failed; retrying in {:?}", retry);
