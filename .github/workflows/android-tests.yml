@@ -5,12 +5,14 @@ on:
     paths:
       - 'android/**'
       - 'mobile/force-close/**'
+      - 'Cargo.lock'
       - '.github/workflows/android-tests.yml'
   push:
     branches: [main]
     paths:
       - 'android/**'
       - 'mobile/force-close/**'
+      - 'Cargo.lock'
       - '.github/workflows/android-tests.yml'
 
 permissions:

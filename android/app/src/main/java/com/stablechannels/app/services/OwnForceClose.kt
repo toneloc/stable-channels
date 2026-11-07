@@ -29,7 +29,8 @@ import uniffi.sc_force_close.buildForceClose
  * broadcasts both to the explorers that don't have a close of the channel, again every [RETRY_MS].
  * The LSP's close can still replace ours in the mempool when it comes back, as it can pay a higher
  * fee from its wallet. After [MAX_BUILD_FAILURES] failed builds the app stops, as building stops
- * the node each time; the LSP's close still frees the funds.
+ * the node each time; the LSP's close still frees the funds. A build that finds the node data in
+ * use ([NodeBusy]) does not count.
  */
 class OwnForceClose(
     private val http: OkHttpClient,
@@ -55,11 +56,16 @@ class OwnForceClose(
         val buildFailures: Int = 0,
         /** When an explorer first showed our close as [spendTxid]. */
         val seenAt: Long? = null,
+        /** A close seen confirmed while an explorer was silent; a later step must see it too. */
+        val confirmedTxid: String? = null,
     ) {
         /** Our close is in a mempool, unconfirmed [SLOW_MS] after an explorer first showed it. */
         fun isSlow(now: Long): Boolean =
             closeTxid != null && spendTxid == closeTxid && seenAt != null && now - seenAt >= SLOW_MS
     }
+
+    /** Another owner had the node data, so nothing was built. */
+    class NodeBusy(message: String) : Exception(message)
 
     private val json = Json { ignoreUnknownKeys = true }
     private val running = Mutex()
@@ -98,6 +104,11 @@ class OwnForceClose(
             var state = _state.value ?: return null
             val spend = fundingSpend(state)
             if (spend?.confirmed == true) {
+                // One explorer's word, with another silent, ends the follow-up only once repeated.
+                if (!spend.allAnswered && state.confirmedTxid != spend.txid) {
+                    save(state, state.copy(confirmedTxid = spend.txid, nextAt = now() + CHECK_MS))
+                    return null
+                }
                 log(
                     "OWN_FORCE_CLOSE_DONE",
                     mapOf("channel_id" to state.channelId, "close_txid" to spend.txid),
@@ -136,7 +147,7 @@ class OwnForceClose(
     }
 
     private fun buildFailed(current: State, e: Exception): String {
-        val failures = current.buildFailures + 1
+        val failures = current.buildFailures + if (e is NodeBusy) 0 else 1
         log(
             "OWN_FORCE_CLOSE_FAILED",
             mapOf(
@@ -154,13 +165,14 @@ class OwnForceClose(
     }
 
     /**
-     * This state with [txid] as the close seen spending the funding output. Our close is timed from
-     * when an explorer first shows it, for [State.isSlow].
+     * This state with [txid] as the unconfirmed close seen spending the funding output, if any. Our
+     * close is timed from when an explorer first shows it, for [State.isSlow].
      */
     private fun State.seen(txid: String?): State =
         copy(
             spendTxid = txid,
             seenAt = if (txid != null && txid == closeTxid) seenAt ?: now() else null,
+            confirmedTxid = null,
         )
 
     /**
@@ -201,17 +213,25 @@ class OwnForceClose(
     /**
      * What the explorers that answer see. [txid] is a close one of them has. Our close goes to
      * [unspentAt], those that see the funding output unspent, which does no harm if it is spent. A
-     * close counts as confirmed only when all of them see it confirmed.
+     * close counts as confirmed only when all of them see it confirmed. [allAnswered] is whether
+     * every explorer answered.
      */
-    private data class Spend(val txid: String?, val confirmed: Boolean, val unspentAt: List<String>)
+    private data class Spend(
+        val txid: String?,
+        val confirmed: Boolean,
+        val unspentAt: List<String>,
+        val allAnswered: Boolean,
+    )
 
     private fun fundingSpend(state: State): Spend? {
-        val answers = chainUrls().mapNotNull { url -> outspend(url, state)?.let { url to it } }
+        val urls = chainUrls()
+        val answers = urls.mapNotNull { url -> outspend(url, state)?.let { url to it } }
         val first = answers.firstOrNull()?.second ?: return null
         return Spend(
             txid = answers.firstNotNullOfOrNull { it.second.txid },
             confirmed = answers.all { it.second.confirmed && it.second.txid == first.txid },
             unspentAt = answers.filter { it.second.txid == null }.map { it.first },
+            allAnswered = answers.size == urls.size,
         )
     }
 

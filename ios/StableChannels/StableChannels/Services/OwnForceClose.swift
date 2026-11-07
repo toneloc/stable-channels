@@ -30,6 +30,8 @@ actor OwnForceClose {
         var buildFailures = 0
         /// When an explorer first showed our close as `spendTxid`.
         var seenAt: TimeInterval?
+        /// A close seen confirmed while an explorer was silent; a later step must see it too.
+        var confirmedTxid: String?
 
         /// Our close is in a mempool, unconfirmed `slowSeconds` after an explorer first showed it.
         func isSlow(now: TimeInterval) -> Bool {
@@ -102,6 +104,14 @@ actor OwnForceClose {
         defer { running = false }
         let spend = await fundingSpend(state)
         if let spend, spend.confirmed {
+            // One explorer's word, with another silent, ends the follow-up only once repeated.
+            if !spend.allAnswered, state.confirmedTxid != spend.txid {
+                var next = state
+                next.confirmedTxid = spend.txid
+                next.nextAt = now() + Self.checkSeconds
+                save(next, ifStill: state)
+                return nil
+            }
             log("OWN_FORCE_CLOSE_DONE", ["channel_id": state.channelId, "close_txid": spend.txid ?? ""])
             save(nil, ifStill: state)
             if let txid = spend.txid { await onConfirmed(state.paymentId, txid) }
@@ -150,12 +160,13 @@ actor OwnForceClose {
         return "Close not created yet. Retrying in 10 minutes."
     }
 
-    /// `state` with `txid` as the close seen spending the funding output. Our close is timed from when an
-    /// explorer first shows it, for `State.isSlow`.
+    /// `state` with `txid` as the unconfirmed close seen spending the funding output, if any. Our close is
+    /// timed from when an explorer first shows it, for `State.isSlow`.
     private func seen(_ state: State, _ txid: String?) -> State {
         var next = state
         next.spendTxid = txid
         next.seenAt = txid != nil && txid == state.closeTxid ? state.seenAt ?? now() : nil
+        next.confirmedTxid = nil
         return next
     }
 
@@ -196,11 +207,13 @@ actor OwnForceClose {
 
     /// What the explorers that answer see. `txid` is a close one of them has. Our close goes to
     /// `unspentAt`, those that see the funding output unspent, which does no harm if it is spent. A close
-    /// counts as confirmed only when all of them see it confirmed.
+    /// counts as confirmed only when all of them see it confirmed. `allAnswered` is whether every explorer
+    /// answered.
     private struct Spend {
         let txid: String?
         let confirmed: Bool
         let unspentAt: [String]
+        let allAnswered: Bool
     }
 
     private func fundingSpend(_ state: State) async -> Spend? {
@@ -212,7 +225,8 @@ actor OwnForceClose {
         return Spend(
             txid: answers.lazy.compactMap(\.outspend.txid).first,
             confirmed: answers.allSatisfy { $0.outspend.confirmed && $0.outspend.txid == first.txid },
-            unspentAt: answers.filter { $0.outspend.txid == nil }.map(\.base)
+            unspentAt: answers.filter { $0.outspend.txid == nil }.map(\.base),
+            allAnswered: answers.count == chainURLs.count
         )
     }
 

@@ -382,6 +382,53 @@ final class OwnForceCloseTests: XCTestCase {
         XCTAssertEqual(events.confirmed, ["close-1 lsp"])
     }
 
+    func testConfirmsOnALaterStepWhenAnExplorerGivesNoAnswer() async {
+        chainURLs.append("https://other.test/api")
+        OwnForceCloseMockURLProtocol.outspend =
+            "{\"spent\":true,\"txid\":\"lsp\",\"vin\":0,\"status\":{\"confirmed\":true}}"
+        let forceClose = ownForceClose()
+        await start(forceClose)
+
+        let message = await runNow(forceClose)
+
+        XCTAssertNil(message)
+        XCTAssertEqual(events.confirmed, [])
+        let nextAt = await forceClose.state?.nextAt
+        XCTAssertEqual(nextAt, clock.now + OwnForceClose.checkSeconds)
+
+        clock.now += OwnForceClose.checkSeconds
+        await runNow(forceClose)
+
+        let state = await forceClose.state
+        XCTAssertNil(state)
+        XCTAssertNil(defaults.data(forKey: "own_force_close"))
+        XCTAssertEqual(events.confirmed, ["close-1 lsp"])
+        // A close that confirmed needs none of ours.
+        XCTAssertEqual(events.builds, 0)
+    }
+
+    func testACloseSeenUnconfirmedUndoesAnEarlierConfirmation() async {
+        chainURLs.append("https://other.test/api")
+        let confirmed = "{\"spent\":true,\"txid\":\"lsp\",\"vin\":0,\"status\":{\"confirmed\":true}}"
+        OwnForceCloseMockURLProtocol.outspend = confirmed
+        let forceClose = ownForceClose()
+        await start(forceClose)
+        await runNow(forceClose)
+        OwnForceCloseMockURLProtocol.outspend =
+            "{\"spent\":true,\"txid\":\"lsp\",\"vin\":0,\"status\":{\"confirmed\":false}}"
+        clock.now += OwnForceClose.checkSeconds
+        await runNow(forceClose)
+        OwnForceCloseMockURLProtocol.outspend = confirmed
+        clock.now += OwnForceClose.checkSeconds
+
+        await runNow(forceClose)
+
+        // The confirmation counts from the start again.
+        let state = await forceClose.state
+        XCTAssertEqual(state?.confirmedTxid, "lsp")
+        XCTAssertEqual(events.confirmed, [])
+    }
+
     func testKeepsAForceCloseStartedDuringAStep() async {
         let forceClose = ownForceClose()
         await start(forceClose)

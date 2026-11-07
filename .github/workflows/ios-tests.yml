@@ -5,12 +5,14 @@ on:
     paths:
       - "ios/**"
       - "mobile/force-close/**"
+      - "Cargo.lock"
       - ".github/workflows/ios-tests.yml"
   push:
     branches: [main]
     paths:
       - "ios/**"
       - "mobile/force-close/**"
+      - "Cargo.lock"
       - ".github/workflows/ios-tests.yml"
 
 permissions:

@@ -2030,7 +2030,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
         setStatus("Force closing channel...")
         nodeService.forceCloseChannel(channel.userChannelId, channel.counterpartyNodeId)
-        val funding = channel.fundingTxo ?: return
+        val funding = channel.fundingTxo
+        if (funding == null) {
+            AuditService.log(
+                "OWN_FORCE_CLOSE_NO_OUTPOINT",
+                mapOf("user_channel_id" to channel.userChannelId),
+            )
+            return
+        }
         ownForceClose.start(channel.channelId, funding.txid, funding.vout.toInt())
         runOwnForceClose()
     }
@@ -2061,8 +2068,10 @@ class AppState(private val context: Context) : ViewModel() {
             val seed = nodeService.walletSeed()
             nodeService.stop()
             try {
-                check(LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
-                    "node data owned by ${LdkNodeOwner.currentOwner()}"
+                if (!LdkNodeOwner.tryAcquire(LdkNodeOwner.MAIN_APP)) {
+                    throw OwnForceClose.NodeBusy(
+                        "node data owned by ${LdkNodeOwner.currentOwner()}"
+                    )
                 }
                 try {
                     OwnForceClose.build(Constants.userDataDir(context), channelId, seed)

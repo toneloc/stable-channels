@@ -219,7 +219,7 @@ class OwnForceCloseTest {
 
     @Test
     fun triesAgainLaterWhenTheCloseCannotBeBuilt() {
-        buildError = IllegalStateException("node data owned by stability-service")
+        buildError = IllegalStateException("channel not found")
         val forceClose = ownForceClose()
         forceClose.start("ch", funding, 1)
 
@@ -230,7 +230,7 @@ class OwnForceCloseTest {
         assertNull(state.closeHex)
         assertEquals(clock + OwnForceClose.RETRY_MS, state.nextAt)
         assertEquals(
-            "java.lang.IllegalStateException: node data owned by stability-service",
+            "java.lang.IllegalStateException: channel not found",
             logged.single().second["error"],
         )
     }
@@ -316,6 +316,24 @@ class OwnForceCloseTest {
     }
 
     @Test
+    fun aBusyNodeDoesNotCountAsAFailedBuild() {
+        buildError = OwnForceClose.NodeBusy("node data owned by stability-service")
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        repeat(OwnForceClose.MAX_BUILD_FAILURES) {
+            assertEquals("Close not created yet. Retrying in 10 minutes.", forceClose.runNow())
+            clock += OwnForceClose.RETRY_MS
+        }
+        assertEquals(0, forceClose.state.value!!.buildFailures)
+
+        buildError = null
+        forceClose.runNow()
+
+        assertEquals(OwnForceClose.MAX_BUILD_FAILURES + 1, builds)
+        assertEquals(listOf("c1hex", "b1hex"), posted)
+    }
+
+    @Test
     fun sendsOurCloseToTheExplorersThatSeeTheFundingUnspent() {
         useOther = true
         otherOutspend =
@@ -356,6 +374,55 @@ class OwnForceCloseTest {
 
         assertNull(forceClose.state.value)
         assertEquals(listOf("ch" to "lsp"), confirmed)
+    }
+
+    @Test
+    fun confirmsOnALaterStepWhenAnExplorerGivesNoAnswer() {
+        useOther = true
+        outspend =
+            MockResponse()
+                .setBody("""{"spent":true,"txid":"lsp","vin":0,"status":{"confirmed":true}}""")
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+
+        assertNull(forceClose.runNow())
+
+        assertEquals(emptyList<Pair<String, String>>(), confirmed)
+        assertEquals(clock + OwnForceClose.CHECK_MS, forceClose.state.value!!.nextAt)
+
+        clock += OwnForceClose.CHECK_MS
+        forceClose.runNow()
+
+        assertNull(forceClose.state.value)
+        assertNull(saved)
+        assertEquals(listOf("ch" to "lsp"), confirmed)
+        // A close that confirmed needs none of ours.
+        assertEquals(0, builds)
+    }
+
+    @Test
+    fun aCloseSeenUnconfirmedUndoesAnEarlierConfirmation() {
+        useOther = true
+        val confirmedLsp =
+            MockResponse()
+                .setBody("""{"spent":true,"txid":"lsp","vin":0,"status":{"confirmed":true}}""")
+        outspend = confirmedLsp
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        forceClose.runNow()
+        outspend =
+            MockResponse()
+                .setBody("""{"spent":true,"txid":"lsp","vin":0,"status":{"confirmed":false}}""")
+        clock += OwnForceClose.CHECK_MS
+        forceClose.runNow()
+        outspend = confirmedLsp
+        clock += OwnForceClose.CHECK_MS
+
+        forceClose.runNow()
+
+        // The confirmation counts from the start again.
+        assertEquals("lsp", forceClose.state.value!!.confirmedTxid)
+        assertEquals(emptyList<Pair<String, String>>(), confirmed)
     }
 
     @Test
