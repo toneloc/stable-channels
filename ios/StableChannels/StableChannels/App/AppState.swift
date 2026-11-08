@@ -56,6 +56,17 @@ class AppState {
         authError = nil
     }
 
+    /// Asks for Face ID or the passcode before the recovery phrase is shown or replaced,
+    /// only when the user turned on App Unlock or Payment Confirmation.
+    func authorizeSeedAccess(reason: String) async -> Bool {
+        let defaults = seedAccessDefaults
+        guard SeedAccessPolicy.requiresAuth(
+            appUnlockEnabled: defaults.bool(forKey: Constants.appUnlockEnabledKey),
+            paymentConfirmationEnabled: defaults.bool(forKey: Constants.transactionAuthEnabledKey)
+        ) else { return true }
+        return await authenticate(reason: reason)
+    }
+
     func authenticate(reason: String = "Authenticate with Stable Channels") async -> Bool {
         guard !isAuthenticating else { return false }
         isAuthenticating = true
@@ -140,6 +151,8 @@ class AppState {
     let spliceBroadcastChecker: SpliceBroadcastChecking
     private let verifyTradeSignature: (([UInt8], String, String) -> Bool)?
     private let customRepairBooksUseCase: RepairBooksUseCase?
+    /// Where the App Access toggles live; injected so seed access can be tested.
+    private let seedAccessDefaults: UserDefaults
     let networkMonitor: any NetworkMonitoring
 
     init(
@@ -147,8 +160,10 @@ class AppState {
         spliceBroadcastChecker: SpliceBroadcastChecking = SpliceBroadcastChecker(),
         verifyTradeSignature: (([UInt8], String, String) -> Bool)? = nil,
         repairBooksUseCase: RepairBooksUseCase? = nil,
-        networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared
+        networkMonitor: any NetworkMonitoring = NWPathNetworkMonitor.shared,
+        seedAccessDefaults: UserDefaults = .standard
     ) {
+        self.seedAccessDefaults = seedAccessDefaults
         self.nodeService = nodeService
         self.spliceBroadcastChecker = spliceBroadcastChecker
         self.verifyTradeSignature = verifyTradeSignature
