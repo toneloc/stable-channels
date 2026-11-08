@@ -19,8 +19,6 @@ pub(crate) const TOKEN_TTL_SECS: i64 = 30 * 86_400;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutcome {
     Saved,
-    /// A held token not stored, because its node stored a token at or after it arrived.
-    Superseded,
     Failed,
 }
 
@@ -66,18 +64,12 @@ fn unix_now() -> i64 {
         .as_secs() as i64
 }
 
-/// Save a token as seen now. Callers store tokens only for nodes with a channel with the LSP (see `registrations`), which bounds the store.
+/// Save a token as seen now. Callers store tokens only for nodes with a channel with the LSP, and only a node's latest registration (see `registrations`), so the last token written is the node's newest.
 pub fn save_token(data_dir: &str, token: &str, platform: &str, node_id: &str, environment: &str) -> SaveOutcome {
-    save_token_with_limits(data_dir, token, platform, node_id, environment, unix_now(), None, MAX_TOKENS_PER_NODE)
+    save_token_with_limits(data_dir, token, platform, node_id, environment, unix_now(), MAX_TOKENS_PER_NODE)
 }
 
-/// Save a token that was held since `arrived_at`, as seen then, unless its node has stored a token at or after that; whatever order the writes run in, a newer token stays the newest.
-pub fn save_held_token(data_dir: &str, token: &str, platform: &str, node_id: &str, environment: &str, arrived_at: i64) -> SaveOutcome {
-    save_token_with_limits(data_dir, token, platform, node_id, environment, unix_now(), Some(arrived_at), MAX_TOKENS_PER_NODE)
-}
-
-/// Save a token: tokens past their use are dropped first, a held one newer tokens superseded is skipped, and a node keeps only its newest tokens.
-#[allow(clippy::too_many_arguments)]
+/// Save a token: tokens past their use are dropped first, and a node keeps only the tokens written last.
 fn save_token_with_limits(
     data_dir: &str,
     token: &str,
@@ -85,7 +77,6 @@ fn save_token_with_limits(
     node_id: &str,
     environment: &str,
     now: i64,
-    held_since: Option<i64>,
     max_per_node: i64,
 ) -> SaveOutcome {
     let path = db_path(data_dir);
@@ -102,40 +93,26 @@ fn save_token_with_limits(
             "DELETE FROM push_tokens WHERE last_seen IS NULL OR last_seen <= ?1",
             rusqlite::params![now - TOKEN_TTL_SECS],
         )?;
-        if let Some(arrived_at) = held_since {
-            let superseded: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM push_tokens WHERE node_id = ?1 AND last_seen >= ?2)",
-                rusqlite::params![node_id, arrived_at],
-                |row| row.get(0),
-            )?;
-            if superseded {
-                tx.commit()?;
-                return Ok(SaveOutcome::Superseded);
-            }
-        }
-        let seen_at = held_since.unwrap_or(now);
         tx.execute(
             "INSERT OR REPLACE INTO push_tokens
              (device_token, platform, registered_at, node_id, environment, last_seen)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![token, platform, seen_at, node_id, environment, seen_at],
+            rusqlite::params![token, platform, now, node_id, environment, now],
         )?;
-        // Within the same second the token just registered counts as the newest.
+        // The row just written has the highest rowid, so write order, not the clock, decides which tokens are newest.
         tx.execute(
             "DELETE FROM push_tokens WHERE node_id = ?1 AND device_token NOT IN (
-                 SELECT device_token FROM push_tokens WHERE node_id = ?1
-                 ORDER BY last_seen DESC, device_token = ?3 DESC, registered_at DESC LIMIT ?2)",
-            rusqlite::params![node_id, max_per_node, token],
+                 SELECT device_token FROM push_tokens WHERE node_id = ?1 ORDER BY rowid DESC LIMIT ?2)",
+            rusqlite::params![node_id, max_per_node],
         )?;
         tx.commit()?;
         Ok(SaveOutcome::Saved)
     })();
     match result {
-        Ok(SaveOutcome::Saved) => {
+        Ok(outcome) => {
             info!("[push-tokens] Saved token for node {} ({})", node_id, platform);
-            SaveOutcome::Saved
+            outcome
         },
-        Ok(outcome) => outcome,
         Err(e) => {
             error!("[push-tokens] Failed to save token: {}", e);
             SaveOutcome::Failed
@@ -160,7 +137,7 @@ fn load_token_for_node_at(data_dir: &str, node_id: &str, now: i64) -> Option<Tok
     conn.query_row(
         "SELECT device_token, platform, environment FROM push_tokens
          WHERE node_id = ?1 AND last_seen > ?2
-         ORDER BY last_seen DESC LIMIT 1",
+         ORDER BY rowid DESC LIMIT 1",
         rusqlite::params![node_id, cutoff],
         |row| {
             Ok(TokenInfo {
@@ -215,7 +192,7 @@ mod tests {
         init_db(dir.path());
         let data_dir = dir.path().to_string_lossy().to_string();
         for i in 0..7 {
-            assert_eq!(save_token_with_limits(&data_dir, &format!("tok{i}"), "android", "node-x", "", 1_000 + i, None, 5), SaveOutcome::Saved);
+            assert_eq!(save_token_with_limits(&data_dir, &format!("tok{i}"), "android", "node-x", "", 1_000 + i, 5), SaveOutcome::Saved);
         }
         assert_eq!(stored_tokens(&data_dir), ["tok2", "tok3", "tok4", "tok5", "tok6"]);
         assert_eq!(load_token_for_node(&data_dir, "node-x").map(|info| info.token), None, "all were seen long ago");
@@ -227,8 +204,8 @@ mod tests {
         init_db(dir.path());
         let data_dir = dir.path().to_string_lossy().to_string();
         let now = 2_000_000_000;
-        save_token_with_limits(&data_dir, "old", "ios", "node-a", "", now - TOKEN_TTL_SECS - 1, None, 5);
-        save_token_with_limits(&data_dir, "new", "ios", "node-b", "", now, None, 5);
+        save_token_with_limits(&data_dir, "old", "ios", "node-a", "", now - TOKEN_TTL_SECS - 1, 5);
+        save_token_with_limits(&data_dir, "new", "ios", "node-b", "", now, 5);
         assert_eq!(stored_tokens(&data_dir), ["new"], "a token that can no longer be used is not kept");
     }
 
@@ -239,10 +216,26 @@ mod tests {
         let data_dir = dir.path().to_string_lossy().to_string();
         let now = 2_000_000_000;
         for token in ["z1", "z2", "z3", "z4", "z5", "a0"] {
-            assert_eq!(save_token_with_limits(&data_dir, token, "ios", "node-x", "", now, None, 5), SaveOutcome::Saved);
+            assert_eq!(save_token_with_limits(&data_dir, token, "ios", "node-x", "", now, 5), SaveOutcome::Saved);
         }
         assert!(stored_tokens(&data_dir).contains(&"a0".to_owned()), "the registration that just succeeded is kept");
         assert_eq!(stored_tokens(&data_dir).len(), 5);
+    }
+
+    #[test]
+    fn the_token_written_last_is_the_one_used_whatever_the_clock_says() {
+        let dir = tempdir().unwrap();
+        init_db(dir.path());
+        let data_dir = dir.path().to_string_lossy().to_string();
+        let now = 2_000_000_000;
+        save_token_with_limits(&data_dir, "first", "ios", "node-x", "", now, 5);
+        save_token_with_limits(&data_dir, "same-second", "ios", "node-x", "", now, 5);
+        assert_eq!(load_token_for_node_at(&data_dir, "node-x", now).map(|info| info.token).as_deref(), Some("same-second"));
+        // A clock stepped back does not make the newest token look older.
+        save_token_with_limits(&data_dir, "after-a-step-back", "ios", "node-x", "", now - 100, 5);
+        assert_eq!(load_token_for_node_at(&data_dir, "node-x", now).map(|info| info.token).as_deref(), Some("after-a-step-back"));
+        save_token_with_limits(&data_dir, "first", "ios", "node-x", "", now, 5);
+        assert_eq!(load_token_for_node_at(&data_dir, "node-x", now).map(|info| info.token).as_deref(), Some("first"), "registering an old token again makes it the newest");
     }
 
     #[test]

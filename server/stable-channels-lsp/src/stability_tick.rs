@@ -49,7 +49,7 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
                     .await;
                 mgr.channel_peer_ids()
             };
-            share_channel_peers(&state, peers);
+            share_channel_peers(&state.push_registrations, peers);
             continue;
         }
         let (plan, peers) = {
@@ -65,7 +65,7 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
                 .await;
             (plan, mgr.channel_peer_ids())
         };
-        share_channel_peers(&state, peers);
+        share_channel_peers(&state.push_registrations, peers);
         // Pushes go out on the watcher task so a slow provider never delays the next tick.
         if !plan.notifications.is_empty() && wakes.send(plan.notifications).is_err() {
             warn!("[stability_tick] wake watcher stopped; notifications dropped");
@@ -73,11 +73,12 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
     }
 }
 
-/// Tell the push registrations which nodes have a channel; what was held for them is stored on its own task, so the tick never waits on a registration. An unloaded list leaves the last set in place.
-pub(crate) fn share_channel_peers(state: &AppState, peers: Option<std::collections::HashSet<String>>) {
-    if let Some(peers) = peers {
-        drop(state.push_registrations.set_channel_peers(peers));
-    }
+/// Tell the push registrations which nodes have a channel; what was held for them is stored on its own task, so the tick never waits on a registration (a wake in the tick a channel first appears may miss that token; the next tick's finds it). An unloaded list leaves the last set in place.
+pub(crate) fn share_channel_peers(
+    registrations: &Arc<crate::push::registrations::Registrations>,
+    peers: Option<std::collections::HashSet<String>>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    peers.map(|peers| registrations.set_channel_peers(peers))
 }
 
 /// One peer's wake for a tick: a single push, plus the channels owed an `lsp_to_user` top-up.

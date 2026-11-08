@@ -12,7 +12,7 @@ const MAX_HELD: usize = 1_000;
 /// What became of a registration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegisterOutcome {
-    /// Stored for a node with a channel.
+    /// Stored for a node with a channel, or passed over for a newer registration of the node.
     Saved,
     /// Held in memory until the node's channel opens.
     Held,
@@ -24,8 +24,8 @@ struct Registration {
     token: String,
     platform: String,
     environment: String,
-    /// Unix seconds it arrived at; a held registration is stored only if nothing newer was stored for its node meanwhile.
-    arrived_at: i64,
+    /// Arrival order across all registrations; of a node's registrations only the latest is ever written, so the stored order never depends on clocks or on which write runs first.
+    seq: u64,
 }
 
 #[derive(Default)]
@@ -35,20 +35,36 @@ struct State {
     /// The latest registration of each node with no channel yet, and the nodes from the one waiting longest.
     held: HashMap<String, Registration>,
     held_order: VecDeque<String>,
+    /// The latest registration of each node on its way to the disk; an older one still waiting is not written.
+    writing: HashMap<String, u64>,
+    next_seq: u64,
 }
 
 pub struct Registrations {
     data_dir: String,
     state: Mutex<State>,
-    /// Token writes take turns, so a flood of registrations cannot pile SQLite writers onto the runtime. The stability tick never waits on it.
+    /// Token writes take turns, so a flood of registrations cannot pile SQLite writers onto the database. The stability tick never waits on it.
     writes: tokio::sync::Mutex<()>,
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+/// A registration accepted for writing; if its request goes away before the write is done, it is held again so the next pass stores it.
+struct Accepted<'a> {
+    registrations: &'a Registrations,
+    node_id: String,
+    registration: Option<Registration>,
+}
+
+impl Drop for Accepted<'_> {
+    fn drop(&mut self) {
+        let Some(registration) = self.registration.take() else { return };
+        let mut state = self.registrations.state();
+        if state.writing.get(&self.node_id) == Some(&registration.seq) {
+            state.writing.remove(&self.node_id);
+            if !state.held.contains_key(&self.node_id) {
+                state.hold(self.node_id.clone(), registration);
+            }
+        }
+    }
 }
 
 impl Registrations {
@@ -64,26 +80,29 @@ impl Registrations {
     /// Store a registration for a node with a channel, or hold it until its channel opens. The node id is kept in lowercase, the form wake lookups use.
     pub async fn register(&self, token: &str, platform: &str, node_id: &str, environment: &str) -> RegisterOutcome {
         let node_id = node_id.to_ascii_lowercase();
-        let registration = Registration {
-            token: token.to_owned(),
-            platform: platform.to_owned(),
-            environment: environment.to_owned(),
-            arrived_at: unix_now(),
-        };
-        {
+        let registration = {
             let mut state = self.state();
+            state.next_seq += 1;
+            let registration = Registration {
+                token: token.to_owned(),
+                platform: platform.to_owned(),
+                environment: environment.to_owned(),
+                seq: state.next_seq,
+            };
             if !state.channel_peers.contains(&node_id) {
                 state.hold(node_id, registration);
                 return RegisterOutcome::Held;
             }
-            // This registration is newer than anything held for the node.
+            // This registration is newer than anything held or on its way for the node.
             state.release(&node_id);
-        }
+            state.writing.insert(node_id.clone(), registration.seq);
+            registration
+        };
+        let mut accepted = Accepted { registrations: self, node_id, registration: Some(registration.clone()) };
         let _write = self.writes.lock().await;
-        match tokens::save_token(&self.data_dir, &registration.token, &registration.platform, &node_id, &registration.environment) {
-            SaveOutcome::Saved | SaveOutcome::Superseded => RegisterOutcome::Saved,
-            SaveOutcome::Failed => RegisterOutcome::Failed,
-        }
+        let outcome = self.store(&accepted.node_id, registration).await;
+        accepted.registration = None;
+        outcome
     }
 
     /// Replace the set of nodes with a channel at once, and store what was held for any of them on a separate task, so the caller never waits on a write.
@@ -91,6 +110,9 @@ impl Registrations {
         let ready: Vec<(String, Registration)> = {
             let mut state = self.state();
             let ready: Vec<_> = peers.iter().filter_map(|node| state.release(node).map(|registration| (node.clone(), registration))).collect();
+            for (node, registration) in &ready {
+                state.writing.insert(node.clone(), registration.seq);
+            }
             state.channel_peers = peers;
             ready
         };
@@ -101,23 +123,35 @@ impl Registrations {
             }
             let _write = registrations.writes.lock().await;
             for (node_id, registration) in ready {
-                let saved = tokens::save_held_token(
-                    &registrations.data_dir,
-                    &registration.token,
-                    &registration.platform,
-                    &node_id,
-                    &registration.environment,
-                    registration.arrived_at,
-                );
-                if saved == SaveOutcome::Failed {
-                    // Kept for the next pass rather than lost, unless the node has registered again since.
-                    let mut state = registrations.state();
-                    if !state.held.contains_key(&node_id) {
-                        state.hold(node_id, registration);
-                    }
-                }
+                registrations.store(&node_id, registration).await;
             }
         })
+    }
+
+    /// Write a node's registration unless a newer one has come since; a failed write is held again for the next pass unless a newer one is on its way. Callers hold the write turn.
+    async fn store(&self, node_id: &str, registration: Registration) -> RegisterOutcome {
+        if self.state().writing.get(node_id) != Some(&registration.seq) {
+            // The newer registration is the one stored.
+            return RegisterOutcome::Saved;
+        }
+        // SQLite can wait seconds for a lock, so the write runs on a blocking thread, never on a runtime worker.
+        let (data_dir, node, entry) = (self.data_dir.clone(), node_id.to_owned(), registration.clone());
+        let saved = tokio::task::spawn_blocking(move || tokens::save_token(&data_dir, &entry.token, &entry.platform, &node, &entry.environment))
+            .await
+            .unwrap_or(SaveOutcome::Failed);
+        let mut state = self.state();
+        let latest = state.writing.get(node_id) == Some(&registration.seq);
+        if latest {
+            state.writing.remove(node_id);
+        }
+        if saved == SaveOutcome::Saved {
+            return RegisterOutcome::Saved;
+        }
+        // Kept for the next pass rather than lost.
+        if latest && !state.held.contains_key(node_id) {
+            state.hold(node_id.to_owned(), registration);
+        }
+        RegisterOutcome::Failed
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -150,6 +184,7 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     const NODE: &str = "02465ed5be53d04fde66c9418ff14a5f2267723810176c9212b722e542dc1afb1b";
@@ -171,6 +206,12 @@ mod tests {
 
     fn peers(node: &str) -> HashSet<String> {
         HashSet::from([node.to_owned()])
+    }
+
+    fn fail_saves(data_dir: &Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(data_dir.join("push_tokens.db")).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_save BEFORE INSERT ON push_tokens BEGIN SELECT RAISE(ABORT, 'forced'); END;").unwrap();
+        conn
     }
 
     #[tokio::test]
@@ -232,12 +273,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_newer_held_token_wins_over_an_older_one_saved_in_the_same_second() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        assert_eq!(registrations.register("older", "ios", NODE, "").await, RegisterOutcome::Saved);
+        // The channel drops out of the list and the app registers again, all within one second.
+        registrations.set_channel_peers(HashSet::new()).await.unwrap();
+        assert_eq!(registrations.register("newer", "ios", NODE, "").await, RegisterOutcome::Held);
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("newer"));
+    }
+
+    #[tokio::test]
+    async fn a_registration_written_after_a_held_one_in_the_same_second_is_the_newest() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.register("held", "ios", NODE, "").await;
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        assert_eq!(registrations.register("rotated", "ios", NODE, "").await, RegisterOutcome::Saved);
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("rotated"));
+    }
+
+    #[tokio::test]
     async fn a_held_registration_whose_save_fails_stays_held_but_never_beats_a_newer_one() {
         let dir = tempdir().unwrap();
         let registrations = registrations(dir.path());
         registrations.register("old", "ios", NODE, "").await;
-        let conn = rusqlite::Connection::open(dir.path().join("push_tokens.db")).unwrap();
-        conn.execute_batch("CREATE TRIGGER fail_save BEFORE INSERT ON push_tokens BEGIN SELECT RAISE(ABORT, 'forced'); END;").unwrap();
+        let conn = fail_saves(dir.path());
         registrations.set_channel_peers(peers(NODE)).await.unwrap();
         assert_eq!(stored_rows(dir.path()), 0);
         assert!(registrations.state().held.contains_key(NODE), "kept until a save succeeds");
@@ -246,6 +309,52 @@ mod tests {
         assert_eq!(registrations.register("new", "ios", NODE, "").await, RegisterOutcome::Saved);
         registrations.set_channel_peers(peers(NODE)).await.unwrap();
         assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_of_a_node_with_a_channel_is_held_for_the_next_pass() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        let conn = fail_saves(dir.path());
+        assert_eq!(registrations.register("tok", "ios", NODE, "").await, RegisterOutcome::Failed);
+        assert_eq!(registrations.state().held.get(NODE).map(|registration| registration.token.as_str()), Some("tok"));
+
+        conn.execute_batch("DROP TRIGGER fail_save").unwrap();
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("tok"), "the next pass stores it");
+    }
+
+    #[tokio::test]
+    async fn a_registration_whose_request_goes_away_before_its_write_is_held_for_the_next_pass() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        let busy = registrations.writes.lock().await;
+        let gone = tokio::time::timeout(Duration::from_millis(20), registrations.register("tok", "ios", NODE, "")).await;
+        assert!(gone.is_err(), "the request gave up while waiting for its write turn");
+        drop(busy);
+        assert!(registrations.state().writing.is_empty());
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("tok"));
+    }
+
+    #[tokio::test]
+    async fn a_write_waiting_on_a_locked_database_does_not_block_the_runtime() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.register("tok", "ios", NODE, "").await;
+        let lock = rusqlite::Connection::open(dir.path().join("push_tokens.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let pending = registrations.set_channel_peers(peers(NODE));
+        let started = Instant::now();
+        // The held token's write starts and waits for the lock; a timer on this single-threaded runtime still fires on time.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+        lock.execute_batch("ROLLBACK").unwrap();
+        pending.await.unwrap();
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("tok"));
     }
 
     #[tokio::test]

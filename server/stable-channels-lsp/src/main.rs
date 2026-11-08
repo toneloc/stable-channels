@@ -182,7 +182,7 @@ async fn main() -> Result<()> {
                 };
                 if peers.is_some() {
                     // Registrations held since start are stored now rather than at the first tick after the load.
-                    crate::stability_tick::share_channel_peers(&state, peers);
+                    crate::stability_tick::share_channel_peers(&state.push_registrations, peers);
                     break;
                 }
                 tracing::warn!("startup reconcile failed; retrying in {:?}", retry);

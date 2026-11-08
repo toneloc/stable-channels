@@ -5062,6 +5062,19 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn the_channel_peers_reach_the_push_registrations_once_the_list_has_loaded() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        let dir = tempfile::tempdir().unwrap();
+        let registrations = std::sync::Arc::new(crate::push::registrations::Registrations::new(dir.path()));
+        registrations.register("tok", "ios", COUNTERPARTY_HEX, "").await;
+        assert!(crate::stability_tick::share_channel_peers(&registrations, mgr.channel_peer_ids()).is_none(), "nothing is shared before the list loads");
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+        crate::stability_tick::share_channel_peers(&registrations, mgr.channel_peer_ids()).expect("the loaded list is shared").await.unwrap();
+        let stored = crate::push::tokens::load_token_for_node(&dir.path().to_string_lossy(), COUNTERPARTY_HEX);
+        assert_eq!(stored.map(|info| info.token).as_deref(), Some("tok"), "a held registration is stored once its channel is known");
+    }
+
+    #[tokio::test]
     async fn the_list_loads_without_a_price() {
         let (mut mgr, ldk) = fifty_dollars_then_restart().await;
         mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
