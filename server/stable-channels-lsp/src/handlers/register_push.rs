@@ -4,10 +4,9 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::response::Response;
 
-use ldk_server_client::ldk_server_grpc::api::VerifySignatureRequest;
 use sc_protos::stable::{RegisterPushRequest, RegisterPushResponse};
 
-use crate::handlers::{decode_body, ok_response};
+use crate::handlers::{decode_body, is_valid_node_id, ok_response, verify_node_signature};
 use crate::push::registrations::RegisterOutcome;
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
@@ -26,8 +25,7 @@ fn invalid_registration_field(token: &str, platform: &str, node_id: &str, enviro
         return Some("platform");
     }
     // Tokens are only ever looked up by node, so one without a node's public key could never wake anyone.
-    let node_key = node_id.len() == 66 && (node_id.starts_with("02") || node_id.starts_with("03")) && node_id.bytes().all(|b| b.is_ascii_hexdigit());
-    if !node_key {
+    if !is_valid_node_id(node_id) {
         return Some("node_id");
     }
     if !matches!(environment, "" | "sandbox" | "production") {
@@ -63,17 +61,7 @@ pub async fn verify_push_registration(
         return false;
     }
     let message = crate::messages::register_push_signed_bytes(node_id, token, timestamp);
-    match ldk
-        .verify_signature(VerifySignatureRequest {
-            message: message.into(),
-            signature: signature.to_string(),
-            public_key: node_id.to_string(),
-        })
-        .await
-    {
-        Ok(r) => r.valid,
-        Err(_) => false,
-    }
+    verify_node_signature(ldk, node_id, message, signature).await.unwrap_or(false)
 }
 
 pub async fn register_push(State(state): State<AppState>, body: Bytes) -> Response {
@@ -206,18 +194,19 @@ pub async fn register_push_legacy(State(state): State<AppState>, body: Bytes) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use async_trait::async_trait;
-    use ldk_server_client::error::LdkServerError;
+    use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
     use ldk_server_client::ldk_server_grpc::api::{
         ListChannelsRequest, ListChannelsResponse, SignMessageRequest, SignMessageResponse,
         SpontaneousSendRequest, SpontaneousSendResponse, VerifySignatureRequest,
         VerifySignatureResponse,
     };
 
-    struct VerifyFake {
-        valid: bool,
+    /// Answers every signature check with `valid`, or fails as an unreachable LDK Server when None.
+    pub(crate) struct VerifyFake {
+        pub(crate) valid: Option<bool>,
     }
 
     #[async_trait]
@@ -244,27 +233,29 @@ mod tests {
             &self,
             _req: VerifySignatureRequest,
         ) -> Result<VerifySignatureResponse, LdkServerError> {
-            Ok(VerifySignatureResponse { valid: self.valid })
+            self.valid
+                .map(|valid| VerifySignatureResponse { valid })
+                .ok_or_else(|| LdkServerError::new(LdkServerErrorCode::InternalError, "unreachable".to_string()))
         }
     }
 
     #[tokio::test]
     async fn valid_fresh_signature_accepted() {
-        let fake = VerifyFake { valid: true };
+        let fake = VerifyFake { valid: Some(true) };
         let ok = verify_push_registration(&fake, "node", "token", "sig", 1000, 1000, 300).await;
         assert!(ok);
     }
 
     #[tokio::test]
     async fn stale_timestamp_rejected() {
-        let fake = VerifyFake { valid: true };
+        let fake = VerifyFake { valid: Some(true) };
         let ok = verify_push_registration(&fake, "node", "token", "sig", 1000, 2000, 300).await;
         assert!(!ok); // 1000s drift > 300s window
     }
 
     #[tokio::test]
     async fn invalid_signature_rejected() {
-        let fake = VerifyFake { valid: false };
+        let fake = VerifyFake { valid: Some(false) };
         let ok = verify_push_registration(&fake, "node", "token", "sig", 1000, 1000, 300).await;
         assert!(!ok);
     }

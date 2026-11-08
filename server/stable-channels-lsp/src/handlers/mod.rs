@@ -22,8 +22,11 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use ldk_server_client::error::{LdkServerError, LdkServerErrorCode};
+use ldk_server_client::ldk_server_grpc::api::VerifySignatureRequest;
 use ldk_server_client::ldk_server_grpc::error::{ErrorCode, ErrorResponse};
 use prost::Message;
+
+use crate::stable_manager::LdkServerCalls;
 
 /// Wrap a successful protobuf response into an HTTP 200 with application/octet-stream.
 pub fn ok_response<M: Message>(msg: M) -> Response {
@@ -78,4 +81,27 @@ pub fn decode_body<M: Message + Default>(body: &Bytes) -> Result<M, Response> {
             format!("Failed to decode request body: {}", e),
         )
     })
+}
+
+/// Returns whether the node_id is a valid 33-byte compressed pubkey hex string.
+pub fn is_valid_node_id(node_id: &str) -> bool {
+    node_id.len() == 66
+        && node_id.chars().all(|c| c.is_ascii_hexdigit())
+        && (node_id.starts_with("02") || node_id.starts_with("03"))
+}
+
+/// Whether `signature` (zbase32, as a node's signMessage returns it) signs `message` with node_id's key; Err when LDK Server could not be asked.
+pub async fn verify_node_signature(
+    ldk: &dyn LdkServerCalls,
+    node_id: &str,
+    message: Vec<u8>,
+    signature: &str,
+) -> Result<bool, LdkServerError> {
+    ldk.verify_signature(VerifySignatureRequest {
+        message: message.into(),
+        signature: signature.to_string(),
+        public_key: node_id.to_string(),
+    })
+    .await
+    .map(|r| r.valid)
 }
