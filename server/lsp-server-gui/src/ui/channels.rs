@@ -190,7 +190,12 @@ pub fn Channels() -> Element {
 		})
 		.unwrap_or_default();
 	let splicing = splicing_channels(&data);
-	let queued: Vec<QueuedSpliceInfo> = data.queued_splices.as_ref().map(|q| q.splices.clone()).unwrap_or_default();
+	let now = *ctx.now.read();
+	let queued: Vec<QueuedSpliceInfo> = data
+		.queued_splices
+		.as_ref()
+		.map(|q| q.splices.iter().filter(|row| queued_splice_is_shown(row, now)).cloned().collect())
+		.unwrap_or_default();
 	let rows: Option<Vec<ChannelRow>> = data.channels.as_ref().map(|resp| {
 		resp.channels
 			.iter()
@@ -310,7 +315,7 @@ pub fn Channels() -> Element {
 				}
 				span { class: "count", "{shown} of {total} channel(s)" }
 				div { class: "row", style: "margin-left: auto;",
-					RefreshBtn { busy: loading, onclick: move |_| actions::fetch_channels(ctx), op: Op::Channels }
+					RefreshBtn { busy: loading, onclick: move |_| { actions::fetch_channels(ctx); actions::fetch_queued_splices(ctx); }, op: Op::Channels }
 					button { class: "btn sm accent", onclick: move |_| open_dialog(ctx, Dialog::OpenChannel), Icon { name: "plus", size: 14 } "Open Channel" }
 				}
 			}
@@ -349,8 +354,13 @@ fn queued_splice_tone(status: &str) -> &'static str {
 		"locked" => "success",
 		"failed" | "stalled" => "danger",
 		"cancelled" => "muted",
-		_ => "accent",
+		_ => "info",
 	}
+}
+
+/// Whether a queued splice still belongs on the Channels tab: open, or finished within the last day.
+fn queued_splice_is_shown(row: &QueuedSpliceInfo, now: u64) -> bool {
+	!matches!(row.status.as_str(), "locked" | "cancelled") || now.saturating_sub(row.updated_at.max(0) as u64) < 86_400
 }
 
 #[component]
@@ -358,8 +368,10 @@ fn QueuedSplices(rows: Vec<QueuedSpliceInfo>) -> Element {
 	let ctx = use_context::<AppCtx>();
 	let now = *ctx.now.read();
 	let busy = ctx.busy(Op::CancelQueuedSplice);
+	let loading = ctx.busy(Op::ListQueuedSplices);
 	rsx! {
 		Card { title: "Queued splice-ins", help: HELP_QUEUED_SPLICES, class: "flush",
+			actions: rsx! { RefreshBtn { busy: loading, onclick: move |_| actions::fetch_queued_splices(ctx), op: Op::ListQueuedSplices } },
 			div { class: "table-wrap",
 				table { class: "table",
 					thead {

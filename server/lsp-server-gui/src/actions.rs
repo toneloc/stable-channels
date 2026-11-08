@@ -142,6 +142,7 @@ pub fn connect(ctx: AppCtx) {
 			fetch_channels(ctx);
 			fetch_price(ctx);
 			fetch_stable_channels(ctx);
+			fetch_queued_splices(ctx);
 			fetch_payments(ctx, false);
 			fetch_forwarded_payments(ctx);
 			fetch_peers(ctx);
