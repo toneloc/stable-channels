@@ -17,7 +17,7 @@ use ldk_server_client::ldk_server_grpc::types::Channel;
 use serde_json::{json, Value};
 use stable_channels::db::{Database, LedgerChannelRow};
 
-use crate::handlers::channel_exists::is_valid_node_id;
+use crate::handlers::is_valid_node_id;
 use crate::stable_manager::LdkServerCalls;
 use crate::state::AppState;
 
