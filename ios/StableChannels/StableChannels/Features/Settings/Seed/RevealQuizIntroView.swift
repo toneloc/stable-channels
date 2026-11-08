@@ -1,0 +1,65 @@
+import SwiftUI
+
+// MARK: - Intro Screen (Step 0)
+
+struct RevealQuizIntroView: View {
+    let onGetStarted: () -> Void
+    let onLearnMore: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Centered when it fits; scrolls at large text sizes instead of truncating.
+            ViewThatFits(in: .vertical) {
+                hero
+                    .frame(maxHeight: .infinity)
+                ScrollView {
+                    hero
+                        .padding(.vertical, 24)
+                }
+            }
+
+            // Bottom Actions
+            VStack(spacing: 16) {
+                Button(action: onGetStarted) {
+                    Text(String(localized: "reveal_quiz_get_started", defaultValue: "Get started"))
+                        .font(.headline)
+                        .foregroundStyle(Color.revealButtonLabel)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Color.revealButtonFill)
+                        .clipShape(Capsule())
+                }
+
+                Button(action: onLearnMore) {
+                    Text(String(localized: "reveal_quiz_learn_more", defaultValue: "Learn more"))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.stablePrimary)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .padding(.bottom, 8)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 20)
+            .layoutPriority(1)
+        }
+    }
+
+    private var hero: some View {
+        VStack(spacing: 0) {
+            // Editorial Vault Artwork
+            RevealQuizPortalIllustration()
+                .padding(.bottom, 36)
+
+            // Subtitle Description
+            Text(String(
+                localized: "reveal_quiz_intro_desc",
+                defaultValue: "To reveal your Secret Recovery Phrase, you need to correctly answer two questions"
+            ))
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 32)
+            .lineSpacing(4)
+        }
+    }
+}

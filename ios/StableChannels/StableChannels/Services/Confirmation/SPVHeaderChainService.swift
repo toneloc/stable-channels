@@ -39,6 +39,20 @@ final class SPVHeaderChainService {
             return
         }
 
+        // A stale verified tip (app was away) must not turn a real catch-up block away: refresh once first.
+        if !HeaderChainPolicy.canStore(incomingHeight: height, verifiedTip: blockHeightService.currentHeight) {
+            await blockHeightService.refresh()
+        }
+        guard HeaderChainPolicy.canStore(incomingHeight: height, verifiedTip: blockHeightService.currentHeight) else {
+            logger.warning("[SPV] Header #\(height) is too far ahead of the verified tip. Not stored.")
+            AuditService.log("SPV_HEADER_REJECTED", data: [
+                "height": "\(height)",
+                "verifiedTip": "\(blockHeightService.currentHeight)"
+            ])
+            advanceHeight(to: height)
+            return
+        }
+
         let timestamp = block.timestamp ?? UInt32(Date().timeIntervalSince1970)
 
         do {
@@ -92,7 +106,14 @@ final class SPVHeaderChainService {
         incomingPrevHash: String,
         timestamp: UInt32
     ) async throws {
-        if incomingPrevHash == tip.hash {
+        let step = HeaderChainPolicy.step(
+            tipHeight: tip.height,
+            tipHash: tip.hash,
+            incomingHeight: incomingHeight,
+            incomingPrevHash: incomingPrevHash
+        )
+        switch step {
+        case .append:
             // prevHash links directly to our stored tip — normal chain growth.
             try databaseService.storeBlockHeader(
                 BlockHeaderRecord(
@@ -105,7 +126,7 @@ final class SPVHeaderChainService {
             logger.info("[SPV] Appended header #\(incomingHeight) (\(incomingHash.prefix(8))…)")
             AuditService.log("SPV_HEADER_ADDED", data: ["height": "\(incomingHeight)"])
 
-        } else if incomingHeight > tip.height + 1 {
+        case .catchUp:
             // The app was backgrounded and we missed N intermediate blocks.
             // Store the new tip and trigger full revalidation of recently confirmed payments via Esplora.
             logger.info(
@@ -126,7 +147,7 @@ final class SPVHeaderChainService {
 
             await confirmationPollingService.revalidateRecentPayments()
 
-        } else {
+        case .reorg:
             // prevHash mismatch at the same or lower height — a competing block won the
             // chain race. Walk back to the common ancestor and roll back affected payments.
             logger
@@ -146,7 +167,7 @@ final class SPVHeaderChainService {
                 timestamp: timestamp
             )
 
-            blockHeightService.setHeightSilently(incomingHeight)
+            // The incoming height is unverified: keep the HTTP-verified tip; `advanceHeight` refreshes it.
             await confirmationPollingService.revalidateRecentPayments()
         }
     }
