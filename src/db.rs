@@ -1414,10 +1414,10 @@ impl Database {
         )
     }
 
-    /// The node no longer holds this row's last call (it refused or dropped it, or another splice locked), so a new call or request may go out.
+    /// The node no longer holds this row's last call (it refused or dropped it), so a new call or request may go out. `note` replaces the error the operator sees.
     pub fn clear_queued_splice_pending(&self, user_channel_id: &str, note: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
-            "UPDATE queued_splices SET pending_on_node = 0, wake_note = ?2, updated_at = ?3
+            "UPDATE queued_splices SET pending_on_node = 0, last_error = ?2, wake_note = NULL, updated_at = ?3
              WHERE user_channel_id = ?1 AND pending_on_node = 1",
             params![user_channel_id, note, now],
             user_channel_id,
