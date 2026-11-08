@@ -43,8 +43,8 @@ struct State {
 pub struct Registrations {
     data_dir: String,
     state: Mutex<State>,
-    /// Token writes take turns, so a flood of registrations cannot pile SQLite writers onto the database. The stability tick never waits on it.
-    writes: tokio::sync::Mutex<()>,
+    /// Token writes take turns, each kept until its SQLite write is done even if its request goes away, so a flood of registrations cannot pile writers onto the database. The stability tick never waits on it.
+    writes: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// A registration accepted for writing; if its request goes away before the write is done, it is held again so the next pass stores it.
@@ -73,7 +73,7 @@ impl Registrations {
         Self {
             data_dir: data_dir.to_string_lossy().to_string(),
             state: Mutex::new(State::default()),
-            writes: tokio::sync::Mutex::new(()),
+            writes: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -99,7 +99,6 @@ impl Registrations {
             registration
         };
         let mut accepted = Accepted { registrations: self, node_id, registration: Some(registration.clone()) };
-        let _write = self.writes.lock().await;
         let outcome = self.store(&accepted.node_id, registration).await;
         accepted.registration = None;
         outcome
@@ -118,27 +117,27 @@ impl Registrations {
         };
         let registrations = Arc::clone(self);
         tokio::spawn(async move {
-            if ready.is_empty() {
-                return;
-            }
-            let _write = registrations.writes.lock().await;
             for (node_id, registration) in ready {
                 registrations.store(&node_id, registration).await;
             }
         })
     }
 
-    /// Write a node's registration unless a newer one has come since; a failed write is held again for the next pass unless a newer one is on its way. Callers hold the write turn.
+    /// Take a write turn and write a node's registration unless a newer one has come since; a failed write is held again for the next pass unless a newer one is on its way.
     async fn store(&self, node_id: &str, registration: Registration) -> RegisterOutcome {
+        let turn = Arc::clone(&self.writes).lock_owned().await;
         if self.state().writing.get(node_id) != Some(&registration.seq) {
             // The newer registration is the one stored.
             return RegisterOutcome::Saved;
         }
-        // SQLite can wait seconds for a lock, so the write runs on a blocking thread, never on a runtime worker.
+        // SQLite can wait seconds for a lock, so the write runs on a blocking thread, never on a runtime worker, and keeps the turn until it is done.
         let (data_dir, node, entry) = (self.data_dir.clone(), node_id.to_owned(), registration.clone());
-        let saved = tokio::task::spawn_blocking(move || tokens::save_token(&data_dir, &entry.token, &entry.platform, &node, &entry.environment))
-            .await
-            .unwrap_or(SaveOutcome::Failed);
+        let saved = tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            tokens::save_token(&data_dir, &entry.token, &entry.platform, &node, &entry.environment)
+        })
+        .await
+        .unwrap_or(SaveOutcome::Failed);
         let mut state = self.state();
         let latest = state.writing.get(node_id) == Some(&registration.seq);
         if latest {
@@ -337,6 +336,22 @@ mod tests {
         assert!(registrations.state().writing.is_empty());
         registrations.set_channel_peers(peers(NODE)).await.unwrap();
         assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("tok"));
+    }
+
+    #[tokio::test]
+    async fn a_write_keeps_its_turn_until_it_is_done_even_if_its_request_goes_away() {
+        let dir = tempdir().unwrap();
+        let registrations = registrations(dir.path());
+        registrations.set_channel_peers(peers(NODE)).await.unwrap();
+        let lock = rusqlite::Connection::open(dir.path().join("push_tokens.db")).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // The request gives up while its write waits for the database.
+        let gone = tokio::time::timeout(Duration::from_millis(50), registrations.register("tok", "ios", NODE, "")).await;
+        assert!(gone.is_err());
+        assert!(registrations.writes.try_lock().is_err(), "the turn stays with the write still running");
+        lock.execute_batch("ROLLBACK").unwrap();
+        let _turn = registrations.writes.lock().await;
+        assert_eq!(token_of(dir.path(), NODE).as_deref(), Some("tok"), "the write is done before the next turn starts");
     }
 
     #[tokio::test]
