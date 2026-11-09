@@ -33,9 +33,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.stablechannels.app.AppState
+import com.stablechannels.app.domain.EmailPromptPolicy
+import com.stablechannels.app.domain.EmailPromptStoring
 import com.stablechannels.app.models.PaymentRecord
 import com.stablechannels.app.models.TradeRecord
+import com.stablechannels.app.services.EmailPromptStore
 import com.stablechannels.app.ui.components.StatusCapsule
+import com.stablechannels.app.ui.email.rememberEmailSettingsModel
 import com.stablechannels.app.ui.history.OrderDetailBottomSheet
 import com.stablechannels.app.ui.history.PaymentDetailBottomSheet
 import com.stablechannels.app.ui.home.balancebar.BalanceBar
@@ -54,7 +58,11 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
+fun HomeScreen(
+    appState: AppState,
+    modifier: Modifier = Modifier,
+    emailPromptStore: EmailPromptStoring = EmailPromptStore.get(LocalContext.current),
+) {
     val totalSats by appState.totalBalanceSats.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val btcPrice by appState.priceService.currentPrice.collectAsState()
@@ -80,11 +88,37 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     var showReceive by remember { mutableStateOf(false) }
     var showBuy by remember { mutableStateOf(false) }
     var showSell by remember { mutableStateOf(false) }
+    var showEmailPrompt by remember { mutableStateOf(false) }
     var prefillTradeAmount by remember { mutableDoubleStateOf(0.0) }
     var showBTC by remember { mutableStateOf(false) }
     var pendingOnchainReceives by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     var pendingOnchainSends by remember { mutableStateOf<List<PaymentRecord>>(emptyList()) }
     val isSweeping by appState.isSpliceInFlightFlow.collectAsState()
+
+    LaunchedEffect(Unit) {
+        emailPromptStore.recordLaunchOnce()
+        // Wait so the prompt never covers the first look at the balance.
+        kotlinx.coroutines.delay(Constants.EMAIL_PROMPT_SHOW_DELAY_MS)
+        val anySheetOpen =
+            showSend ||
+                showReceive ||
+                showBuy ||
+                showSell ||
+                selectedTrade != null ||
+                selectedPayment != null
+        if (
+            !anySheetOpen &&
+                EmailPromptPolicy.shouldShow(
+                    launches = emailPromptStore.launches,
+                    timesShown = emailPromptStore.timesShown,
+                    lastShownLaunch = emailPromptStore.lastShownLaunch,
+                    hasResponded = emailPromptStore.hasResponded,
+                )
+        ) {
+            emailPromptStore.recordShown()
+            showEmailPrompt = true
+        }
+    }
 
     LaunchedEffect(isFlashing, confirmationUpdateEpoch, onchainSats, spendableOnchainSats) {
         withContext(Dispatchers.IO) {
@@ -749,6 +783,17 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 }
             }
         }
+    }
+
+    if (showEmailPrompt) {
+        EmailPromptSheet(
+            model = rememberEmailSettingsModel(appState.nodeService),
+            onNotNow = {
+                emailPromptStore.markResponded()
+                showEmailPrompt = false
+            },
+            onClose = { showEmailPrompt = false },
+        )
     }
 
     selectedTrade?.let { trade ->
