@@ -65,6 +65,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
     val statusMessage by appState.statusMessage.collectAsState()
     val onchainSats by appState.onchainBalanceSats.collectAsState()
     val hasReadyChannel by appState.hasReadyChannel.collectAsState()
+    val canMoveToChannel by appState.canMoveToChannel.collectAsState()
     val spendableOnchainSats by appState.spendableOnchainSats.collectAsState()
     val isSyncing by appState.isSyncing.collectAsState()
     val isFlashing by appState.paymentFlash.collectAsState()
@@ -284,7 +285,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                 // Only the "Move" + incoming-deposit combo is busy enough (3 rows) to warrant
                 // collapsing; every other state is already a single compact row like iOS.
                 val isBusyOnchainState =
-                    (hasReadyChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
+                    (canMoveToChannel && spendableOnchainSats > 0 && hasPendingOnchainReceive) ||
                         (isSweeping && hasPendingOnchainReceive)
                 var onchainExpanded by remember { mutableStateOf(false) }
                 val chevronRotation by
@@ -406,7 +407,7 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                             Spacer(Modifier.height(10.dp))
                             PendingRow("Channel closing\u2026", lastCloseTxid, context)
                             PendingReceiveRows(pendingReceives, context, btcPrice)
-                        } else if (hasReadyChannel && spendableOnchainSats > 0) {
+                        } else if (canMoveToChannel && spendableOnchainSats > 0) {
                             // Has channel + confirmed funds — offer to sweep
                             if (hasPendingOnchainReceive) {
                                 // Busy state — both "Move" and an incoming deposit at once.
@@ -590,15 +591,18 @@ fun HomeScreen(appState: AppState, modifier: Modifier = Modifier) {
                                 )
                             }
                         } else {
-                            // 4. No channel, confirmed deposit — just needs Lightning.
-                            // A newer deposit can still be confirming alongside it.
+                            // 4. Confirmed deposit and no channel to move it into yet: none, or
+                            // one whose funding is still confirming (#467). A newer deposit can
+                            // still be confirming alongside it.
                             PendingReceiveRows(pendingReceives, context, btcPrice)
-                            Spacer(Modifier.height(8.dp))
-                            Text(
-                                "Receive a payment over Lightning to activate your account.",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                            if (!hasReadyChannel) {
+                                Spacer(Modifier.height(8.dp))
+                                Text(
+                                    "Receive a payment over Lightning to activate your account.",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         pendingSends.forEach { send ->
                             Spacer(Modifier.height(10.dp))

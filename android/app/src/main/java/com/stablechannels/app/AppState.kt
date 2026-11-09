@@ -81,6 +81,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         /**
+         * Whether Move can splice into a channel: it must be ready, with its funding confirmed. A
+         * zero-conf channel is ready before its funding reaches the chain, and a splice of it could
+         * then never be broadcast (#467).
+         */
+        fun isMoveTarget(isChannelReady: Boolean, confirmations: UInt?): Boolean =
+            isChannelReady && (confirmations ?: 0u) > 0u
+
+        /**
          * Set to true right before launching an in-app activity that backgrounds the app (e.g. the
          * log share sheet). [MainActivity] honors this only for a short grace window (see
          * `SHARE_SUPPRESS_WINDOW_MS`): if the app resumes within that window the node stop/restart
@@ -767,6 +775,11 @@ class AppState(private val context: Context) : ViewModel() {
         )
     val hasReadyChannel: StateFlow<Boolean>
         get() = _hasReadyChannel
+
+    /** A ready channel with confirmed funding, which Move can splice into ([isMoveTarget]). */
+    private val _canMoveToChannel = MutableStateFlow(false)
+    val canMoveToChannel: StateFlow<Boolean>
+        get() = _canMoveToChannel
 
     private val _pendingSweepBalanceSats = MutableStateFlow(0L)
     val pendingSweepBalanceSats: StateFlow<Long>
@@ -2115,63 +2128,12 @@ class AppState(private val context: Context) : ViewModel() {
                     // later attempt), so verify against esplora rather than assuming: if the tx
                     // was never broadcast, this is a real failure, and it must be handled or the
                     // confirmation monitor + "Move" lock (isSweeping) hang forever.
-                    when (doesTxExist(capturedTxid)) {
-                        TxBroadcastStatus.EXISTS -> {
-                            AuditService.log(
-                                "SPLICE_FAILED_IGNORED_STALE",
-                                mapOf(
-                                    "channel_id" to event.channelId,
-                                    "splice_txid" to capturedTxid,
-                                ),
-                            )
-                        }
-                        TxBroadcastStatus.INCONCLUSIVE -> {
-                            // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity)
-                            // — preserve the splice rather than risk a false failure.
-                            AuditService.log(
-                                "SPLICE_FAILED_CHECK_INCONCLUSIVE",
-                                mapOf(
-                                    "channel_id" to event.channelId,
-                                    "splice_txid" to capturedTxid,
-                                ),
-                            )
-                        }
-                        TxBroadcastStatus.NOT_FOUND -> {
-                            // The DB row genuinely failed regardless of what's current now — this
-                            // uses the captured row id, never a live re-read, so it can only ever
-                            // touch the row that belonged to this specific splice.
-                            databaseService?.failNegotiatedSplice(
-                                capturedTxid,
-                                capturedPaymentRowId,
-                            )
-                            if (spliceGeneration.get() != capturedGeneration) {
-                                // A newer splice has started while the check was in flight — none
-                                // of its in-memory state belongs to this stale handler.
-                                AuditService.log(
-                                    "SPLICE_FAILED_STALE_GENERATION",
-                                    mapOf(
-                                        "channel_id" to event.channelId,
-                                        "splice_txid" to capturedTxid,
-                                    ),
-                                )
-                            } else {
-                                isSweeping = false
-                                spliceConfirmationJob?.cancel()
-                                spliceConfirmationJob = null
-                                monitoredSpliceTxid = null
-                                pendingSplice = null
-                                if (spliceTxid == capturedTxid) spliceTxid = null
-                                AuditService.log(
-                                    "SPLICE_FAILED",
-                                    mapOf(
-                                        "channel_id" to event.channelId,
-                                        "splice_txid" to capturedTxid,
-                                        "reason" to "txid_never_broadcast",
-                                    ),
-                                )
-                            }
-                        }
-                    }
+                    failSpliceIfNeverBroadcast(
+                        event.channelId,
+                        capturedTxid,
+                        capturedGeneration,
+                        capturedPaymentRowId,
+                    )
                 } else {
                     // Pre-negotiation failure. The row still failed regardless of what's current
                     // now. The generation guard here is defensive rather than closing a real race:
@@ -3232,6 +3194,13 @@ class AppState(private val context: Context) : ViewModel() {
         spliceTxid = txid
         _statusMessage.value = "Move pending confirmation"
         startSpliceConfirmationMonitor(txid)
+        // No channel is left: the splice's channel closed, maybe while the app was not running.
+        if (nodeService.isRunning && nodeService.channels.isEmpty()) {
+            val generation = spliceGeneration.get()
+            viewModelScope.launch(Dispatchers.IO) {
+                failSpliceIfNeverBroadcast("", txid, generation, row.id)
+            }
+        }
     }
 
     /**
@@ -3248,6 +3217,64 @@ class AppState(private val context: Context) : ViewModel() {
         val urls =
             listOf(chainUrl, Constants.PRIMARY_CHAIN_URL, Constants.FALLBACK_CHAIN_URL).distinct()
         return spliceBroadcastChecker.checkStatus(txid, urls)
+    }
+
+    /**
+     * Fails the splice [txid] when esplora has never heard of it: it can't confirm, and it would
+     * otherwise hold the confirmation monitor and the "Move" lock (isSweeping) forever (#467). Its
+     * in-memory state is torn down unless a newer splice started after [generation] was read.
+     */
+    private fun failSpliceIfNeverBroadcast(
+        channelId: String,
+        txid: String,
+        generation: Long,
+        paymentRowId: Long?,
+    ) {
+        when (doesTxExist(txid)) {
+            TxBroadcastStatus.EXISTS -> {
+                AuditService.log(
+                    "SPLICE_FAILED_IGNORED_STALE",
+                    mapOf("channel_id" to channelId, "splice_txid" to txid),
+                )
+            }
+            TxBroadcastStatus.INCONCLUSIVE -> {
+                // Can't prove the tx doesn't exist (timeouts/429/5xx/no connectivity) — preserve
+                // the splice rather than risk a false failure.
+                AuditService.log(
+                    "SPLICE_FAILED_CHECK_INCONCLUSIVE",
+                    mapOf("channel_id" to channelId, "splice_txid" to txid),
+                )
+            }
+            TxBroadcastStatus.NOT_FOUND -> {
+                // The DB row genuinely failed regardless of what's current now — this uses the
+                // captured row id, never a live re-read, so it can only ever touch the row that
+                // belonged to this specific splice.
+                databaseService?.failNegotiatedSplice(txid, paymentRowId)
+                if (spliceGeneration.get() != generation) {
+                    // A newer splice has started while the check was in flight — none of its
+                    // in-memory state belongs to this stale handler.
+                    AuditService.log(
+                        "SPLICE_FAILED_STALE_GENERATION",
+                        mapOf("channel_id" to channelId, "splice_txid" to txid),
+                    )
+                } else {
+                    isSweeping = false
+                    spliceConfirmationJob?.cancel()
+                    spliceConfirmationJob = null
+                    monitoredSpliceTxid = null
+                    pendingSplice = null
+                    if (spliceTxid == txid) spliceTxid = null
+                    AuditService.log(
+                        "SPLICE_FAILED",
+                        mapOf(
+                            "channel_id" to channelId,
+                            "splice_txid" to txid,
+                            "reason" to "txid_never_broadcast",
+                        ),
+                    )
+                }
+            }
+        }
     }
 
     private fun isTxConfirmed(txid: String): Boolean {
@@ -3622,6 +3649,16 @@ class AppState(private val context: Context) : ViewModel() {
         // to avoid double-counting with on-chain. refreshBalances() clears it when ready.
         refreshBalances()
         _statusMessage.value = if (isChannelClosing) "Channel closing…" else "Channel closed"
+
+        // A splice can't complete once its channel has closed.
+        databaseService?.getPendingSpliceTxid(userChannelId, channelId)?.let { txid ->
+            failSpliceIfNeverBroadcast(
+                channelId,
+                txid,
+                spliceGeneration.get(),
+                databaseService?.getSplice(txid)?.id,
+            )
+        }
     }
 
     private fun startStabilityTimer() {
@@ -4322,9 +4359,14 @@ class AppState(private val context: Context) : ViewModel() {
         }
 
         val channel =
-            nodeService.channels.find { it.isChannelReady }
+            nodeService.channels.find { isMoveTarget(it.isChannelReady, it.confirmations) }
                 ?: run {
-                    _statusMessage.value = "No ready channel"
+                    _statusMessage.value =
+                        if (nodeService.channels.any { it.isChannelReady }) {
+                            "Move is available once the channel confirms"
+                        } else {
+                            "No ready channel"
+                        }
                     return
                 }
 
@@ -4795,6 +4837,8 @@ class AppState(private val context: Context) : ViewModel() {
         _lightningBalanceSats.value = lightning
         _onchainBalanceSats.value = onchain
         _hasReadyChannel.value = hasReady
+        _canMoveToChannel.value =
+            nodeService.channels.any { isMoveTarget(it.isChannelReady, it.confirmations) }
         _spendableOnchainSats.value = spendable
         ldkClosedChannelFunds =
             ClosedChannelFunds.from(

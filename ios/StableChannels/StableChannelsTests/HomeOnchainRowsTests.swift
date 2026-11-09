@@ -158,7 +158,8 @@ final class HomeOnchainRowsTests: XCTestCase {
         let card = try XCTUnwrap(HomeOnchainRows.card(.init(
             onchainBalanceSats: 1000,
             spendableOnchainSats: 1000,
-            hasReadyChannel: true
+            hasReadyChannel: true,
+            canMoveToChannel: true
         )))
         XCTAssertEqual(card.moveButton, .plain)
         XCTAssertFalse(card.isExpandable)
@@ -170,6 +171,7 @@ final class HomeOnchainRowsTests: XCTestCase {
             onchainBalanceSats: 3000,
             spendableOnchainSats: 1000,
             hasReadyChannel: true,
+            canMoveToChannel: true,
             pendingReceives: [payment(id: 1, confirmations: 1)]
         )))
         XCTAssertTrue(card.isExpandable)
@@ -186,10 +188,22 @@ final class HomeOnchainRowsTests: XCTestCase {
             onchainBalanceSats: 3000,
             spendableOnchainSats: 1000,
             hasReadyChannel: true,
+            canMoveToChannel: true,
             pendingReceives: [payment(id: 1), payment(id: 2), payment(id: 3)]
         )))
         XCTAssertEqual(card.collapsedSummary?.receives, .count(3))
         XCTAssertEqual(card.rows.count, 3)
+    }
+
+    func testNoMoveIntoAChannelWhoseFundingHasNotConfirmed() throws {
+        // A zero-conf channel is ready before its funding confirms (#467).
+        let card = try XCTUnwrap(HomeOnchainRows.card(.init(
+            onchainBalanceSats: 1000,
+            spendableOnchainSats: 1000,
+            hasReadyChannel: true
+        )))
+        XCTAssertNil(card.moveButton)
+        XCTAssertFalse(card.showsActivationHint)
     }
 
     // MARK: Receives

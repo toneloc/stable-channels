@@ -130,6 +130,11 @@ class SpliceEventRecoveryTest {
     }
 
     @Suppress("UNCHECKED_CAST")
+    private fun setRunning(state: AppState) {
+        (read(state.nodeService, "_isRunning") as MutableStateFlow<Boolean>).value = true
+    }
+
+    @Suppress("UNCHECKED_CAST")
     private fun setChannel(state: AppState, userChannelId: String) {
         (read(state, "_stableChannel") as MutableStateFlow<StableChannel>).value =
             StableChannel(channelId = channel, userChannelId = userChannelId)
@@ -541,6 +546,65 @@ class SpliceEventRecoveryTest {
             handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
             assertEquals("pending", payment(id).status)
             assertTrue(db.hasPendingSplice())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun closingTheChannelFailsItsMoveEsploraNeverSaw() {
+        val id = pending()
+        record(negotiated)
+        val state = appState()
+        setChannel(state, "7")
+        val server = MockWebServer().also { it.start() }
+        try {
+            routeEsploraTo(state, server) { MockResponse().setResponseCode(404) }
+            resume(state)
+            assertTrue(state.isSpliceInFlight)
+            handle(state, Event.ChannelClosed(channel, "7", "peer", null))
+            assertEquals("failed", payment(id).status)
+            assertFalse(state.isSpliceInFlight)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun closingTheChannelKeepsAMoveEsploraHas() {
+        val id = pending()
+        record(negotiated)
+        val state = appState()
+        setChannel(state, "7")
+        val server = MockWebServer().also { it.start() }
+        try {
+            routeEsploraTo(state, server) { MockResponse().setBody("0200") }
+            resume(state)
+            handle(state, Event.ChannelClosed(channel, "7", "peer", null))
+            assertEquals("pending", payment(id).status)
+            assertTrue(state.isSpliceInFlight)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun aMovePendingAtStartupWithNoChannelLeftIsFailedWhenEsploraNeverSawIt() {
+        val id = pending()
+        record(negotiated)
+        val state = appState()
+        setRunning(state)
+        val server = MockWebServer().also { it.start() }
+        try {
+            routeEsploraTo(state, server) { MockResponse().setResponseCode(404) }
+            resume(state)
+            // The check runs off the calling thread.
+            val deadline = System.currentTimeMillis() + 5_000
+            while (state.isSpliceInFlight && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20)
+            }
+            assertFalse(state.isSpliceInFlight)
+            assertEquals("failed", payment(id).status)
         } finally {
             server.shutdown()
         }
