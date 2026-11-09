@@ -3,6 +3,7 @@ mod backfill;
 mod channel_audit;
 mod channel_close;
 mod config;
+mod emails;
 mod event_loop;
 mod geoip;
 mod handlers;
@@ -152,6 +153,7 @@ async fn main() -> Result<()> {
         db: db_arc,
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         push_registrations: Arc::new(crate::push::registrations::Registrations::new(&data_dir)),
+        emails: crate::emails::Emails::open_or_off(&data_dir),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         geoip: geoip::load(cfg.geoip.country_db.as_deref()),
         geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
