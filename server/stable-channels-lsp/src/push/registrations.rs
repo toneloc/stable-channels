@@ -104,6 +104,11 @@ impl Registrations {
         outcome
     }
 
+    /// Whether a node, in lowercase hex, has a channel with the LSP, as last reported.
+    pub fn has_channel(&self, node_id: &str) -> bool {
+        self.state().channel_peers.contains(node_id)
+    }
+
     /// Replace the set of nodes with a channel at once, and store what was held for any of them on a separate task, so the caller never waits on a write.
     pub fn set_channel_peers(self: &Arc<Self>, peers: HashSet<String>) -> tokio::task::JoinHandle<()> {
         let ready: Vec<(String, Registration)> = {
