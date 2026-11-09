@@ -13,6 +13,7 @@ mod payment_filter;
 mod push;
 mod record_limits;
 mod revenue;
+mod secret_file;
 mod stability_tick;
 mod stable_manager;
 mod state;
@@ -80,7 +81,7 @@ async fn main() -> Result<()> {
 
     let data_dir = PathBuf::from(&cfg.storage.disk.dir_path);
     let network_dir = data_dir.join(&cfg.node.network);
-    std::fs::create_dir_all(&network_dir)
+    secret_file::create_private_dir_all(&network_dir)
         .with_context(|| format!("Failed to create network dir {}", network_dir.display()))?;
 
     let tls_opts = tls::TlsConfig { cert_path: None, key_path: None, hosts: cfg.tls.hosts.clone() };
@@ -321,38 +322,83 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Size of the SC daemon's api key in bytes.
+const API_KEY_LEN: usize = 32;
+
 /// Read or auto-generate the api_key file. Returns the hex-encoded bytes used as the HMAC key.
 fn ensure_local_api_key(cfg: &Config) -> Result<Vec<u8>> {
     let path = cfg.local_api_key_path();
-    let raw = if path.exists() {
-        std::fs::read(&path)
-            .with_context(|| format!("Failed to read api_key file {}", path.display()))?
-    } else {
-        let mut key = vec![0u8; 32];
-        use ring::rand::SecureRandom;
-        let rng = ring::rand::SystemRandom::new();
-        rng.fill(&mut key)
-            .map_err(|_| anyhow::anyhow!("SecureRandom::fill failed"))?;
+    // symlink_metadata, so a dangling symlink counts as present and is never written through.
+    let raw = match std::fs::symlink_metadata(&path) {
+        Ok(_) => read_api_key(&path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut key = vec![0u8; API_KEY_LEN];
+            use ring::rand::SecureRandom;
+            let rng = ring::rand::SystemRandom::new();
+            rng.fill(&mut key)
+                .map_err(|_| anyhow::anyhow!("SecureRandom::fill failed"))?;
 
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "Failed to create parent dir for api_key: {}",
-                    parent.display()
-                )
-            })?;
-        }
-        std::fs::write(&path, &key)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
-        info!("generated new SC api_key at {}", path.display());
-        key
+            if let Some(parent) = path.parent() {
+                secret_file::create_private_dir_all(parent).with_context(|| {
+                    format!(
+                        "Failed to create parent dir for api_key: {}",
+                        parent.display()
+                    )
+                })?;
+            }
+            secret_file::write_new(&path, &key, 0o600)
+                .with_context(|| format!("Failed to write {}", path.display()))?;
+            info!("generated new SC api_key at {}", path.display());
+            key
+        },
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("Failed to check api_key file {}", path.display()))
+        },
     };
 
-    let mut hex = String::with_capacity(raw.len() * 2);
-    for b in &raw {
-        hex.push_str(&format!("{:02x}", b));
+    Ok(bytes_to_lower_hex(&raw).into_bytes())
+}
+
+/// Read a stored api key, refusing one that is not exactly `API_KEY_LEN` bytes, and make it readable by its owner only.
+fn read_api_key(path: &std::path::Path) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to read api_key file {}", path.display()))?;
+    let mut raw = Vec::with_capacity(API_KEY_LEN + 1);
+    // One byte past the expected size is enough to tell a longer file apart.
+    (&file)
+        .take(API_KEY_LEN as u64 + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("Failed to read api_key file {}", path.display()))?;
+    if raw.len() != API_KEY_LEN {
+        let size = if raw.len() > API_KEY_LEN {
+            format!("more than {API_KEY_LEN} bytes")
+        } else {
+            format!("{} bytes", raw.len())
+        };
+        anyhow::bail!(
+            "api_key file {} holds {size}, expected exactly {API_KEY_LEN}; refusing to start. \
+             Stop the daemon, delete the file and start again to generate a new key, then give the new key to the operator GUI",
+            path.display()
+        );
     }
-    Ok(hex.into_bytes())
+    match secret_file::make_owner_only(&file) {
+        Ok(Some(old_mode)) => warn!(
+            "api_key file {} was open to its group or other users (mode {:o}); set it to {:o}, owner only. \
+             If anyone else may have read it, generate a new key: stop the daemon, delete the file and start again",
+            path.display(),
+            old_mode,
+            old_mode & 0o700
+        ),
+        Ok(None) => {},
+        Err(error) => warn!(
+            "could not make api_key file {} owner only: {}",
+            path.display(),
+            error
+        ),
+    }
+    Ok(raw)
 }
 
 /// Build the gRPC client and return it together with the resolved base URL.
@@ -400,4 +446,95 @@ fn bytes_to_lower_hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn config_with_storage(dir: &std::path::Path) -> Config {
+        let mut cfg: Config = toml::from_str(
+            r#"
+            [node]
+            rest_service_address = "127.0.0.1:3002"
+            network = "regtest"
+            [storage.disk]
+            dir_path = ""
+            [ldk_server]
+            "#,
+        )
+        .unwrap();
+        cfg.storage.disk.dir_path = dir.to_str().unwrap().to_owned();
+        cfg
+    }
+
+    fn mode_of(path: &std::path::Path) -> u32 {
+        std::fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_generated_api_key_is_32_bytes_readable_by_its_owner_only_in_a_private_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with_storage(&dir.path().join("data"));
+
+        let key = ensure_local_api_key(&cfg).unwrap();
+
+        let path = cfg.local_api_key_path();
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(raw.len(), API_KEY_LEN);
+        assert_eq!(key, bytes_to_lower_hex(&raw).into_bytes());
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(mode_of(path.parent().unwrap()), 0o700);
+        assert_eq!(mode_of(&dir.path().join("data")), 0o700);
+        assert_eq!(ensure_local_api_key(&cfg).unwrap(), key, "the stored key is reused");
+    }
+
+    #[test]
+    fn a_stored_api_key_open_to_its_group_or_others_is_made_owner_only_and_still_used() {
+        for old_mode in [0o644, 0o664, 0o640] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = config_with_storage(dir.path());
+            let path = cfg.local_api_key_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, [0x42u8; API_KEY_LEN]).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(old_mode)).unwrap();
+
+            let key = ensure_local_api_key(&cfg).unwrap();
+
+            assert_eq!(key, bytes_to_lower_hex(&[0x42u8; API_KEY_LEN]).into_bytes());
+            assert_eq!(mode_of(&path), 0o600, "from {old_mode:o}");
+        }
+    }
+
+    #[test]
+    fn a_stored_api_key_of_the_wrong_size_stops_startup() {
+        for size in [0, 1, API_KEY_LEN - 1, API_KEY_LEN + 1, 4096] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = config_with_storage(dir.path());
+            let path = cfg.local_api_key_path();
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0x42u8; size]).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+            let error = ensure_local_api_key(&cfg).unwrap_err().to_string();
+
+            assert!(error.contains("expected exactly 32"), "size {size}: {error}");
+            assert_eq!(std::fs::read(&path).unwrap().len(), size, "the file is left for the operator");
+        }
+    }
+
+    #[test]
+    fn a_dangling_api_key_symlink_stops_startup_without_writing_through_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = config_with_storage(dir.path());
+        let path = cfg.local_api_key_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let target = dir.path().join("elsewhere");
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        assert!(ensure_local_api_key(&cfg).is_err());
+
+        assert!(!target.exists());
+    }
 }
