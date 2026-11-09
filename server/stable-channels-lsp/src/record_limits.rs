@@ -52,13 +52,16 @@ impl DayCount {
     }
 }
 
-/// A past day on which records went over a limit, for one peer or, with no peer, across all peers.
+/// A day on which records went over a limit, for one peer or, with no peer, across all peers.
 #[derive(Debug, PartialEq)]
 pub struct LimitedDay {
     pub peer: Option<String>,
     pub kind: RecordKind,
     pub day: i64,
+    /// Records held back that day, so far while the day is not over.
     pub not_recorded: u32,
+    /// False for the report made as soon as the all-peers limit is reached, true for the one after the day ends.
+    pub day_over: bool,
 }
 
 /// Record counts per peer and across all peers, kept for each UTC day until that day is reported.
@@ -67,6 +70,8 @@ pub struct RecordLimits {
     // An entry is only made for a written record, so never-usable entries stop at the all-peers limit.
     per_peer: HashMap<(String, RecordKind, i64), DayCount>,
     never_usable: HashMap<i64, DayCount>,
+    /// Days whose all-peers limit was reached and not yet reported; that limit holds back every peer's records, not only one's own.
+    reached: Vec<i64>,
 }
 
 impl RecordLimits {
@@ -85,6 +90,7 @@ impl RecordLimits {
             if all.written >= NEVER_USABLE_RECORDS_PER_DAY {
                 if all.hold_back() {
                     tracing::warn!("[records] today's limit of {} never-usable records across all peers is reached; the rest are counted", NEVER_USABLE_RECORDS_PER_DAY);
+                    self.reached.push(day);
                 }
                 return false;
             }
@@ -94,16 +100,28 @@ impl RecordLimits {
         true
     }
 
-    /// Drop the counts of every day but the current one, returning the days that held records back.
-    pub fn take_ended(&mut self, now: i64) -> Vec<LimitedDay> {
+    /// Take the reports due: today's all-peers limit once it is reached, and every ended day that held records back, whose counts are dropped.
+    pub fn take_reports(&mut self, now: i64) -> Vec<LimitedDay> {
         let today = now.div_euclid(DAY_SECS);
+        // A day that has ended since its limit was reached gets only the report with its full count.
+        let mut reached: Vec<LimitedDay> = std::mem::take(&mut self.reached)
+            .into_iter()
+            .filter(|day| *day == today)
+            .map(|day| LimitedDay {
+                peer: None,
+                kind: RecordKind::NeverUsable,
+                day,
+                not_recorded: self.never_usable.get(&day).map_or(0, |count| count.not_recorded),
+                day_over: false,
+            })
+            .collect();
         let mut ended = Vec::new();
         self.per_peer.retain(|(peer, kind, day), count| {
             if *day == today {
                 return true;
             }
             if count.not_recorded > 0 {
-                ended.push(LimitedDay { peer: Some(peer.clone()), kind: *kind, day: *day, not_recorded: count.not_recorded });
+                ended.push(LimitedDay { peer: Some(peer.clone()), kind: *kind, day: *day, not_recorded: count.not_recorded, day_over: true });
             }
             false
         });
@@ -112,12 +130,13 @@ impl RecordLimits {
                 return true;
             }
             if count.not_recorded > 0 {
-                ended.push(LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: *day, not_recorded: count.not_recorded });
+                ended.push(LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: *day, not_recorded: count.not_recorded, day_over: true });
             }
             false
         });
         ended.sort_by(|a, b| (a.day, &a.peer, a.kind.name()).cmp(&(b.day, &b.peer, b.kind.name())));
-        ended
+        reached.append(&mut ended);
+        reached
     }
 }
 
@@ -127,12 +146,14 @@ pub fn limited_day_record(day: &LimitedDay) -> Value {
         Some(peer) => (peer.as_str(), day.kind.per_peer()),
         None => ("all", NEVER_USABLE_RECORDS_PER_DAY),
     };
+    let reached = if day.day_over { "" } else { ":reached" };
     let mut record = json!({
         "records": day.kind.name(),
         "day_started_at": day.day * DAY_SECS,
         "limit": limit,
         "not_recorded": day.not_recorded,
-        "dedup_key": format!("lsp:peer-records-limited:{scope}:{}:{}", day.kind.name(), day.day),
+        "day_over": day.day_over,
+        "dedup_key": format!("lsp:peer-records-limited:{scope}:{}:{}{reached}", day.kind.name(), day.day),
     });
     if let Some(peer) = &day.peer {
         record["counterparty_node_id"] = json!(peer);
@@ -200,41 +221,68 @@ mod tests {
             limits.allow(PEER, RecordKind::NeverUsable, NOON);
         }
         limits.allow(OTHER, RecordKind::NeverUsable, NOON);
-        assert!(limits.take_ended(NOON + 3_600).is_empty(), "not before the day is over");
-        let ended = limits.take_ended(NOON + 43_200);
-        assert_eq!(ended, [LimitedDay { peer: Some(PEER.to_string()), kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 3 }]);
-        assert!(limits.take_ended(NOON + 43_200).is_empty(), "reported once");
+        assert!(limits.take_reports(NOON + 3_600).is_empty(), "not before the day is over");
+        let ended = limits.take_reports(NOON + 43_200);
+        assert_eq!(ended, [LimitedDay { peer: Some(PEER.to_string()), kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 3, day_over: true }]);
+        assert!(limits.take_reports(NOON + 43_200).is_empty(), "reported once");
         assert!(limits.per_peer.is_empty() && limits.never_usable.is_empty(), "an ended day's counts are dropped, also ones that held nothing back");
     }
 
     #[test]
-    fn a_day_over_the_all_peers_limit_is_reported_with_its_count() {
+    fn reaching_the_all_peers_limit_is_reported_at_once_and_again_after_the_day_ends() {
+        let mut limits = RecordLimits::default();
+        for n in 0..NEVER_USABLE_RECORDS_PER_DAY + 2 {
+            limits.allow(&node(n), RecordKind::NeverUsable, NOON);
+        }
+        let reached = LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 2, day_over: false };
+        assert_eq!(limits.take_reports(NOON + 30), [reached], "the next poll reports it while the day goes on");
+        for n in 0..2 {
+            limits.allow(&node(NEVER_USABLE_RECORDS_PER_DAY + 2 + n), RecordKind::NeverUsable, NOON + 60);
+        }
+        assert!(limits.take_reports(NOON + 90).is_empty(), "reported once a day");
+        let ended = limits.take_reports(NOON + 43_200);
+        assert_eq!(ended, [LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4, day_over: true }]);
+    }
+
+    #[test]
+    fn a_day_that_ends_before_its_reached_limit_is_reported_gets_only_its_full_count() {
         let mut limits = RecordLimits::default();
         for n in 0..NEVER_USABLE_RECORDS_PER_DAY + 4 {
             limits.allow(&node(n), RecordKind::NeverUsable, NOON);
         }
-        let ended = limits.take_ended(NOON + 43_200);
-        assert_eq!(ended, [LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4 }]);
+        let ended = limits.take_reports(NOON + 43_200);
+        assert_eq!(ended, [LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4, day_over: true }]);
     }
 
     #[test]
     fn the_report_names_the_scope_the_kind_the_day_and_the_count() {
-        let peer = LimitedDay { peer: Some(PEER.to_string()), kind: RecordKind::Connection, day: 20_389, not_recorded: 7 };
+        let peer = LimitedDay { peer: Some(PEER.to_string()), kind: RecordKind::Connection, day: 20_389, not_recorded: 7, day_over: true };
         assert_eq!(limited_day_record(&peer), serde_json::json!({
             "counterparty_node_id": PEER,
             "records": "connection",
             "day_started_at": 1_761_609_600,
             "limit": CONNECTION_RECORDS_PER_PEER,
             "not_recorded": 7,
+            "day_over": true,
             "dedup_key": format!("lsp:peer-records-limited:{PEER}:connection:20389"),
         }));
-        let all = LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 9 };
+        let all = LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 9, day_over: true };
         assert_eq!(limited_day_record(&all), serde_json::json!({
             "records": "never_usable",
             "day_started_at": 1_761_609_600,
             "limit": NEVER_USABLE_RECORDS_PER_DAY,
             "not_recorded": 9,
+            "day_over": true,
             "dedup_key": "lsp:peer-records-limited:all:never_usable:20389",
+        }));
+        let reached = LimitedDay { day_over: false, not_recorded: 1, ..all };
+        assert_eq!(limited_day_record(&reached), serde_json::json!({
+            "records": "never_usable",
+            "day_started_at": 1_761_609_600,
+            "limit": NEVER_USABLE_RECORDS_PER_DAY,
+            "not_recorded": 1,
+            "day_over": false,
+            "dedup_key": "lsp:peer-records-limited:all:never_usable:20389:reached",
         }));
     }
 }
