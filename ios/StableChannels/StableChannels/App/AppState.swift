@@ -855,6 +855,13 @@ class AppState {
             reregisterPushTokenIfNeeded()
             statusMessage = ""
             NotificationCenter.default.post(name: .priceHistoryUpdated, object: nil)
+        } catch is CancellationError {
+            if !nodeService.isRunning {
+                NodeDirLock.shared.release()
+            }
+            phase = priorPhase
+            statusMessage = ""
+            AuditService.log("WALLET_RESTORE_PAUSED", data: [:])
         } catch {
             // If we failed before the node came up (e.g. DB init threw), no
             // node owns the wallet dir — release so the NSE isn't blocked.
@@ -900,6 +907,7 @@ class AppState {
         transactionLinkService.clearReceiveTxid()
         pendingTradePayments.removeAll()
         pendingSplice = nil
+        pendingOnlineRetry = false
 
         let shared = UserDefaults(suiteName: Constants.appGroupIdentifier)
         shared?.removeObject(forKey: "funding_txid")
@@ -1136,6 +1144,10 @@ class AppState {
                     await MainActor.run { ensureLSPConnected() }
                 }
                 await resumeAfterNodeStart()
+            } catch is CancellationError {
+                // Background paused the launch; keeps coordinator's state and leaves startup resumable on foreground.
+                AuditService.log("STARTUP_LAUNCH_PAUSED", data: [:])
+                pendingOnlineRetry = true
             } catch {
                 await handleNodeStartFailure(error, failPrefix: "Node start failed") {
                     AuditService.log("STARTUP_OFFLINE", data: ["error": error.localizedDescription])
@@ -1184,6 +1196,11 @@ class AppState {
                 startStabilityTimer()
                 reregisterPushTokenIfNeeded()
                 replayPendingTxidWork()
+            } catch is CancellationError {
+                // Background paused wallet creation; keeps coordinator's state and leaves startup resumable on
+                // foreground.
+                AuditService.log("WALLET_CREATE_PAUSED", data: [:])
+                pendingOnlineRetry = true
             } catch {
                 await handleNodeStartFailure(error, failPrefix: "Wallet creation failed") {
                     AuditService.log("WALLET_CREATE_OFFLINE", data: ["error": error.localizedDescription])
@@ -1265,6 +1282,8 @@ class AppState {
                     run: nodeStartRetryRun()
                 ) {
                     showRetrySchedule(schedule)
+                } else {
+                    pendingOnlineRetry = true
                 }
             } catch {
                 if previousPhase.isRecoveringNodeStart {
@@ -1310,6 +1329,7 @@ class AppState {
             retryNodeStartLater(reason: error.localizedDescription)
         case .fail:
             nodeStartup.reset()
+            pendingOnlineRetry = false
             phase = .error("\(failPrefix): \(error.localizedDescription)")
         }
     }
@@ -1583,6 +1603,7 @@ class AppState {
 
     /// Restore gossip data and restart the node when returning to foreground.
     func restartNodeFromForeground() async {
+        cancelBackgroundStop()
         // Every foreground ends the pause, whatever the phase, so a later start keeps its node.
         nodeStartup.resume()
         if NodeStartupPolicy.shouldResumeRetry(
@@ -1590,8 +1611,6 @@ class AppState {
             isRetrying: nodeStartup.isRetrying,
             isNodeRunning: nodeService.isRunning
         ) {
-            // Back in foreground: the pending background stop must not pause this retry again.
-            cancelBackgroundStop()
             nodeStartup.resumeIfIdle(
                 maxDelay: Constants.nodeStartRetryMaxDelay,
                 reason: "resumed on foreground",
@@ -1599,10 +1618,14 @@ class AppState {
             )
             return
         }
+        if pendingOnlineRetry {
+            pendingOnlineRetry = false
+            await retryConnection()
+            return
+        }
         guard case .wallet = phase else { return }
         nodeFlowInProgress = true
         defer { finishNodeFlow() }
-        cancelBackgroundStop()
         reloadStateWrittenWhileSuspended()
         if nodeService.isRunning {
             // Node never stopped, so gossip was never extracted — do NOT touch

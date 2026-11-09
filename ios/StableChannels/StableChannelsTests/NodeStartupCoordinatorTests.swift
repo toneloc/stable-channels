@@ -827,6 +827,73 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         XCTAssertTrue(appState.nodeStartup.isRetrying)
         appState.nodeStartup.reset()
     }
+
+    func testForegroundInOfflinePhase_disarmsTheBackgroundStop() async {
+        let appState = AppState(nodeStartup: heldRetries())
+        appState.phase = .offline
+        appState.stopNodeForBackground()
+        XCTAssertTrue(appState.hasPendingBackgroundStop)
+
+        await appState.restartNodeFromForeground()
+
+        XCTAssertFalse(
+            appState.hasPendingBackgroundStop,
+            "Foreground in offline phase must disarm the pending background stop"
+        )
+    }
+
+    func testPausedOfflineRetry_resumesAutomaticallyOnForeground() async {
+        let node = FeeStallingNodeService()
+        var appState: AppState?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+        })
+        appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+        appState?.phase = .offline
+
+        await appState?.retryConnection()
+
+        XCTAssertTrue(node.startedURLs.count <= 2, "Only primary and fallback tried before background stop")
+        XCTAssertEqual(appState?.phase, .offline, "Phase remains offline while paused in background")
+
+        let attemptsBeforeForeground = node.startedURLs.count
+
+        // Returning to foreground must automatically resume the interrupted recovery
+        await appState?.restartNodeFromForeground()
+
+        XCTAssertGreaterThan(
+            node.startedURLs.count,
+            attemptsBeforeForeground,
+            "Foreground must resume the interrupted start"
+        )
+        coordinator.reset()
+    }
+
+    func testBackgroundStopDuringLaunch_doesNotProduceTerminalError() async {
+        let node = FeeStallingNodeService()
+        var appState: AppState?
+        let coordinator = makeCoordinator(sleep: { duration in
+            guard duration == Constants.nodeStartRetryDelay else { return }
+            appState?.performBackgroundStop()
+        })
+        appState = AppState(
+            nodeService: node,
+            networkMonitor: MockNetworkMonitor(initialStatus: .online),
+            nodeStartup: coordinator
+        )
+
+        await appState?.start()
+
+        if case .error = appState?.phase {
+            XCTFail("Must not enter terminal error on background pause")
+        }
+        coordinator.reset()
+    }
 }
 
 /// A node whose start always fails with a transient wallet-sync error.
