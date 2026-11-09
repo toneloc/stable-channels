@@ -66,6 +66,8 @@ pub struct FundingOutpointsRequest {
 /// One funding output the wallet should watch; `funding_vout` is None when only the txid was recorded.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FundingOutpoint {
+    /// The same number for every output of one channel, counting from 0 in the order channels first appear in this reply.
+    pub channel: usize,
     pub funding_txid: String,
     pub funding_vout: Option<u32>,
     pub state: &'static str,
@@ -317,7 +319,7 @@ fn node_channels<'a>(db: &Database, live_all: &'a [Channel], node_id: &'a str, m
 fn funding_outpoints_of(db: &Database, channels: &NodeChannels) -> rusqlite::Result<Vec<FundingOutpoint>> {
     let names = |row: &LedgerChannelRow| row.counterparty_node_id.as_deref().map(|n| n.eq_ignore_ascii_case(channels.node_id));
     let mut found = Vec::new();
-    for uid in &channels.ids {
+    for (key, uid) in channels.ids.iter().enumerate() {
         let rows: Vec<LedgerChannelRow> = db
             .ledger_channel_rows_by_ref("user_channel_id", uid, FUNDING_EVENTS)?
             .into_iter()
@@ -358,13 +360,19 @@ fn funding_outpoints_of(db: &Database, channels: &NodeChannels) -> rusqlite::Res
             .into_iter()
             .enumerate()
             .filter(|(i, funding)| *i < MAX_OUTPUTS_PER_CHANNEL || live_txid.as_ref() == Some(&funding.txid))
-            .map(|(_, funding)| (state, funding));
+            .map(|(_, funding)| (key, state, funding));
         found.extend(kept);
     }
-    found.sort_by_key(|(state, funding)| (*state != "open", std::cmp::Reverse(funding.at_ms)));
+    found.sort_by_key(|(_, state, funding)| (*state != "open", std::cmp::Reverse(funding.at_ms)));
+    // Number channels by first appearance, so the wallet can group the outputs and check each channel's newest first.
+    let mut numbers = HashMap::new();
     Ok(found
         .into_iter()
-        .map(|(state, f)| FundingOutpoint { funding_txid: f.txid, funding_vout: f.vout, state })
+        .map(|(key, state, f)| {
+            let next = numbers.len();
+            let channel = *numbers.entry(key).or_insert(next);
+            FundingOutpoint { channel, funding_txid: f.txid, funding_vout: f.vout, state }
+        })
         .collect())
 }
 
@@ -514,8 +522,8 @@ mod tests {
         }
     }
 
-    fn outpoint(txid: &str, vout: Option<u32>, state: &'static str) -> FundingOutpoint {
-        FundingOutpoint { funding_txid: txid.to_string(), funding_vout: vout, state }
+    fn outpoint(channel: usize, txid: &str, vout: Option<u32>, state: &'static str) -> FundingOutpoint {
+        FundingOutpoint { channel, funding_txid: txid.to_string(), funding_vout: vout, state }
     }
 
     fn collect_funding_outpoints(db: &Database, live: &[Channel], node_id: &str) -> rusqlite::Result<Vec<FundingOutpoint>> {
@@ -530,7 +538,7 @@ mod tests {
             "channel_id": "c", "user_channel_id": ALICE_UID, "counterparty_node_id": ALICE,
         }));
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(1), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(1), "closed")]);
     }
 
     fn negotiated(db: &Database, uid: &str, txo: &str, at_ms: i64) {
@@ -553,9 +561,9 @@ mod tests {
         negotiated(&db, ALICE_UID, &format!("{TX_SPLICE_3}:2"), 3_000);
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
         assert_eq!(found, [
-            outpoint(TX_SPLICE_3, Some(2), "closed"),
-            outpoint(TX_SPLICE, Some(1), "closed"),
-            outpoint(TX_OPEN, Some(0), "closed"),
+            outpoint(0, TX_SPLICE_3, Some(2), "closed"),
+            outpoint(0, TX_SPLICE, Some(1), "closed"),
+            outpoint(0, TX_OPEN, Some(0), "closed"),
         ]);
     }
 
@@ -574,9 +582,9 @@ mod tests {
         record(&db, "CHANNEL_CLOSED", 5_000, serde_json::json!({"user_channel_id": ALICE_UID, "counterparty_node_id": ALICE}));
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
         assert_eq!(found, [
-            outpoint(TX_SPLICE_3, Some(2), "closed"),
-            outpoint(TX_SPLICE, Some(1), "closed"),
-            outpoint(TX_OPEN, Some(0), "closed"),
+            outpoint(0, TX_SPLICE_3, Some(2), "closed"),
+            outpoint(0, TX_SPLICE, Some(1), "closed"),
+            outpoint(0, TX_OPEN, Some(0), "closed"),
         ]);
     }
 
@@ -588,7 +596,7 @@ mod tests {
         }));
         opened(&db, ALICE, ALICE_UID, &format!("{TX_OPEN}:1"), 2_000);
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(1), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(1), "closed")]);
     }
 
     #[test]
@@ -598,7 +606,7 @@ mod tests {
             "user_channel_id": ALICE_UID, "counterparty_node_id": ALICE, "funding_txo": TX_OPEN,
         }));
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, None, "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, None, "closed")]);
     }
 
     #[test]
@@ -607,7 +615,7 @@ mod tests {
         opened(&db, ALICE, ALICE_UID, &format!("{TX_OPEN}:0"), 1_000);
         negotiated(&db, ALICE_UID, &format!("{TX_SPLICE}:1"), 2_000);
         let found = collect_funding_outpoints(&db, &[live(ALICE, ALICE_UID, TX_OPEN, 0)], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_SPLICE, Some(1), "open"), outpoint(TX_OPEN, Some(0), "open")]);
+        assert_eq!(found, [outpoint(0, TX_SPLICE, Some(1), "open"), outpoint(0, TX_OPEN, Some(0), "open")]);
     }
 
     #[test]
@@ -615,7 +623,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         negotiated(&db, ALICE_UID, &format!("{TX_SPLICE}:1"), 2_000);
         let found = collect_funding_outpoints(&db, &[live(ALICE, ALICE_UID, TX_OPEN, 0)], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "open"), outpoint(TX_SPLICE, Some(1), "open")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "open"), outpoint(0, TX_SPLICE, Some(1), "open")]);
     }
 
     #[test]
@@ -645,7 +653,7 @@ mod tests {
             "previous": {"user_channel_id": ALICE_UID},
         }));
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -667,7 +675,7 @@ mod tests {
         // A lock record names no counterparty, so it can't be told apart once the id is shared.
         splice_locked(&db, "7", &format!("{TX_SPLICE_2}:0"), 2_000);
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -677,7 +685,7 @@ mod tests {
         record(&db, "CHANNEL_CLOSED", 1_500, serde_json::json!({"user_channel_id": "7", "counterparty_node_id": BOB}));
         opened(&db, ALICE, "7", &format!("{TX_OPEN}:0"), 2_000);
         let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -686,7 +694,7 @@ mod tests {
         splice_locked(&db, "7", &format!("{TX_SPLICE_2}:0"), 1_000);
         opened(&db, ALICE, "7", &format!("{TX_OPEN}:0"), 2_000);
         let found = collect_funding_outpoints(&db, &[live(BOB, "7", TX_BOB, 0)], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -700,7 +708,7 @@ mod tests {
             "prev_user_channel_id": ALICE_UID, "next_user_channel_id": BOB_UID,
         }));
         let found = collect_funding_outpoints(&db, &[live(BOB, BOB_UID, TX_BOB, 0)], ALICE).unwrap();
-        assert_eq!(found, [outpoint(TX_OPEN, Some(0), "closed")]);
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -722,9 +730,26 @@ mod tests {
         let open = live(ALICE, "220608917660482373069445486228549857596", TX_OTHER, 3);
         let found = collect_funding_outpoints(&db, &[open], ALICE).unwrap();
         assert_eq!(found, [
-            outpoint(TX_OTHER, Some(3), "open"),
-            outpoint(TX_SPLICE_2, Some(0), "closed"),
-            outpoint(TX_OPEN, Some(0), "closed"),
+            outpoint(0, TX_OTHER, Some(3), "open"),
+            outpoint(1, TX_SPLICE_2, Some(0), "closed"),
+            outpoint(2, TX_OPEN, Some(0), "closed"),
+        ]);
+    }
+
+    #[test]
+    fn outputs_of_one_channel_share_a_number_when_channels_interleave_in_time() {
+        let (_dir, db) = fresh_db();
+        // ALICE_UID sorts after ALICE_UID_2 but has the newest output, so it must be numbered 0.
+        opened(&db, ALICE, ALICE_UID_2, &format!("{TX_OTHER}:0"), 1_000);
+        opened(&db, ALICE, ALICE_UID, &format!("{TX_OPEN}:0"), 2_000);
+        negotiated(&db, ALICE_UID_2, &format!("{TX_SPLICE_2}:1"), 3_000);
+        negotiated(&db, ALICE_UID, &format!("{TX_SPLICE}:1"), 4_000);
+        let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
+        assert_eq!(found, [
+            outpoint(0, TX_SPLICE, Some(1), "closed"),
+            outpoint(1, TX_SPLICE_2, Some(1), "closed"),
+            outpoint(0, TX_OPEN, Some(0), "closed"),
+            outpoint(1, TX_OTHER, Some(0), "closed"),
         ]);
     }
 
@@ -802,9 +827,9 @@ mod tests {
         let busy = live(ALICE, ALICE_UID, &format!("{:064x}", 0xfeed_0000u64 + 11), 1);
         let found = collect_funding_outpoints(&db, &[busy], ALICE).unwrap();
         assert_eq!(found.len(), 11);
-        assert_eq!(found[0], outpoint(&format!("{:064x}", 0xfeed_0000u64 + 11), Some(1), "open"));
-        assert_eq!(found[9], outpoint(&format!("{:064x}", 0xfeed_0000u64 + 2), Some(1), "open"), "the two oldest are cut");
-        assert_eq!(found[10], outpoint(TX_SPLICE_2, Some(0), "closed"), "the other channel is still listed");
+        assert_eq!(found[0], outpoint(0, &format!("{:064x}", 0xfeed_0000u64 + 11), Some(1), "open"));
+        assert_eq!(found[9], outpoint(0, &format!("{:064x}", 0xfeed_0000u64 + 2), Some(1), "open"), "the two oldest are cut");
+        assert_eq!(found[10], outpoint(1, TX_SPLICE_2, Some(0), "closed"), "the other channel is still listed");
     }
 
     #[test]
@@ -830,9 +855,9 @@ mod tests {
         assert_eq!(channels.ids, expected);
         let found = funding_outpoints_of(&db, &channels).unwrap();
         assert_eq!(found.len(), 21);
-        assert_eq!(found[0], outpoint(TX_OPEN, Some(1), "open"));
-        assert_eq!(found[1], outpoint(&txid(20), Some(0), "closed"));
-        assert_eq!(found[20], outpoint(&txid(1), Some(0), "closed"));
+        assert_eq!(found[0], outpoint(0, TX_OPEN, Some(1), "open"));
+        assert_eq!(found[1], outpoint(1, &txid(20), Some(0), "closed"));
+        assert_eq!(found[20], outpoint(20, &txid(1), Some(0), "closed"));
     }
 
     #[test]
@@ -862,8 +887,8 @@ mod tests {
         }
         let found = collect_funding_outpoints(&db, &[live(ALICE, ALICE_UID, TX_OPEN, 0)], ALICE).unwrap();
         assert_eq!(found.len(), 11);
-        assert!(found.contains(&outpoint(TX_OPEN, Some(0), "open")));
-        assert_eq!(found[0], outpoint(&format!("{:064x}", 0xbeef_0000u64 + 10), Some(1), "open"));
+        assert!(found.contains(&outpoint(0, TX_OPEN, Some(0), "open")));
+        assert_eq!(found[0], outpoint(0, &format!("{:064x}", 0xbeef_0000u64 + 10), Some(1), "open"));
     }
 
     struct FakeLdk {
@@ -954,7 +979,7 @@ mod tests {
         let (status, reply) = answer(&Arc::new(FakeLdk::new(vec![])), &db, &route(), &body, NOW).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(reply, serde_json::json!({"funding_outpoints": [
-            {"funding_txid": TX_OPEN, "funding_vout": 1, "state": "closed"},
+            {"channel": 0, "funding_txid": TX_OPEN, "funding_vout": 1, "state": "closed"},
         ]}));
     }
 
