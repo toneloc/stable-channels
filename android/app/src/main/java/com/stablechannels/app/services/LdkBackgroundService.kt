@@ -21,6 +21,7 @@ class LdkBackgroundService : Service() {
         const val EXTRA_REASON = "reason"
         const val REASON_PAYMENT = "payment"
         const val REASON_SPLICE = "splice"
+        const val REASON_LSP_SPLICE = "lsp_splice"
 
         fun start(context: Context, reason: String = REASON_PAYMENT) {
             Log.d(TAG, "Starting LdkBackgroundService (reason=$reason)")
@@ -49,6 +50,7 @@ class LdkBackgroundService : Service() {
         val contentText =
             when (intent?.getStringExtra(EXTRA_REASON)) {
                 REASON_SPLICE -> "Stable Channels is completing your on-chain move..."
+                REASON_LSP_SPLICE -> "Stable Channels is updating your channel..."
                 else -> "Stable Channels is waiting for your payment to complete..."
             }
         val notification =
