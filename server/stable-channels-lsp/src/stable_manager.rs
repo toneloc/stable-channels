@@ -1176,6 +1176,11 @@ impl StableChannelManager {
         self.hydrated
     }
 
+    /// The node ids, in lowercase hex, of every peer with a loaded channel; None until the list has loaded.
+    pub fn channel_peer_ids(&self) -> Option<std::collections::HashSet<String>> {
+        self.hydrated.then(|| self.stable_channels.iter().map(|sc| sc.counterparty.to_string().to_ascii_lowercase()).collect())
+    }
+
     /// Validate, patch expected_usd/note (Some sets, None keeps prior, both-None-no-prior rejected), persist, and update the cache.
     pub async fn edit_stable_channel(
         &mut self,
@@ -5046,6 +5051,27 @@ pub(crate) mod tests {
         assert!(mgr.hydrated);
         assert_eq!(mgr.stable_channels.len(), 2, "a list that is not empty is not proof it was loaded");
         assert!(mgr.stable_channels.iter().any(|sc| sc.expected_usd.0 == 50.0 && sc.backing_sats == 50_000));
+    }
+
+    #[tokio::test]
+    async fn channel_peers_are_known_only_once_the_list_has_loaded() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        assert_eq!(mgr.channel_peer_ids(), None, "an unloaded list says nothing about who has a channel");
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+        assert_eq!(mgr.channel_peer_ids(), Some(std::collections::HashSet::from([COUNTERPARTY_HEX.to_owned()])));
+    }
+
+    #[tokio::test]
+    async fn the_channel_peers_reach_the_push_registrations_once_the_list_has_loaded() {
+        let (mut mgr, ldk) = fifty_dollars_then_restart().await;
+        let dir = tempfile::tempdir().unwrap();
+        let registrations = std::sync::Arc::new(crate::push::registrations::Registrations::new(dir.path()));
+        registrations.register("tok", "ios", COUNTERPARTY_HEX, "").await;
+        assert!(crate::stability_tick::share_channel_peers(&registrations, mgr.channel_peer_ids()).is_none(), "nothing is shared before the list loads");
+        mgr.reconcile_unless_hydrated(&ldk as &dyn LdkServerCalls, 0.0).await;
+        crate::stability_tick::share_channel_peers(&registrations, mgr.channel_peer_ids()).expect("the loaded list is shared").await.unwrap();
+        let stored = crate::push::tokens::load_token_for_node(&dir.path().to_string_lossy(), COUNTERPARTY_HEX);
+        assert_eq!(stored.map(|info| info.token).as_deref(), Some("tok"), "a held registration is stored once its channel is known");
     }
 
     #[tokio::test]

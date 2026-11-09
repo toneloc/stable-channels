@@ -336,7 +336,7 @@ fn limit_observed_records(
                 || limits.allow(data["counterparty_node_id"].as_str().unwrap_or_default(), RecordKind::NeverUsable, now)
         })
         .collect();
-    ObservedRecords { connections, shutdowns, reports: limits.take_ended(now) }
+    ObservedRecords { connections, shutdowns, reports: limits.take_reports(now) }
 }
 
 /// Write the records kept from one poll.
@@ -449,6 +449,18 @@ mod tests {
     }
 
     #[test]
+    fn the_next_poll_reports_the_all_peers_limit_the_day_it_is_reached() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_DAY;
+        let mut limits = RecordLimits::default();
+        // Channel records from the event loop use up the limit between two polls.
+        for n in 0..=NEVER_USABLE_RECORDS_PER_DAY {
+            limits.allow(&format!("02{n:064x}"), RecordKind::NeverUsable, NOON);
+        }
+        let reports = limit_observed_records(&mut limits, &HashSet::new(), &HashSet::new(), Vec::new(), Vec::new(), NOON + 30).reports;
+        assert_eq!(reports.iter().map(|day| (day.peer.clone(), day.not_recorded, day.day_over)).collect::<Vec<_>>(), [(None, 1, false)]);
+    }
+
+    #[test]
     fn before_the_channel_list_loads_every_record_is_kept() {
         use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
         use crate::stable_manager::StableChannelManager;
@@ -465,7 +477,7 @@ mod tests {
     fn kept_records_and_reports_are_written_to_the_ledger_stream() {
         use crate::stable_manager::tests::AUDIT_TEST_GUARD;
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
-        let report = crate::record_limits::LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4 };
+        let report = crate::record_limits::LimitedDay { peer: None, kind: RecordKind::NeverUsable, day: 20_389, not_recorded: 4, day_over: true };
         let records = ObservedRecords {
             connections: vec![(USABLE.to_string(), true), (USABLE.to_string(), false)],
             shutdowns: vec![shutdown_of("7", USABLE)],
