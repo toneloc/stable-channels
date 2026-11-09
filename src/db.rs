@@ -1414,6 +1414,16 @@ impl Database {
         )
     }
 
+    /// A row that never got a call is stalled so the operator is alerted; it is still tried when the phone shows up, but no longer pushed for.
+    pub fn stall_queued_splice(&self, user_channel_id: &str, error: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
+        self.update_queued_splice(
+            "UPDATE queued_splices SET status = 'stalled', last_error = ?2, updated_at = ?3
+             WHERE user_channel_id = ?1 AND pending_on_node = 0 AND status IN ('queued', 'failed')",
+            params![user_channel_id, error, now],
+            user_channel_id,
+        )
+    }
+
     /// The node no longer holds this row's last call (it refused or dropped it), so a new call or request may go out. `note` replaces the error the operator sees.
     pub fn clear_queued_splice_pending(&self, user_channel_id: &str, note: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
@@ -8751,6 +8761,26 @@ mod tests {
         assert_eq!((cancelled.status.as_str(), cancelled.last_error.as_deref(), cancelled.wake_note), ("cancelled", Some("channel closed"), None));
         // Nothing of it may still lock, so the job stops looking at it.
         assert!(db.list_open_queued_splices(107, 3_600).unwrap().is_empty());
+    }
+
+    #[test]
+    fn queued_splice_pending_row_takes_no_new_call_even_once_stalled() {
+        let db = Database::open_in_memory().unwrap();
+        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("7", "peer", 50_000, 100).unwrap() else { panic!("queued") };
+        db.mark_queued_splice_splicing("7", row.request_id, Some("aa:0"), 500_000, 400_000, 101).unwrap().unwrap();
+        // The call timed out with no answer: the row stalls, but the call is still pending on the node.
+        let stalled = db.stall_queued_splice_pending("7", "no answer", 102).unwrap().unwrap();
+        assert_eq!((stalled.status.as_str(), stalled.pending_on_node), ("stalled", true));
+        assert!(
+            db.mark_queued_splice_splicing("7", row.request_id, Some("aa:0"), 500_000, 400_000, 103).unwrap().is_none(),
+            "a stalled row with a pending call gets no second call"
+        );
+        // A never-called row can be stalled too, and then called when the phone shows up.
+        db.queue_splice_in("8", "peer", 50_000, 104).unwrap();
+        assert!(db.stall_queued_splice("7", "never called", 105).unwrap().is_none(), "only rows without a pending call");
+        let never = db.stall_queued_splice("8", "never called", 105).unwrap().unwrap();
+        assert_eq!((never.status.as_str(), never.pending_on_node, never.last_error.as_deref()), ("stalled", false, Some("never called")));
+        assert!(db.mark_queued_splice_splicing("8", never.request_id, Some("aa:0"), 500_000, 400_000, 106).unwrap().is_some());
     }
 
     #[test]

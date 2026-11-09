@@ -10705,6 +10705,50 @@
         }
       }
     },
+    "info_closed_channel_keep_app" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep the app installed until it arrives."
+          }
+        }
+      }
+    },
+    "info_closed_channel_moves" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It moves to your onchain wallet automatically, which can take about a day."
+          }
+        }
+      }
+    },
+    "info_closed_channel_safe" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ is safe on the Bitcoin blockchain."
+          }
+        }
+      }
+    },
+    "info_closed_channel_unlocks" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It unlocks in %@, then moves to your onchain wallet automatically."
+          }
+        }
+      }
+    },
     "info_custom_lsp" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -18367,7 +18411,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain; funds return after a timelock. Only continue if this is your only way back into the wallet."
+            "value" : "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain. If the channel was open on this phone, the app then moves your funds to your onchain wallet automatically. Only continue if this is your only way back into the wallet."
           }
         }
       }
