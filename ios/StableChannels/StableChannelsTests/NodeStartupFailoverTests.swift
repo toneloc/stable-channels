@@ -39,6 +39,22 @@ final class NodeStartupFailoverTests: XCTestCase {
         }
     }
 
+    /// The reported failure: an online fee-rate timeout whose text says "timed out" must retry,
+    /// not land on the offline page.
+    func testOnlineFeeRateTimeout_retriesDespiteTimedOutText() {
+        let error = NodeError.FeerateEstimationUpdateTimeout(message: "Connection timed out")
+        let outcome = NodeStartupPolicy.failureOutcome(
+            isNetworkOffline: false,
+            looksOffline: NetworkReachabilityEvaluator.shouldPresentOfflineNotice(
+                error: error,
+                isNetworkOffline: false
+            ),
+            isRetryable: error.isRetryableNodeStartError
+        )
+
+        XCTAssertEqual(outcome, .retry)
+    }
+
     func testBridgedErrorsCarryingCaseNameTextAreNotRetryable() {
         // Only typed NodeError cases qualify. A foreign error whose description happens to
         // contain the case name must not trigger a provider retry.
@@ -164,5 +180,28 @@ final class NodeStartupFailoverTests: XCTestCase {
         NodeDirLock.shared.release()
         NodeDirLock.shared.release()
         XCTAssertFalse(NodeDirLock.shared.isHeld, "Extra releases must stay harmless no-ops")
+    }
+
+    /// A paused node-start retry may be waiting on the NSE's lock; cancellation must end the
+    /// poll at once instead of spinning to the 35s deadline.
+    func testCancelledLockWait_returnsNotHeldPromptly() async {
+        let tempDir = makeTempDir()
+        // Another process's flock: a separate open file description conflicts even in-process.
+        let other = open(tempDir.appendingPathComponent(NodeDirLock.lockFilename).path, O_CREAT | O_RDWR, 0o644)
+        XCTAssertEqual(flock(other, LOCK_EX | LOCK_NB), 0)
+        defer {
+            close(other)
+            NodeDirLock.shared.release()
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let wait = Task { await NodeDirLock.shared.acquireReportingNew(dataDir: tempDir, timeout: 35) }
+        try? await Task.sleep(for: .milliseconds(300))
+        let cancelledAt = ContinuousClock.now
+        wait.cancel()
+        let lease = await wait.value
+
+        XCTAssertFalse(lease.held)
+        XCTAssertLessThan(ContinuousClock.now - cancelledAt, .seconds(1))
     }
 }

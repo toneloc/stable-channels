@@ -4,6 +4,8 @@ enum Constants {
     // MARK: - Network
 
     static let satsInBTC = UInt64(BitcoinUnits.satsPerBTC)
+    /// How long the app waits for the wallet-dir lock; outlasts the notification extension's ~30 s window.
+    static let nodeDirLockTimeoutSecs: TimeInterval = 35
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let tradeMessageType = "TRADE_V1"
@@ -28,6 +30,14 @@ enum Constants {
         }
     }
 
+    // Caps every Esplora fee-rate refresh (node start and runtime): a stalled provider fails fast, start
+    // moves on to the next provider or the retry loop, and a failed runtime refresh keeps cached rates.
+    static let feeRateCacheUpdateTimeoutSecs: UInt64 = 8
+    static let nodeStartRetryDelay: Duration = .seconds(2)
+    // Ceiling for the launch-time backoff that keeps retrying node start after every provider failed.
+    static let nodeStartRetryMaxDelay: Duration = .seconds(60)
+    // Automatic node-start retries before the error screen (backoff 1+2+4+8+16+32s, about 1-3 minutes).
+    static let nodeStartMaxRetries = 6
     static let txExplorerURL = "https://mempool.space/tx"
 
     static let feeRateBlockstreamURL = primaryChainURL
@@ -63,6 +73,11 @@ enum Constants {
     /// Longer budget for the ~30-day hourly OHLC chart backfill, which is a much larger download
     /// than a single-price ticker and must not share the short per-feed ticker timeout.
     static let chartFetchTimeoutSecs: TimeInterval = 30
+    /// The launch-time chain source probe's budget: a slow primary must not hold the launch screen.
+    static let chainProbeRequestTimeoutSecs: TimeInterval = 2
+    static let chainProbeResourceTimeoutSecs: TimeInterval = 3
+    /// Shortest time the launch screen stays up, so a fast start never flashes it.
+    static let minimumSplashDuration: TimeInterval = 1.6
 
     static let onchainWalletSyncIntervalSecs: UInt64 = 120
     static let lightningWalletSyncIntervalSecs: UInt64 = 60
