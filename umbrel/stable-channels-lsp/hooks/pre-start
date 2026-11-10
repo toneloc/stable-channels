@@ -116,7 +116,7 @@ dir_path = "/data/stable-channels-lsp"
 config_path = "/etc/sc-lsp/ldk-server.toml"
 grpc_address = "${LDK_SERVER_HOST}:3536"
 cert_path    = "/data/ldk-server/tls.crt"
-api_key_path = "/data/ldk-server/${NETWORK}/api_key"
+macaroon_path = "/data/ldk-server/${NETWORK}/macaroons/admin.macaroon"
 
 # Optional mobile push notifications. Copy the credential files into this
 # app's data/config directory, then uncomment the relevant settings below.

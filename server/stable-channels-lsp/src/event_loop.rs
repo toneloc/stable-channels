@@ -346,7 +346,7 @@ fn payment_failure_reason_name(reason: Option<i32>) -> Option<String> {
 }
 
 /// LDK Server rev this daemon's ldk-server-client is pinned to; a test keeps it equal to Cargo.toml.
-const PINNED_LDK_SERVER_REV: &str = "bd95e187";
+const PINNED_LDK_SERVER_REV: &str = "aa2d60f5";
 
 /// Whether LDK Server's reported build (`<version> (<git commit>)`) is the pinned rev; None when it reports no build.
 fn ldk_server_matches_pin(ldk_server_version: Option<&str>) -> Option<bool> {
@@ -1603,9 +1603,9 @@ mod tests {
 
     #[test]
     fn connected_row_names_the_ldk_server_build_and_whether_it_matches_the_pin() {
-        let d = connected_audit_data(Some("event-stream-gap-1"), Some("0.1.0 (bd95e187b0c08b3fb90fc42a96f0f8a2b6773495)"));
+        let d = connected_audit_data(Some("event-stream-gap-1"), Some("0.1.0 (aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3)"));
         assert_eq!(d["correlation_id"], "event-stream-gap-1");
-        assert_eq!(d["ldk_server_version"], "0.1.0 (bd95e187b0c08b3fb90fc42a96f0f8a2b6773495)");
+        assert_eq!(d["ldk_server_version"], "0.1.0 (aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3)");
         assert_eq!(d["expected_ldk_server_rev"], PINNED_LDK_SERVER_REV);
         assert_eq!(d["ldk_server_matches_pin"], true);
         assert_eq!(connected_audit_data(None, Some("0.1.0 (0e4434d7083ae9926c73f26e7cd52f00bde44d37)"))["ldk_server_matches_pin"], false);

@@ -460,19 +460,53 @@ fn build_ldk_server_client(cfg: &Config) -> Result<(LdkServerClient, String)> {
     let cert_pem = std::fs::read(&cert_path)
         .with_context(|| format!("Failed to read LDK Server cert at {}", cert_path.display()))?;
 
-    let api_key = if let Some(p) = &cfg.ldk_server.api_key_path {
-        let bytes = std::fs::read(p)
-            .with_context(|| format!("Failed to read api_key file {}", p))?;
-        bytes_to_lower_hex(&bytes)
-    } else {
-        ldk_config::resolve_api_key(None, ldk_cfg_ref)
-            .map_err(|e| anyhow::anyhow!(e))?
-            .ok_or_else(|| anyhow::anyhow!("Could not resolve LDK Server api_key"))?
-    };
+    if let Some(p) = &cfg.ldk_server.api_key_path {
+        warn!(
+            "[ldk_server] api_key_path = {} is ignored: LDK Server now uses macaroons (set macaroon_path, or config_path to use its admin.macaroon)",
+            p
+        );
+    }
+    let macaroon = resolve_ldk_macaroon(cfg.ldk_server.macaroon_path.as_deref(), ldk_cfg_ref)?;
 
-    let client = LdkServerClient::new(base_url.clone(), api_key, &cert_pem)
+    let client = LdkServerClient::new(base_url.clone(), macaroon, &cert_pem)
         .map_err(|e| anyhow::anyhow!("LdkServerClient::new failed: {}", e))?;
     Ok((client, base_url))
+}
+
+/// LDK Server's macaroon: the `macaroon_path` file if set, else `admin.macaroon` in LDK Server's storage dir.
+fn resolve_ldk_macaroon(macaroon_path: Option<&str>, ldk_cfg: Option<&ldk_config::Config>) -> Result<String> {
+    if let Some(p) = macaroon_path {
+        return read_macaroon_file(std::path::Path::new(p));
+    }
+    let default_path = ldk_config::resolve_macaroon_path(ldk_cfg).map_err(|e| anyhow::anyhow!(e))?;
+    ldk_config::resolve_macaroon(None, ldk_cfg).map_err(|e| anyhow::anyhow!(e))?.ok_or_else(|| match default_path {
+        Some(path) => anyhow::anyhow!(
+            "LDK Server macaroon not found at {} (start LDK Server once to create it, or set [ldk_server] macaroon_path)",
+            path.display()
+        ),
+        None => anyhow::anyhow!("Could not locate LDK Server's macaroon; set [ldk_server] macaroon_path or config_path"),
+    })
+}
+
+fn read_macaroon_file(path: &std::path::Path) -> Result<String> {
+    use std::io::Read;
+    // Hex doubles the size; the slack covers a trailing newline.
+    let limit = ldk_server_client::macaroon::MAX_MACAROON_BYTES * 2 + 16;
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("Failed to open LDK Server macaroon file {}", path.display()))?;
+    let mut raw = Vec::new();
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut raw)
+        .with_context(|| format!("Failed to read LDK Server macaroon file {}", path.display()))?;
+    if raw.len() > limit {
+        anyhow::bail!("LDK Server macaroon file {} is larger than {} bytes", path.display(), limit);
+    }
+    let token = std::str::from_utf8(&raw)
+        .map(str::trim)
+        .map_err(|_| anyhow::anyhow!("LDK Server macaroon file {} is not a hex macaroon (an old api_key file?)", path.display()))?;
+    ldk_server_client::macaroon::parse_reusable_macaroon(token)
+        .map_err(|e| anyhow::anyhow!("Invalid LDK Server macaroon in {}: {}", path.display(), e))?;
+    Ok(token.to_owned())
 }
 
 fn bytes_to_lower_hex(bytes: &[u8]) -> String {
@@ -567,7 +601,7 @@ mod tests {
         let db = Arc::new(Database::open(dir).unwrap());
         AppState {
             ldk_server: Arc::new(ldk_client::LdkClient::new(
-                LdkServerClient::new("localhost:1".into(), String::new(), &cert).unwrap(),
+                LdkServerClient::new("localhost:1".into(), test_macaroon(b"offline"), &cert).unwrap(),
             )),
             api_key: Arc::new(vec![0x42; API_KEY_LEN]),
             data_dir: dir.to_path_buf(),
@@ -643,5 +677,116 @@ mod tests {
         assert!(ensure_local_api_key(&cfg).is_err());
 
         assert!(!target.exists());
+    }
+
+    fn test_macaroon(id: &[u8]) -> String {
+        ldk_server_client::macaroon::Macaroon::mint(b"ldk server test root key", id).unwrap().to_hex()
+    }
+
+    fn ldk_config_with_storage(dir: &std::path::Path) -> ldk_config::Config {
+        let path = dir.join("ldk-server.toml");
+        let text = format!(
+            "[node]\nnetwork = \"regtest\"\ngrpc_service_address = \"127.0.0.1:3536\"\n[storage.disk]\ndir_path = \"{}\"\n",
+            dir.display()
+        );
+        std::fs::write(&path, text).unwrap();
+        ldk_config::load_config(&path).unwrap()
+    }
+
+    fn write_admin_macaroon(storage: &std::path::Path, contents: &str) -> PathBuf {
+        let path = storage.join("regtest").join("macaroons").join("admin.macaroon");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_config_still_naming_the_old_api_key_connects_with_ldk_servers_admin_macaroon() {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_dir = dir.path().join("ldk");
+        std::fs::create_dir_all(&ldk_dir).unwrap();
+        ldk_config_with_storage(&ldk_dir);
+        tls::get_or_generate_tls_config(None, ldk_dir.to_str().unwrap()).unwrap();
+        write_admin_macaroon(&ldk_dir, &test_macaroon(b"admin"));
+        let old_key = ldk_dir.join("regtest").join("api_key");
+        std::fs::write(&old_key, [0x42u8; 32]).unwrap();
+        let mut cfg = config_with_storage(&dir.path().join("sc"));
+        cfg.ldk_server.config_path = Some(ldk_dir.join("ldk-server.toml").to_str().unwrap().to_owned());
+        cfg.ldk_server.api_key_path = Some(old_key.to_str().unwrap().to_owned());
+
+        let (_, base_url) = build_ldk_server_client(&cfg).unwrap();
+
+        assert_eq!(base_url, "127.0.0.1:3536");
+    }
+
+    #[test]
+    fn the_ldk_server_macaroon_comes_from_macaroon_path_with_its_newline_trimmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = test_macaroon(b"sc-daemon");
+        let path = dir.path().join("sc-daemon.macaroon");
+        std::fs::write(&path, format!("{token}\n")).unwrap();
+
+        let resolved = resolve_ldk_macaroon(Some(path.to_str().unwrap()), None).unwrap();
+
+        assert_eq!(resolved, token);
+    }
+
+    #[test]
+    fn without_macaroon_path_the_admin_macaroon_in_ldk_servers_storage_dir_is_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let admin = test_macaroon(b"admin");
+        write_admin_macaroon(dir.path(), &format!("{admin}\n"));
+
+        assert_eq!(resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap(), admin);
+
+        let scoped = test_macaroon(b"scoped");
+        let scoped_path = dir.path().join("scoped.macaroon");
+        std::fs::write(&scoped_path, &scoped).unwrap();
+        let resolved = resolve_ldk_macaroon(Some(scoped_path.to_str().unwrap()), Some(&ldk_cfg)).unwrap();
+        assert_eq!(resolved, scoped, "macaroon_path wins over LDK Server's admin.macaroon");
+    }
+
+    #[test]
+    fn a_missing_admin_macaroon_stops_startup_and_names_where_it_looked() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let expected = dir.path().join("regtest").join("macaroons").join("admin.macaroon");
+
+        let error = resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap_err().to_string();
+
+        assert!(error.contains(&expected.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn an_old_api_key_file_is_not_accepted_as_a_macaroon() {
+        let dir = tempfile::tempdir().unwrap();
+        let ldk_cfg = ldk_config_with_storage(dir.path());
+        let old_key = dir.path().join("regtest").join("api_key");
+        std::fs::create_dir_all(old_key.parent().unwrap()).unwrap();
+        for raw in [vec![0xdeu8; 32], vec![0x42u8; 32]] {
+            std::fs::write(&old_key, &raw).unwrap();
+
+            let error = resolve_ldk_macaroon(Some(old_key.to_str().unwrap()), Some(&ldk_cfg))
+                .unwrap_err()
+                .to_string();
+
+            assert!(error.contains(&old_key.display().to_string()), "{error}");
+        }
+        let admin_path = write_admin_macaroon(dir.path(), "4242");
+        let error = resolve_ldk_macaroon(None, Some(&ldk_cfg)).unwrap_err().to_string();
+        assert!(error.contains(&admin_path.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn an_oversized_macaroon_file_is_refused_before_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.macaroon");
+        std::fs::write(&path, "a".repeat(ldk_server_client::macaroon::MAX_MACAROON_BYTES * 2 + 17)).unwrap();
+
+        let error = resolve_ldk_macaroon(Some(path.to_str().unwrap()), None).unwrap_err().to_string();
+
+        assert!(error.contains("larger than"), "{error}");
     }
 }

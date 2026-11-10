@@ -49,7 +49,7 @@ channels.
 
 ### Detailed forwarded-payment history and version compatibility
 
-LDK Server at `bd95e187b0c08b3fb90fc42a96f0f8a2b6773495` defaults to
+LDK Server at `aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3` defaults to
 `forwarded_payment_tracking_mode = "stats"`. SC's missed-forward reconstruction
 needs `"detailed"` under `[node]`; stats totals cannot reconstruct individual
 forwards. Detailed history has a limited retention window (about two hours).
@@ -61,7 +61,7 @@ the hook/package, or restarting an old cached image, does **not** enable detaile
 history. Do not manually add this field to an old pinned installation.
 
 The capability gate is **inside the new image**, not a tag, environment flag or
-guess about `latest`: `Dockerfile.ldk-server` builds the fixed `bd95e187` revision
+guess about `latest`: `Dockerfile.ldk-server` builds the fixed `aa2d60f5` revision
 and installs `ldk-server-entrypoint.py`. Before starting LDK, that entrypoint:
 
 - Validates the complete UTF-8 TOML, and inserts the missing key into `[node]`
@@ -72,7 +72,7 @@ and installs `ldk-server-entrypoint.py`. Before starting LDK, that entrypoint:
   Keeping `"stats"` intentionally leaves individual-forward recovery unavailable.
 - Atomically replaces only that config file, preserving its owner, group, mode
   and extended attributes/ACLs. Repeated starts do not rewrite an explicit value.
-  No seed, wallet/channel database, TLS material or API key is migrated.
+  No seed, wallet/channel database, TLS material or macaroon is migrated.
 - Refuses invalid or unsafe-to-edit layouts, symlinks/hardlinks, and failures to
   write or preserve metadata. LDK is **not started**; the source is left intact
   and logs give a manual migration path without printing configuration values.
@@ -103,6 +103,26 @@ data and review upstream state-format compatibility. An older LDK will reject
 even an explicit `"stats"` field: remove **only this config field** after that
 review, or restore the pre-upgrade config while retaining current channel data.
 Never restore stale channel state as a way to undo a config migration.
+
+### LDK Server macaroons
+
+From `aa2d60f5`, LDK Server authenticates gRPC with macaroons instead of an API
+key. On its first start it writes `/data/ldk-server/<network>/macaroons/admin.macaroon`
+(mode 0400) and the root keys under `macaroons/roots/`. sc-lsp runs as the same
+UID `1000` and reads `admin.macaroon` through its read-only `/data/ldk-server` mount.
+
+New installs get `macaroon_path` from `hooks/pre-start`. Older `sc-lsp.toml` files
+keep their `api_key_path` line, because the hook preserves operator edits. The
+rebuilt daemon ignores that line, logs a warning, and finds `admin.macaroon`
+through `config_path`. The currently pinned `5f631bd` daemon ignores the new
+`macaroon_path` key and still finds the old API key through `config_path`.
+
+Mixed images do not work: a rebuilt SC daemon cannot start against an LDK image
+from before `aa2d60f5` (there is no `admin.macaroon`), and an older SC daemon is
+refused by a rebuilt LDK image. Bump all image digests in one release. Back up
+`macaroons/` with the rest of the LDK data: deleting `roots/` invalidates every
+macaroon, and LDK Server then creates a new admin macaroon. sc-lsp reads the
+macaroon only at startup, so restart it after LDK Server replaces the file.
 
 ## Local community-store test
 

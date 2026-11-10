@@ -17,10 +17,10 @@ flowchart TD
         Local --> SCData[("sqlite + price feed<br/>+ audit log")]
     end
 
-    Grpc -->|"gRPC over TLS :3536<br/>protobuf body<br/>X-Auth = HMAC(LDK Server api_key, body)"| LDKVerify
+    Grpc -->|"gRPC over TLS :3536<br/>protobuf body<br/>macaroon header (bound to method + body)"| LDKVerify
 
     subgraph LDK ["LDK Server (vanilla, no SC code)"]
-        LDKVerify{"HMAC verify<br/>LDK Server api_key"} --> LDKDispatch["gRPC service<br/>dispatch"]
+        LDKVerify{"Macaroon verify<br/>LDK Server root keys"} --> LDKDispatch["gRPC service<br/>dispatch"]
         LDKDispatch --> Node["LDK Node<br/>(channels, payments,<br/>graph, peer manager)"]
         LDKDispatch --> Bdk["BDK on-chain wallet"]
         LDKDispatch --> Lsps2["LSPS2 service<br/>(JIT channels)"]
@@ -50,19 +50,19 @@ Each connection (client → SC daemon, *and* SC daemon → LDK Server) is secure
 | Item | Role |
 |---|---|
 | **API URL** | Where the listener is (`https://127.0.0.1:3002` for the SC daemon, `127.0.0.1:3536` for LDK Server gRPC). |
-| **api_key** | 32-byte shared secret. Used as the key in `HMAC-SHA256(api_key, request_body)`. The resulting HMAC goes in the `X-Auth` header on every request. **The key itself never travels on the wire after provisioning.** This is what authenticates the **client to the server**. |
+| **Client credential** | Hop 1 (SC daemon): a 32-byte api_key, used as the key in `HMAC-SHA256(api_key, request_body)`; the HMAC goes in the `X-Auth` header. Hop 2 (LDK Server): a macaroon; for every request the client adds a caveat binding a copy to the RPC method, body hash and time, and sends that copy in the `macaroon` header. **Neither secret travels on the wire after provisioning.** This is what authenticates the **client to the server**. |
 | **TLS certificate** | The server's self-signed cert, **pinned** by the client. Authenticates the **server to the client** and encrypts the channel. |
 
-So three jobs, three mechanisms: HMAC proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
+So three jobs, three mechanisms: the HMAC or bound macaroon proves who's calling, cert pinning proves who's answering, TLS encrypts the bytes in between.
 
-The two hops use **independent pairs** of (api_key, TLS cert):
+The two hops use **independent pairs** of (credential, TLS cert):
 
 - Hop 1 (client → SC daemon): the SC daemon's api_key + the SC daemon's TLS cert.
-- Hop 2 (SC daemon → LDK Server): **LDK Server's own** api_key + **LDK Server's own** TLS cert.
+- Hop 2 (SC daemon → LDK Server): **LDK Server's own** macaroon + **LDK Server's own** TLS cert.
 
-A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on the operator GUI host, anywhere) gives the attacker access only to the SC daemon, not to LDK Server, because LDK Server only trusts its own key. Symmetrically, leaking LDK Server's key (e.g., off the host running both daemons) reveals nothing about any wallet's traffic.
+A leak on either hop is contained. A leaked SC daemon api_key (on a wallet, on the operator GUI host, anywhere) gives the attacker access only to the SC daemon, not to LDK Server, because LDK Server only trusts its own macaroons. Symmetrically, a leaked LDK Server macaroon (e.g., off the host running both daemons) gives no access to the SC daemon's REST API, though an admin macaroon can read every channel and payment on the node, wallets' node ids included, and can move funds.
 
-**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the api_key file and TLS cert paths from it, and loads both into memory. Both daemons therefore need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
+**How the SC daemon obtains LDK Server's secrets**: at startup the SC daemon reads LDK Server's own config file (path set in `sc-config.toml` under `[ldk_server] config_path`), derives the TLS cert path and `<storage>/<network>/macaroons/admin.macaroon` from it, and loads both into memory. `[ldk_server] macaroon_path` points it at a different macaroon instead. A macaroon without a permission breaks whatever needs it: the daemon's own stability, SYNC and refund keysends, message signing and verification, channel and payment reads and the event stream, and also the operator GUI's actions, which go through the daemon's proxy routes. The daemon reads the macaroon only at startup, so restart it after replacing the file. Both daemons need read access to a shared filesystem, usually the same host (Umbrel, VM, etc.). To split them across hosts, those two files have to be shipped over a separate secure channel, or the transport upgraded to mTLS.
 
 ## Crates
 
@@ -93,7 +93,7 @@ The GUI is a Dioxus app with two targets that share one codebase and stylesheet 
 ```bash
 git clone https://github.com/toneloc/stable-channels.git
 git clone https://github.com/lightningdevkit/ldk-server.git
-git -C ldk-server checkout bd95e187b0c08b3fb90fc42a96f0f8a2b6773495
+git -C ldk-server checkout aa2d60f51ebacc7edd5dbdfb90b53a9c73ee0bd3
 ```
 
 They can live anywhere on disk in any layout. Cargo pulls `ldk-server-client` from upstream at a pinned rev, so no sibling-directory requirement. Run LDK Server at that same rev (the `ldk-server-client` rev in `server/stable-channels-lsp/Cargo.toml`): the daemon and LDK Server must speak the same protobuf format.
@@ -120,7 +120,7 @@ min_payment_size_msat        = 1000000
 proxy_address = "127.0.0.1:9050"
 ```
 
-This field requires the pinned `bd95e187` LDK Server above; older Umbrel-pinned
+This field requires the pinned `aa2d60f5` LDK Server above; older Umbrel-pinned
 images reject it. Upgrade LDK Server and the SC daemon/client in lockstep and
 back up current configs and node data before changing versions. On rebuilt
 Umbrel images, the LDK image's entrypoint adds the key only if absent, preserving
@@ -160,7 +160,7 @@ network = "signet"
 config_path = "/absolute/path/to/ldk-server/contrib/ldk-server-config.toml"
 ```
 
-`config_path` is how the SC daemon discovers LDK Server's TLS cert and api_key.
+`config_path` is how the SC daemon discovers LDK Server's TLS cert and admin macaroon. LDK Server creates `admin.macaroon` on its first start, so start it before the daemon.
 
 For push notifications, add an optional `[push]` section with `apns_*` and `fcm_service_account_path` fields. Each is optional. Missing credentials disable that sender and log a warning at startup, but `RegisterPush` keeps working. See `server/stable-channels-lsp/example-config.toml` for the full schema.
 

@@ -51,7 +51,7 @@ services:
     volumes:
       - ${APP_DATA_DIR}/data/config:/etc/sc-lsp:ro
       - ${APP_DATA_DIR}/data/sc-lsp:/data/stable-channels-lsp
-      # Read ldk-server's auto-generated tls.crt + api_key for its gRPC.
+      # Read ldk-server's auto-generated tls.crt + admin.macaroon for its gRPC.
       - ${APP_DATA_DIR}/data/ldk-server:/data/ldk-server:ro
 
   gui:

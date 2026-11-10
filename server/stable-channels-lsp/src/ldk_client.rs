@@ -33,6 +33,7 @@ impl LdkClient {
 
 /// Whether asking again may get another answer: LDK Server timed out, wasn't reached or failed inside, rather than refusing the call.
 pub(crate) fn unanswered(error: &LdkServerError) -> bool {
+    // A missing macaroon permission (AuthorizationError) says nothing about the request, so a trade is held and retried, then dropped with a record, rather than decided.
     !matches!(
         error.error_code,
         LdkServerErrorCode::LightningError | LdkServerErrorCode::InvalidRequestError | LdkServerErrorCode::AuthError
@@ -124,7 +125,8 @@ mod tests {
         let storage = tempfile::tempdir().unwrap();
         crate::tls::get_or_generate_tls_config(None, storage.path().to_str().unwrap()).unwrap();
         let cert = std::fs::read(storage.path().join("tls.crt")).unwrap();
-        LdkClient::with_limit(LdkServerClient::new(address, "00".repeat(32), &cert).unwrap(), limit)
+        let macaroon = ldk_server_client::macaroon::Macaroon::mint(b"ldk server test root key", b"timeouts").unwrap().to_hex();
+        LdkClient::with_limit(LdkServerClient::new(address, macaroon, &cert).unwrap(), limit)
     }
 
     #[tokio::test]
@@ -162,6 +164,14 @@ mod tests {
         assert!(unanswered(&error), "a timeout must not count as a node refusal");
         assert!(error.message.contains("splice_in"), "{}", error.message);
         assert!(accepted.load(Ordering::SeqCst) >= 1, "the call reached the server and waited there");
+    }
+
+    #[test]
+    fn a_missing_macaroon_permission_is_retried_rather_than_taken_as_a_refusal() {
+        let denied = LdkServerError::new(LdkServerErrorCode::AuthorizationError, "macaroon requires permission: messages:verify");
+        assert!(unanswered(&denied), "fixing the macaroon changes the answer");
+        let refused = LdkServerError::new(LdkServerErrorCode::LightningError, "no route");
+        assert!(!unanswered(&refused));
     }
 
     #[tokio::test]
