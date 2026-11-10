@@ -127,15 +127,18 @@ pub struct RouteState {
     budgets: Mutex<Budgets>,
     // Nodes with a lookup running.
     lookups: Mutex<HashSet<String>>,
+    // Test hook: the next ledger read waits here, so a test can hold one in progress.
+    #[cfg(test)]
+    read_gate: Mutex<Option<tests::ReadGate>>,
 }
 
-/// Marks a node's lookup as running until dropped, also when its request is cancelled.
-struct Lookup<'a> {
-    route: &'a RouteState,
+/// Marks a node's lookup as running until dropped; it moves into the ledger read, so a cancelled request keeps it until the read ends.
+struct Lookup {
+    route: Arc<RouteState>,
     node_id: String,
 }
 
-impl Drop for Lookup<'_> {
+impl Drop for Lookup {
     fn drop(&mut self) {
         self.route.lookups.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.node_id);
     }
@@ -199,9 +202,9 @@ impl RouteState {
     }
 
     /// Start a lookup for a node; None while another one for the same node is running.
-    fn start_lookup(&self, node_id: &str) -> Option<Lookup<'_>> {
+    fn start_lookup(self: &Arc<Self>, node_id: &str) -> Option<Lookup> {
         let started = self.lookups.lock().unwrap_or_else(PoisonError::into_inner).insert(node_id.to_string());
-        started.then(|| Lookup { route: self, node_id: node_id.to_string() })
+        started.then(|| Lookup { route: Arc::clone(self), node_id: node_id.to_string() })
     }
 
     /// Whether a node already spent its budget for this window; counts nothing.
@@ -220,6 +223,15 @@ impl RouteState {
             budgets.pruned_at = now;
         }
         budgets.windows.entry(node_id.to_string()).or_default().allow(now)
+    }
+
+    #[cfg(test)]
+    fn wait_at_read_gate(&self) {
+        let gate = self.read_gate.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(gate) = gate {
+            let _ = gate.reached.send(());
+            let _ = gate.open.recv_timeout(Duration::from_secs(5));
+        }
     }
 }
 
@@ -315,6 +327,11 @@ fn node_channels<'a>(db: &Database, live_all: &'a [Channel], node_id: &'a str, m
     Ok(NodeChannels { node_id, live, foreign, known, ids })
 }
 
+/// Whether a user_channel_id is a random 128-bit value, which no other channel shares; one below 2^64 was not drawn at random (an old LDK left inbound channels at 0).
+fn drawn_at_random(uid: &str) -> bool {
+    uid.parse::<u128>().is_ok_and(|id| id > u128::from(u64::MAX))
+}
+
 /// Every funding outpoint of the node's channels, open ones first, then newest first.
 fn funding_outpoints_of(db: &Database, channels: &NodeChannels) -> rusqlite::Result<Vec<FundingOutpoint>> {
     let names = |row: &LedgerChannelRow| row.counterparty_node_id.as_deref().map(|n| n.eq_ignore_ascii_case(channels.node_id));
@@ -325,8 +342,10 @@ fn funding_outpoints_of(db: &Database, channels: &NodeChannels) -> rusqlite::Res
             .into_iter()
             .filter(|row| row.user_channel_id.as_deref() == Some(uid.as_str()))
             .collect();
-        // Another node's channel with the same user_channel_id: then only rows naming this node can be attributed.
-        let shared = channels.foreign.contains(uid.as_str()) || rows.iter().any(|row| names(row) == Some(false));
+        // Another node's channel may use the same user_channel_id: then only rows naming this node can be attributed.
+        let shared = !drawn_at_random(uid)
+            || channels.foreign.contains(uid.as_str())
+            || rows.iter().any(|row| names(row) == Some(false));
         let mut outputs = ChannelOutputs::default();
         for row in rows {
             match names(&row) {
@@ -392,7 +411,7 @@ fn refuse(status: StatusCode, error: &str) -> (StatusCode, Value) {
 pub async fn answer<L: LdkServerCalls + 'static>(
     ldk: &Arc<L>,
     db: &Database,
-    route: &RouteState,
+    route: &Arc<RouteState>,
     body: &[u8],
     now: u64,
 ) -> (StatusCode, Value) {
@@ -422,7 +441,7 @@ pub async fn answer<L: LdkServerCalls + 'static>(
     // The node signs the id exactly as it sends it; lookups use the lowercase form LDK records.
     let node_id = req.node_id.to_ascii_lowercase();
     // One lookup per node at a time, held until the request is counted, so copies sent together can't each read the ledger.
-    let Some(_lookup) = route.start_lookup(&node_id) else {
+    let Some(lookup) = route.start_lookup(&node_id) else {
         return refuse(StatusCode::TOO_MANY_REQUESTS, "lookup already running");
     };
     // Refused before any read, so a node past its budget costs only the signature check.
@@ -432,23 +451,35 @@ pub async fn answer<L: LdkServerCalls + 'static>(
     let Some(live) = route.channels(ldk.clone()).await else {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "LDK Server unavailable");
     };
-    let found = node_channels(db, &live, &node_id, MAX_LINK_ROWS).and_then(|channels| {
-        // A node with no channel record needs no budget; any record, a failed open included, gets one.
-        if channels.known && !route.allow(&node_id, now) {
-            return Ok(None);
-        }
-        funding_outpoints_of(db, &channels).map(Some)
-    });
+    let (db, route, read_node_id) = (db.clone(), Arc::clone(route), node_id.clone());
+    // On a blocking thread, so SQLite and the database lock never hold a runtime worker; the guard goes along until the read ends.
+    let found = tokio::task::spawn_blocking(move || {
+        let _lookup = lookup;
+        #[cfg(test)]
+        route.wait_at_read_gate();
+        node_channels(&db, &live, &read_node_id, MAX_LINK_ROWS).and_then(|channels| {
+            // A node with no channel record needs no budget; any record, a failed open included, gets one.
+            if channels.known && !route.allow(&read_node_id, now) {
+                return Ok(None);
+            }
+            funding_outpoints_of(&db, &channels).map(Some)
+        })
+    })
+    .await;
     match found {
-        Ok(Some(outpoints)) => {
+        Ok(Ok(Some(outpoints))) => {
             if !outpoints.is_empty() {
                 tracing::info!("[funding-outpoints] {} outpoint(s) for {}", outpoints.len(), node_id);
             }
             (StatusCode::OK, json!({ "funding_outpoints": outpoints }))
         },
-        Ok(None) => refuse(StatusCode::TOO_MANY_REQUESTS, "rate limited"),
-        Err(e) => {
+        Ok(Ok(None)) => refuse(StatusCode::TOO_MANY_REQUESTS, "rate limited"),
+        Ok(Err(e)) => {
             tracing::error!("[funding-outpoints] ledger read failed: {}", e);
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "ledger unavailable")
+        },
+        Err(e) => {
+            tracing::error!("[funding-outpoints] ledger read task failed: {}", e);
             refuse(StatusCode::SERVICE_UNAVAILABLE, "ledger unavailable")
         },
     }
@@ -549,6 +580,16 @@ mod tests {
 
     fn splice_locked(db: &Database, uid: &str, txo: &str, at_ms: i64) {
         record(db, "CHANNEL_READY_SPLICE", at_ms, serde_json::json!({"user_channel_id": uid, "funding_txo": txo}));
+    }
+
+    #[test]
+    fn a_random_ids_splice_known_only_from_its_lock_row_is_returned() {
+        let (_dir, db) = fresh_db();
+        opened(&db, ALICE, ALICE_UID, &format!("{TX_OPEN}:0"), 1_000);
+        // Negotiated during a stream gap, so the lock row, which names no counterparty, is its only record.
+        splice_locked(&db, ALICE_UID, &format!("{TX_SPLICE}:1"), 2_000);
+        let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
+        assert_eq!(found, [outpoint(0, TX_SPLICE, Some(1), "closed"), outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
     #[test]
@@ -665,6 +706,25 @@ mod tests {
         }));
         opened(&db, BOB, "0", &format!("{TX_BOB}:0"), 1_000);
         assert!(collect_funding_outpoints(&db, &[], ALICE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unnamed_row_of_another_channel_with_a_non_random_id_is_never_returned() {
+        let (_dir, db) = fresh_db();
+        // Bob's channel left only a row naming no counterparty, and an old LDK gave both channels id 0.
+        record(&db, "CHANNEL_READY_TRACKED", 1_000, serde_json::json!({"user_channel_id": "0", "funding_txo": format!("{TX_BOB}:0")}));
+        opened(&db, ALICE, "0", &format!("{TX_OPEN}:0"), 2_000);
+        let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
+    }
+
+    #[test]
+    fn only_a_random_128_bit_user_channel_id_counts_as_unshared() {
+        assert!(drawn_at_random(ALICE_UID));
+        assert!(drawn_at_random(&u128::MAX.to_string()));
+        for id in ["0", "7", &u64::MAX.to_string(), "", "abc", "-1"] {
+            assert!(!drawn_at_random(id), "{id}");
+        }
     }
 
     #[test]
@@ -961,10 +1021,72 @@ mod tests {
         request(node_id, NOW, "d9o8ftxzs3ggfpzwfkqbjzb7rsh1bs5wb5oy9ji8ayahbqzr6rksi4ff4jcb94mgfujbhp3e6z86qucb9mt1iw4cdw7aqyw4bksfb5r")
     }
 
-    fn route() -> RouteState {
-        let route = RouteState::default();
+    fn route() -> Arc<RouteState> {
+        let route = Arc::new(RouteState::default());
         route.remember_lsp_node_id(LSP);
         route
+    }
+
+    /// Holds the next ledger read at its start: `reached` fires when it gets there, and a send on `open` lets it go on.
+    pub(super) struct ReadGate {
+        pub(super) reached: tokio::sync::oneshot::Sender<()>,
+        pub(super) open: std::sync::mpsc::Receiver<()>,
+    }
+
+    fn hold_next_read(route: &RouteState) -> (tokio::sync::oneshot::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (reached, reached_rx) = tokio::sync::oneshot::channel();
+        let (open_tx, open) = std::sync::mpsc::channel();
+        *route.read_gate.lock().unwrap() = Some(ReadGate { reached, open });
+        (reached_rx, open_tx)
+    }
+
+    #[tokio::test]
+    async fn a_ledger_read_waiting_on_the_database_does_not_hold_the_runtime() {
+        let (_dir, db) = fresh_db();
+        let (secret, node) = wallet(0x55);
+        opened(&db, &node, ALICE_UID, &format!("{TX_OPEN}:1"), 1_000);
+        let (ldk, route) = (Arc::new(FakeLdk::new(vec![])), route());
+        let (reached, open) = hold_next_read(&route);
+        let body = signed(&secret, &node, LSP, NOW);
+        let started = std::time::Instant::now();
+        // While the read is held, a timer on this single-threaded runtime still fires, then lets the read go on.
+        let other_work = async {
+            tokio::time::timeout(Duration::from_secs(5), reached).await.expect("the read was never reached").unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            open.send(()).unwrap();
+        };
+        let (reply, ()) = tokio::join!(answer(&ldk, &db, &route, &body, NOW), other_work);
+        assert_eq!(reply.0, StatusCode::OK);
+        assert!(started.elapsed() < Duration::from_secs(2), "the read held the runtime for {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_keeps_its_node_lookup_until_the_ledger_read_ends() {
+        let (_dir, db) = fresh_db();
+        let (secret, node) = wallet(0x66);
+        opened(&db, &node, ALICE_UID, &format!("{TX_OPEN}:1"), 1_000);
+        let (ldk, route) = (Arc::new(FakeLdk::new(vec![])), route());
+        let (reached, open) = hold_next_read(&route);
+        let body = signed(&secret, &node, LSP, NOW);
+        let request = tokio::spawn({
+            let (ldk, db, route, body) = (Arc::clone(&ldk), db.clone(), Arc::clone(&route), body.clone());
+            async move { answer(&ldk, &db, &route, &body, NOW).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), reached).await.expect("the read was never reached").unwrap();
+        // The client goes away while its read is running.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        let copy = answer(&ldk, &db, &route, &body, NOW).await;
+        assert_eq!((copy.0, copy.1["error"].as_str()), (StatusCode::TOO_MANY_REQUESTS, Some("lookup already running")));
+        open.send(()).unwrap();
+        // Freed once the read ends.
+        for _ in 0..200 {
+            if route.lookups.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(answer(&ldk, &db, &route, &body, NOW).await.0, StatusCode::OK);
     }
 
     #[tokio::test]
@@ -1017,7 +1139,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         let (secret, node) = wallet(0x11);
         let ldk = Arc::new(FakeLdk::new(vec![]));
-        let empty = RouteState::default();
+        let empty = Arc::new(RouteState::default());
         assert_eq!(answer(&ldk, &db, &empty, &signed(&secret, &node, LSP, NOW - 301), NOW).await.0, StatusCode::UNAUTHORIZED);
         let ahead = signed(&secret, &node, LSP, NOW + 301);
         assert_eq!(answer(&ldk, &db, &empty, &ahead, NOW).await.0, StatusCode::UNAUTHORIZED, "a timestamp too far ahead too");
@@ -1028,7 +1150,7 @@ mod tests {
     async fn malformed_requests_are_refused_before_any_ldk_server_call() {
         let (_dir, db) = fresh_db();
         let ldk = Arc::new(FakeLdk::new(vec![]));
-        let empty = RouteState::default();
+        let empty = Arc::new(RouteState::default());
         let off_curve = format!("02{}", "ff".repeat(32));
         let too_long = request(&wallet(0x11).1, NOW, &"y".repeat(151));
         assert_eq!(answer(&ldk, &db, &empty, b"{\"node_id\":", NOW).await.0, StatusCode::BAD_REQUEST);
@@ -1217,7 +1339,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         let (secret, node) = wallet(0x33);
         let ldk = Arc::new(FakeLdk { node_id: Some(LSP.to_ascii_uppercase()), ..FakeLdk::new(vec![]) });
-        let route = RouteState::default();
+        let route = Arc::new(RouteState::default());
         assert_eq!(answer(&ldk, &db, &route, &signed(&secret, &node, LSP, NOW), NOW).await.0, StatusCode::OK);
         assert_eq!(route.lsp_node_id.get().unwrap(), LSP);
     }
@@ -1227,7 +1349,7 @@ mod tests {
         let (_dir, db) = fresh_db();
         let (secret, node) = wallet(0x33);
         let ldk = Arc::new(FakeLdk { node_id: None, ..FakeLdk::new(vec![]) });
-        let route = RouteState::default();
+        let route = Arc::new(RouteState::default());
         for at in [NOW, NOW + 9] {
             assert_eq!(answer(&ldk, &db, &route, &signed(&secret, &node, LSP, at), at).await.0, StatusCode::SERVICE_UNAVAILABLE);
         }
@@ -1238,7 +1360,7 @@ mod tests {
 
     #[test]
     fn the_lsp_node_id_is_kept_lowercase_and_an_empty_one_is_ignored() {
-        let route = RouteState::default();
+        let route = Arc::new(RouteState::default());
         route.remember_lsp_node_id("");
         assert!(route.lsp_node_id.get().is_none());
         route.remember_lsp_node_id(&LSP.to_ascii_uppercase());
