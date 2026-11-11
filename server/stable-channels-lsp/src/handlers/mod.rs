@@ -7,6 +7,7 @@ pub mod channels;
 pub mod graph;
 pub mod ldk_log;
 pub mod lightning;
+pub mod onboarding_swap;
 pub mod onchain;
 pub mod payments;
 pub mod peers;
