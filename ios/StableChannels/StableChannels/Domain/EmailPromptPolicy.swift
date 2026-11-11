@@ -2,14 +2,21 @@ import Foundation
 
 /// Decides when Home offers the email prompt: to anyone who has opened the wallet a few times, funded or
 /// not. Save or "Not now" ends it; a sheet swiped away comes back after three times as many launches
-/// (3, 9, 27 for a new user), at most `maxShows` times.
+/// (3, 9, 27 for a new user), at most `maxShows` times. Never while the app is locked: the sheet would draw above the
+/// lock.
 enum EmailPromptPolicy {
     static let firstLaunch = 3
     static let launchGrowth = 3
     static let maxShows = 3
 
-    static func shouldShow(launches: Int, timesShown: Int, lastShownLaunch: Int, hasResponded: Bool) -> Bool {
-        guard !hasResponded, timesShown < maxShows else { return false }
+    static func shouldShow(
+        launches: Int,
+        timesShown: Int,
+        lastShownLaunch: Int,
+        hasResponded: Bool,
+        isAppLocked: Bool
+    ) -> Bool {
+        guard !hasResponded, !isAppLocked, timesShown < maxShows else { return false }
         return launches >= max(firstLaunch, lastShownLaunch * launchGrowth)
     }
 }

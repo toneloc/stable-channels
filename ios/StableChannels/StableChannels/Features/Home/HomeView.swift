@@ -132,7 +132,8 @@ struct HomeView: View {
                 launches: emailPromptStore.launches,
                 timesShown: emailPromptStore.timesShown,
                 lastShownLaunch: emailPromptStore.lastShownLaunch,
-                hasResponded: emailPromptStore.hasResponded
+                hasResponded: emailPromptStore.hasResponded,
+                isAppLocked: !appState.isUnlocked && UserDefaults.standard.bool(forKey: Constants.appUnlockEnabledKey)
             ) else { return }
             emailPromptStore.recordShown()
             showEmailPrompt = true
