@@ -3,6 +3,7 @@ mod backfill;
 mod channel_audit;
 mod channel_close;
 mod config;
+mod emails;
 mod event_loop;
 mod geoip;
 mod handlers;
@@ -152,6 +153,7 @@ async fn main() -> Result<()> {
         db: db_arc,
         push: Arc::new(tokio::sync::Mutex::new(push_service)),
         push_registrations: Arc::new(crate::push::registrations::Registrations::new(&data_dir)),
+        emails: crate::emails::Emails::open_or_off(&data_dir),
         stable_manager: Arc::new(tokio::sync::Mutex::new(stable_manager)),
         geoip: geoip::load(cfg.geoip.country_db.as_deref()),
         geoip_record_ips: cfg.geoip.record_ips.unwrap_or(cfg.geoip.country_db.is_some()),
@@ -297,7 +299,12 @@ async fn main() -> Result<()> {
             "/api/channel-exists",
             post(handlers::channel_exists::channel_exists),
         )
-        // Defense-in-depth body cap covering every route, including the two unsigned endpoints
+        // Optional wallet email: proven by a node-key signature, not HMAC, so wallets with no channel can share one.
+        .route(
+            "/api/register-email",
+            post(handlers::register_email::register_email),
+        )
+        // Defense-in-depth body cap covering every route, including the wallet endpoints
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())

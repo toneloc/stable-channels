@@ -26,6 +26,8 @@ pub struct AppState {
     pub push: Arc<Mutex<PushService>>,
     /// Wallet push registrations, stored only for nodes with a channel; kept apart from `push` so registrations and the tick never wait on a send.
     pub push_registrations: Arc<crate::push::registrations::Registrations>,
+    /// Optional emails wallets shared, keyed by node id; None when emails.db could not be opened.
+    pub emails: Option<Arc<crate::emails::Emails>>,
     /// In-memory + sqlite-backed stable channel manager.
     pub stable_manager: Arc<Mutex<StableChannelManager>>,
     /// Offline IP-to-country lookup for stable counterparties' connection history.
