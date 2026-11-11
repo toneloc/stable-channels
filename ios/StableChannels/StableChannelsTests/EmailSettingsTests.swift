@@ -365,19 +365,25 @@ final class EmailPromptPolicyTests: XCTestCase {
         )
     }
 
-    func testShows_onLaunches3_9_27_whenSwipedAway() {
+    // Gaps of 3, 9 and 27 launches between showings: launches 3, 12 and 39, then the loop repeats.
+    func testShows_afterGapsOf3_9_27_thenRepeats() {
         XCTAssertFalse(shows(2))
         XCTAssertTrue(shows(3))
-        XCTAssertFalse(shows(8, shown: 1, lastShown: 3))
-        XCTAssertTrue(shows(9, shown: 1, lastShown: 3))
-        XCTAssertFalse(shows(26, shown: 2, lastShown: 9))
-        XCTAssertTrue(shows(27, shown: 2, lastShown: 9))
-        XCTAssertFalse(shows(1000, shown: 3, lastShown: 27))
+        XCTAssertFalse(shows(11, shown: 1, lastShown: 3))
+        XCTAssertTrue(shows(12, shown: 1, lastShown: 3))
+        XCTAssertFalse(shows(38, shown: 2, lastShown: 12))
+        XCTAssertTrue(shows(39, shown: 2, lastShown: 12))
+        XCTAssertFalse(shows(41, shown: 3, lastShown: 39))
+        XCTAssertTrue(shows(42, shown: 3, lastShown: 39))
+        XCTAssertFalse(shows(50, shown: 4, lastShown: 42))
+        XCTAssertTrue(shows(51, shown: 4, lastShown: 42))
+        XCTAssertTrue(shows(78, shown: 5, lastShown: 51))
     }
 
-    func testLateFirstShow_waitsThreeTimesAsLong() {
-        XCTAssertFalse(shows(21, shown: 1, lastShown: 20))
-        XCTAssertTrue(shows(60, shown: 1, lastShown: 20))
+    // A showing that was held back (app locked, another sheet open) starts its gap from when it did show.
+    func testDelayedShow_countsTheNextGapFromWhenItShowed() {
+        XCTAssertFalse(shows(28, shown: 1, lastShown: 20))
+        XCTAssertTrue(shows(29, shown: 1, lastShown: 20))
     }
 
     func testNeverShows_afterAnswer() {
