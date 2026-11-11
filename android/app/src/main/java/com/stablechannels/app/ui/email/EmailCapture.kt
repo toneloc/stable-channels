@@ -47,6 +47,8 @@ import com.stablechannels.app.services.NodeService
 import com.stablechannels.app.services.NodeServiceSigner
 import com.stablechannels.app.ui.theme.LocalSemanticColors
 import com.stablechannels.app.util.Constants
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /** Form state for the optional email, shared by the Home prompt and Settings > Email. */
 class EmailSettingsModel(
@@ -128,12 +130,15 @@ class EmailSettingsModel(
             status = Status.FAILED
             return
         }
-        savedStore.savedEmail = email
-        savedEmail = email
-        isChanging = false
-        if (email == null) input = ""
-        status = Status.SAVED
-        onSaved()
+        // The server already holds the change, so finish recording it even if the sheet closes now.
+        withContext(NonCancellable) {
+            savedStore.savedEmail = email
+            savedEmail = email
+            isChanging = false
+            if (email == null) input = ""
+            status = Status.SAVED
+            onSaved()
+        }
     }
 
     private fun clearResult() {
