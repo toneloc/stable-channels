@@ -148,6 +148,34 @@ final class SpliceRepositoryTests: XCTestCase {
         XCTAssertEqual(rows[1].status, "pending")
     }
 
+    // MARK: - The emergency close's move check (#456)
+
+    func testOnlyAMoveThatHasNotFailedOrExpiredSpendsLdksFunding() throws {
+        let channel = SpliceChannelIdentity(userChannelId: "7", channelId: "channel", previousFundingTxid: "old")
+        let move = {
+            try self.service.spliceRepo.recordPendingSplice(
+                paymentType: .spliceOut, amountMsat: 50_000_000, amountUSD: 25.0, btcPrice: 50_000.0,
+                address: "bc1qtestaddress", channel: channel
+            )
+        }
+        let spends = { (user: String, funding: String) in
+            try self.service.spliceRepo.moveSpends(userChannelId: user, fundingTxid: funding)
+        }
+
+        let failed = try move()
+        XCTAssertTrue(try spends("7", "old"))
+        XCTAssertFalse(try spends("8", "old"))
+        // A later splice the app didn't record, such as one the LSP started, moved the funding on.
+        XCTAssertFalse(try spends("7", "other"))
+        XCTAssertTrue(service.spliceRepo.failPendingSplice(rowId: failed))
+        XCTAssertFalse(try spends("7", "old"))
+
+        _ = try move()
+        try ageOutPendingSplices()
+        XCTAssertFalse(try service.spliceRepo.hasPendingSplice())
+        XCTAssertFalse(try spends("7", "old"))
+    }
+
     // MARK: - Expiry sweep and late negotiation
 
     func testExpirySweepMarksRowExpiredNotFailed() throws {
