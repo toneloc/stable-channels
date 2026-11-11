@@ -57,6 +57,19 @@ final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked 
         defaults.set(launches, forKey: Self.lastShownLaunchKey)
     }
 
+    /// Forgets the prompt state and the saved address, for a restore that brings in a different wallet.
+    func reset() {
+        for key in [
+            Self.launchesKey,
+            Self.respondedKey,
+            Self.timesShownKey,
+            Self.lastShownLaunchKey,
+            Self.savedEmailKey
+        ] {
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     func markResponded() {
         defaults.set(true, forKey: Self.respondedKey)
     }

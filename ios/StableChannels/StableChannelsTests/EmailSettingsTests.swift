@@ -44,6 +44,21 @@ final class EmailAddressTests: XCTestCase {
         }
     }
 
+    // Same rule as the server: plain ASCII address characters only, so nothing the server refuses gets sent.
+    func testAddressesTheServerRefuses_areRejected() {
+        let refused = [
+            "a<b@example.com", "a>b@example.com", "\"a\"@example.com", "a@exa<mple.com", "a@example.com/x",
+            "a@exa_mple.com", "a@-example.com", "a@example-.com", "a\\b@example.com", "ä@example.com",
+            "a@exämple.com", ".a@example.com", "a.@example.com", "a..b@example.com"
+        ]
+        for raw in refused {
+            XCTAssertNil(EmailAddress(raw), raw)
+        }
+        for raw in ["o'brien@example.com", "a_b-c+d@sub-domain.example.co", "x@xn--bcher-kva.example"] {
+            XCTAssertNotNil(EmailAddress(raw), raw)
+        }
+    }
+
     func testLongestAllowedAddress_isAccepted() {
         let raw = "a@" + String(repeating: "b", count: EmailAddress.maxLength - 6) + ".com"
         XCTAssertEqual(raw.count, EmailAddress.maxLength)
@@ -334,12 +349,19 @@ final class EmailSettingsModelTests: XCTestCase {
 }
 
 final class EmailPromptPolicyTests: XCTestCase {
-    private func shows(_ launches: Int, shown: Int = 0, lastShown: Int = 0, responded: Bool = false) -> Bool {
+    private func shows(
+        _ launches: Int,
+        shown: Int = 0,
+        lastShown: Int = 0,
+        responded: Bool = false,
+        locked: Bool = false
+    ) -> Bool {
         EmailPromptPolicy.shouldShow(
             launches: launches,
             timesShown: shown,
             lastShownLaunch: lastShown,
-            hasResponded: responded
+            hasResponded: responded,
+            isAppLocked: locked
         )
     }
 
@@ -362,6 +384,12 @@ final class EmailPromptPolicyTests: XCTestCase {
         XCTAssertFalse(shows(3, responded: true))
         XCTAssertFalse(shows(9, shown: 1, lastShown: 3, responded: true))
     }
+
+    // The sheet draws above the App Access overlay, so a locked phone must never get the prompt.
+    func testNeverShows_whileTheAppIsLocked() {
+        XCTAssertFalse(shows(3, locked: true))
+        XCTAssertFalse(shows(9, shown: 1, lastShown: 3, locked: true))
+    }
 }
 
 final class EmailPromptStoreTests: XCTestCase {
@@ -381,6 +409,25 @@ final class EmailPromptStoreTests: XCTestCase {
 
         EmailPromptStore(defaults: defaults).recordLaunchOnce()
         XCTAssertEqual(EmailPromptStore(defaults: defaults).launches, 2)
+    }
+
+    // A restored wallet is a different node: the old address and answers must not carry over.
+    func testReset_clearsEverythingForANewWallet() {
+        let defaults = makeDefaults()
+        let store = EmailPromptStore(defaults: defaults)
+        store.recordLaunchOnce()
+        store.recordShown()
+        store.markResponded()
+        store.savedEmail = EmailAddress("a@b.com")
+
+        store.reset()
+
+        let reopened = EmailPromptStore(defaults: defaults)
+        XCTAssertEqual(reopened.launches, 0)
+        XCTAssertEqual(reopened.timesShown, 0)
+        XCTAssertEqual(reopened.lastShownLaunch, 0)
+        XCTAssertFalse(reopened.hasResponded)
+        XCTAssertNil(reopened.savedEmail)
     }
 
     func testRecordShown_countsAndRemembersTheLaunch() {
