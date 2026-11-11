@@ -127,5 +127,12 @@ class LspSplicePushTest {
         late.onLocked(58_000)
         assertTrue(late.isDone(61_000))
         assertEquals(LspSpliceWait.Outcome.LOCKED, late.outcome)
+
+        // A failure after the lock ends the wait at once but does not take the lock back.
+        val lockedThenFailed = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
+        lockedThenFailed.onLocked(30_000)
+        lockedThenFailed.onFailed()
+        assertTrue(lockedThenFailed.isDone(30_001))
+        assertEquals(LspSpliceWait.Outcome.LOCKED, lockedThenFailed.outcome)
     }
 }

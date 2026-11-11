@@ -711,8 +711,12 @@ class StabilityProcessingService : Service() {
                         persistSpliceEvent(event, { ready -> fundingOf(node, ready) }) {
                             node.eventHandled()
                         }
-                        // A ready channel during the wait is the splice locking on its new funding.
-                        wait.onLocked(System.currentTimeMillis())
+                        // The splice has locked once the LSP's channel is ready on new funding; a
+                        // replayed ready event, or one for another channel, moves nothing.
+                        val fundingNow = lspChannelFunding(node, lspPubkey)
+                        if (fundingNow != null && fundingNow.txid != fundingBefore?.txid) {
+                            wait.onLocked(System.currentTimeMillis())
+                        }
                     }
                     is Event.SpliceNegotiationFailed -> {
                         deferSpliceFailure { node.eventHandled() }

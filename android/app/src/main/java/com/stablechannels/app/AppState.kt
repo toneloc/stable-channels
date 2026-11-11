@@ -1425,6 +1425,8 @@ class AppState(private val context: Context) : ViewModel() {
     fun stop() {
         LspSpliceHoldBridge.holder = null
         lspSpliceHoldUntilMs = 0L
+        // A push in the seconds after this would otherwise be left to an app with no node.
+        FCMService.clearHeartbeat(context)
         cancelBackgroundStop()
         stabilityJob?.cancel()
         heartbeatJob?.cancel()
@@ -1492,7 +1494,8 @@ class AppState(private val context: Context) : ViewModel() {
      */
     fun holdNodeForLspSplice() {
         viewModelScope.launch {
-            if (nodeService.node == null) {
+            // The push may land while a background stop is already letting go of the node.
+            if (LspSpliceHoldBridge.holder == null || !nodeService.isRunning) {
                 FCMService.flagPendingPayment(context)
                 return@launch
             }
@@ -1521,10 +1524,15 @@ class AppState(private val context: Context) : ViewModel() {
      */
     private fun releaseLspSpliceHold(reason: String) {
         if (lspSpliceHoldUntilMs == 0L) return
-        lspSpliceHoldUntilMs = 0L
-        AuditService.log("LSP_SPLICE_HOLD_RELEASED", mapOf("reason" to reason))
-        if (isInBackground && !isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
-            launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+        // Node events arrive on the IO thread; the stop job is only ever replaced on main, like
+        // the hold and the background hooks do, or two writers could leave a stop untracked.
+        viewModelScope.launch {
+            if (lspSpliceHoldUntilMs == 0L) return@launch
+            lspSpliceHoldUntilMs = 0L
+            AuditService.log("LSP_SPLICE_HOLD_RELEASED", mapOf("reason" to reason))
+            if (isInBackground && !isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
+                launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
+            }
         }
     }
 
@@ -1579,12 +1587,16 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     private fun performBackgroundStop() {
+        // A stop job that outlived a return to the foreground must not take the node down.
+        if (!isInBackground) return
+        // Unregister before anything else, so a push landing during the stop is flagged for the
+        // next start instead of asking an app that is letting go of its node to hold it.
+        LspSpliceHoldBridge.holder = null
         try {
             LdkBackgroundService.stop(context)
         } catch (e: Exception) {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
-        LspSpliceHoldBridge.holder = null
         lspSpliceHoldUntilMs = 0L
         heartbeatJob?.cancel()
         heartbeatJob = null

@@ -74,11 +74,12 @@ internal class LspSpliceWait(startMs: Long, waitMs: Long, private val settleMs: 
     private var lockedAtMs: Long? = null
     private var failed = false
 
+    /** A lock is the outcome once seen; a failure after it belongs to some later negotiation. */
     val outcome: Outcome
         get() =
             when {
-                failed -> Outcome.FAILED
                 lockedAtMs != null -> Outcome.LOCKED
+                failed -> Outcome.FAILED
                 else -> Outcome.TIMED_OUT
             }
 
