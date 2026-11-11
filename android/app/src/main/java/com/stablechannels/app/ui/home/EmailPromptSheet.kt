@@ -59,12 +59,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Home prompt for the optional email. [onNotNow] answers it; [onClose] runs when it is swiped away
- * or closes after a save, so a swiped-away prompt can come back later.
+ * Home prompt for the optional email. Only a save answers it; [onClose] runs for "Not now", a
+ * swipe, or the close after a save, so an unanswered prompt can come back on a later launch.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun EmailPromptSheet(model: EmailSettingsModel, onNotNow: () -> Unit, onClose: () -> Unit) {
+fun EmailPromptSheet(model: EmailSettingsModel, onClose: () -> Unit) {
     val saved = model.status == EmailSettingsModel.Status.SAVED
 
     LaunchedEffect(saved) {
@@ -96,14 +96,14 @@ fun EmailPromptSheet(model: EmailSettingsModel, onNotNow: () -> Unit, onClose: (
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                if (isSaved) SavedContent(model) else FormContent(model, onNotNow)
+                if (isSaved) SavedContent(model) else FormContent(model, onClose)
             }
         }
     }
 }
 
 @Composable
-private fun FormContent(model: EmailSettingsModel, onNotNow: () -> Unit) {
+private fun FormContent(model: EmailSettingsModel, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val save: () -> Unit = {
@@ -153,7 +153,7 @@ private fun FormContent(model: EmailSettingsModel, onNotNow: () -> Unit) {
         }
     }
     NeutralTextButton(
-        onClick = onNotNow,
+        onClick = onClose,
         modifier = Modifier.heightIn(min = Constants.MIN_TOUCH_TARGET_DP.dp),
     ) {
         Text(stringResource(R.string.email_prompt_not_now), color = secondary)

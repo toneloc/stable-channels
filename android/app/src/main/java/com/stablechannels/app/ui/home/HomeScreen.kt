@@ -788,10 +788,6 @@ fun HomeScreen(
     if (showEmailPrompt) {
         EmailPromptSheet(
             model = rememberEmailSettingsModel(appState.nodeService),
-            onNotNow = {
-                emailPromptStore.markResponded()
-                showEmailPrompt = false
-            },
             onClose = { showEmailPrompt = false },
         )
     }
