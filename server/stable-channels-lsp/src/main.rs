@@ -305,6 +305,11 @@ async fn main() -> Result<()> {
             "/api/funding-outpoints",
             post(handlers::funding_outpoints::funding_outpoints),
         )
+        // Optional wallet email: proven by a node-key signature, not HMAC, so wallets with no channel can share one.
+        .route(
+            "/api/register-email",
+            post(handlers::register_email::register_email),
+        )
         // Defense-in-depth body cap covering every route, including the endpoints outside the auth layer
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
