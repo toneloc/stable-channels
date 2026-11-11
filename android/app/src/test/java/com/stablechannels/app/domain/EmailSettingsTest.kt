@@ -18,6 +18,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 
 private const val NODE_ID = "02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619"
 private const val TS = 1_762_790_000L
@@ -73,6 +74,38 @@ class EmailAddressTest {
                 "a@" + "b".repeat(250) + ".com",
             )
         for (raw in invalid) assertNull(raw, EmailAddress.parse(raw))
+    }
+
+    // Same rule as the server: plain ASCII address characters only, so nothing the server refuses
+    // gets sent.
+    @Test
+    fun addressesTheServerRefuses_areRejected() {
+        val refused =
+            listOf(
+                "a<b@example.com",
+                "a>b@example.com",
+                "\"a\"@example.com",
+                "a@exa<mple.com",
+                "a@example.com/x",
+                "a@exa_mple.com",
+                "a@-example.com",
+                "a@example-.com",
+                "a\\b@example.com",
+                "ä@example.com",
+                "a@exämple.com",
+                ".a@example.com",
+                "a.@example.com",
+                "a..b@example.com",
+            )
+        for (raw in refused) assertNull(raw, EmailAddress.parse(raw))
+        for (raw in
+            listOf(
+                "o'brien@example.com",
+                "a_b-c+d@sub-domain.example.co",
+                "x@xn--bcher-kva.example",
+            )) {
+            assertNotNull(raw, EmailAddress.parse(raw))
+        }
     }
 
     @Test
@@ -327,6 +360,7 @@ class EmailPromptPolicyTest {
 }
 
 @RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class EmailPromptStoreTest {
     private fun prefs() =
         RuntimeEnvironment.getApplication()
@@ -355,6 +389,26 @@ class EmailPromptStoreTest {
         val reopened = EmailPromptStore(prefs)
         assertEquals(1, reopened.timesShown)
         assertEquals(1, reopened.lastShownLaunch)
+    }
+
+    // A restored wallet is a different node: the old address and answers must not carry over.
+    @Test
+    fun reset_clearsEverythingForANewWallet() {
+        val prefs = prefs()
+        val store = EmailPromptStore(prefs)
+        store.recordLaunchOnce()
+        store.recordShown()
+        store.markResponded()
+        store.savedEmail = email("user@example.com")
+
+        store.reset()
+
+        val reopened = EmailPromptStore(prefs)
+        assertEquals(0, reopened.launches)
+        assertEquals(0, reopened.timesShown)
+        assertEquals(0, reopened.lastShownLaunch)
+        assertFalse(reopened.hasResponded)
+        assertNull(reopened.savedEmail)
     }
 
     @Test
