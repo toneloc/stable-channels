@@ -827,6 +827,7 @@ class AppState(private val context: Context) : ViewModel() {
         }
         _closedChannelFunds.value = null
         BalanceCacheKey.clearAll(context)
+        EmailPromptStore.get(context).reset()
     }
 
     private val _spendableOnchainSats =

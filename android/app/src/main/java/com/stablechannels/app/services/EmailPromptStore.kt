@@ -53,6 +53,21 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
             .apply()
     }
 
+    /**
+     * Forgets the prompt state and the saved address, for a restore that brings in a different
+     * wallet.
+     */
+    fun reset() {
+        prefs
+            .edit()
+            .remove(KEY_LAUNCHES)
+            .remove(KEY_RESPONDED)
+            .remove(KEY_TIMES_SHOWN)
+            .remove(KEY_LAST_SHOWN_LAUNCH)
+            .remove(KEY_SAVED_EMAIL)
+            .apply()
+    }
+
     override fun markResponded() {
         prefs.edit().putBoolean(KEY_RESPONDED, true).apply()
     }
