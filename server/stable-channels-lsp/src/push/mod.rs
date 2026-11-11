@@ -3,7 +3,7 @@ pub mod fcm;
 pub mod registrations;
 pub mod tokens;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -70,6 +70,8 @@ pub struct PushService {
     last_push_sent: HashMap<String, Instant>,
     /// Sends that failed or have not reported back; a send counts as failed until its provider accepts it.
     last_push_failed: HashMap<String, Instant>,
+    /// Nodes the last stability tick decided to wake. Their one push slot belongs to that wake; other pushes to them yield.
+    stability_wakes_due: HashSet<String>,
 }
 
 impl PushService {
@@ -88,7 +90,18 @@ impl PushService {
             data_dir: data_dir.to_string_lossy().to_string(),
             last_push_sent: HashMap::new(),
             last_push_failed: HashMap::new(),
+            stability_wakes_due: HashSet::new(),
         }
+    }
+
+    /// Record which nodes the stability tick wants to wake; replaces the previous tick's set, so an empty tick clears it.
+    pub fn set_stability_wakes_due(&mut self, node_ids: impl IntoIterator<Item = String>) {
+        self.stability_wakes_due = node_ids.into_iter().collect();
+    }
+
+    /// Whether the stability tick wants to wake this node, so any other push to it should wait.
+    pub fn stability_wake_due(&self, node_id: &str) -> bool {
+        self.stability_wakes_due.contains(node_id)
     }
 
     /// Whether a device token is registered for this node, so a push can reach it at all.
@@ -282,5 +295,17 @@ mod tests {
 
         assert!(!notify(&push, "node", "lsp_to_user").await);
         assert!(sender.sent().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stability_wakes_due_are_replaced_by_each_tick() {
+        let dir = tempfile::tempdir().unwrap();
+        let push = testing::service(testing::FakeSender::new(true), dir.path(), &[]);
+        assert!(!push.lock().await.stability_wake_due("peer"));
+        push.lock().await.set_stability_wakes_due(vec!["peer".to_string()]);
+        assert!(push.lock().await.stability_wake_due("peer"));
+        assert!(!push.lock().await.stability_wake_due("other"));
+        push.lock().await.set_stability_wakes_due(Vec::<String>::new());
+        assert!(!push.lock().await.stability_wake_due("peer"));
     }
 }
