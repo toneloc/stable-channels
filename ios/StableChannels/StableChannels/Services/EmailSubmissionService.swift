@@ -23,6 +23,11 @@ extension NodeService: EmailRequestSigning {}
 
 /// Builds the signed `REGISTER_EMAIL_V1` request body, the same envelope shape as the keysend messages.
 enum EmailRegistrationEnvelope {
+    /// Whether the server's reply body says `"ok": true`; anything else is a refusal, so it is never shown as saved.
+    static func isAccepted(_ body: Data) -> Bool {
+        (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["ok"] as? Bool == true
+    }
+
     /// Sorted-key JSON of the payload; an empty `email` asks the server to remove the saved address.
     static func payload(email: String, nodeId: String, timestamp: Int64) -> String? {
         let object: [String: Any] = [
@@ -92,15 +97,16 @@ struct EmailSubmissionService: EmailSubmitting {
 
         let session = URLSession(configuration: configuration)
         defer { session.finishTasksAndInvalidate() }
+        let data: Data
         let response: URLResponse
         do {
-            (_, response) = try await session.data(for: request)
+            (data, response) = try await session.data(for: request)
         } catch {
             throw EmailSubmissionError.unreachable
         }
 
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard (200 ..< 300).contains(statusCode) else {
+        guard (200 ..< 300).contains(statusCode), EmailRegistrationEnvelope.isAccepted(data) else {
             throw EmailSubmissionError.rejected(statusCode: statusCode)
         }
     }

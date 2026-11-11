@@ -59,6 +59,7 @@ final class EmailPromptStore: EmailPromptStoring, SavedEmailStoring, @unchecked 
 
     /// Forgets the prompt state and the saved address, for a restore that brings in a different wallet.
     func reset() {
+        recordedThisProcess = false
         for key in [
             Self.launchesKey,
             Self.respondedKey,
