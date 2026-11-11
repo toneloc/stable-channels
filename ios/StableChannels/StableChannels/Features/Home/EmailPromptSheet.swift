@@ -1,15 +1,13 @@
 import SwiftUI
 
-/// Home prompt for the optional email. Save or "Not now" answers it; swiping it away lets it come back later.
+/// Home prompt for the optional email. Only Save answers it; "Not now" or a swipe lets it come back on a later launch.
 struct EmailPromptSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var model: EmailSettingsModel
     @State private var contentHeight: CGFloat = 0
     @State private var bounceCheckmark = false
-    private let promptStore: EmailPromptStoring
 
     init(service: EmailSubmitting, store: EmailPromptStoring & SavedEmailStoring) {
-        promptStore = store
         _model = State(initialValue: EmailSettingsModel(service: service, store: store, onSaved: store.markResponded))
     }
 
@@ -91,7 +89,6 @@ struct EmailPromptSheet: View {
                 .padding(.bottom, 4)
 
             Button {
-                promptStore.markResponded()
                 dismiss()
             } label: {
                 Text(String(localized: "button_not_now", defaultValue: "Not now"))
