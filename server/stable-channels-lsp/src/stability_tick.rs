@@ -50,6 +50,8 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
                 mgr.channel_peer_ids()
             };
             share_channel_peers(&state.push_registrations, peers);
+            // No plan this tick, so no stability wake is due: the previous tick's set must not keep other pushes waiting.
+            share_wakes_due(&state.push, &[]).await;
             continue;
         }
         let (plan, peers) = {
