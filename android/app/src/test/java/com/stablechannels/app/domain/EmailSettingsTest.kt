@@ -335,21 +335,27 @@ class EmailPromptPolicyTest {
         responded: Boolean = false,
     ) = EmailPromptPolicy.shouldShow(launches, shown, lastShown, responded)
 
+    // Gaps of 3, 9 and 27 launches between showings: launches 3, 12 and 39, then the loop repeats.
     @Test
-    fun shows_onLaunches3_9_27_whenSwipedAway() {
+    fun shows_afterGapsOf3_9_27_thenRepeats() {
         assertFalse(shows(2))
         assertTrue(shows(3))
-        assertFalse(shows(8, shown = 1, lastShown = 3))
-        assertTrue(shows(9, shown = 1, lastShown = 3))
-        assertFalse(shows(26, shown = 2, lastShown = 9))
-        assertTrue(shows(27, shown = 2, lastShown = 9))
-        assertFalse(shows(1000, shown = 3, lastShown = 27))
+        assertFalse(shows(11, shown = 1, lastShown = 3))
+        assertTrue(shows(12, shown = 1, lastShown = 3))
+        assertFalse(shows(38, shown = 2, lastShown = 12))
+        assertTrue(shows(39, shown = 2, lastShown = 12))
+        assertFalse(shows(41, shown = 3, lastShown = 39))
+        assertTrue(shows(42, shown = 3, lastShown = 39))
+        assertFalse(shows(50, shown = 4, lastShown = 42))
+        assertTrue(shows(51, shown = 4, lastShown = 42))
+        assertTrue(shows(78, shown = 5, lastShown = 51))
     }
 
+    // A showing that was held back (another sheet open) starts its gap from when it did show.
     @Test
-    fun lateFirstShow_waitsThreeTimesAsLong() {
-        assertFalse(shows(21, shown = 1, lastShown = 20))
-        assertTrue(shows(60, shown = 1, lastShown = 20))
+    fun delayedShow_countsTheNextGapFromWhenItShowed() {
+        assertFalse(shows(28, shown = 1, lastShown = 20))
+        assertTrue(shows(29, shown = 1, lastShown = 20))
     }
 
     @Test

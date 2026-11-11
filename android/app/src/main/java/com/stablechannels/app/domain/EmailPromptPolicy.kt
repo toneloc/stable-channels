@@ -2,13 +2,12 @@ package com.stablechannels.app.domain
 
 /**
  * Decides when Home offers the email prompt: to anyone who has opened the wallet a few times,
- * funded or not. Only Save ends it; after "Not now" or a swipe it comes back after three times as
- * many launches (3, 9, 27 for a new user), at most [MAX_SHOWS] times.
+ * funded or not. Only Save ends it; after "Not now" or a swipe the next showing waits the next gap
+ * in [SHOW_GAPS] (launches 3, 12, 39), and the gaps repeat, so a 39-launch stretch never asks more
+ * than three times.
  */
 object EmailPromptPolicy {
-    const val FIRST_LAUNCH = 3
-    const val LAUNCH_GROWTH = 3
-    const val MAX_SHOWS = 3
+    val SHOW_GAPS = listOf(3, 9, 27)
 
     fun shouldShow(
         launches: Int,
@@ -16,8 +15,8 @@ object EmailPromptPolicy {
         lastShownLaunch: Int,
         hasResponded: Boolean,
     ): Boolean {
-        if (hasResponded || timesShown >= MAX_SHOWS) return false
-        return launches >= maxOf(FIRST_LAUNCH, lastShownLaunch * LAUNCH_GROWTH)
+        if (hasResponded) return false
+        return launches >= lastShownLaunch + SHOW_GAPS[timesShown % SHOW_GAPS.size]
     }
 }
 
