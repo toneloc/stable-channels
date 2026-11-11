@@ -7,6 +7,7 @@ enum Constants {
     static let stableChannelTLVType: UInt64 = 13_377_331
     static let signedStabilityTLVType: UInt64 = 13_377_333
     static let tradeMessageType = "TRADE_V1"
+    static let emailRegisterMessageType = "REGISTER_EMAIL_V1"
     static let syncMessageType = "SYNC_V1"
 
     // MARK: - Default Configuration
@@ -48,6 +49,22 @@ enum Constants {
     static let lspPushRegisterURL = "https://stablechannels.com/api/register-push"
     static let lspChannelExistsURL = "https://stablechannels.com/api/channel-exists"
     static let privacyPolicyURL = "https://stablechannels.com/privacy.html"
+    /// Optional email the user chooses to share; each request is signed with the node key.
+    static let emailSubmitURL = "https://stablechannels.com/api/register-email"
+    static let emailSubmitTimeoutSeconds: TimeInterval = 15
+    /// The Home email prompt waits this long so it never covers the first look at the balance.
+    static let emailPromptShowDelaySeconds: Double = 2
+    static let emailPromptSavedDismissDelaySeconds: Double = 1.4
+
+    // MARK: - Email Design
+
+    static let emailFieldHeight: CGFloat = 52
+    static let emailFieldCornerRadius: CGFloat = 14
+    static let emailFieldFocusBorderWidth: CGFloat = 1.5
+    static let emailBadgeSize: CGFloat = 56
+    static let emailBadgeFillOpacity: Double = 0.12
+    static let emailPrimaryButtonMinHeight: CGFloat = 52
+    static let emailSecondaryButtonMinHeight: CGFloat = 44
 
     static func txExplorerLink(for txid: String) -> URL? {
         URL(string: "\(txExplorerURL)/\(txid)")

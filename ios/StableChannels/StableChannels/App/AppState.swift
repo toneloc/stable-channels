@@ -898,6 +898,7 @@ class AppState {
         shared?.set(false, forKey: BalanceCacheKey.hasReadyChannel)
         clearPendingOutboundSendCache(from: shared)
         shared?.set(false, forKey: "pending_push_payment")
+        EmailPromptStore.shared.reset()
     }
 
     private func dropDatabaseServices() {
