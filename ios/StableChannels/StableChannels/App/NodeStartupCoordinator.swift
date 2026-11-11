@@ -91,6 +91,8 @@ final class NodeStartupCoordinator {
         using startNode: (String) async throws -> Void
     ) async throws -> String {
         guard let primaryURL = attempts.first?.url else { throw NodeStartupError.noAttempts }
+        // Every start goes through here, so a start asked for while the app is suspended never runs LDK.
+        guard !isPaused else { throw CancellationError() }
         runningFailovers += 1
         defer { runningFailovers -= 1 }
         let pausesAtStart = pauseCount

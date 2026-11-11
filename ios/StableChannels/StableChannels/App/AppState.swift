@@ -1664,6 +1664,11 @@ class AppState {
             await processPendingPushPayment()
             reconcilePendingLightningPayments()
             clearSyncStatusMessage()
+        } catch is CancellationError {
+            // Backgrounded again before the node came up: hand the wallet dir back and finish on the next foreground.
+            AuditService.log("FOREGROUND_RESTART_PAUSED", data: [:])
+            if !nodeService.isRunning { NodeDirLock.shared.release() }
+            pendingOnlineRetry = true
         } catch {
             print("[App] Node restart failed: \(error)")
         }
@@ -4313,6 +4318,8 @@ class AppState {
     /// On total failure the lock is released so a broken app process never starves the NSE;
     /// on success the running node keeps it.
     private func startNodeWithFailover(mnemonic: String = "") async throws {
+        // Backgrounded: leave the wallet dir to the notification extension; the caller keeps the start pending.
+        guard !nodeStartup.isPaused else { throw CancellationError() }
         chainURL = try await NodeDirLock.shared.withHeldLock(
             dataDir: Constants.userDataDir,
             timeout: Constants.nodeDirLockTimeoutSecs,

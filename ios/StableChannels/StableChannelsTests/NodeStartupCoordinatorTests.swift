@@ -349,6 +349,36 @@ final class NodeStartupCoordinatorTests: XCTestCase {
         coordinator.reset()
     }
 
+    /// A start asked for while the app is already backgrounded (the paused launch's follow-up retry,
+    /// a network-online callback) must not run LDK or take the wallet dir; foreground lets it through.
+    func testStartWhilePaused_neverStartsTheNodeUntilForeground() async throws {
+        let coordinator = makeCoordinator()
+        coordinator.pause()
+
+        do {
+            _ = try await coordinator.startWithFailover(
+                preferred: primary,
+                providers: [primary, fallback],
+                retryDelay: delay,
+                isRetryable: { _ in true }
+            ) { self.startedURLs.append($0) }
+            XCTFail("A start while paused must end as cancelled")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        XCTAssertEqual(startedURLs, [], "No LDK start while the app is suspended")
+
+        coordinator.resume()
+        let url = try await coordinator.startWithFailover(
+            preferred: primary,
+            providers: [primary, fallback],
+            retryDelay: delay,
+            isRetryable: { _ in true }
+        ) { self.startedURLs.append($0) }
+        XCTAssertEqual(url, primary)
+        XCTAssertEqual(startedURLs, [primary])
+    }
+
     func testPause_keepsBackoffAndReset_clearsIt() {
         let coordinator = makeCoordinator(sleep: { _ in try await Task.sleep(for: .seconds(60)) })
         coordinator.scheduleRetry(maxDelay: maxDelay, reason: "stall", run: run())
