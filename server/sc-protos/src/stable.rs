@@ -443,6 +443,39 @@ mod tests {
 	}
 
 	#[test]
+	fn queued_splice_messages_roundtrip() {
+		let request = QueueSpliceInRequest { user_channel_id: "42".into(), counterparty_node_id: "02ab".into(), amount_sats: 50_000 };
+		assert_eq!(QueueSpliceInRequest::decode(request.encode_to_vec().as_slice()).unwrap(), request);
+		let queued = QueueSpliceInResponse { ok: true, status: "queued".into() };
+		assert_eq!(QueueSpliceInResponse::decode(queued.encode_to_vec().as_slice()).unwrap(), queued);
+		let list = ListQueuedSplicesResponse {
+			splices: vec![QueuedSpliceInfo {
+				user_channel_id: "42".into(),
+				counterparty_node_id: "02ab".into(),
+				amount_sats: 50_000,
+				status: "negotiated".into(),
+				attempts: 1,
+				last_error: "the splice negotiation failed".into(),
+				funding_txo: "bb:1".into(),
+				created_at: 1,
+				updated_at: 2,
+				wake_sent_at: 3,
+				last_attempt_at: 4,
+				wake_note: "no usable push token".into(),
+				pending_on_node: true,
+			}],
+		};
+		let decoded = ListQueuedSplicesResponse::decode(list.encode_to_vec().as_slice()).unwrap();
+		assert_eq!(decoded, list);
+		assert!(decoded.splices[0].pending_on_node);
+		assert_eq!(ListQueuedSplicesRequest::decode(ListQueuedSplicesRequest {}.encode_to_vec().as_slice()).unwrap(), ListQueuedSplicesRequest {});
+		let cancel = CancelQueuedSpliceRequest { user_channel_id: "42".into(), force: true };
+		assert_eq!(CancelQueuedSpliceRequest::decode(cancel.encode_to_vec().as_slice()).unwrap(), cancel);
+		let cancelled = CancelQueuedSpliceResponse { ok: false, status: "nothing to cancel".into() };
+		assert_eq!(CancelQueuedSpliceResponse::decode(cancelled.encode_to_vec().as_slice()).unwrap(), cancelled);
+	}
+
+	#[test]
 	fn ledger_messages_roundtrip() {
 		let response = ListChannelLedgerEventsResponse {
 			events: vec![ChannelLedgerEvent {
