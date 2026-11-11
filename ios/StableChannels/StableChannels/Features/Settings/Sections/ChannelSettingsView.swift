@@ -116,7 +116,7 @@ struct ChannelSettingsView: View {
                 // Shown while the channel is listed, even when it is not usable or its close is
                 // stuck (#363). A pending splice spends the funding output the app's own close
                 // follows (#456).
-                let movePending = appState.pendingSplice != nil
+                let movePending = appState.isMovePending
                 Section {
                     Button(
                         String(localized: "button_force_close", defaultValue: "Emergency force close"),
@@ -353,7 +353,10 @@ private struct ForceCloseSheet: View {
                         dismiss()
                         onConfirm()
                     }
-                    .disabled(!appState.isOnline || !ForceCloseConfirmation.isConfirmed(input))
+                    // Coming back to the app can restore a pending move while the sheet is open.
+                    .disabled(
+                        !appState.isOnline || appState.isMovePending || !ForceCloseConfirmation.isConfirmed(input)
+                    )
                 }
             }
             .navigationTitle(String(localized: "button_force_close", defaultValue: "Emergency force close"))

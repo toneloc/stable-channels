@@ -600,6 +600,11 @@ class AppState {
     // Pending splice info
     var pendingSplice: PendingSplice?
 
+    /// A move from its start until its splice confirms, also after a restart. `pendingSplice` alone ends
+    /// when the splice is negotiated. LDK reports the pre-splice funding output until the splice locks,
+    /// so the app's own close would follow an output the splice spends (#456).
+    var isMovePending: Bool { pendingSplice != nil || isSweeping }
+
     enum WalletRestoreError: LocalizedError {
         case invalidMnemonic
         case activeChannelDetected

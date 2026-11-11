@@ -9,6 +9,7 @@ import SQLite3
 /// The app force closes only when the LSP is offline or a normal close is stuck. After `start`, the
 /// channel is followed until a close of it confirms: the app builds its close with a fee bump and
 /// broadcasts both to the explorers that don't have a close of the channel, again every `retrySeconds`.
+/// Once every explorer has our close, the fee bump alone goes again, as sending it may have failed.
 /// The LSP's close can still replace ours in the mempool when it comes back, as it can pay a higher
 /// fee from its wallet. After `maxBuildFailures` failed builds the app stops, as building
 /// stops the node each time; the LSP's close still frees the funds.
@@ -138,6 +139,9 @@ actor OwnForceClose {
         if let spend, !spend.unspentAt.isEmpty {
             return await send(state, to: spend.unspentAt, spendTxid: spend.txid)
         }
+        if let spend, spend.txid == state.closeTxid {
+            return await send(state, to: chainURLs, spendTxid: spend.txid, close: false)
+        }
         var next = spend.map { seen(state, $0.txid) } ?? state
         next.nextAt = now() + Self.checkSeconds
         save(next, ifStill: state)
@@ -173,8 +177,9 @@ actor OwnForceClose {
     }
 
     /// Broadcasts our close to `urls`, the explorers that see the funding output unspent, again every
-    /// `retrySeconds`. `spendTxid` is a close another explorer already has.
-    private func send(_ current: State, to urls: [String], spendTxid: String?) async -> String? {
+    /// `retrySeconds`. `spendTxid` is a close another explorer already has. Without `close`, only the fee
+    /// bump goes, to explorers that already have our close.
+    private func send(_ current: State, to urls: [String], spendTxid: String?, close: Bool = true) async -> String? {
         var state = seen(current, spendTxid)
         if now() < state.broadcastAt + Self.retrySeconds {
             state.nextAt = now() + Self.checkSeconds
@@ -182,7 +187,10 @@ actor OwnForceClose {
             return nil
         }
         // The fee bump spends the close, so it goes second.
-        let closeResults = await Self.broadcast(session: session, chainURLs: urls, hex: state.closeHex ?? "")
+        var closeResults: [String: String] = [:]
+        if close {
+            closeResults = await Self.broadcast(session: session, chainURLs: urls, hex: state.closeHex ?? "")
+        }
         let bumpResults = await Self.broadcast(session: session, chainURLs: urls, hex: state.feeBumpHex ?? "")
         log("OWN_FORCE_CLOSE_BROADCAST", [
             "channel_id": state.channelId,

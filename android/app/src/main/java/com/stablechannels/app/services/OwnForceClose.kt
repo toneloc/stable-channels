@@ -27,6 +27,7 @@ import uniffi.sc_force_close.buildForceClose
  * The app force closes only when the LSP is offline or a normal close is stuck. After [start], the
  * channel is followed until a close of it confirms: the app builds its close with a fee bump and
  * broadcasts both to the explorers that don't have a close of the channel, again every [RETRY_MS].
+ * Once every explorer has our close, the fee bump alone goes again, as sending it may have failed.
  * The LSP's close can still replace ours in the mempool when it comes back, as it can pay a higher
  * fee from its wallet. After [MAX_BUILD_FAILURES] failed builds the app stops, as building stops
  * the node each time; the LSP's close still frees the funds. Builds that find the node data in use
@@ -140,6 +141,8 @@ class OwnForceClose(
             when {
                 spend == null -> save(state, state.copy(nextAt = now() + CHECK_MS))
                 spend.unspentAt.isNotEmpty() -> return send(state, spend.unspentAt, spend.txid)
+                spend.txid == state.closeTxid ->
+                    return send(state, chainUrls(), spend.txid, close = false)
                 else -> save(state, state.seen(spend.txid).copy(nextAt = now() + CHECK_MS))
             }
             return null
@@ -188,16 +191,22 @@ class OwnForceClose(
 
     /**
      * Broadcasts our close to [urls], the explorers that see the funding output unspent, again
-     * every [RETRY_MS]. [spendTxid] is a close another explorer already has.
+     * every [RETRY_MS]. [spendTxid] is a close another explorer already has. Without [close], only
+     * the fee bump goes, to explorers that already have our close.
      */
-    private fun send(current: State, urls: List<String>, spendTxid: String?): String? {
+    private fun send(
+        current: State,
+        urls: List<String>,
+        spendTxid: String?,
+        close: Boolean = true,
+    ): String? {
         val state = current.seen(spendTxid)
         if (now() < state.broadcastAt + RETRY_MS) {
             save(current, state.copy(nextAt = now() + CHECK_MS))
             return null
         }
         // The fee bump spends the close, so it goes second.
-        val closeResults = broadcast(http, urls, state.closeHex!!)
+        val closeResults = if (close) broadcast(http, urls, state.closeHex!!) else emptyMap()
         val bumpResults = broadcast(http, urls, state.feeBumpHex!!)
         log(
             "OWN_FORCE_CLOSE_BROADCAST",

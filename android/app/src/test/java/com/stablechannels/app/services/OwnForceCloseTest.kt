@@ -295,6 +295,29 @@ class OwnForceCloseTest {
     }
 
     @Test
+    fun sendsTheFeeBumpAgainWhileEveryExplorerHasOurUnconfirmedClose() {
+        useOther = true
+        otherOutspend = MockResponse().setBody("""{"spent":false}""")
+        val forceClose = ownForceClose()
+        forceClose.start("ch", funding, 1)
+        forceClose.runNow()
+        // Both explorers have our close now; its fee bump may not have gone through.
+        val ours = """{"spent":true,"txid":"c1","vin":0,"status":{"confirmed":false}}"""
+        outspend = MockResponse().setBody(ours)
+        otherOutspend = MockResponse().setBody(ours)
+        clock += OwnForceClose.CHECK_MS
+        assertNull(forceClose.runNow())
+        assertEquals(listOf("c1hex", "b1hex"), posted)
+        clock += OwnForceClose.RETRY_MS
+
+        assertNull(forceClose.runNow())
+
+        assertEquals(1, builds)
+        assertEquals(listOf("c1hex", "b1hex", "b1hex"), posted)
+        assertEquals(listOf("c1hex", "b1hex", "b1hex"), otherPosted)
+    }
+
+    @Test
     fun stopsAfterTheCloseCannotBeBuiltThreeTimes() {
         buildError = IllegalStateException("channel not found")
         val forceClose = ownForceClose()

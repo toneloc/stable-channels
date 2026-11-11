@@ -50,8 +50,11 @@ fun ChannelView(appState: AppState) {
     val isOnline by appState.isOnline.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val hasCachedChannel = hasReadyChannel || sc.userChannelId.isNotEmpty()
-    // A pending splice spends the funding output the app's own close follows (#456).
-    val movePending = appState.pendingSplice != null
+    // A pending splice spends the funding output the app's own close follows (#456). A move is in
+    // flight from its start until its splice confirms, also after a restart; the flow redraws this
+    // screen when that changes.
+    val spliceInFlight by appState.isSpliceInFlightFlow.collectAsState()
+    val movePending = spliceInFlight || appState.pendingSplice != null
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (channels.isNotEmpty() && !isClosing) {
@@ -224,7 +227,11 @@ fun ChannelView(appState: AppState) {
             },
             confirmButton = {
                 NeutralTextButton(
-                    enabled = isOnline && ForceCloseConfirmation.isConfirmed(forceCloseInput),
+                    // Coming back to the app can restore a pending move while this is open.
+                    enabled =
+                        isOnline &&
+                            !movePending &&
+                            ForceCloseConfirmation.isConfirmed(forceCloseInput),
                     onClick = {
                         showForceClose = false
                         val closeStarted = appState.isChannelClosing

@@ -328,6 +328,30 @@ final class OwnForceCloseTests: XCTestCase {
         XCTAssertEqual(state?.isSlow(now: seenAt + OwnForceClose.slowSeconds), true)
     }
 
+    func testSendsTheFeeBumpAgainWhileEveryExplorerHasOurUnconfirmedClose() async {
+        chainURLs.append("https://other.test/api")
+        OwnForceCloseMockURLProtocol.otherOutspend = "{\"spent\":false}"
+        let forceClose = ownForceClose()
+        await start(forceClose)
+        await runNow(forceClose)
+        // Both explorers have our close now; its fee bump may not have gone through.
+        let ours = "{\"spent\":true,\"txid\":\"c1\",\"vin\":0,\"status\":{\"confirmed\":false}}"
+        OwnForceCloseMockURLProtocol.outspend = ours
+        OwnForceCloseMockURLProtocol.otherOutspend = ours
+        clock.now += OwnForceClose.checkSeconds
+        let early = await runNow(forceClose)
+        XCTAssertEqual(posted, ["c1hex", "c1hex", "b1hex", "b1hex"])
+        clock.now += OwnForceClose.retrySeconds
+
+        let message = await runNow(forceClose)
+
+        XCTAssertNil(early)
+        XCTAssertNil(message)
+        XCTAssertEqual(events.builds, 1)
+        XCTAssertEqual(Array(posted.dropFirst(4)), ["b1hex", "b1hex"])
+        XCTAssertEqual(Array(postedHosts.dropFirst(4)), ["esplora.test", "other.test"])
+    }
+
     func testStopsAfterTheCloseCannotBeBuiltThreeTimes() async {
         events.buildError = BuildFailed()
         let forceClose = ownForceClose()

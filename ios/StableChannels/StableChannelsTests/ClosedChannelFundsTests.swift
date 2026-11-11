@@ -337,6 +337,23 @@ final class ClosedChannelFundsTests: XCTestCase {
         XCTAssertEqual(calls, ["force close"])
     }
 
+    @MainActor
+    func testTheEmergencyCloseWaitsForAMoveUntilItsSpliceConfirms() {
+        let appState = AppState()
+        XCTAssertFalse(appState.isMovePending)
+
+        // A move starts.
+        appState.isSweeping = true
+        appState.pendingSplice = PendingSplice(paymentType: .spliceOut, amountSats: 20_000, address: "tb1qtest")
+        XCTAssertTrue(appState.isMovePending)
+        // Its splice is negotiated: the splice-pending handler clears pendingSplice.
+        appState.pendingSplice = nil
+        XCTAssertTrue(appState.isMovePending)
+        // Its splice confirms.
+        appState.isSweeping = false
+        XCTAssertFalse(appState.isMovePending)
+    }
+
     /// Recovery waits for LDK's own sweep to confirm, even once the card leaves it out.
     func testLdkHandlesACloseUntilItsSweepConfirms() {
         let sweep = PendingSweepBalance.broadcastAwaitingConfirmation(
