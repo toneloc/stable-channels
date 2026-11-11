@@ -178,6 +178,19 @@ class EmailSubmissionServiceTest {
         }
     }
 
+    // A 2xx whose body does not say ok:true is a refusal, so a refused save is never shown as
+    // saved.
+    @Test
+    fun submit_when2xxWithoutOkTrue_failsAsRejected() = runTest {
+        for (body in listOf("""{"ok":false}""", "", "not json")) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(200).setBody(body))
+                val failure = failureOf { service(server, FakeSigner()).submit(null) }
+                assertEquals(body, EmailSaveFailure.REJECTED, failure)
+            }
+        }
+    }
+
     @Test
     fun submit_whenServerUnreachable_failsAsNetwork() = runTest {
         val server = MockWebServer()
@@ -398,6 +411,16 @@ class EmailPromptStoreTest {
     }
 
     // A restored wallet is a different node: the old address and answers must not carry over.
+    // The restored wallet's own launch counts even though this process already counted one.
+    @Test
+    fun reset_letsThisLaunchCountForTheNewWallet() {
+        val store = EmailPromptStore(prefs())
+        store.recordLaunchOnce()
+        store.reset()
+        store.recordLaunchOnce()
+        assertEquals(1, store.launches)
+    }
+
     @Test
     fun reset_clearsEverythingForANewWallet() {
         val prefs = prefs()

@@ -58,6 +58,7 @@ class EmailPromptStore(private val prefs: SharedPreferences) :
      * wallet.
      */
     fun reset() {
+        recordedThisProcess = false
         prefs
             .edit()
             .remove(KEY_LAUNCHES)

@@ -9,7 +9,11 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -43,6 +47,11 @@ object EmailRegistration {
         .toString()
 }
 
+/** Whether the server's reply body says `"ok": true`; anything else is a refusal. */
+private fun isOkReply(body: String): Boolean =
+    runCatching { Json.parseToJsonElement(body).jsonObject["ok"]?.jsonPrimitive?.booleanOrNull }
+        .getOrNull() == true
+
 /** Signs with the running node; not ready until the node has started. */
 class NodeServiceSigner(private val nodeService: NodeService) : NodeMessageSigner {
     override val readyNodeId: String?
@@ -66,7 +75,9 @@ class EmailSubmissionService(
             val request = Request.Builder().url(endpoint).post(body).build()
             val accepted =
                 try {
-                    client.newCall(request).execute().use { it.isSuccessful }
+                    client.newCall(request).execute().use {
+                        it.isSuccessful && isOkReply(it.body?.string().orEmpty())
+                    }
                 } catch (e: IOException) {
                     throw EmailSaveException(EmailSaveFailure.NETWORK, e)
                 }
