@@ -108,6 +108,9 @@ class FCMService : FirebaseMessagingService() {
                 "lsp_to_user"
             }
 
+        // Whoever ends up owning the node, a splice negotiated soon is the LSP's.
+        if (direction == LSP_SPLICE_IN_DIRECTION) LspSpliceExpectation.note(this)
+
         val prefs = getPrefs(this)
         val lastActive = prefs.getLong(KEY_MAIN_APP_LAST_ACTIVE, 0)
         val now = System.currentTimeMillis() / 1000

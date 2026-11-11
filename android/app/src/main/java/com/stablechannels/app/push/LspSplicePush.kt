@@ -1,5 +1,7 @@
 package com.stablechannels.app.push
 
+import android.content.Context
+
 /**
  * The push direction the LSP sends before it splices its own funds into the channel. Both sides
  * sign the splice, so the node has to be online for the whole negotiation; the LSP sends it even
@@ -57,6 +59,38 @@ object LspSpliceHoldBridge {
         holder()
         return true
     }
+}
+
+/**
+ * When the LSP last pushed for a splice of its own. It pushes before every one, and again every few
+ * minutes while its call is unanswered, so a splice negotiated inside this window with no Move of
+ * the user's in flight is the LSP's: a Move the app lost track of must not be given its
+ * transaction.
+ */
+object LspSpliceExpectation {
+    const val WINDOW_MS = 10 * 60 * 1000L
+    private const val PREFS_NAME = "lsp_splice"
+    private const val KEY_PUSHED_AT_MS = "pushed_at_ms"
+
+    fun note(context: Context, nowMs: Long = System.currentTimeMillis()) {
+        context
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putLong(KEY_PUSHED_AT_MS, nowMs)
+            .apply()
+    }
+
+    fun isExpected(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean =
+        expectedWithin(
+            context
+                .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .getLong(KEY_PUSHED_AT_MS, 0L),
+            nowMs,
+        )
+
+    /** From the push until the window ends; a clock set back before the push expects nothing. */
+    internal fun expectedWithin(pushedAtMs: Long, nowMs: Long): Boolean =
+        pushedAtMs > 0L && nowMs >= pushedAtMs && nowMs - pushedAtMs < WINDOW_MS
 }
 
 /**

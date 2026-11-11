@@ -97,6 +97,19 @@ class LspSplicePushTest {
     }
 
     @Test
+    fun `a splice is expected from the push until the window ends`() {
+        assertFalse("no push yet", LspSpliceExpectation.expectedWithin(0L, 5_000L))
+        assertTrue(LspSpliceExpectation.expectedWithin(5_000L, 5_000L))
+        assertTrue(
+            LspSpliceExpectation.expectedWithin(5_000L, 5_000L + LspSpliceExpectation.WINDOW_MS - 1)
+        )
+        assertFalse(
+            LspSpliceExpectation.expectedWithin(5_000L, 5_000L + LspSpliceExpectation.WINDOW_MS)
+        )
+        assertFalse("clock before the push", LspSpliceExpectation.expectedWithin(5_000L, 4_999L))
+    }
+
+    @Test
     fun `the wait ends at the lock plus the settle window`() {
         val wait = LspSpliceWait(startMs = 1_000, waitMs = 60_000, settleMs = 10_000)
         assertFalse(wait.isDone(30_000))

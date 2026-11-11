@@ -106,15 +106,28 @@ class StabilityProcessingService : Service() {
         }
     }
 
-    /** Both background loops commit splice details before removing the event from LDK. */
+    /**
+     * Both background loops commit splice details before removing the event from LDK. With
+     * [lspSplice] the splice is known to be the LSP's, so no Move of the user's is given it.
+     */
     internal fun persistSpliceEvent(
         event: Event,
         fundingForReady: (Event.ChannelReady) -> OutPoint?,
+        lspSplice: Boolean = false,
+        channelValueSats: (String, String) -> Long? = { _, _ -> null },
         acknowledge: () -> Unit,
     ) {
         try {
             DatabaseService(this).use { db ->
-                check(SpliceEventRecorder.record(db, event, fundingForReady))
+                check(
+                    SpliceEventRecorder.record(
+                        db,
+                        event,
+                        lspSplice = lspSplice,
+                        channelValueSats = channelValueSats,
+                        fundingForReady = fundingForReady,
+                    )
+                )
             }
         } catch (e: Exception) {
             throw BackingUpdateFailed("Cannot persist splice event: ${e.message}")
@@ -478,7 +491,12 @@ class StabilityProcessingService : Service() {
                     }
                     is Event.SpliceNegotiated,
                     is Event.ChannelReady -> {
-                        persistSpliceEvent(event, { ready -> fundingOf(node, ready) }) {
+                        persistSpliceEvent(
+                            event,
+                            { ready -> fundingOf(node, ready) },
+                            lspSplice = LspSpliceExpectation.isExpected(this),
+                            channelValueSats = channelValueOf(node),
+                        ) {
                             node.eventHandled()
                         }
                     }
@@ -624,6 +642,16 @@ class StabilityProcessingService : Service() {
             }
             ?.fundingTxo
 
+    /** The live value of a channel, for the size of an LSP splice. */
+    private fun channelValueOf(node: Node): (String, String) -> Long? =
+        { userChannelId, channelId ->
+            node
+                .listChannels()
+                .singleOrNull { it.userChannelId == userChannelId && it.channelId == channelId }
+                ?.channelValueSats
+                ?.toLong()
+        }
+
     /** The funding outpoint of the channel with the LSP, if there is one. */
     private fun lspChannelFunding(node: Node, lspPubkey: String): OutPoint? =
         node.listChannels().firstOrNull { it.counterpartyNodeId == lspPubkey }?.fundingTxo
@@ -703,12 +731,22 @@ class StabilityProcessingService : Service() {
                         node.eventHandled()
                     }
                     is Event.SpliceNegotiated -> {
-                        persistSpliceEvent(event, { ready -> fundingOf(node, ready) }) {
+                        persistSpliceEvent(
+                            event,
+                            { ready -> fundingOf(node, ready) },
+                            lspSplice = true,
+                            channelValueSats = channelValueOf(node),
+                        ) {
                             node.eventHandled()
                         }
                     }
                     is Event.ChannelReady -> {
-                        persistSpliceEvent(event, { ready -> fundingOf(node, ready) }) {
+                        persistSpliceEvent(
+                            event,
+                            { ready -> fundingOf(node, ready) },
+                            lspSplice = true,
+                            channelValueSats = channelValueOf(node),
+                        ) {
                             node.eventHandled()
                         }
                         // The splice has locked once the LSP's channel is ready on new funding; a
@@ -1020,15 +1058,9 @@ class StabilityProcessingService : Service() {
                     is Event.ChannelReady -> {
                         persistSpliceEvent(
                             event,
-                            { ready ->
-                                node
-                                    .listChannels()
-                                    .singleOrNull {
-                                        it.userChannelId == ready.userChannelId &&
-                                            it.channelId == ready.channelId
-                                    }
-                                    ?.fundingTxo
-                            },
+                            { ready -> fundingOf(node, ready) },
+                            lspSplice = LspSpliceExpectation.isExpected(this),
+                            channelValueSats = channelValueOf(node),
                         ) {
                             node.eventHandled()
                         }

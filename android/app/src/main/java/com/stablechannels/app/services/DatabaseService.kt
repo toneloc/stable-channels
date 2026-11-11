@@ -2733,6 +2733,13 @@ class DatabaseService(context: Context) :
         return txids.singleOrNull()
     }
 
+    /** The LSP's splice on [txid], if the app saw it negotiated. */
+    fun getLspSplice(txid: String): LspSplice? = SpliceEventRecorder.lspSplice(this, txid)
+
+    /** Whether the LSP has a splice negotiated on the channel that has not locked yet. */
+    fun hasPendingLspSplice(nowEpochSecs: Long = System.currentTimeMillis() / 1000L): Boolean =
+        SpliceEventRecorder.hasPendingLspSplice(this, nowEpochSecs)
+
     fun hasPendingSplice(): Boolean {
         // If the app died before SpliceNegotiated delivered a txid, there is no
         // durable in-flight splice to wait for. Let that pre-negotiation lock heal.
