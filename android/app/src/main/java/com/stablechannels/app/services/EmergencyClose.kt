@@ -8,6 +8,9 @@ import org.lightningdevkit.ldknode.ChannelShutdownState
  * so a close under way is forced, as is a normal close that LDK refuses.
  */
 object EmergencyClose {
+    /** Why the emergency close is off while a move is not final (#456). */
+    const val MOVE_PENDING = "Not available until the provider finishes your move."
+
     /** Whether to force close without trying a normal close first. */
     fun forcesAtOnce(
         closeStarted: Boolean,

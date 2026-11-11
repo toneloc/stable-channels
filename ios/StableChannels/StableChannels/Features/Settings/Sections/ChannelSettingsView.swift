@@ -114,9 +114,9 @@ struct ChannelSettingsView: View {
                 }
 
                 // Shown while the channel is listed, even when it is not usable or its close is
-                // stuck (#363). A pending splice spends the funding output the app's own close
-                // follows (#456).
-                let movePending = appState.isMovePending
+                // stuck (#363). A move spends the funding output the app's own close follows, until
+                // LDK reports the splice's output (#456).
+                let movePending = appState.emergencyCloseWaitsForMove(appState.nodeService.channels.first)
                 Section {
                     Button(
                         String(localized: "button_force_close", defaultValue: "Emergency force close"),
@@ -128,10 +128,7 @@ struct ChannelSettingsView: View {
                     .foregroundStyle(appState.isOnline && !movePending ? .red : .secondary)
                 } footer: {
                     if movePending {
-                        Text(String(
-                            localized: "info_force_close_move_pending",
-                            defaultValue: "Not available while a move is pending."
-                        ))
+                        Text(EmergencyClose.movePending)
                     }
                 }
             } else if appState.isChannelClosing {
@@ -230,6 +227,11 @@ struct ChannelSettingsView: View {
             AuditService.log("CHANNEL_CLOSE_NO_OUTPOINT", data: [
                 "user_channel_id": appState.stableChannel.userChannelId
             ])
+            return
+        }
+        // Read again before the close starts.
+        if emergency, appState.emergencyCloseWaitsForMove(channel) {
+            appState.statusMessage = EmergencyClose.movePending
             return
         }
         let closeStarted = appState.isChannelClosing
@@ -355,7 +357,9 @@ private struct ForceCloseSheet: View {
                     }
                     // Coming back to the app can restore a pending move while the sheet is open.
                     .disabled(
-                        !appState.isOnline || appState.isMovePending || !ForceCloseConfirmation.isConfirmed(input)
+                        !appState.isOnline
+                            || appState.emergencyCloseWaitsForMove(appState.nodeService.channels.first)
+                            || !ForceCloseConfirmation.isConfirmed(input)
                     )
                 }
             }

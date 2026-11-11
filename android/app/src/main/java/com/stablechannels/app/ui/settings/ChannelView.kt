@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewModelScope
 import com.stablechannels.app.AppState
 import com.stablechannels.app.services.AuditService
+import com.stablechannels.app.services.EmergencyClose
 import com.stablechannels.app.ui.components.NeutralOutlinedButton
 import com.stablechannels.app.ui.components.NeutralTextButton
 import com.stablechannels.app.ui.components.OfflineBadge
@@ -50,11 +51,11 @@ fun ChannelView(appState: AppState) {
     val isOnline by appState.isOnline.collectAsState()
     val lightningSats by appState.lightningBalanceSats.collectAsState()
     val hasCachedChannel = hasReadyChannel || sc.userChannelId.isNotEmpty()
-    // A pending splice spends the funding output the app's own close follows (#456). A move is in
-    // flight from its start until its splice confirms, also after a restart; the flow redraws this
-    // screen when that changes.
+    // A move spends the funding output the app's own close follows, until LDK reports the
+    // splice's output (#456). The flow redraws this screen when a move starts or confirms.
     val spliceInFlight by appState.isSpliceInFlightFlow.collectAsState()
-    val movePending = spliceInFlight || appState.pendingSplice != null
+    val movePending =
+        spliceInFlight || channels.firstOrNull()?.let(appState::emergencyCloseWaitsForMove) == true
 
     Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp)) {
         if (channels.isNotEmpty() && !isClosing) {
@@ -234,6 +235,11 @@ fun ChannelView(appState: AppState) {
                             ForceCloseConfirmation.isConfirmed(forceCloseInput),
                     onClick = {
                         showForceClose = false
+                        // Read again before the close is tracked.
+                        if (appState.emergencyCloseWaitsForMove(forceCloseChannel)) {
+                            appState.setStatus(EmergencyClose.MOVE_PENDING)
+                            return@NeutralTextButton
+                        }
                         val closeStarted = appState.isChannelClosing
                         appState.isChannelClosing = true
                         appState.prepareChannelCloseTracking(forceCloseChannel.userChannelId)
@@ -402,7 +408,7 @@ private fun ForceCloseButton(enabled: Boolean, movePending: Boolean, onClick: ()
     }
     if (movePending) {
         Text(
-            text = "Not available while a move is pending.",
+            text = EmergencyClose.MOVE_PENDING,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,

@@ -155,6 +155,19 @@ enum ForceCloseConfirmation {
 /// refuses a normal close while one is under way, also after a restart or when the LSP started it, so a
 /// close under way is forced, as is a normal close that LDK refuses.
 enum EmergencyClose {
+    /// Why the emergency close is off while a move is not final (#456).
+    static var movePending: String {
+        String(
+            localized: "info_force_close_move_pending",
+            defaultValue: "Not available until the provider finishes your move."
+        )
+    }
+
+    /// A force close refused because a move is not final.
+    struct MovePending: LocalizedError {
+        var errorDescription: String? { EmergencyClose.movePending }
+    }
+
     /// Whether to force close without trying a normal close first.
     static func forcesAtOnce(closeStarted: Bool, lspOnline: Bool, shutdownState: ChannelShutdownState?) -> Bool {
         closeStarted || !lspOnline || (shutdownState.map { $0 != .notShuttingDown } ?? false)

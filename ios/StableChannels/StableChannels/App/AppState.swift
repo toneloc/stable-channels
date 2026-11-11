@@ -601,9 +601,31 @@ class AppState {
     var pendingSplice: PendingSplice?
 
     /// A move from its start until its splice confirms, also after a restart. `pendingSplice` alone ends
-    /// when the splice is negotiated. LDK reports the pre-splice funding output until the splice locks,
-    /// so the app's own close would follow an output the splice spends (#456).
+    /// when the splice is negotiated.
     var isMovePending: Bool { pendingSplice != nil || isSweeping }
+
+    /// Whether the emergency close waits for a move: from its start until LDK reports the splice's funding
+    /// output, when the splice locks, after it confirms. Until then the app's own close would follow an
+    /// output the splice spends (#456). Read from LDK and the splice rows each time, so a move that fails
+    /// or expires stops counting. A database error leaves the close available.
+    func emergencyCloseWaitsForMove(userChannelId: String, fundingTxid: String?) -> Bool {
+        if isMovePending { return true }
+        guard let fundingTxid, let spliceRepo = databaseService?.spliceRepo else { return false }
+        do {
+            return try spliceRepo.moveSpends(userChannelId: userChannelId, fundingTxid: fundingTxid)
+        } catch {
+            AuditService.log("MOVE_CHECK_FAILED", data: ["error": error.localizedDescription])
+            return false
+        }
+    }
+
+    func emergencyCloseWaitsForMove(_ channel: ChannelDetails?) -> Bool {
+        guard let channel else { return isMovePending }
+        return emergencyCloseWaitsForMove(
+            userChannelId: "\(channel.userChannelId)",
+            fundingTxid: channel.fundingTxo.map { "\($0.txid)" }
+        )
+    }
 
     enum WalletRestoreError: LocalizedError {
         case invalidMnemonic
@@ -2683,6 +2705,10 @@ class AppState {
         fundingOutpointVout: UInt32,
         force: Bool = false
     ) async throws {
+        // The screen checks this first; checked again before LDK closes.
+        if force, emergencyCloseWaitsForMove(userChannelId: "\(userChannelId)", fundingTxid: fundingOutpointTxid) {
+            throw EmergencyClose.MovePending()
+        }
         // Snapshot here: AppState globals could be wrong for rapid re-tap or multi-channel
         let balanceSats = stableChannel.stableReceiverBTC.sats
         let price = spotOrBookedPrice

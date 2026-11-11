@@ -2005,11 +2005,36 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /**
+     * Whether the emergency close waits for a move: from its start until LDK reports the splice's
+     * funding output, when the splice locks, after it confirms. Until then the app's own close
+     * would follow an output the splice spends (#456). Read from LDK and the splice rows each time,
+     * so a move that fails or expires stops counting. A database error leaves the close available.
+     */
+    fun emergencyCloseWaitsForMove(userChannelId: String, fundingTxid: String?): Boolean {
+        if (isSpliceInFlight || pendingSplice != null) return true
+        if (fundingTxid == null) return false
+        return try {
+            databaseService?.moveSpends(userChannelId, fundingTxid) == true
+        } catch (e: Exception) {
+            AuditService.log(
+                "MOVE_CHECK_FAILED",
+                mapOf("error" to (e.message ?: e.javaClass.simpleName)),
+            )
+            false
+        }
+    }
+
+    fun emergencyCloseWaitsForMove(channel: ChannelDetails): Boolean =
+        emergencyCloseWaitsForMove(channel.userChannelId, channel.fundingTxo?.txid)
+
+    /**
      * The emergency close (#363), as [EmergencyClose] decides. [closeStarted] is a normal close
      * this session started. The app broadcasts a force close itself (#456): ldk-node leaves the
      * close of a channel with the trusted LSP to the LSP.
      */
     suspend fun emergencyCloseChannel(channel: ChannelDetails, closeStarted: Boolean) {
+        // The screen checks this before it tracks the close; checked again before LDK closes.
+        check(!emergencyCloseWaitsForMove(channel)) { EmergencyClose.MOVE_PENDING }
         val node = nodeService.node
         val lspOnline =
             node?.listPeers()?.any { it.nodeId == channel.counterpartyNodeId && it.isConnected } ==
