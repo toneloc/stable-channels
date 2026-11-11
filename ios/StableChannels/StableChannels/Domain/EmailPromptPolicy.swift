@@ -1,7 +1,7 @@
 import Foundation
 
 /// Decides when Home offers the email prompt: to anyone who has opened the wallet a few times, funded or
-/// not. Save or "Not now" ends it; a sheet swiped away comes back after three times as many launches
+/// not. Only Save ends it; after "Not now" or a swipe it comes back after three times as many launches
 /// (3, 9, 27 for a new user), at most `maxShows` times. Never while the app is locked: the sheet would draw above the
 /// lock.
 enum EmailPromptPolicy {
