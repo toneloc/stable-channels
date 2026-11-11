@@ -396,8 +396,10 @@ pub struct QueuedSplice {
     pub last_error: Option<String>,
     /// Why the phone is not being pushed right now; cleared when a push goes out or a call is made.
     pub wake_note: Option<String>,
-    /// The outpoint the node negotiated while this row's call was out. Informational: a lock is attributed by balance, since a user's splice can negotiate in the same window.
+    /// The outpoint the node negotiated while this row's call was out. A lock is attributed by the channel and the wallet, not by it, since a user's splice can negotiate in the same window; but a row that holds one keeps its call through a later negotiation failure, since the signed splice may have landed.
     pub funding_txo: Option<String>,
+    /// When that outpoint was negotiated; cleared with it by the next call.
+    pub negotiated_at: Option<i64>,
     pub wake_sent_at: Option<i64>,
     pub last_attempt_at: Option<i64>,
     /// The channel's funding outpoint when the last splice-in call was made.
@@ -429,7 +431,7 @@ pub enum QueueSpliceOutcome {
     PendingOnNode(QueuedSplice),
 }
 
-const QUEUED_SPLICE_COLUMNS: &str = "rowid, user_channel_id, counterparty, amount_sats, status, attempts, last_error, wake_note, funding_txo, wake_sent_at, last_attempt_at, channel_funding_txo, channel_value_before, lsp_sats_before, pending_on_node, created_at, updated_at";
+const QUEUED_SPLICE_COLUMNS: &str = "rowid, user_channel_id, counterparty, amount_sats, status, attempts, last_error, wake_note, funding_txo, wake_sent_at, last_attempt_at, channel_funding_txo, channel_value_before, lsp_sats_before, pending_on_node, created_at, updated_at, negotiated_at";
 
 fn queued_splice_row(row: &rusqlite::Row<'_>) -> SqliteResult<QueuedSplice> {
     Ok(QueuedSplice {
@@ -450,6 +452,7 @@ fn queued_splice_row(row: &rusqlite::Row<'_>) -> SqliteResult<QueuedSplice> {
         pending_on_node: row.get::<_, i64>(14)? != 0,
         created_at: row.get(15)?,
         updated_at: row.get(16)?,
+        negotiated_at: row.get(17)?,
     })
 }
 
@@ -981,6 +984,7 @@ impl Database {
                 last_error TEXT,
                 wake_note TEXT,
                 funding_txo TEXT,
+                negotiated_at INTEGER,
                 wake_sent_at INTEGER,
                 last_attempt_at INTEGER,
                 channel_funding_txo TEXT,
@@ -1354,7 +1358,7 @@ impl Database {
     ) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
             "UPDATE queued_splices
-             SET status = 'splicing', last_attempt_at = ?6, last_error = NULL, wake_note = NULL, funding_txo = NULL,
+             SET status = 'splicing', last_attempt_at = ?6, last_error = NULL, wake_note = NULL, funding_txo = NULL, negotiated_at = NULL,
                  channel_funding_txo = ?3, channel_value_before = ?4, lsp_sats_before = ?5, pending_on_node = 1, updated_at = ?6
              WHERE user_channel_id = ?1 AND rowid = ?2 AND pending_on_node = 0
                AND status IN ('queued', 'waking', 'failed', 'stalled')",
@@ -1366,7 +1370,7 @@ impl Database {
     /// The node negotiated a splice while this row's call was out.
     pub fn note_queued_splice_negotiated(&self, user_channel_id: &str, funding_txo: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
-            "UPDATE queued_splices SET status = 'negotiated', funding_txo = ?2, updated_at = ?3
+            "UPDATE queued_splices SET status = 'negotiated', funding_txo = ?2, negotiated_at = ?3, updated_at = ?3
              WHERE user_channel_id = ?1 AND status = 'splicing'",
             params![user_channel_id, funding_txo, now],
             user_channel_id,
@@ -8724,7 +8728,7 @@ mod tests {
         db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, 103).unwrap();
         assert!(db.mark_queued_splice_splicing("7", request_id + 1, Some("aa:0"), 500_000, 400_000, 103).unwrap().is_none(), "another request's id");
         let negotiated = db.note_queued_splice_negotiated("7", "bb:1", 104).unwrap().unwrap();
-        assert_eq!((negotiated.status.as_str(), negotiated.funding_txo.as_deref()), ("negotiated", Some("bb:1")));
+        assert_eq!((negotiated.status.as_str(), negotiated.funding_txo.as_deref(), negotiated.negotiated_at), ("negotiated", Some("bb:1"), Some(104)));
         // A push for a splice the node is finishing keeps the state.
         let pushed = db.note_queued_splice_wake_sent("7", 105).unwrap().unwrap();
         assert_eq!((pushed.status.as_str(), pushed.wake_sent_at), ("negotiated", Some(105)));
