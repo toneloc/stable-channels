@@ -129,8 +129,12 @@ final class EmailSubmissionServiceTests: XCTestCase {
         return data
     }
 
-    private static func response(_ request: URLRequest, status: Int) -> (HTTPURLResponse, Data) {
-        (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data())
+    private static func response(
+        _ request: URLRequest,
+        status: Int,
+        body: String = #"{"ok":true}"#
+    ) -> (HTTPURLResponse, Data) {
+        (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!, Data(body.utf8))
     }
 
     func testSubmit_postsSignedEnvelope() async throws {
@@ -198,6 +202,19 @@ final class EmailSubmissionServiceTests: XCTestCase {
             XCTFail("expected rejected")
         } catch {
             XCTAssertEqual(error as? EmailSubmissionError, .rejected(statusCode: 401))
+        }
+    }
+
+    // A 2xx whose body does not say ok:true is a refusal, so a refused save is never shown as saved.
+    func testSubmit_2xxWithoutOkTrue_isRejected() async {
+        for body in [#"{"ok":false}"#, "", "not json"] {
+            MockURLProtocol.requestHandler = { Self.response($0, status: 200, body: body) }
+            do {
+                try await makeService(signer: FakeSigner()).submit(EmailAddress("a@b.com"))
+                XCTFail("expected rejected for \(body)")
+            } catch {
+                XCTAssertEqual(error as? EmailSubmissionError, .rejected(statusCode: 200), body)
+            }
         }
     }
 
@@ -434,6 +451,15 @@ final class EmailPromptStoreTests: XCTestCase {
         XCTAssertEqual(reopened.lastShownLaunch, 0)
         XCTAssertFalse(reopened.hasResponded)
         XCTAssertNil(reopened.savedEmail)
+    }
+
+    // The restored wallet's own launch counts even though this process already counted one.
+    func testReset_letsThisLaunchCountForTheNewWallet() {
+        let store = EmailPromptStore(defaults: makeDefaults())
+        store.recordLaunchOnce()
+        store.reset()
+        store.recordLaunchOnce()
+        XCTAssertEqual(store.launches, 1)
     }
 
     func testRecordShown_countsAndRemembersTheLaunch() {
