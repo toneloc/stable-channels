@@ -60,6 +60,8 @@ pub(crate) const PENDING_ALERT_SECS: i64 = 600;
 pub(crate) const NEGOTIATED_ALERT_SECS: i64 = 3 * 3_600;
 /// A row that has not had a call within this time of being queued, or of its last attempt, stalls, so a phone that never comes online, or has no push token, is reported instead of waiting forever.
 pub(crate) const QUEUED_ALERT_SECS: i64 = 24 * 3_600;
+/// What the node's own failure event records on the row it fails; a refusal records the call's error instead. A negotiation that follows such a failure this soon, before any retry could go out, revives the call: the event names no outpoint, so a stale or replayed one can fail a call whose splice is still being signed.
+const NEGOTIATION_FAILED_ERROR: &str = "the splice negotiation failed";
 /// A failed attempt is not retried before this long, so a phone that comes back is tried within two minutes and a refusal that keeps happening is recorded no more often than that. A retry that needs a push also waits for the node's push cooldown.
 pub(crate) const RETRY_BACKOFF_SECS: i64 = 120;
 /// Failed attempts after which the row stalls and the operator is alerted. A stalled row is no longer pushed for, but is still tried when the phone shows up.
@@ -371,12 +373,12 @@ pub(crate) async fn run_once(
                 && c.counterparty_node_id == row.counterparty
         });
         let Some(channel) = channel else {
-            // The node's list is complete, so a channel missing from it is gone.
-            end_for_channel(db, &row, "the node no longer lists this channel", now);
+            // The node's list is complete, so a channel missing from it is gone; but the list is not the node's word on a call, so one that is pending stays so until it locks or the operator releases it.
+            end_for_channel(db, &row, "the node no longer lists this channel", false, now);
             continue;
         };
         if row.pending_on_node {
-            follow_pending_call(db, ldk, push, &row, channel, now).await;
+            follow_pending_call(db, ldk, push, &row, channel, now, clock).await;
             continue;
         }
         // The node answered the last call, but the splice it reported dropped or refused may be the one on the channel now, so look before any new call.
@@ -406,7 +408,7 @@ pub(crate) async fn run_once(
                         start_splice(db, ldk, &row, channel, now, false).await;
                     }
                 } else {
-                    wake_or_splice(db, ldk, push, &row, channel, now).await;
+                    wake_or_splice(db, ldk, push, &row, channel, now, clock).await;
                 }
             }
             "waking" => {
@@ -430,6 +432,7 @@ async fn follow_pending_call(
     row: &QueuedSplice,
     channel: &Channel,
     now: i64,
+    clock: &(dyn Fn() -> i64 + Sync),
 ) {
     if lock_if_shown(db, ldk, row, channel, now).await == LockCheck::Locked
         || matches!(row.status.as_str(), "cancelled" | "stalled")
@@ -451,7 +454,7 @@ async fn follow_pending_call(
             Ok(Some(stalled)) => audit(
                 "QUEUED_SPLICE_STALLED",
                 &stalled,
-                &[("dedup_key", dedup_key("stalled", &stalled, "pending"))],
+                &[("dedup_key", dedup_key("stalled", &stalled, format_args!("pending:{called_at}")))],
             ),
             Ok(None) => {}
             Err(error) => db_failed("stall_queued_splice_pending", &row.user_channel_id, error),
@@ -460,14 +463,14 @@ async fn follow_pending_call(
     }
     let since = row.wake_sent_at.unwrap_or(0).max(called_at);
     if now >= since + PENDING_WAKE_SECS {
-        wake_again(db, push, row, now).await;
+        wake_again(db, push, row, now, clock).await;
     }
 }
 
 /// The channel moved since the row's last call, but the node cannot say whether that was the LSP's own splice: no new call goes out, and once that has lasted as long as an unanswered call may, the row stalls so the operator hears of it, whether it was waiting for its retry or already pushed for it.
 fn hold_for_lookup(db: &Database, row: &QueuedSplice, now: i64) {
     let note = "the node could not say whether the earlier splice-in landed; no new call until it answers";
-    if let Err(error) = db.note_queued_splice_wake_issue(&row.user_channel_id, note, now) {
+    if let Err(error) = db.note_queued_splice_wake_issue(&row.user_channel_id, row.request_id, note, now) {
         db_failed("note_queued_splice_wake_issue", &row.user_channel_id, error);
     }
     if row.status == "stalled" || lookup_unavailable_for(now) < PENDING_ALERT_SECS {
@@ -475,10 +478,15 @@ fn hold_for_lookup(db: &Database, row: &QueuedSplice, now: i64) {
     }
     let error = format!("{note}; it has not answered for {PENDING_ALERT_SECS}s");
     match db.stall_queued_splice(&row.user_channel_id, row.request_id, &error, now) {
-        Ok(Some(stalled)) => audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, "lookup"))]),
+        Ok(Some(stalled)) => audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, format_args!("lookup:{}", since_call(row))))]),
         Ok(None) => {}
         Err(error) => db_failed("stall_queued_splice", &row.user_channel_id, error),
     }
+}
+
+/// When the row's last call was made, or when it was queued if none was: what a ledger row for the row's state since then is keyed on, so the same state after a later call gets its own row.
+fn since_call(row: &QueuedSplice) -> i64 {
+    row.last_attempt_at.unwrap_or(row.created_at)
 }
 
 /// A row that gets no call for a day, since it was queued or since its last attempt, stalls, so the operator hears about a phone that never comes online.
@@ -489,7 +497,7 @@ fn stall_uncalled(db: &Database, row: &QueuedSplice, now: i64) {
         None => format!("no splice-in call could be made within {QUEUED_ALERT_SECS}s of {since}"),
     };
     match db.stall_queued_splice(&row.user_channel_id, row.request_id, &error, now) {
-        Ok(Some(stalled)) => audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, "queued"))]),
+        Ok(Some(stalled)) => audit("QUEUED_SPLICE_STALLED", &stalled, &[("dedup_key", dedup_key("stalled", &stalled, format_args!("queued:{}", since_call(row))))]),
         Ok(None) => {}
         Err(error) => db_failed("stall_queued_splice", &row.user_channel_id, error),
     }
@@ -537,9 +545,11 @@ async fn wake_or_splice(
     row: &QueuedSplice,
     channel: &Channel,
     now: i64,
+    clock: &(dyn Fn() -> i64 + Sync),
 ) {
     if send_push(db, push, row, now).await {
-        match db.mark_queued_splice_waking(&row.user_channel_id, now) {
+        // The provider took its time; the phone's window starts now, not when the pass began.
+        match db.mark_queued_splice_waking(&row.user_channel_id, row.request_id, clock()) {
             Ok(Some(woken)) => audit("QUEUED_SPLICE_WAKE_SENT", &woken, &[("timeout_secs", json!(WAKE_TIMEOUT_SECS))]),
             Ok(None) => {}
             Err(error) => db_failed("mark_queued_splice_waking", &row.user_channel_id, error),
@@ -552,11 +562,11 @@ async fn wake_or_splice(
 }
 
 /// Push the phone again for a call the node is still to answer; the row keeps its state.
-async fn wake_again(db: &Database, push: &Arc<Mutex<PushService>>, row: &QueuedSplice, now: i64) {
+async fn wake_again(db: &Database, push: &Arc<Mutex<PushService>>, row: &QueuedSplice, now: i64, clock: &(dyn Fn() -> i64 + Sync)) {
     if !send_push(db, push, row, now).await {
         return;
     }
-    match db.note_queued_splice_wake_sent(&row.user_channel_id, now) {
+    match db.note_queued_splice_wake_sent(&row.user_channel_id, row.request_id, clock()) {
         Ok(Some(woken)) => audit("QUEUED_SPLICE_WAKE_SENT", &woken, &[("timeout_secs", json!(PENDING_WAKE_SECS))]),
         Ok(None) => {}
         Err(error) => db_failed("note_queued_splice_wake_sent", &row.user_channel_id, error),
@@ -581,7 +591,7 @@ async fn send_push(db: &Database, push: &Arc<Mutex<PushService>>, row: &QueuedSp
     } else {
         "the push provider did not accept the push"
     };
-    if let Err(error) = db.note_queued_splice_wake_issue(&row.user_channel_id, note, now) {
+    if let Err(error) = db.note_queued_splice_wake_issue(&row.user_channel_id, row.request_id, note, now) {
         db_failed("note_queued_splice_wake_issue", &row.user_channel_id, error);
     }
     false
@@ -655,7 +665,7 @@ async fn start_splice(
                     ("channel_funding_txo", json!(current_txo)),
                     ("channel_value_before", json!(channel.channel_value_sats)),
                     ("lsp_sats_before", json!(lsp_before)),
-                    ("dedup_key", dedup_key("started", &attempt, attempt.attempts + 1)),
+                    ("dedup_key", dedup_key("started", &attempt, since_call(&attempt))),
                 ],
             );
         }
@@ -714,9 +724,9 @@ fn fail_from(db: &Database, row: &QueuedSplice, from_status: &str, error: &str, 
     }
 }
 
-/// The channel is gone: nothing on it can be pending or lock.
-fn end_for_channel(db: &Database, row: &QueuedSplice, reason: &str, now: i64) {
-    match db.close_queued_splice_channel(&row.user_channel_id, reason, now) {
+/// The channel is gone, so the row is cancelled. The node's closed event means nothing on it can be pending or lock, and `release` then clears the call; a listing without the channel is not the node's word on the call, so the call stays pending until it locks or the operator releases it.
+fn end_for_channel(db: &Database, row: &QueuedSplice, reason: &str, release: bool, now: i64) {
+    match db.close_queued_splice_channel(&row.user_channel_id, reason, release, now) {
         Ok(Some(ended)) if row.status != "cancelled" => {
             audit("QUEUED_SPLICE_CANCELLED", &ended, &[("dedup_key", dedup_key("cancelled", &ended, "channel"))]);
         }
@@ -725,32 +735,52 @@ fn end_for_channel(db: &Database, row: &QueuedSplice, reason: &str, now: i64) {
     }
 }
 
-/// The node negotiated a splice on the channel. Only a row whose call is out notes it; whether it was this row's is settled at the lock.
+/// The channel's row, for an event about the channel; None when there is none, or the read failed (which is audited).
+fn row_for_event(db: &Database, key: &str) -> Option<QueuedSplice> {
+    match db.load_queued_splice(key) {
+        Ok(row) => row,
+        Err(error) => {
+            audit_event("DB_READ_FAILED", json!({ "op": "load_queued_splice", "user_channel_id": key, "error": error.to_string() }));
+            None
+        }
+    }
+}
+
+/// Whether a negotiation on the channel belongs to a call of the row's that a failure event released by mistake: the row is still failed by such an event, and no retry can have gone out this soon after it.
+fn released_by_a_failure_event(row: &QueuedSplice, now: i64) -> bool {
+    !row.pending_on_node
+        && matches!(row.status.as_str(), "failed" | "stalled")
+        && row.last_error.as_deref() == Some(NEGOTIATION_FAILED_ERROR)
+        && row.last_attempt_at.is_some_and(|failed_at| now < failed_at + RETRY_BACKOFF_SECS)
+}
+
+/// The node negotiated a splice on the channel. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure; whether the splice was the row's own is settled at the lock. A row a failure event released this side of the retry backoff is made pending again, since the event may have been for someone else's splice.
 pub(crate) fn on_splice_negotiated(db: &Database, user_channel_id: &str, funding_txo: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
-    match db.note_queued_splice_negotiated(&key, funding_txo, now) {
-        Ok(Some(row)) => audit("QUEUED_SPLICE_NEGOTIATED", &row, &[]),
+    let Some(row) = row_for_event(db, &key) else { return };
+    let (op, result) = if row.pending_on_node {
+        ("note_queued_splice_negotiated", db.note_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
+    } else if released_by_a_failure_event(&row, now) {
+        ("revive_queued_splice_negotiated", db.revive_queued_splice_negotiated(&key, row.request_id, funding_txo, now))
+    } else {
+        return;
+    };
+    match result {
+        Ok(Some(noted)) => audit("QUEUED_SPLICE_NEGOTIATED", &noted, &[("revived", json!(!row.pending_on_node))]),
         Ok(None) => {}
-        Err(error) => db_failed("note_queued_splice_negotiated", &key, error),
+        Err(error) => db_failed(op, &key, error),
     }
 }
 
 /// The node dropped the splice it was negotiating on the channel. A row whose call is out and whose splice was never signed goes back for a retry, and nothing of it is pending any more. A row that already holds a signed splice keeps it and its pending call: the dropped splice may be someone else's, and once a later splice has replaced the signed one on the channel, a check against the channel's current funding could not tell that a second call would fund it twice. Such a row locks when the channel shows its splice, or alerts the operator [`NEGOTIATED_ALERT_SECS`] after the signing.
 pub(crate) fn on_splice_negotiation_failed(db: &Database, user_channel_id: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
-    let row = match db.load_queued_splice(&key) {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
-        Err(error) => {
-            audit_event("DB_READ_FAILED", json!({ "op": "load_queued_splice", "user_channel_id": key, "error": error.to_string() }));
-            return;
-        }
-    };
+    let Some(row) = row_for_event(db, &key) else { return };
     if !row.pending_on_node || row.funding_txo.is_some() {
         return;
     }
     if row.status == "splicing" {
-        fail(db, &row, "the splice negotiation failed", now);
+        fail(db, &row, NEGOTIATION_FAILED_ERROR, now);
     } else if let Err(error) = db.clear_queued_splice_pending(&key, row.request_id, "the node dropped the splice it was negotiating; nothing is pending", now) {
         db_failed("clear_queued_splice_pending", &key, error);
     }
@@ -759,15 +789,14 @@ pub(crate) fn on_splice_negotiation_failed(db: &Database, user_channel_id: &str,
 /// The channel closed, so nothing can be spliced into it.
 pub(crate) fn on_channel_closed(db: &Database, user_channel_id: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
-    let row = match db.load_queued_splice(&key) {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
-        Err(error) => {
-            audit_event("DB_READ_FAILED", json!({ "op": "load_queued_splice", "user_channel_id": key, "error": error.to_string() }));
-            return;
-        }
-    };
-    end_for_channel(db, &row, "the channel closed", now);
+    let Some(row) = row_for_event(db, &key) else { return };
+    end_for_channel(db, &row, "the channel closed", true, now);
+}
+
+/// The channel's queued splice while the job is working on it or its last call may still be pending on the node. A manual splice-in then would be a second splice for the request, or be taken for its lock, so the operator route refuses one; an unreadable queue counts as open.
+pub(crate) fn open_row(db: &Database, user_channel_id: &str) -> Result<Option<QueuedSplice>, rusqlite::Error> {
+    let Some(key) = row_key(user_channel_id) else { return Ok(None) };
+    Ok(db.load_queued_splice(&key)?.filter(|row| row.is_active() || row.pending_on_node))
 }
 
 #[cfg(test)]
@@ -781,7 +810,7 @@ mod tests {
     use ldk_server_client::ldk_server_grpc::types::{
         payment_kind, Onchain, OutPoint, Payment as GrpcPayment, PaymentKind, PaymentStatus,
     };
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicI64, Ordering};
 
     const FUNDED_SATS: u64 = 1_000_000;
     const AMOUNT_SATS: u64 = 50_000;
@@ -1578,7 +1607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_channel_the_node_no_longer_lists_ends_the_row() {
+    async fn a_channel_the_node_no_longer_lists_ends_the_row_but_its_call_stays_pending_until_it_locks() {
         let _guard = AUDIT_TEST_GUARD.lock().unwrap();
         let db = database();
         let ldk = node(true);
@@ -1590,10 +1619,24 @@ mod tests {
 
         pass(&db, &ldk, &push, 101).await;
         let ended = row(&db);
-        assert_eq!((ended.status.as_str(), ended.pending_on_node, ended.lsp_sats_before), ("cancelled", false, None));
-        assert!(ended.last_error.unwrap().contains("no longer lists"));
-        assert_eq!(names(&capture()), ["QUEUED_SPLICE_CANCELLED"]);
-        assert!(db.list_open_queued_splices(102, CANCELLED_RECONCILE_SECS).unwrap().is_empty());
+        assert_eq!((ended.status.as_str(), ended.pending_on_node, ended.lsp_sats_before), ("cancelled", true, None));
+        assert!(ended.last_error.as_deref().unwrap().contains("no longer lists"));
+        // Nothing more happens while the channel stays missing; the job keeps watching the row.
+        pass(&db, &ldk, &push, 102).await;
+        assert_eq!(db.list_open_queued_splices(102, CANCELLED_RECONCILE_SECS).unwrap().len(), 1);
+        // The listing was incomplete: the channel is back with the call's splice, which locks instead of being made again.
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_B);
+        pass(&db, &ldk, &push, 103).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("locked", false));
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1);
+        // A row with no call pending is ended outright.
+        queued(&db, 104);
+        *ldk.channels.lock().unwrap() = vec![];
+        pass(&db, &ldk, &push, 105).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
+        assert!(db.list_open_queued_splices(105, CANCELLED_RECONCILE_SECS).unwrap().is_empty());
+        assert_eq!(names(&capture()), ["QUEUED_SPLICE_CANCELLED", "QUEUED_SPLICE_LOCKED", "QUEUED_SPLICE_CANCELLED"]);
     }
 
     #[tokio::test]
@@ -1803,5 +1846,139 @@ mod tests {
         assert_eq!((stalled.status.as_str(), stalled.attempts), ("stalled", 1));
         assert!(stalled.last_error.as_deref().unwrap().contains("of the last attempt: waiting for the phone's push cooldown"));
         assert_eq!(names(&capture()), ["QUEUED_SPLICE_STALLED"]);
+    }
+
+    #[tokio::test]
+    async fn a_negotiation_is_recorded_on_a_row_stalled_or_cancelled_with_its_call_pending_so_a_later_failure_releases_nothing() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        // The phone is quiet for ten minutes after the call: the row stalls with the call pending.
+        let stalled_at = 100 + PENDING_ALERT_SECS;
+        pass(&db, &ldk, &push, stalled_at).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node, row(&db).funding_txo), ("stalled", true, None));
+        // The splice is signed after all, confirms, and a splice of the user's own replaces it before any pass sees it; then a negotiation on the channel fails.
+        let signed_at = stalled_at + 1;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), signed_at);
+        let signed = row(&db);
+        assert_eq!((signed.status.as_str(), signed.pending_on_node, signed.funding_txo, signed.negotiated_at), ("stalled", true, Some(txo(TX_B, 1)), Some(signed_at)));
+        *ldk.channels.lock().unwrap() = vec![channel_sides(true, TX_C, 0, LSP_SATS + AMOUNT_SATS, USER_SATS + 80_000)];
+        wallet_funded_tx(&ldk, TX_B);
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, signed_at + 1);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("stalled", true));
+        stable_channels::audit::enable_test_capture();
+        pass(&db, &ldk, &push, signed_at + 1 + RETRY_BACKOFF_SECS).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1, "a stalled row's signed splice is never made again");
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("stalled", true));
+
+        // Cancelled with the call pending, the row records a signing too, and holds the channel until the operator releases it.
+        let cancelled_at = signed_at + 2 + RETRY_BACKOFF_SECS;
+        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, Some("by the operator"), false, cancelled_at).unwrap();
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_C, 0), cancelled_at + 1);
+        assert_eq!((row(&db).status.as_str(), row(&db).funding_txo), ("cancelled", Some(txo(TX_C, 0))));
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, cancelled_at + 2);
+        assert!(row(&db).pending_on_node);
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, cancelled_at + 3).await;
+        assert!(!ok, "{status}");
+        let events = capture();
+        let events = names(&events);
+        assert!(events.contains(&"QUEUED_SPLICE_NEGOTIATED") && !events.contains(&"QUEUED_SPLICE_STARTED"), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn a_negotiation_soon_after_a_failure_event_revives_the_call_so_no_retry_goes_out() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        // A stale failure event fails the call while its splice is still being signed.
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("failed", false));
+        stable_channels::audit::enable_test_capture();
+        let signed_at = 101 + RETRY_BACKOFF_SECS - 1;
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), signed_at);
+        let revived = row(&db);
+        assert_eq!(
+            (revived.status.as_str(), revived.pending_on_node, revived.funding_txo, revived.attempts, revived.last_error),
+            ("negotiated", true, Some(txo(TX_B, 1)), 1, None)
+        );
+        // The retry that was due makes no call; the splice locks once the channel shows it.
+        pass(&db, &ldk, &push, 101 + RETRY_BACKOFF_SECS).await;
+        assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1, "no second call");
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_B);
+        pass(&db, &ldk, &push, 102 + RETRY_BACKOFF_SECS).await;
+        assert_eq!(row(&db).status, "locked");
+        let events = capture();
+        assert_eq!(names(&events), ["QUEUED_SPLICE_NEGOTIATED", "QUEUED_SPLICE_LOCKED"]);
+        assert_eq!(events[0].1["revived"], true);
+    }
+
+    #[tokio::test]
+    async fn a_negotiation_at_the_backoff_or_after_a_refusal_revives_nothing() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
+        // By the backoff a retry may have gone out, so a negotiation then is left to the pass.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 101 + RETRY_BACKOFF_SECS);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node, row(&db).funding_txo), ("failed", false, None));
+
+        // A refusal is the node's own answer to the call: a negotiation after it is someone else's.
+        *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::LightningError, "no such peer".into()));
+        pass(&db, &ldk, &push, 101 + RETRY_BACKOFF_SECS).await;
+        let refused = row(&db);
+        assert_eq!((refused.status.as_str(), refused.attempts, refused.last_attempt_at), ("failed", 2, Some(101 + RETRY_BACKOFF_SECS)));
+        assert!(refused.last_error.as_deref().unwrap().starts_with("splice_in:"));
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 102 + RETRY_BACKOFF_SECS);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("failed", false));
+    }
+
+    #[tokio::test]
+    async fn the_phones_window_starts_once_the_provider_has_taken_the_push() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let db = database();
+        let ldk = node(false);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[COUNTERPARTY_HEX]);
+        queued(&db, 100);
+        // A clock that moves a second per reading: the pass reads it once to list the rows, once for the row, and once more when the provider has answered.
+        let readings = AtomicI64::new(100);
+        let clock = move || readings.fetch_add(1, Ordering::SeqCst);
+        run_once(&db, &ldk, &push, &clock).await;
+        let woken = row(&db);
+        assert_eq!((woken.status.as_str(), woken.wake_sent_at), ("waking", Some(102)));
+    }
+
+    #[tokio::test]
+    async fn a_manual_splice_is_refused_while_the_channel_has_a_row_the_job_works_on_or_a_call_pending() {
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
+        assert!(open_row(&db, "not a channel").unwrap().is_none());
+        queued(&db, 100);
+        assert_eq!(open_row(&db, USER_CHANNEL_ID_DECIMAL).unwrap().map(|row| row.status), Some("queued".into()));
+        let hex_id = format!("{:032x}", USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap());
+        assert!(open_row(&db, &hex_id).unwrap().is_some(), "the hex form finds it too");
+        pass(&db, &ldk, &push, 100).await;
+        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, false, 101).unwrap();
+        assert_eq!(
+            open_row(&db, USER_CHANNEL_ID_DECIMAL).unwrap().map(|row| (row.status, row.pending_on_node)),
+            Some(("cancelled".into(), true)),
+            "a cancelled row with its call pending still holds the channel"
+        );
+        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, true, 102).unwrap();
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL).unwrap().is_none());
     }
 }
