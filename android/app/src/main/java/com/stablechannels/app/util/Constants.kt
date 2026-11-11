@@ -28,6 +28,20 @@ object Constants {
     const val LSP_PUSH_REGISTER_URL = "https://stablechannels.com/api/register-push"
     const val LSP_CHANNEL_EXISTS_URL = "https://stablechannels.com/api/channel-exists"
     const val PRIVACY_POLICY_URL = "https://stablechannels.com/privacy.html"
+    /** Optional email the user chooses to share, signed with the node key (REGISTER_EMAIL_V1). */
+    const val EMAIL_SUBMIT_URL = "https://stablechannels.com/api/register-email"
+    const val EMAIL_SUBMIT_TIMEOUT_SECS: Long = 15
+    /** The Home email prompt waits this long so it never covers the first look at the balance. */
+    const val EMAIL_PROMPT_SHOW_DELAY_MS: Long = 2_000
+    const val EMAIL_PROMPT_SAVED_DISMISS_DELAY_MS: Long = 1_400
+    const val EMAIL_FIELD_HEIGHT_DP = 52
+    const val EMAIL_FIELD_CORNER_RADIUS_DP = 14
+    const val EMAIL_FIELD_FOCUS_BORDER_DP = 1.5f
+    const val EMAIL_HERO_ICON_CIRCLE_DP = 56
+    const val EMAIL_HERO_ICON_CIRCLE_ALPHA = 0.12f
+    const val EMAIL_PRIMARY_BUTTON_HEIGHT_DP = 52
+    const val EMAIL_DISABLED_ALPHA = 0.4f
+    const val MIN_TOUCH_TARGET_DP = 44
 
     const val PRIMARY_CHAIN_URL = "https://blockstream.info/api"
     const val FALLBACK_CHAIN_URL = "https://mempool.space/api"

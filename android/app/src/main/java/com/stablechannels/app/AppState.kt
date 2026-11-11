@@ -4442,6 +4442,8 @@ class AppState(private val context: Context) : ViewModel() {
         toRemoteRecovery.startAfterRestore(fundingTxid, fundingVout, repeat = channelMayExist)
         chainUrl = resolveChainUrl()
         nodeService.start(Network.BITCOIN, chainUrl, mnemonic)
+        // A restored seed is a different node: forget the old wallet's email and prompt answers.
+        EmailPromptStore.get(context).reset()
     }
 
     private fun publishClosedChannelFunds() {

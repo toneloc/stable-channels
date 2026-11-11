@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Optional email: Home prompt and Settings > Email -->
+    <string name="email_prompt_title">Stay in touch</string>
+    <string name="email_prompt_body">Share your email and the Stable Channels team can ask how the wallet is working for you and tell you about important updates.</string>
+    <string name="email_prompt_not_now">Not now</string>
+    <string name="email_prompt_footnote">Optional. Tied to this wallet, never to your recovery phrase. Change or remove it anytime in Settings.</string>
+    <string name="email_prompt_saved_title">Thanks!</string>
+    <string name="email_prompt_saved_body">We\'ll write to you at %1$s.</string>
+    <string name="email_field_placeholder">you@example.com</string>
+    <string name="email_field_invalid">Enter a valid email address.</string>
+    <string name="email_save">Save email</string>
+    <string name="email_error_wallet_not_ready">Your wallet is still starting. Try again in a moment.</string>
+    <string name="email_error_network">Couldn\'t reach Stable Channels. Check your connection and try again.</string>
+    <string name="email_error_rejected">Couldn\'t save your email. Try again.</string>
+    <string name="email_settings_footer">The Stable Channels team may write to ask how the wallet is working for you or to tell you about important updates. No spam, and we will never ask for your recovery phrase.</string>
+    <string name="email_settings_saved_header">Your email</string>
+    <string name="email_settings_saved_label">Saved</string>
+    <string name="email_settings_change">Change email</string>
+    <string name="email_settings_remove">Remove email</string>
+    <string name="email_remove_confirm_title">Remove your email?</string>
+    <string name="email_remove_confirm_message">We\'ll delete it from the Stable Channels server.</string>
+    <string name="email_remove_confirm_remove">Remove</string>
+    <string name="email_remove_confirm_cancel">Cancel</string>
+</resources>
