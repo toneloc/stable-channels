@@ -25,11 +25,22 @@ const WAKE_WATCH_TIMEOUT_SECS: u64 = 60;
 const WAKE_WATCH_INTERVAL_SECS: u64 = 1;
 /// Bound on one list_channels poll, so a stalled call costs one attempt and not the whole watch.
 const WAKE_WATCH_RPC_TIMEOUT_SECS: u64 = 5;
+/// Bound on the tick's own list_channels for opening records, so a stalled call can't hold up the tick.
+const OPENINGS_RPC_TIMEOUT_SECS: u64 = 10;
 
 pub fn spawn(state: AppState) {
     let (wakes, plans) = mpsc::unbounded_channel();
     tokio::spawn(watch_wakes(state.clone(), plans));
     tokio::spawn(run(state, wakes));
+}
+
+/// Record openings the daily record limit held back once their funding confirms; it needs no price or loaded list, so it runs every tick.
+pub(crate) async fn record_confirmed_openings(ldk: &dyn LdkServerCalls, manager: &Mutex<crate::stable_manager::StableChannelManager>) {
+    match timeout(Duration::from_secs(OPENINGS_RPC_TIMEOUT_SECS), ldk.list_channels(ListChannelsRequest {})).await {
+        Ok(Ok(listed)) => manager.lock().await.record_confirmed_openings(&listed.channels),
+        Ok(Err(e)) => warn!("[stability_tick] list_channels for opening records failed: {}", e),
+        Err(_) => warn!("[stability_tick] list_channels for opening records timed out"),
+    }
 }
 
 async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationRequest>>) {
@@ -39,6 +50,8 @@ async fn run(state: AppState, wakes: mpsc::UnboundedSender<Vec<WakeNotificationR
     info!("[stability_tick] running every {}s", interval_secs);
     loop {
         ticker.tick().await;
+        // Before the price check: recording a confirmed opening needs no price.
+        record_confirmed_openings(state.ldk_server.as_ref(), &state.stable_manager).await;
         let btc_price = stable_channels::price_feeds::get_fresh_cached_price_no_fetch();
         if btc_price <= 0.0 {
             warn!("[stability_tick] price cache cold; skipping");
@@ -323,6 +336,32 @@ async fn settle_reconnected(state: &AppState, watcher: &mut WakeWatcher) {
 mod tests {
     use super::*;
     use crate::push::testing::{service, FakeSender};
+
+    /// An LDK Server whose channel list never answers.
+    struct HungChannelList;
+
+    #[async_trait::async_trait]
+    impl LdkServerCalls for HungChannelList {
+        async fn list_channels(&self, _req: ListChannelsRequest) -> Result<ldk_server_client::ldk_server_grpc::api::ListChannelsResponse, ldk_server_client::error::LdkServerError> {
+            std::future::pending().await
+        }
+        async fn spontaneous_send(&self, _req: ldk_server_client::ldk_server_grpc::api::SpontaneousSendRequest) -> Result<ldk_server_client::ldk_server_grpc::api::SpontaneousSendResponse, ldk_server_client::error::LdkServerError> {
+            unreachable!()
+        }
+        async fn sign_message(&self, _req: ldk_server_client::ldk_server_grpc::api::SignMessageRequest) -> Result<ldk_server_client::ldk_server_grpc::api::SignMessageResponse, ldk_server_client::error::LdkServerError> {
+            unreachable!()
+        }
+        async fn verify_signature(&self, _req: ldk_server_client::ldk_server_grpc::api::VerifySignatureRequest) -> Result<ldk_server_client::ldk_server_grpc::api::VerifySignatureResponse, ldk_server_client::error::LdkServerError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_channel_list_for_opening_records_does_not_hold_up_the_tick() {
+        let manager = Mutex::new(crate::stable_manager::tests::make_manager());
+        let bound = Duration::from_secs(OPENINGS_RPC_TIMEOUT_SECS + 1);
+        timeout(bound, record_confirmed_openings(&HungChannelList, &manager)).await.expect("gives up after its own timeout");
+    }
 
     fn request(user_channel_id: u128, peer: &str) -> WakeSettlementRequest {
         WakeSettlementRequest {

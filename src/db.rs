@@ -368,6 +368,7 @@ pub struct LedgerChannelRow {
     pub counterparty_node_id: Option<String>,
     pub user_channel_id: Option<String>,
     pub funding_txo: Option<String>,
+    pub channel_id: Option<String>,
 }
 
 /// SQL for the channel fields of ledger rows found through one reference, with `type_count` event-type placeholders; the rest of each row stays in SQLite.
@@ -380,13 +381,14 @@ fn ledger_channel_rows_sql(type_count: usize, order: &str, limit: Option<usize>)
         )
     };
     format!(
-        "SELECT e.event_type, e.occurred_at_ms, {}, {}, {}
+        "SELECT e.event_type, e.occurred_at_ms, {}, {}, {}, {}
          FROM ledger_event_refs r JOIN ledger_events e ON e.id = r.event_id
          WHERE r.value = ? AND r.role = ? AND e.event_type IN ({types})
          ORDER BY {order}{limit}",
         field("counterparty_node_id"),
         field("user_channel_id"),
         field("funding_txo"),
+        field("channel_id"),
     )
 }
 
@@ -1223,6 +1225,7 @@ impl Database {
                 counterparty_node_id: row.get(2)?,
                 user_channel_id: row.get(3)?,
                 funding_txo: row.get(4)?,
+                channel_id: row.get(5)?,
             })
         })?;
         rows.collect()
@@ -5387,10 +5390,11 @@ mod tests {
         let bob = "0380ba01cf1f8232298198ce1c6da12a7bd159656e79cbc22a5dfbea62ab1aef4b";
         let uid = "5293213951182344713304712262222632001";
         let txo = "a2a93969722ff1335da9b6b2c029a1f754cfd4ccfea0740a0bf0a41c641a3e86:1";
+        let channel = "863e1a641ca4f00b0a74a0fecc4dcf54f7a129c0b2b6a95d33f12f726939a9a3";
         for (event, detail) in [
-            ("CHANNEL_PENDING", serde_json::json!({"counterparty_node_id": alice, "user_channel_id": uid, "funding_txo": txo, "reason_message": "x".repeat(100_000), "occurred_at_ms": 3_000})),
+            ("CHANNEL_PENDING", serde_json::json!({"channel_id": channel, "counterparty_node_id": alice, "user_channel_id": uid, "funding_txo": txo, "reason_message": "x".repeat(100_000), "occurred_at_ms": 3_000})),
             ("PAYMENT_FORWARDED", serde_json::json!({"prev_node_id": alice, "next_node_id": bob, "occurred_at_ms": 2_000})),
-            ("SPLICE_NEGOTIATED", serde_json::json!({"counterparty_node_id": alice, "user_channel_id": 7, "funding_txo": 7, "occurred_at_ms": 1_000})),
+            ("SPLICE_NEGOTIATED", serde_json::json!({"channel_id": 7, "counterparty_node_id": alice, "user_channel_id": 7, "funding_txo": 7, "occurred_at_ms": 1_000})),
             ("CHANNEL_PENDING", serde_json::json!({"counterparty_node_id": bob, "user_channel_id": "281056294790600824049085389430669369069", "occurred_at_ms": 4_000})),
         ] {
             db.append_ledger_event(&LedgerEventDraft::from_audit_event(event, detail)).unwrap();
@@ -5398,8 +5402,8 @@ mod tests {
         let rows = db.ledger_channel_rows_by_ref("node_id", alice, &["CHANNEL_PENDING", "SPLICE_NEGOTIATED"]).unwrap();
         // Oldest first, other types and other nodes left out; only the channel fields leave SQLite, and one that isn't a string reads as None.
         assert_eq!(rows, [
-            LedgerChannelRow { event_type: "SPLICE_NEGOTIATED".into(), occurred_at_ms: 1_000, counterparty_node_id: Some(alice.into()), user_channel_id: None, funding_txo: None },
-            LedgerChannelRow { event_type: "CHANNEL_PENDING".into(), occurred_at_ms: 3_000, counterparty_node_id: Some(alice.into()), user_channel_id: Some(uid.into()), funding_txo: Some(txo.into()) },
+            LedgerChannelRow { event_type: "SPLICE_NEGOTIATED".into(), occurred_at_ms: 1_000, counterparty_node_id: Some(alice.into()), user_channel_id: None, funding_txo: None, channel_id: None },
+            LedgerChannelRow { event_type: "CHANNEL_PENDING".into(), occurred_at_ms: 3_000, counterparty_node_id: Some(alice.into()), user_channel_id: Some(uid.into()), funding_txo: Some(txo.into()), channel_id: Some(channel.into()) },
         ]);
         assert!(db.ledger_channel_rows_by_ref("user_channel_id", alice, &["CHANNEL_PENDING"]).unwrap().is_empty(), "a value under another role does not match");
     }

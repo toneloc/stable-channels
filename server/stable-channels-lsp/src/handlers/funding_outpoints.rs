@@ -1,7 +1,7 @@
 //! FundingOutpoints handler: a wallet restored without its channel data asks for its channels' funding outpoints to find a force close.
 //! Outside the auth layer like /api/channel-exists, but the node key signs the request: an outpoint ties a private channel on chain to the node.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -274,7 +274,8 @@ impl ChannelOutputs {
 /// The node's channels: live ones from LDK Server, and any the ledger links to it as counterparty.
 struct NodeChannels<'a> {
     node_id: &'a str,
-    live: HashMap<&'a str, &'a Channel>,
+    // A random user_channel_id names one live channel; channels from before random ids can share one.
+    live: HashMap<&'a str, Vec<&'a Channel>>,
     // user_channel_ids of other nodes' live channels.
     foreign: HashSet<&'a str>,
     // Whether the LSP has any channel record with the node, a failed open included.
@@ -284,11 +285,10 @@ struct NodeChannels<'a> {
 
 /// Find the channels the node has or had with the LSP from its newest `max_link_rows` channel records; `node_id` is lowercase.
 fn node_channels<'a>(db: &Database, live_all: &'a [Channel], node_id: &'a str, max_link_rows: usize) -> rusqlite::Result<NodeChannels<'a>> {
-    let live: HashMap<&str, &Channel> = live_all
-        .iter()
-        .filter(|c| c.counterparty_node_id.eq_ignore_ascii_case(node_id))
-        .map(|c| (c.user_channel_id.as_str(), c))
-        .collect();
+    let mut live: HashMap<&str, Vec<&Channel>> = HashMap::new();
+    for c in live_all.iter().filter(|c| c.counterparty_node_id.eq_ignore_ascii_case(node_id)) {
+        live.entry(c.user_channel_id.as_str()).or_default().push(c);
+    }
     // Each ledger channel's latest link row, and the channels whose open failed.
     let mut last_seen: HashMap<String, i64> = HashMap::new();
     let mut failed = HashSet::new();
@@ -306,10 +306,10 @@ fn node_channels<'a>(db: &Database, live_all: &'a [Channel], node_id: &'a str, m
         }
     }
     let known = !live.is_empty() || !last_seen.is_empty();
-    // A failed open that isn't live has no outpoint to return, so it is settled here without a lookup.
+    // A failed open that isn't live has no outpoint to return, so it is settled here without a lookup; an older id may also name the node's other channels, so it is looked up.
     let mut closed: Vec<(i64, String)> = last_seen
         .into_iter()
-        .filter(|(uid, _)| !live.contains_key(uid.as_str()) && !failed.contains(uid))
+        .filter(|(uid, _)| !live.contains_key(uid.as_str()) && (!failed.contains(uid) || !drawn_at_random(uid)))
         .map(|(uid, at)| (at, uid))
         .collect();
     closed.sort_unstable_by(|a, b| b.cmp(a));
@@ -336,51 +336,91 @@ fn drawn_at_random(uid: &str) -> bool {
 fn funding_outpoints_of(db: &Database, channels: &NodeChannels) -> rusqlite::Result<Vec<FundingOutpoint>> {
     let names = |row: &LedgerChannelRow| row.counterparty_node_id.as_deref().map(|n| n.eq_ignore_ascii_case(channels.node_id));
     let mut found = Vec::new();
-    for (key, uid) in channels.ids.iter().enumerate() {
+    let mut key = 0;
+    for uid in &channels.ids {
         let rows: Vec<LedgerChannelRow> = db
             .ledger_channel_rows_by_ref("user_channel_id", uid, FUNDING_EVENTS)?
             .into_iter()
             .filter(|row| row.user_channel_id.as_deref() == Some(uid.as_str()))
             .collect();
+        let random = drawn_at_random(uid);
         // Another node's channel may use the same user_channel_id: then only rows naming this node can be attributed.
-        let shared = !drawn_at_random(uid)
+        let shared = !random
             || channels.foreign.contains(uid.as_str())
             || rows.iter().any(|row| names(row) == Some(false));
-        let mut outputs = ChannelOutputs::default();
+        let live = channels.live.get(uid.as_str()).map(Vec::as_slice).unwrap_or_default();
+        // A random id is one channel; the node's channels sharing an older id are told apart by channel_id, or by outpoint without one, so a wallet never skips one channel after finding another's close.
+        let group_of = |channel_id: Option<&str>, txid: &str| match channel_id.filter(|id| !random && !id.is_empty()) {
+            Some(id) => id.to_ascii_lowercase(),
+            None if random => String::new(),
+            None => format!("txid:{txid}"),
+        };
+        let live_txid_of = |c: &Channel| c.funding_txo.as_ref().and_then(|txo| parse_funding(&txo.txid)).map(|(txid, _)| txid);
+        let live_groups: Vec<(String, &Channel)> = live
+            .iter()
+            .map(|c| (group_of(Some(&c.channel_id), live_txid_of(c).as_deref().unwrap_or_default()), *c))
+            .collect();
+        let mut groups: BTreeMap<String, ChannelOutputs> = BTreeMap::new();
+        for (group, _) in &live_groups {
+            groups.entry(group.clone()).or_default();
+        }
         for row in rows {
             match names(&row) {
                 Some(false) => continue,
                 None if shared => continue,
                 _ => {},
             }
+            let funding = row.funding_txo.as_deref().and_then(parse_funding);
+            let txid = funding.as_ref().map_or("", |(txid, _)| txid.as_str());
+            let outputs = groups.entry(group_of(row.channel_id.as_deref(), txid)).or_default();
             if row.event_type == "CHANNEL_OPEN_FAILED" {
                 outputs.open_failed = true;
                 continue;
             }
-            if let Some((txid, vout)) = row.funding_txo.as_deref().and_then(parse_funding) {
+            if let Some((txid, vout)) = funding {
                 outputs.add(Funding { txid, vout, at_ms: row.occurred_at_ms });
             }
         }
-        let channel = channels.live.get(uid.as_str());
-        // LDK Server's current output, which the ledger may have missed.
-        let live_txid = channel.and_then(|c| c.funding_txo.as_ref()).and_then(|txo| {
-            let (txid, _) = parse_funding(&txo.txid)?;
-            outputs.add(Funding { txid: txid.clone(), vout: Some(txo.vout), at_ms: i64::MAX });
-            Some(txid)
-        });
-        if outputs.open_failed && channel.is_none() {
-            continue;
+        // An output recorded without a channel_id joins the channel that has the same output, so it isn't listed twice.
+        let loose: Vec<String> = groups.keys().filter(|g| g.starts_with("txid:") && !live_groups.iter().any(|(live, _)| live == *g)).cloned().collect();
+        for group in loose {
+            let txid = &group["txid:".len()..];
+            let owner = live_groups
+                .iter()
+                .find(|(live, c)| !live.starts_with("txid:") && live_txid_of(c).as_deref() == Some(txid))
+                .map(|(live, _)| live.clone())
+                .or_else(|| groups.iter().find(|(g, o)| !g.starts_with("txid:") && o.outputs.iter().any(|f| f.txid == txid)).map(|(g, _)| g.clone()));
+            if let (Some(owner), Some(outputs)) = (owner, groups.remove(&group)) {
+                let target = groups.entry(owner).or_default();
+                target.open_failed |= outputs.open_failed;
+                for funding in outputs.outputs {
+                    target.add(funding);
+                }
+            }
         }
-        let state = if channel.is_some() { "open" } else { "closed" };
-        let mut newest = outputs.outputs;
-        newest.sort_by_key(|funding| std::cmp::Reverse(funding.at_ms));
-        // The live output is the one a close spends while a splice is pending, so the cap never cuts it.
-        let kept = newest
-            .into_iter()
-            .enumerate()
-            .filter(|(i, funding)| *i < MAX_OUTPUTS_PER_CHANNEL || live_txid.as_ref() == Some(&funding.txid))
-            .map(|(_, funding)| (key, state, funding));
-        found.extend(kept);
+        for (group, mut outputs) in groups {
+            let channel = live_groups.iter().find(|(live_group, _)| *live_group == group).map(|(_, c)| *c);
+            // LDK Server's current output, which the ledger may have missed.
+            let live_txid = channel.and_then(|c| c.funding_txo.as_ref()).and_then(|txo| {
+                let (txid, _) = parse_funding(&txo.txid)?;
+                outputs.add(Funding { txid: txid.clone(), vout: Some(txo.vout), at_ms: i64::MAX });
+                Some(txid)
+            });
+            if outputs.open_failed && channel.is_none() {
+                continue;
+            }
+            let state = if channel.is_some() { "open" } else { "closed" };
+            let mut newest = outputs.outputs;
+            newest.sort_by_key(|funding| std::cmp::Reverse(funding.at_ms));
+            // The live output is the one a close spends while a splice is pending, so the cap never cuts it.
+            let kept = newest
+                .into_iter()
+                .enumerate()
+                .filter(|(i, funding)| *i < MAX_OUTPUTS_PER_CHANNEL || live_txid.as_ref() == Some(&funding.txid))
+                .map(|(_, funding)| (key, state, funding));
+            found.extend(kept);
+            key += 1;
+        }
     }
     found.sort_by_key(|(_, state, funding)| (*state != "open", std::cmp::Reverse(funding.at_ms)));
     // Number channels by first appearance, so the wallet can group the outputs and check each channel's newest first.
@@ -718,6 +758,119 @@ mod tests {
         assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
     }
 
+    fn opened_as(db: &Database, uid: &str, channel_id: &str, txo: &str, at_ms: i64) {
+        record(db, "CHANNEL_PENDING", at_ms, serde_json::json!({
+            "channel_id": channel_id, "user_channel_id": uid, "counterparty_node_id": ALICE, "funding_txo": txo,
+        }));
+    }
+
+    fn live_as(uid: &str, channel_id: &str, txid: &str, vout: u32) -> Channel {
+        Channel { channel_id: channel_id.to_string(), ..live(ALICE, uid, txid, vout) }
+    }
+
+    #[test]
+    fn a_nodes_channels_sharing_an_old_id_are_numbered_apart() {
+        let (_dir, db) = fresh_db();
+        // An old LDK gave both of Alice's channels id 0; the first was spliced, then both closed.
+        opened_as(&db, "0", "chan-a", &format!("{TX_OPEN}:0"), 1_000);
+        opened_as(&db, "0", "chan-b", &format!("{TX_OTHER}:1"), 2_000);
+        record(&db, "SPLICE_NEGOTIATED", 3_000, serde_json::json!({
+            "channel_id": "chan-a", "user_channel_id": "0", "counterparty_node_id": ALICE, "funding_txo": format!("{TX_SPLICE}:1"),
+        }));
+        let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
+        assert_eq!(found, [
+            outpoint(0, TX_SPLICE, Some(1), "closed"),
+            outpoint(1, TX_OTHER, Some(1), "closed"),
+            outpoint(0, TX_OPEN, Some(0), "closed"),
+        ]);
+    }
+
+    #[test]
+    fn a_closed_channel_sharing_an_old_id_with_a_live_one_stays_closed() {
+        let (_dir, db) = fresh_db();
+        opened_as(&db, "0", "chan-a", &format!("{TX_OPEN}:0"), 1_000);
+        opened_as(&db, "0", "chan-b", &format!("{TX_OTHER}:2"), 2_000);
+        let found = collect_funding_outpoints(&db, &[live_as("0", "chan-b", TX_OTHER, 2)], ALICE).unwrap();
+        assert_eq!(found, [outpoint(0, TX_OTHER, Some(2), "open"), outpoint(1, TX_OPEN, Some(0), "closed")]);
+    }
+
+    #[test]
+    fn live_channels_sharing_an_old_id_are_all_returned() {
+        let (_dir, db) = fresh_db();
+        let both = [live_as("0", "chan-a", TX_OPEN, 0), live_as("0", "chan-b", TX_OTHER, 1)];
+        let found = collect_funding_outpoints(&db, &both, ALICE).unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_ne!(found[0].channel, found[1].channel);
+        assert!(found.iter().all(|f| f.state == "open"));
+        // Without a channel_id a live channel still stands alone by its outpoint.
+        let unnamed = [live_as("0", "", TX_OPEN, 0), live_as("0", "", TX_OTHER, 1)];
+        let found = collect_funding_outpoints(&db, &unnamed, ALICE).unwrap();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_ne!(found[0].channel, found[1].channel);
+    }
+
+    #[test]
+    fn a_failed_open_under_an_old_id_hides_none_of_the_nodes_other_channels() {
+        let (_dir, db) = fresh_db();
+        opened_as(&db, "0", "chan-a", &format!("{TX_OPEN}:0"), 1_000);
+        record(&db, "CHANNEL_OPEN_FAILED", 2_000, serde_json::json!({
+            "channel_id": "chan-b", "user_channel_id": "0", "counterparty_node_id": ALICE,
+        }));
+        let found = collect_funding_outpoints(&db, &[], ALICE).unwrap();
+        assert_eq!(found, [outpoint(0, TX_OPEN, Some(0), "closed")]);
+    }
+
+    #[test]
+    fn an_output_recorded_without_a_channel_id_joins_its_channel() {
+        let (_dir, db) = fresh_db();
+        // Rows from before channel ids were recorded: one of a closed channel, one of the live channel.
+        record(&db, "CHANNEL_PENDING", 1_000, serde_json::json!({"user_channel_id": "0", "counterparty_node_id": ALICE, "funding_txo": format!("{TX_OPEN}:0")}));
+        opened_as(&db, "0", "chan-a", &format!("{TX_OPEN}:0"), 1_500);
+        record(&db, "CHANNEL_PENDING", 2_000, serde_json::json!({"user_channel_id": "0", "counterparty_node_id": ALICE, "funding_txo": format!("{TX_OTHER}:2")}));
+        let found = collect_funding_outpoints(&db, &[live_as("0", "chan-b", TX_OTHER, 2)], ALICE).unwrap();
+        assert_eq!(found, [outpoint(0, TX_OTHER, Some(2), "open"), outpoint(1, TX_OPEN, Some(0), "closed")]);
+    }
+
+    #[tokio::test]
+    async fn an_opening_the_daily_limit_held_back_is_returned_once_its_funding_confirms() {
+        use crate::record_limits::NEVER_USABLE_RECORDS_PER_PEER;
+        use crate::stable_manager::tests::{make_channel, FakeLdkServer, AUDIT_TEST_GUARD};
+        use crate::stable_manager::StableChannelManager;
+        use ldk_server_client::ldk_server_grpc::events::event_envelope::Event as EventVariant;
+        use ldk_server_client::ldk_server_grpc::events::{ChannelState, ChannelStateChanged};
+        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let (dir, db) = fresh_db();
+        stable_channels::audit::set_audit_ledger(db.clone());
+        let mut mgr = StableChannelManager::new(Arc::new(db.clone()), dir.path().to_path_buf());
+        let ldk = FakeLdkServer::new(vec![]);
+        let uid = |n: u32| (u128::MAX - u128::from(n)).to_string();
+        let channel_id = |n: u32| format!("{n:064x}");
+        // Alice opens one channel more than her daily limit records; the last one's opening is held back.
+        for n in 0..=NEVER_USABLE_RECORDS_PER_PEER {
+            let event = ChannelStateChanged {
+                channel_id: channel_id(n),
+                user_channel_id: uid(n),
+                counterparty_node_id: Some(ALICE.to_string()),
+                state: ChannelState::Pending as i32,
+                funding_txo: Some(format!("{TX_OPEN}:{n}")),
+                ..Default::default()
+            };
+            crate::event_loop::dispatch_event(Some(EventVariant::ChannelStateChanged(event)), &mut mgr, &db, &ldk, 100_000.0).await;
+        }
+        let held_back = |found: &[FundingOutpoint]| found.iter().any(|f| f.funding_vout == Some(NEVER_USABLE_RECORDS_PER_PEER));
+        assert!(!held_back(&collect_funding_outpoints(&db, &[], ALICE).unwrap()), "the limit held the last opening back");
+        // Its funding confirms before it is ready; the tick records it, so after a close the restored wallet still gets it.
+        let pending = Channel {
+            is_channel_ready: false,
+            confirmations: Some(1),
+            funding_txo: Some(OutPoint { txid: TX_OPEN.into(), vout: NEVER_USABLE_RECORDS_PER_PEER }),
+            ..make_channel(&channel_id(NEVER_USABLE_RECORDS_PER_PEER), &uid(NEVER_USABLE_RECORDS_PER_PEER), ALICE, 100_000, 0, false)
+        };
+        let manager = tokio::sync::Mutex::new(mgr);
+        crate::stability_tick::record_confirmed_openings(&FakeLdkServer::new(vec![pending]), &manager).await;
+        assert!(held_back(&collect_funding_outpoints(&db, &[], ALICE).unwrap()));
+    }
+
     #[test]
     fn only_a_random_128_bit_user_channel_id_counts_as_unshared() {
         assert!(drawn_at_random(ALICE_UID));
@@ -895,7 +1048,8 @@ mod tests {
     #[test]
     fn the_twenty_newest_closed_channels_are_looked_up_and_failed_opens_do_not_count() {
         let (_dir, db) = fresh_db();
-        let uid = |n: u64| (0xa11ce_u128 * 1_000_003 + u128::from(n) * 7_919).to_string();
+        // Ids above 2^64, as the LSP's node draws them; a smaller one may be shared and is always looked up.
+        let uid = |n: u64| ((0xa11ce_u128 << 64) + u128::from(n) * 7_919).to_string();
         let txid = |n: u64| format!("{:064x}", 0xc0ff_ee00_u64 + n);
         // 21 closed channels; the oldest is past the cap.
         for n in 0..21 {
@@ -926,7 +1080,7 @@ mod tests {
         opened(&db, ALICE, ALICE_UID, &format!("{TX_OPEN}:0"), 1_000);
         for n in 0..3u64 {
             record(&db, "CHANNEL_OPEN_FAILED", 2_000 + n as i64, serde_json::json!({
-                "user_channel_id": (0xfa11_u128 * 1_000_003 + u128::from(n)).to_string(), "counterparty_node_id": ALICE,
+                "user_channel_id": ((0xfa11_u128 << 64) + u128::from(n)).to_string(), "counterparty_node_id": ALICE,
             }));
         }
         opened(&db, ALICE, ALICE_UID_2, &format!("{TX_SPLICE_2}:1"), 9_000);
