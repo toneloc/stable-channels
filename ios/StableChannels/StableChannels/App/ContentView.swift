@@ -19,7 +19,7 @@ struct ContentView: View {
     }
 
     private var biometricEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "biometricAuthEnabled")
+        UserDefaults.standard.bool(forKey: Constants.appUnlockEnabledKey)
     }
 
     var body: some View {

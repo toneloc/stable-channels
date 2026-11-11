@@ -179,6 +179,18 @@ enum Bech32 {
         }
     }
 
+    /// The scriptPubKey a native segwit address pays to: the witness version opcode, then the
+    /// program.
+    static func segwitScriptPubKey(_ address: String, expectedHrp: String) -> Data? {
+        let cleanAddress = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard verifySegwitAddress(cleanAddress, expectedHrp: expectedHrp),
+              let (_, payload, _) = try? parse(cleanAddress, limitLength: true),
+              let program = convertBits(data: Array(payload.dropFirst()), fromBits: 5, toBits: 8, pad: false)
+        else { return nil }
+        let version = payload[0]
+        return Data([version == 0 ? 0x00 : 0x50 + version, UInt8(program.count)] + program)
+    }
+
     /// Converts an array of 5-bit integers to an array of 8-bit integers (or vice-versa).
     static func convertBits(data: [UInt8], fromBits: Int, toBits: Int, pad: Bool) -> [UInt8]? {
         var acc = 0

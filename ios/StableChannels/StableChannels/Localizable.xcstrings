@@ -1977,6 +1977,17 @@
         }
       }
     },
+    "backup_complete" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Backup complete"
+          }
+        }
+      }
+    },
     "backup_now" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -2230,6 +2241,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "任意金额"
+          }
+        }
+      }
+    },
+    "button_back" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Back"
           }
         }
       }
@@ -2831,77 +2853,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制地址"
-          }
-        }
-      }
-    },
-    "button_copy_anyway" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "النسخ على أي حال"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "যাইহোক কপি করুন"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Trotzdem kopieren"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Copy Anyway"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copiar de todos modos"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copier quand même"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "फिर भी कॉपी करें"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "とにかくコピー"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copiar mesmo assim"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Всё равно скопировать"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仍然复制"
           }
         }
       }
@@ -4703,73 +4654,84 @@
         }
       }
     },
+    "button_try_again" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Try again"
+          }
+        }
+      }
+    },
     "button_view_seed" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
         "ar" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "عرض الكلمات (Seed)"
+            "value" : "إظهار عبارة الاسترداد السرية"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "সীড শব্দগুলো দেখুন"
+            "value" : "গোপন সীড ফ্রেজ দেখান"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Seed-Wörter anzeigen"
+            "value" : "Geheime Seed-Phrase anzeigen"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "View Seed Words"
+            "value" : "Reveal Secret Recovery Phrase"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ver palabras de la semilla"
+            "value" : "Mostrar la frase semilla secreta"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Afficher les mots de la graine"
+            "value" : "Afficher la phrase de récupération secrète"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "सीड शब्द देखें"
+            "value" : "गुप्त सीड वाक्यांश दिखाएं"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "シードの単語を表示"
+            "value" : "秘密のシードフレーズを表示"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Ver palavras da semente"
+            "value" : "Revelar frase de recuperação secreta"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Посмотреть seed-фразу"
+            "value" : "Показать секретную seed-фразу"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "查看助记词"
+            "value" : "显示秘密助记词"
           }
         }
       }
@@ -9085,6 +9047,116 @@
         }
       }
     },
+    "guideline_impersonators_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Support staff, developers, or bots will never ask for your recovery phrase. Never share it with anyone under any circumstance."
+          }
+        }
+      }
+    },
+    "guideline_impersonators_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Beware of Impersonators"
+          }
+        }
+      }
+    },
+    "guideline_master_key_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your words mathematically derive all private keys in your wallet. Anyone with these words has full, irreversible control of your funds."
+          }
+        }
+      }
+    },
+    "guideline_master_key_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Words Are Your Master Key"
+          }
+        }
+      }
+    },
+    "guideline_never_stored_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels never stores your Secret Recovery Phrase and will never ask for it. If you turn on iCloud backup, an encrypted copy is kept in your own iCloud. Without that or your written copy, no one can recover your wallet."
+          }
+        }
+      }
+    },
+    "guideline_never_stored_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "We never have it"
+          }
+        }
+      }
+    },
+    "guideline_store_offline_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Write your words on paper or stamp them on metal kept in a private, secure location. Never take screenshots or save digital copies in cloud notes."
+          }
+        }
+      }
+    },
+    "guideline_store_offline_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Store Offline on Physical Media"
+          }
+        }
+      }
+    },
+    "guidelines_hero_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Secret Recovery Phrase gives complete ownership of your Bitcoin and Lightning funds. Follow these core principles to stay secure."
+          }
+        }
+      }
+    },
+    "guidelines_hero_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Self-Custody Guidelines"
+          }
+        }
+      }
+    },
     "header_amount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -10629,6 +10701,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "通道正在关闭 - 确认后将出现在区块浏览器上"
+          }
+        }
+      }
+    },
+    "info_closed_channel_keep_app" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Keep the app installed until it arrives."
+          }
+        }
+      }
+    },
+    "info_closed_channel_moves" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It moves to your onchain wallet automatically, which can take about a day."
+          }
+        }
+      }
+    },
+    "info_closed_channel_safe" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "%@ is safe on the Bitcoin blockchain."
+          }
+        }
+      }
+    },
+    "info_closed_channel_unlocks" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "It unlocks in %@, then moves to your onchain wallet automatically."
           }
         }
       }
@@ -18295,7 +18411,7 @@
         "en" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain; funds return after a timelock. Only continue if this is your only way back into the wallet."
+            "value" : "This wallet still has an open Lightning channel with the LSP. Restoring from seed alone cannot restore the channel and it will be force-closed on-chain. If the channel was open on this phone, the app then moves your funds to your onchain wallet automatically. Only continue if this is your only way back into the wallet."
           }
         }
       }
@@ -21377,6 +21493,160 @@
         }
       }
     },
+    "quiz_q1_correct_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Write it down, engrave it on metal, or keep it in multiple secret spots so you never lose it. If you lose it, it's gone forever."
+          }
+        }
+      }
+    },
+    "quiz_q1_correct_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Right! No one can help get your Secret Recovery Phrase back"
+          }
+        }
+      }
+    },
+    "quiz_q1_incorrect_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If you lose your Secret Recovery Phrase, it's gone forever. No one can help you get it back, no matter what they might say."
+          }
+        }
+      }
+    },
+    "quiz_q1_incorrect_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong! No one can help get your Secret Recovery Phrase back"
+          }
+        }
+      }
+    },
+    "quiz_q1_opt1" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can get it back for you"
+          }
+        }
+      }
+    },
+    "quiz_q1_opt2" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Can't help you"
+          }
+        }
+      }
+    },
+    "quiz_q1_prompt" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If you lose your Secret Recovery Phrase, Stable Channels..."
+          }
+        }
+      }
+    },
+    "quiz_q2_correct_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Stable Channels support will never ask for your recovery phrase. Anyone asking for it is trying to steal your funds."
+          }
+        }
+      }
+    },
+    "quiz_q2_correct_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Right! Never share your Secret Recovery Phrase with anyone"
+          }
+        }
+      }
+    },
+    "quiz_q2_incorrect_exp" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "No legitimate agent, developer, or service will ever ask for your recovery phrase. If they do, it is always a scam."
+          }
+        }
+      }
+    },
+    "quiz_q2_incorrect_heading" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Wrong! Never share your Secret Recovery Phrase with anyone"
+          }
+        }
+      }
+    },
+    "quiz_q2_opt1" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "You're being scammed"
+          }
+        }
+      }
+    },
+    "quiz_q2_opt2" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "You should give it to them"
+          }
+        }
+      }
+    },
+    "quiz_q2_prompt" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If anyone, even a support agent, asks for your Secret Recovery Phrase..."
+          }
+        }
+      }
+    },
     "recovery_banner_text_prefix" : {
       "extractionState" : "extracted_with_value",
       "localizations" : {
@@ -22005,6 +22275,149 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "从 iCloud 恢复将擦除您现有的钱包和所有资金。请在继续操作前提取所有比特币。"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_confirm" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy to Clipboard"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Copy Secret Recovery Phrase?"
+          }
+        }
+      }
+    },
+    "reveal_phrase_copy_warning" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your clipboard is accessible to other apps. For your protection, it will be automatically cleared in %lld seconds."
+          }
+        }
+      }
+    },
+    "reveal_phrase_header" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Your Secret Recovery Phrase gives full access to your wallet. Do not share it with anyone."
+          }
+        }
+      }
+    },
+    "reveal_phrase_nav_title" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Reveal Secret Recovery Phrase"
+          }
+        }
+      }
+    },
+    "reveal_phrase_tap_to_reveal" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Tap to reveal"
+          }
+        }
+      }
+    },
+    "reveal_phrase_tap_to_reveal_hint" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Make sure no one is watching your screen."
+          }
+        }
+      }
+    },
+    "reveal_quiz_correct" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Correct!"
+          }
+        }
+      }
+    },
+    "reveal_quiz_get_started" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Get started"
+          }
+        }
+      }
+    },
+    "reveal_quiz_incorrect" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Incorrect!"
+          }
+        }
+      }
+    },
+    "reveal_quiz_intro_desc" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "To reveal your Secret Recovery Phrase, you need to correctly answer two questions"
+          }
+        }
+      }
+    },
+    "reveal_quiz_learn_more" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Learn more"
+          }
+        }
+      }
+    },
+    "reveal_quiz_progress" : {
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Question %1$lld of %2$lld"
           }
         }
       }
@@ -29239,219 +29652,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "钱包已恢复！"
-          }
-        }
-      }
-    },
-    "warning_copy_seed_message" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "يتم مشاركة الحافظة مع التطبيقات الأخرى."
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "ক্লিপবোর্ড অন্য অ্যাপের সাথে শেয়ার করা হয়।"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Die Zwischenablage wird mit anderen Apps geteilt."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Clipboard is shared with other apps."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "El portapapeles se comparte con otras apps."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Le presse-papiers est partagé avec d'autres applications."
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "क्लिपबोर्ड अन्य ऐप के साथ साझा किया जाता है।"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "クリップボードは他のアプリと共有されます。"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "A área de transferência é compartilhada com outros aplicativos."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Буфер обмена доступен другим приложениям."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "剪贴板与其它应用共享。"
-          }
-        }
-      }
-    },
-    "warning_copy_seed_title" : {
-      "extractionState" : "extracted_with_value",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "نسخ الكلمات (Seed)؟"
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "সীড শব্দগুলো কপি করবেন?"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Seed-Wörter kopieren?"
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Copy Seed Words?"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "¿Copiar palabras de la semilla?"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copier les mots de la graine ?"
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "सीड शब्द कॉपी करें?"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "シードの単語をコピーしますか？"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Copiar palavras da semente?"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Скопировать seed-фразу?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "复制助记词？"
-          }
-        }
-      }
-    },
-    "warning_seed" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "لا تشارك كلمات الاسترداد مع أي شخص أبدًا."
-          }
-        },
-        "bn" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "কখনও কারও সাথে আপনার সীড ফ্রেজ শেয়ার করবেন না।"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Teilen Sie Ihre Seed-Phrase niemals mit jemandem."
-          }
-        },
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Never share your seed phrase with anyone."
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nunca compartas tu semilla con nadie."
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Ne partagez jamais votre phrase secrète avec qui que ce soit."
-          }
-        },
-        "hi" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "कभी भी अपना सीड वाक्यांश किसी के साथ साझा न करें।"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "シードフレーズは絶対に誰とも共有しないでください。"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Nunca compartilhe sua frase de recuperação com ninguém."
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Никогда никому не передавайте свою seed-фразу."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "切勿与任何人分享您的助记词。"
           }
         }
       }

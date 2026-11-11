@@ -38,6 +38,8 @@ enum Constants {
     static let maxAllowedFeeRateSatVb: Double = 10_000.0
     /// Rate used for estimates before a real rate loads; sends are gated on a real rate.
     static let placeholderFeeRateSatVb: Double = 10
+    /// UserDefaults key for the App Unlock setting (authenticate when the app opens).
+    static let appUnlockEnabledKey = "biometricAuthEnabled"
     /// UserDefaults key for the Payment Confirmation setting (authenticate before each send).
     static let transactionAuthEnabledKey = "transactionAuthEnabled"
 

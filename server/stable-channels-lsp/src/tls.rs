@@ -8,9 +8,7 @@
 // licenses.
 
 use std::fs;
-use std::io::Write;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use base64::Engine;
@@ -19,23 +17,14 @@ use ring::signature::{EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::ServerConfig;
 
+use crate::secret_file;
+
 /// Minimal TlsConfig (subset of LDK Server's struct, only the fields we use).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsConfig {
 	pub cert_path: Option<String>,
 	pub key_path: Option<String>,
 	pub hosts: Vec<String>,
-}
-
-/// Write a file with the given content and mode, failing if the file already exists.
-/// Mirrors LDK Server's `util::write_new` helper.
-fn write_new(path: &Path, content: &[u8], mode: u32) -> std::io::Result<()> {
-	let mut file =
-		fs::OpenOptions::new().create_new(true).write(true).mode(mode).open(path)?;
-	file.write_all(content)?;
-	fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
-	file.sync_all()?;
-	Ok(())
 }
 
 // Issuer and Subject common name
@@ -152,9 +141,10 @@ fn generate_self_signed_cert(
 	let cert_pem = der_to_pem(&cert_der, PEM_CERT_BEGIN, PEM_CERT_END);
 	let key_pem = der_to_pem(pkcs8_doc.as_ref(), PEM_KEY_BEGIN, PEM_KEY_END);
 
-	write_new(Path::new(key_path), key_pem.as_bytes(), 0o400)
+	// An existing key is never replaced; the certificate must match the new key, so it replaces whatever is there (a symlink included, never followed).
+	secret_file::write_new(Path::new(key_path), key_pem.as_bytes(), 0o400)
 		.map_err(|e| format!("Failed to write TLS key to '{key_path}': {e}"))?;
-	fs::write(cert_path, &cert_pem)
+	secret_file::replace(Path::new(cert_path), cert_pem.as_bytes(), 0o644)
 		.map_err(|e| format!("Failed to write TLS certificate to '{cert_path}': {e}"))?;
 
 	Ok(())
@@ -521,5 +511,51 @@ mod tests {
 		// Clean up
 		let _ = fs::remove_file(&cert_path);
 		let _ = fs::remove_file(&key_path);
+	}
+
+	fn mode_of(path: &Path) -> u32 {
+		use std::os::unix::fs::PermissionsExt;
+		fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+	}
+
+	#[test]
+	fn generated_key_is_owner_read_only_and_certificate_is_public() {
+		let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+		let storage = tempfile::tempdir().unwrap();
+
+		get_or_generate_tls_config(None, storage.path().to_str().unwrap()).unwrap();
+
+		assert_eq!(mode_of(&storage.path().join("tls.key")), 0o400);
+		assert_eq!(mode_of(&storage.path().join("tls.crt")), 0o644);
+	}
+
+	#[test]
+	fn a_certificate_symlink_is_replaced_and_the_file_it_points_to_is_left_alone() {
+		let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+		let storage = tempfile::tempdir().unwrap();
+		let network = storage.path().join("regtest");
+		fs::create_dir(&network).unwrap();
+		let api_key = network.join("api_key");
+		fs::write(&api_key, [0x42u8; 32]).unwrap();
+		std::os::unix::fs::symlink(&api_key, storage.path().join("tls.crt")).unwrap();
+
+		get_or_generate_tls_config(None, storage.path().to_str().unwrap()).unwrap();
+
+		assert_eq!(fs::read(&api_key).unwrap(), [0x42u8; 32]);
+		let cert = storage.path().join("tls.crt");
+		assert!(fs::symlink_metadata(&cert).unwrap().file_type().is_file());
+		assert!(fs::read_to_string(&cert).unwrap().starts_with(PEM_CERT_BEGIN));
+	}
+
+	#[test]
+	fn an_existing_key_without_a_certificate_is_never_replaced() {
+		let storage = tempfile::tempdir().unwrap();
+		let key = storage.path().join("tls.key");
+		fs::write(&key, b"operator key").unwrap();
+
+		assert!(get_or_generate_tls_config(None, storage.path().to_str().unwrap()).is_err());
+
+		assert_eq!(fs::read(&key).unwrap(), b"operator key");
+		assert!(!storage.path().join("tls.crt").exists());
 	}
 }
