@@ -299,7 +299,12 @@ async fn main() -> Result<()> {
             "/api/channel-exists",
             post(handlers::channel_exists::channel_exists),
         )
-        // Defense-in-depth body cap covering every route, including the two unsigned endpoints
+        // Optional wallet email: proven by a node-key signature, not HMAC, so wallets with no channel can share one.
+        .route(
+            "/api/register-email",
+            post(handlers::register_email::register_email),
+        )
+        // Defense-in-depth body cap covering every route, including the wallet endpoints
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
