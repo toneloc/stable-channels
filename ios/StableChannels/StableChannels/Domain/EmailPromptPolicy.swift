@@ -1,13 +1,11 @@
 import Foundation
 
 /// Decides when Home offers the email prompt: to anyone who has opened the wallet a few times, funded or
-/// not. Only Save ends it; after "Not now" or a swipe it comes back after three times as many launches
-/// (3, 9, 27 for a new user), at most `maxShows` times. Never while the app is locked: the sheet would draw above the
-/// lock.
+/// not. Only Save ends it; after "Not now" or a swipe the next showing waits the next gap in `showGaps`
+/// (launches 3, 12, 39), and the gaps repeat, so a 39-launch stretch never asks more than three times.
+/// Never while the app is locked: the sheet would draw above the lock.
 enum EmailPromptPolicy {
-    static let firstLaunch = 3
-    static let launchGrowth = 3
-    static let maxShows = 3
+    static let showGaps = [3, 9, 27]
 
     static func shouldShow(
         launches: Int,
@@ -16,8 +14,8 @@ enum EmailPromptPolicy {
         hasResponded: Bool,
         isAppLocked: Bool
     ) -> Bool {
-        guard !hasResponded, !isAppLocked, timesShown < maxShows else { return false }
-        return launches >= max(firstLaunch, lastShownLaunch * launchGrowth)
+        guard !hasResponded, !isAppLocked else { return false }
+        return launches >= lastShownLaunch + showGaps[timesShown % showGaps.count]
     }
 }
 
