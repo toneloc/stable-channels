@@ -6,6 +6,7 @@ import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
 import com.stablechannels.app.services.DatabaseService
+import com.stablechannels.app.services.StabilityService
 import com.stablechannels.app.services.TradeControlApplyStatus
 import com.stablechannels.app.services.TradeControlMessage
 import com.stablechannels.app.services.TradeCorrelation
@@ -113,6 +114,7 @@ class TradeDatabaseServiceTest {
         assertTrue(channelColumns.contains("sync_version"))
         assertTrue(tradeColumns.contains("trade_id"))
         assertTrue(tradeColumns.contains("uncertainty_reason"))
+        assertTrue(tradeColumns.contains("old_backing_sats"))
         val channel = upgraded.loadChannel("legacy-user-channel")
         assertNotNull(channel)
         channel!!
@@ -130,6 +132,50 @@ class TradeDatabaseServiceTest {
                 }
         assertEquals(1L, tradeCount)
         upgraded.close()
+    }
+
+    @Test
+    fun delayedAcceptanceKeepsAStabilityPaymentMadeWhileTheResultWasInFlight() {
+        val service = DatabaseService(context)
+        val sync = prepareBuyThenPayStabilityInFlight(service)
+
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        val after = service.loadChannel("7")!!
+        assertEquals(90.0, after.expectedUSD, 0.000000001)
+        assertEquals(70_000L, after.backingSats)
+        // $87.50 against a $90 target at $125k: the wallet does not pay the LSP a second time.
+        assertEquals(
+            StabilityService.StabilityAction.CHECK_ONLY,
+            StabilityService.checkStabilityAction(
+                    StableChannel(
+                        channelId = sync.channelId,
+                        userChannelId = "7",
+                        expectedUSD = USD(after.expectedUSD),
+                        stableReceiverBTC = Bitcoin(129_900),
+                        backingSats = after.backingSats,
+                    ),
+                    125_000.0,
+                )
+                .action,
+        )
+        service.close()
+    }
+
+    @Test
+    fun tradeRecordedWithoutOldBackingKeepsItsPreparedBacking() {
+        val service = DatabaseService(context)
+        val sync = prepareBuyThenPayStabilityInFlight(service)
+        service.writableDatabase.execSQL("UPDATE trades SET old_backing_sats = NULL")
+
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        assertEquals(90_000L, service.loadChannel("7")?.backingSats)
+        service.close()
     }
 
     @Test
@@ -1172,6 +1218,69 @@ class TradeDatabaseServiceTest {
         assertEquals(15_000L, repaired!!.newBackingSats)
         assertEquals(15.0, repaired.newExpectedUSD, 0.0001)
         service.close()
+    }
+
+    /**
+     * $100 backed by 100,000 sats at $100k with 50,000 native sats, then a prepared $10 buy
+     * (backing 90,000). Before its result arrives, BTC reaches $125k and the wallet pays 20,000
+     * sats to bring the old $100 position back to par. Returns the trade's acceptance.
+     */
+    private fun prepareBuyThenPayStabilityInFlight(
+        service: DatabaseService
+    ): TradeControlMessage.Sync {
+        val identifier = "ab".repeat(32)
+        val paymentId = "cd".repeat(32)
+        val tradeId = "ef".repeat(32)
+        service.saveChannel(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUSD = 100.0,
+            backingSats = 100_000,
+            note = null,
+            receiverSats = 150_000,
+            latestPrice = 100_000.0,
+        )
+        val prepared =
+            TradeProtocol.prepare(
+                spendableSats = 150_000,
+                sc =
+                    StableChannel(
+                        channelId = identifier,
+                        userChannelId = "7",
+                        expectedUSD = USD(100.0),
+                        stableReceiverBTC = Bitcoin(150_000),
+                        backingSats = 100_000,
+                    ),
+                action = "buy",
+                amountUsd = 10.0,
+                amountBtc = 0.0001,
+                feeUsd = 0.1,
+                newExpectedUsd = 90.0,
+                quotePrice = 100_000.0,
+                tradeId = tradeId,
+            )!!
+        assertEquals(90_000L, prepared.newBackingSats)
+        service.recordPreparedTrade(prepared)
+        assertNotNull(service.adoptUnattachedPreparedTrade(paymentId, prepared.feeMsat))
+
+        service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = "12".repeat(32),
+            paymentType = "stability",
+            direction = "sent",
+            amountMsat = 20_000_000,
+            userChannelId = "7",
+            backingDeltaSats = -20_000,
+        )
+        assertEquals(80_000L, service.loadChannel("7")?.backingSats)
+
+        return TradeControlMessage.Sync(
+            channelId = identifier,
+            userChannelId = "7",
+            expectedUsd = prepared.newExpectedUsd,
+            backingSats = prepared.newBackingSats,
+            syncVersion = 1,
+            correlation = TradeCorrelation(tradeId, paymentId, prepared.requestHash),
+        )
     }
 
     private fun deleteDatabaseFiles() {

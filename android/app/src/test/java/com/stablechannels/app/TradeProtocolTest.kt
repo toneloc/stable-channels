@@ -22,6 +22,27 @@ class TradeProtocolTest {
     private val identifier = "ab".repeat(32)
 
     @Test
+    fun acceptedTradeBackingAppliesTheTradeToTheCurrentBacking() {
+        // Buy $10 of $100 at $100k: 100,000 -> 90,000 sats. A 20,000-sat stability payment
+        // made while the result was in flight stays paid.
+        assertEquals(70_000L, TradeProtocol.acceptedTradeBacking(90_000, 100_000, 80_000))
+        // Nothing moved in flight: the prepared value.
+        assertEquals(90_000L, TradeProtocol.acceptedTradeBacking(90_000, 100_000, 100_000))
+        // A 22,500-sat credit from the LSP in flight stays credited.
+        assertEquals(112_500L, TradeProtocol.acceptedTradeBacking(90_000, 100_000, 122_500))
+    }
+
+    @Test
+    fun acceptedTradeBackingKeepsThePreparedValueWhereARebaseCannotApply() {
+        // A full exit stays at 0, even if a credit landed in flight.
+        assertEquals(0L, TradeProtocol.acceptedTradeBacking(0, 100_000, 105_000))
+        // A trade recorded before old_backing_sats existed.
+        assertEquals(90_000L, TradeProtocol.acceptedTradeBacking(90_000, null, 80_000))
+        // In-flight payments used up the whole new position: zero backing would stop stability.
+        assertEquals(10_000L, TradeProtocol.acceptedTradeBacking(10_000, 100_000, 85_000))
+    }
+
+    @Test
     fun requestHashUsesForwardLowercaseSha256OfExactBytes() {
         val payload = "{\"type\":\"TRADE_V1\",\"user_channel_id\":\"7\",\"expected_usd\":25.0}"
         assertEquals(

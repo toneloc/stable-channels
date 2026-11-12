@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteOpenHelper
 import androidx.core.database.sqlite.transaction
 import com.stablechannels.app.models.*
@@ -123,6 +124,7 @@ class DatabaseService(context: Context) :
                 trade_payment_id TEXT,
                 old_expected_usd REAL,
                 new_expected_usd REAL,
+                old_backing_sats INTEGER,
                 new_backing_sats INTEGER,
                 quote_price REAL,
                 fee_msat INTEGER NOT NULL DEFAULT 0,
@@ -261,8 +263,30 @@ class DatabaseService(context: Context) :
         createPendingStabilitySendTable(db)
         createStabilitySettlementsTable(db)
         createTradeIndexes(db)
+        addTradeOldBackingColumn(db)
         pruneHistoricalData(db)
     }
+
+    /**
+     * Added on open instead of with a version bump: SQLiteOpenHelper refuses to open a database
+     * whose version is newer than the build's, so a bump would lock out any older build.
+     */
+    private fun addTradeOldBackingColumn(db: SQLiteDatabase) {
+        if (tradesHaveOldBackingColumn(db)) return
+        try {
+            db.execSQL("ALTER TABLE trades ADD COLUMN old_backing_sats INTEGER")
+        } catch (e: SQLiteException) {
+            // Another open of this database added it first.
+            if (!tradesHaveOldBackingColumn(db)) throw e
+        }
+    }
+
+    private fun tradesHaveOldBackingColumn(db: SQLiteDatabase): Boolean =
+        db.rawQuery("PRAGMA table_info(trades)", null).use { c ->
+            var found = false
+            while (!found && c.moveToNext()) found = c.getString(1) == "old_backing_sats"
+            found
+        }
 
     private fun createPendingStabilitySendTable(db: SQLiteDatabase) {
         db.execSQL(
@@ -712,6 +736,7 @@ class DatabaseService(context: Context) :
                     put("request_payload", trade.requestPayload)
                     put("old_expected_usd", trade.oldExpectedUsd)
                     put("new_expected_usd", trade.newExpectedUsd)
+                    put("old_backing_sats", trade.oldBackingSats)
                     put("new_backing_sats", trade.newBackingSats)
                     put("quote_price", trade.quotePrice)
                     put("fee_msat", trade.feeMsat)
@@ -1123,7 +1148,7 @@ class DatabaseService(context: Context) :
                 db.rawQuery(
                         """
                         SELECT id, channel_id, user_channel_id, trade_payment_id, new_expected_usd,
-                               new_backing_sats, status, action
+                               new_backing_sats, status, action, old_backing_sats
                         FROM trades
                         WHERE trade_id = ? AND request_hash = ?
                           AND (trade_payment_id = ? OR trade_payment_id IS NULL)
@@ -1148,6 +1173,7 @@ class DatabaseService(context: Context) :
                                 c.getLong(5),
                                 c.getString(6),
                                 c.getString(7),
+                                c.getLongOrNull(8),
                             )
                     } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val tradeId = trade[0] as Long
@@ -1158,6 +1184,7 @@ class DatabaseService(context: Context) :
             val storedBacking = trade[5] as Long
             val status = trade[6] as String
             val action = trade[7] as String
+            val storedOldBacking = trade[8] as Long?
             if (
                 tradeChannelId != sync.channelId ||
                     tradeUserChannelId != sync.userChannelId ||
@@ -1203,14 +1230,16 @@ class DatabaseService(context: Context) :
             val currentVersion = channel[2] as Long
             val currentBacking = channel[3] as Long
             val allocationApplied = sync.syncVersion > currentVersion
+            val acceptedBacking =
+                TradeProtocol.acceptedTradeBacking(storedBacking, storedOldBacking, currentBacking)
             if (allocationApplied) {
-                if (storedBacking < 0L || storedBacking > receiverSats) {
+                if (acceptedBacking < 0L || acceptedBacking > receiverSats) {
                     return rollbackResult(db, TradeControlApplyStatus.RETRY)
                 }
                 val channelValues =
                     ContentValues().apply {
                         put("expected_usd", sync.expectedUsd)
-                        put("stable_sats", storedBacking)
+                        put("stable_sats", acceptedBacking)
                         put("sync_version", sync.syncVersion)
                         put("updated_at", System.currentTimeMillis() / 1000L)
                     }
@@ -1239,7 +1268,7 @@ class DatabaseService(context: Context) :
             db.execSQL("COMMIT")
             return TradeControlApplyResult(
                 TradeControlApplyStatus.APPLIED,
-                if (allocationApplied) storedBacking else currentBacking,
+                if (allocationApplied) acceptedBacking else currentBacking,
                 sync.backingSats,
                 correlation.tradePaymentId,
                 action,
@@ -3015,3 +3044,5 @@ private fun Cursor.getStringOrNull(index: Int): String? =
 
 private fun Cursor.getDoubleOrNull(index: Int): Double? =
     if (isNull(index)) null else getDouble(index)
+
+private fun Cursor.getLongOrNull(index: Int): Long? = if (isNull(index)) null else getLong(index)
