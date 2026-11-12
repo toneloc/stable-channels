@@ -2075,8 +2075,7 @@ class AppState(private val context: Context) : ViewModel() {
                 nodeService.refreshChannels()
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
-                SpliceEventRecorder.record(db, event, channelValueSats = ::liveChannelValueSats) {
-                    ready ->
+                SpliceEventRecorder.record(db, event, channelValue = ::liveChannelValue) { ready ->
                     nodeService.channels
                         .singleOrNull {
                             it.userChannelId == ready.userChannelId &&
@@ -2163,6 +2162,9 @@ class AppState(private val context: Context) : ViewModel() {
             is Event.SpliceNegotiated -> {
                 val db =
                     databaseService ?: throw IllegalStateException("Splice history unavailable")
+                // A 0-conf splice may have locked already, so the value before it is the last
+                // listing that still showed the old funding.
+                val seen = liveChannelValue(event.userChannelId, event.channelId)
                 nodeService.refreshChannels()
                 // With no Move of its own in flight, a splice negotiated within the window of the
                 // LSP's push is the LSP's; a Move the app lost track of is not given it.
@@ -2170,7 +2172,8 @@ class AppState(private val context: Context) : ViewModel() {
                     db,
                     event,
                     lspSplice = pendingSplice == null && LspSpliceExpectation.isExpected(context),
-                    channelValueSats = ::liveChannelValueSats,
+                    channelValue = ::liveChannelValue,
+                    channelValueSeen = { _, _ -> seen },
                 ) {
                     null
                 }
@@ -3104,11 +3107,10 @@ class AppState(private val context: Context) : ViewModel() {
     }
 
     /** The channel's value as last listed, for the size of an LSP splice. */
-    private fun liveChannelValueSats(userChannelId: String, channelId: String): Long? =
+    private fun liveChannelValue(userChannelId: String, channelId: String): ChannelValue? =
         nodeService.channels
             .singleOrNull { it.userChannelId == userChannelId && it.channelId == channelId }
-            ?.channelValueSats
-            ?.toLong()
+            ?.let { ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong()) }
 
     private fun handleSplicePending(
         channelId: String,

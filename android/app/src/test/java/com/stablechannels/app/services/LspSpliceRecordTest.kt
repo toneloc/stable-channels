@@ -62,12 +62,21 @@ class LspSpliceRecordTest {
 
     private fun payment(id: Long) = db.getRecentPayments(100).single { it.id == id }
 
-    private fun record(event: Event, lspSplice: Boolean = false, value: Long, now: Long = 1_000) =
+    /** The node lists the channel at [value] on [onFunding]: the old funding until the lock. */
+    private fun record(
+        event: Event,
+        lspSplice: Boolean = false,
+        value: Long,
+        onFunding: String = if (event is Event.ChannelReady) txid else oldTxid,
+        seen: ChannelValue? = null,
+        now: Long = 1_000,
+    ) =
         SpliceEventRecorder.record(
             db,
             event,
             lspSplice = lspSplice,
-            channelValueSats = { _, _ -> value },
+            channelValue = { _, _ -> ChannelValue(onFunding, value) },
+            channelValueSeen = { _, _ -> seen },
             nowEpochSecs = now,
         ) {
             null
@@ -92,6 +101,41 @@ class LspSpliceRecordTest {
         assertTrue(record(negotiated, value = valueBefore + 1, now = 1_020))
         assertEquals(locked, db.getLspSplice(txid))
         assertTrue(db.getRecentPayments(100).isEmpty())
+    }
+
+    @Test
+    fun aLockThatLandsBeforeTheNegotiationIsHandledTakesTheValueBeforeFromTheListingSeenLast() {
+        // 0-conf: the node already lists the channel on the new funding at its new size.
+        assertTrue(
+            record(
+                negotiated,
+                value = valueAfter,
+                onFunding = txid,
+                seen = ChannelValue(oldTxid, valueBefore),
+            )
+        )
+        assertEquals(valueBefore, db.getLspSplice(txid)!!.valueBeforeSats)
+        assertTrue(record(ready, value = valueAfter, now = 1_010))
+        assertEquals(50_000L, db.getLspSplice(txid)!!.addedSats)
+    }
+
+    @Test
+    fun aValueOnlySeenOnTheNewFundingLeavesTheSizeUnknownRatherThanZero() {
+        assertTrue(
+            record(
+                negotiated,
+                value = valueAfter,
+                onFunding = txid,
+                seen = ChannelValue(txid, valueAfter),
+            )
+        )
+        assertNull(db.getLspSplice(txid)!!.valueBeforeSats)
+        // Nor is a listing on some other funding at the ready event the value after.
+        assertTrue(record(ready, value = valueAfter + 5, onFunding = oldTxid, now = 1_010))
+        val locked = db.getLspSplice(txid)!!
+        assertEquals("locked", locked.status)
+        assertNull(locked.valueAfterSats)
+        assertNull(locked.addedSats)
     }
 
     @Test

@@ -29,6 +29,9 @@ data class LspSplice(
             else null
 }
 
+/** A channel's value as the node listed it, with the funding it was on at the time. */
+data class ChannelValue(val fundingTxid: String?, val valueSats: Long)
+
 /** Durable operation identity and event receipt, shared by the foreground and push service. */
 object SpliceEventRecorder {
     /** A negotiated LSP splice older than this no longer holds the books repair back. */
@@ -103,14 +106,17 @@ object SpliceEventRecorder {
      * funding locks it. With [lspSplice] the caller knows the splice is the LSP's (the LSP pushed
      * for it and nothing of the user's is in flight), so a Move still waiting for its transaction
      * is not given this one; a replay of the user's own negotiation is still recognised by its
-     * transaction. [channelValueSats] gives the channel's value, read before the splice at the
-     * negotiation and after it at the ready event, so the LSP's amount is known.
+     * transaction. [channelValue] lists the channel as the node shows it now and [channelValueSeen]
+     * as it was last listed before this event; the value before the splice comes from whichever
+     * still shows another funding, the value after from the live listing on the new one, so the
+     * LSP's amount is known.
      */
     fun record(
         service: DatabaseService,
         event: Event,
         lspSplice: Boolean = false,
-        channelValueSats: (String, String) -> Long? = { _, _ -> null },
+        channelValue: (String, String) -> ChannelValue? = { _, _ -> null },
+        channelValueSeen: (String, String) -> ChannelValue? = { _, _ -> null },
         nowEpochSecs: Long = System.currentTimeMillis() / 1000,
         fundingForReady: (Event.ChannelReady) -> OutPoint?,
     ): Boolean {
@@ -182,7 +188,14 @@ object SpliceEventRecorder {
                             put("user_channel_id", userChannelId)
                             put("channel_id", channelId)
                             put("status", "negotiated")
-                            put("value_before_sats", channelValueSats(userChannelId, channelId))
+                            put(
+                                "value_before_sats",
+                                valueBefore(
+                                    channelValue(userChannelId, channelId),
+                                    channelValueSeen(userChannelId, channelId),
+                                    funding.txid,
+                                ),
+                            )
                             put("created_at", nowEpochSecs)
                         },
                         SQLiteDatabase.CONFLICT_IGNORE,
@@ -207,7 +220,12 @@ object SpliceEventRecorder {
                         "lsp_splices",
                         ContentValues().apply {
                             put("status", "locked")
-                            put("value_after_sats", channelValueSats(userChannelId, channelId))
+                            put(
+                                "value_after_sats",
+                                channelValue(userChannelId, channelId)
+                                    ?.takeIf { it.fundingTxid == funding.txid }
+                                    ?.valueSats,
+                            )
                             put("locked_at", nowEpochSecs)
                         },
                         "txid = ? AND status = 'negotiated'",
@@ -232,6 +250,17 @@ object SpliceEventRecorder {
         }
         return true
     }
+
+    /**
+     * The channel's value before the splice on [newTxid]. A 0-conf splice can lock before the app
+     * handles its negotiation, so a listing counts only while it shows another funding: the live
+     * one first, else the last one seen before the event. Null when neither does, rather than the
+     * new size as the old.
+     */
+    internal fun valueBefore(live: ChannelValue?, seen: ChannelValue?, newTxid: String): Long? =
+        listOf(live, seen).firstNotNullOfOrNull { value ->
+            value?.takeIf { it.fundingTxid != newTxid }?.valueSats
+        }
 
     /** The LSP splice on [txid], if one was recorded. */
     fun lspSplice(service: DatabaseService, txid: String): LspSplice? =
