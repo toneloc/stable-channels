@@ -849,10 +849,12 @@ pub(crate) fn on_channel_closed(db: &Database, user_channel_id: &str, now: i64) 
     end_for_channel(db, &row, "the channel closed", true, now);
 }
 
-/// The channel's queued splice while the job is working on it, its last call may still be pending on the node, or a signing could still revive that call. A manual splice-in then would be a second splice for the request, or be taken for its lock, so the operator route refuses one; an unreadable queue counts as open.
+/// The channel's queued splice while the job may still call for it: any row but a locked one or a cancelled one, since the job retries a failed or stalled row too, plus a cancelled row whose last call may still be pending on the node or could still be revived by a signing. A manual splice-in then would be a second splice for the request, or be taken for its lock, so the operator route refuses one; an unreadable queue counts as open.
 pub(crate) fn open_row(db: &Database, user_channel_id: &str, now: i64) -> Result<Option<QueuedSplice>, rusqlite::Error> {
     let Some(key) = row_key(user_channel_id) else { return Ok(None) };
-    Ok(db.load_queued_splice(&key)?.filter(|row| row.is_active() || row.pending_on_node || released_by_a_failure_event(row, now)))
+    Ok(db.load_queued_splice(&key)?.filter(|row| {
+        !matches!(row.status.as_str(), "locked" | "cancelled") || row.pending_on_node || released_by_a_failure_event(row, now)
+    }))
 }
 
 #[cfg(test)]
@@ -918,6 +920,11 @@ mod tests {
         });
     }
 
+    /// The tests share the audit capture, so they run one at a time; a test that failed must not fail the rest through a poisoned lock.
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        AUDIT_TEST_GUARD.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn database() -> Database {
         // The job's episode markers are process-wide: a test starts with neither episode open.
         LOOKUP_UNAVAILABLE_SINCE.store(0, Ordering::SeqCst);
@@ -962,7 +969,7 @@ mod tests {
 
     #[tokio::test]
     async fn pushes_first_then_splices_once_the_channel_is_usable_and_the_grace_has_passed() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1002,7 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn splices_at_once_when_the_phone_is_online_but_cannot_be_pushed() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1022,7 +1029,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_offline_phone_times_the_wake_out_and_is_pushed_again_after_the_backoff_and_cooldown() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(false);
         let dir = tempfile::tempdir().unwrap();
@@ -1061,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_that_never_gets_a_call_stalls_after_a_day_and_is_still_tried_when_the_phone_shows_up() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(false);
         let dir = tempfile::tempdir().unwrap();
@@ -1091,7 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_node_refusal_counts_an_attempt_and_the_row_stalls_at_the_cap() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::LightningError, "no such peer".into()));
@@ -1128,7 +1135,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_wallet_lookup_makes_no_new_call_refuses_a_new_request_and_alerts_in_time() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1169,7 +1176,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pending_row_with_a_failing_lookup_still_reaches_its_alert() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1192,7 +1199,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_pushed_for_a_retry_and_held_by_a_failing_lookup_stalls_with_an_alert() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1239,7 +1246,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_lock_found_for_a_request_replaced_during_the_lookup_leaves_the_replacement_alone() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1273,7 +1280,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_after_someone_elses_negotiation_counts_the_attempt_and_the_row_is_retried() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1304,7 +1311,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_due_stability_wake_takes_the_push_and_the_splice_runs_once_the_channel_is_usable() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(false);
         let dir = tempfile::tempdir().unwrap();
@@ -1337,7 +1344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_lost_answer_keeps_the_call_pending_until_the_channel_shows_it_locked() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::InternalError, "gRPC request failed: connection reset".into()));
@@ -1392,7 +1399,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_operator_can_release_a_pending_call_after_checking_the_node() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::InternalError, "gRPC request failed".into()));
@@ -1421,7 +1428,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_that_lands_after_a_cancel_still_clears_the_pending_call() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::InternalError, "gRPC request failed".into()));
@@ -1444,7 +1451,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_queue_request_locks_a_pending_call_the_channel_shows_completed_before_saving() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1462,7 +1469,7 @@ mod tests {
 
     #[tokio::test]
     async fn another_splice_locking_while_the_call_is_out_is_neither_this_rows_lock_nor_its_end() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1488,7 +1495,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_users_splice_plus_a_payment_to_the_lsp_is_not_taken_as_the_lsps_lock() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1514,7 +1521,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_whose_call_was_reported_failed_is_locked_not_called_again_when_the_channel_shows_its_splice() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1538,7 +1545,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stability_payment_during_the_splice_does_not_hide_the_lock() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1559,7 +1566,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_negotiated_splice_waits_for_its_lock_wakes_the_phone_again_and_alerts_the_operator_on_the_scale_of_confirmations() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1606,7 +1613,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_row_whose_call_the_node_completes_is_recorded_as_locked() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1628,7 +1635,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unfunded_wallet_fails_the_attempt_instead_of_calling_the_node() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         ldk.spendable_onchain_sats.store(AMOUNT_SATS + FEE_HEADROOM_SATS - 1, Ordering::SeqCst);
@@ -1647,7 +1654,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_replaced_during_the_pass_is_not_spliced_for_the_old_amount() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let stale = queued(&db, 100);
@@ -1664,7 +1671,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_channel_the_node_no_longer_lists_ends_the_row_but_its_call_stays_pending_until_it_locks() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1697,7 +1704,7 @@ mod tests {
 
     #[tokio::test]
     async fn node_events_move_the_row() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let request_id = queued(&db, 100).request_id;
         stable_channels::audit::enable_test_capture();
@@ -1738,7 +1745,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_checks_the_request_the_channel_and_the_wallet_before_saving() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         stable_channels::audit::enable_test_capture();
@@ -1826,7 +1833,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_transaction_the_wallet_funded_counts_as_the_lsps() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let _db = database();
         let ldk = node(true);
         assert_eq!(wallet_funded(&ldk, TX_B, 1).await, Some(false), "the wallet has no record of it");
@@ -1847,7 +1854,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_negotiation_failing_after_the_rows_splice_was_signed_makes_no_second_call_even_once_a_later_splice_hides_it() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1879,7 +1886,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_row_that_gets_no_further_call_stalls_a_day_after_its_last_attempt() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(false);
         let dir = tempfile::tempdir().unwrap();
@@ -1906,7 +1913,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_negotiation_is_recorded_on_a_row_stalled_or_cancelled_with_its_call_pending_so_a_later_failure_releases_nothing() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1946,7 +1953,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_negotiation_soon_after_a_failure_event_revives_the_call_so_no_retry_goes_out() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1977,7 +1984,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_negotiation_at_the_backoff_or_after_a_refusal_revives_nothing() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2000,7 +2007,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_phones_window_starts_once_the_provider_has_taken_the_push() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(false);
         let dir = tempfile::tempdir().unwrap();
@@ -2025,35 +2032,43 @@ mod tests {
 
     #[tokio::test]
     async fn a_manual_splice_is_refused_while_the_channel_has_a_row_the_job_works_on_or_a_call_pending() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
         let push = service(FakeSender::new(true), dir.path(), &[]);
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 100).unwrap().is_none());
         assert!(open_row(&db, "not a channel", 100).unwrap().is_none());
-        queued(&db, 100);
+        let request_id = queued(&db, 100).request_id;
         assert_eq!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 100).unwrap().map(|row| row.status), Some("queued".into()));
         let hex_id = format!("{:032x}", USER_CHANNEL_ID_DECIMAL.parse::<u128>().unwrap());
         assert!(open_row(&db, &hex_id, 100).unwrap().is_some(), "the hex form finds it too");
         pass(&db, &ldk, &push, 100).await;
-        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, false, NEGOTIATION_FAILED_ERROR, 101).unwrap();
+        // A failed or stalled row is still retried by the job, so it holds the channel whether or not a signing could revive it.
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
+        assert_eq!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 101 + 2 * RETRY_BACKOFF_SECS).unwrap().map(|row| row.status), Some("failed".into()));
+        db.stall_queued_splice(USER_CHANNEL_ID_DECIMAL, request_id, "no phone", 102).unwrap();
+        assert_eq!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102 + 2 * RETRY_BACKOFF_SECS).unwrap().map(|row| row.status), Some("stalled".into()));
+        // A cancelled row holds it only while its call is pending or could be revived.
+        db.mark_queued_splice_splicing(USER_CHANNEL_ID_DECIMAL, request_id, Some(&txo(TX_A, 0)), LSP_SATS + USER_SATS, LSP_SATS, 103).unwrap();
+        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, false, NEGOTIATION_FAILED_ERROR, 104).unwrap();
         assert_eq!(
-            open_row(&db, USER_CHANNEL_ID_DECIMAL, 101).unwrap().map(|row| (row.status, row.pending_on_node)),
+            open_row(&db, USER_CHANNEL_ID_DECIMAL, 104).unwrap().map(|row| (row.status, row.pending_on_node)),
             Some(("cancelled".into(), true)),
             "a cancelled row with its call pending still holds the channel"
         );
-        // A failure event released the call: the channel stays held while a signing could still revive it.
-        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 102);
-        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102 + RETRY_BACKOFF_SECS - 1).unwrap().is_some());
-        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102 + RETRY_BACKOFF_SECS).unwrap().is_none());
-        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, true, NEGOTIATION_FAILED_ERROR, 103).unwrap();
-        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 103).unwrap().is_none());
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 105);
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 105 + RETRY_BACKOFF_SECS - 1).unwrap().is_some(), "a signing could still revive the call");
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 105 + RETRY_BACKOFF_SECS).unwrap().is_none());
+        db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, true, NEGOTIATION_FAILED_ERROR, 106).unwrap();
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 106).unwrap().is_none(), "released by the operator");
+        db.mark_queued_splice_locked(USER_CHANNEL_ID_DECIMAL, request_id, &txo(TX_B, 1), 107).unwrap();
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 107).unwrap().is_none(), "a locked row is done");
     }
 
     #[tokio::test]
     async fn a_failure_event_on_a_stalled_pending_call_counts_the_attempt_so_the_retry_waits_and_a_signing_revives_it() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2086,7 +2101,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_request_replaces_a_row_while_a_signing_could_still_revive_its_call() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2112,7 +2127,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failure_event_on_a_cancelled_pending_call_holds_the_channel_through_the_backoff_and_a_signing_keeps_it_cancelled_but_pending() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2149,7 +2164,7 @@ mod tests {
 
     #[tokio::test]
     async fn ledger_rows_for_one_request_are_keyed_to_the_call_they_belong_to() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2178,7 +2193,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_retry_checks_a_fresh_listing_right_before_its_call_so_a_lock_that_landed_during_the_pass_is_not_made_again() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2197,7 +2212,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pushed_phone_that_is_here_but_gets_no_call_fails_the_wake_at_the_timeout() {
-        let _guard = AUDIT_TEST_GUARD.lock().unwrap();
+        let _guard = guard();
         let db = database();
         let ldk = node(true);
         let dir = tempfile::tempdir().unwrap();
@@ -2221,5 +2236,41 @@ mod tests {
         pass(&db, &ldk, &push, 100 + WAKE_TIMEOUT_SECS + RETRY_BACKOFF_SECS).await;
         assert_eq!(ldk.splice_ins.lock().unwrap().len(), 1);
         assert_eq!(names(&capture()), ["QUEUED_SPLICE_FAILED", "QUEUED_SPLICE_STARTED"]);
+    }
+
+    #[tokio::test]
+    async fn a_plain_cancel_inside_the_revive_window_keeps_it_so_a_signing_still_holds_the_channel() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 101);
+        // The operator reads "failed" and cancels, without force: the window stays, so no request replaces the row yet.
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 110);
+        assert!(ok);
+        let cancelled = row(&db);
+        assert_eq!((cancelled.status.as_str(), cancelled.pending_on_node, cancelled.last_error.as_deref()), ("cancelled", false, Some(NEGOTIATION_FAILED_ERROR)));
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 111).await;
+        assert!(!ok && status.contains("can replace it once"), "{status}");
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 111).unwrap().is_some());
+        // The failure was stale: the signing holds the cancelled row's call again, and it locks.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 112);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", true));
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_B);
+        pass(&db, &ldk, &push, 113).await;
+        assert_eq!((row(&db).status.as_str(), ldk.splice_ins.lock().unwrap().len()), ("locked", 1));
+        // Past the window, a plain cancel is the end of the row as before: a new request replaces it.
+        queued(&db, 200);
+        pass(&db, &ldk, &push, 200).await;
+        on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 201);
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 201 + RETRY_BACKOFF_SECS);
+        assert!(ok);
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 201 + RETRY_BACKOFF_SECS).unwrap().is_none());
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 202 + RETRY_BACKOFF_SECS).await;
+        assert!(ok, "{status}");
     }
 }
