@@ -4691,6 +4691,8 @@ pub(crate) mod tests {
         pub splice_in_error: StdMutex<Option<(LdkServerErrorCode, String)>>,
         /// Confirmed on-chain sats the node reports as spendable.
         pub spendable_onchain_sats: std::sync::atomic::AtomicU64,
+        /// Runs once inside the next balance read: something that happens while a caller is away from its tables.
+        pub balances_hook: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     }
 
     /// Use up one of a counter's remaining failures; false once none are left.
@@ -4732,6 +4734,7 @@ pub(crate) mod tests {
                 splice_ins: StdMutex::new(Vec::new()),
                 splice_in_error: StdMutex::new(None),
                 spendable_onchain_sats: std::sync::atomic::AtomicU64::new(0),
+                balances_hook: StdMutex::new(None),
             }
         }
         pub fn like_ldk_node(mut self) -> Self {
@@ -4865,6 +4868,9 @@ pub(crate) mod tests {
             -> Result<GetBalancesResponse, LdkServerError> {
             if self.balances_fail.load(Ordering::SeqCst) {
                 return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
+            }
+            if let Some(hook) = self.balances_hook.lock().unwrap().take() {
+                hook();
             }
             use ldk_server_client::ldk_server_grpc::types::{lightning_balance::BalanceType, ClaimableOnChannelClose};
             let mut lightning_balances = self.lightning_balances.lock().unwrap().clone();
