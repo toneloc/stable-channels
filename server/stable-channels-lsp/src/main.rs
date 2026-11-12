@@ -6,6 +6,7 @@ mod config;
 mod event_loop;
 mod geoip;
 mod handlers;
+mod ldk_client;
 pub mod messages;
 mod observability;
 mod price_task;
@@ -145,7 +146,7 @@ async fn main() -> Result<()> {
     stable_manager.enforce_max_stabilization = cfg.enforce_max_stabilization;
 
     let state = AppState {
-        ldk_server: Arc::new(ldk_server),
+        ldk_server: Arc::new(ldk_client::LdkClient::new(ldk_server)),
         api_key: Arc::new(api_key),
         data_dir: data_dir.clone(),
         network: cfg.node.network.clone(),

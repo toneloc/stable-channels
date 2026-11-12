@@ -1019,6 +1019,8 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "RECONCILIATION_GAP_DETECTED",
     "RECONCILIATION_RESULT",
     "RECONCILIATION_SCOPE_FAILED",
+    // How many events a full buffer dropped, durable since trades and forward deductions among them are not replayed.
+    "EVENT_BUFFER_RESUMED",
     // Operator refunds of rejected trade fees: money left the node, so the record must survive.
     "TRADE_FEE_REFUND_SENT",
     "TRADE_FEE_REFUND_OUTCOME_UNKNOWN",
@@ -1048,6 +1050,7 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "ONCHAIN_DEPOSIT_COMPLETION_FAILED",
     "OUTGOING_PAYMENT_CLASSIFICATION_FAILED",
     "TRADE_PAYMENT_CLASSIFICATION_FAILED",
+    "EVENT_RETRY_ABANDONED",
     "CHANNEL_READY_UID_UNPARSEABLE",
     "TRADE_PARSE_PAYLOAD_FAILED",
     "TRADE_PARSE_SIGNED_FAILED",
@@ -1113,6 +1116,7 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     "STABILITY_WAKE_POLL_TIMEOUT",
     // Event-stream transport; EVENT_STREAM_GAP_STARTED, EVENT_STREAM_GAP_CLOSED and RECONCILIATION_RESULT are the durable records.
     "EVENT_STREAM_CONNECTED", "EVENT_STREAM_CONNECT_FAILED", "EVENT_STREAM_DISCONNECTED", "RECONCILIATION_STARTED",
+    "EVENT_BUFFER_FULL",
     // Price-feed transport.
     "WEBSOCKET_DISCONNECTED",
     // Per-tick and per-attempt traces whose outcome is recorded elsewhere, transport, and UI.
