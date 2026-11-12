@@ -1465,12 +1465,14 @@ impl Database {
         Ok(())
     }
 
-    /// Cancel a row that has not locked. A call already made cannot be taken back, so `pending_on_node` is kept and the job keeps watching for its lock, unless `release` says the operator has checked that the node holds no splice for the channel; then the flag is cleared too, on a row already cancelled as well, and a row still showing the node's failure event (`failure_event_error`, which could revive its call) records the release instead, so nothing revives it.
+    /// Cancel a row that has not locked. A call already made cannot be taken back, so `pending_on_node` is kept and the job keeps watching for its lock, unless `release` says the operator has checked that the node holds no splice for the channel; then the flag is cleared too, on a row already cancelled as well, and a row still showing the node's failure event (`failure_event_error`, which could revive its call) records the release instead, so nothing revives it. Without `release`, a row showing that event keeps it in place of the reason (its status says it was cancelled), so the call can still be revived while the job allows.
     pub fn cancel_queued_splice(&self, user_channel_id: &str, reason: Option<&str>, release: bool, failure_event_error: &str, now: i64) -> SqliteResult<Option<QueuedSplice>> {
         self.update_queued_splice(
             "UPDATE queued_splices
              SET status = 'cancelled', wake_note = NULL, updated_at = ?3,
-                 last_error = CASE WHEN ?4 THEN COALESCE(?2, 'released by the operator') ELSE COALESCE(?2, last_error) END,
+                 last_error = CASE WHEN ?4 THEN COALESCE(?2, 'released by the operator')
+                                   WHEN last_error = ?5 THEN last_error
+                                   ELSE COALESCE(?2, last_error) END,
                  pending_on_node = CASE WHEN ?4 THEN 0 ELSE pending_on_node END
              WHERE user_channel_id = ?1 AND status != 'locked'
                AND (status != 'cancelled' OR (?4 AND (pending_on_node = 1 OR last_error = ?5)))",
@@ -8804,9 +8806,11 @@ mod tests {
         db.cancel_queued_splice("7", Some("by the operator"), false, "the splice negotiation failed", 104).unwrap();
         let cancelled = db.note_queued_splice_negotiated("7", row.request_id, "cc:2", 105).unwrap().unwrap();
         assert_eq!((cancelled.status.as_str(), cancelled.funding_txo.as_deref(), cancelled.pending_on_node), ("cancelled", Some("cc:2"), true));
-        // Released by the node's answer, it records the time of that answer and a revival keeps it cancelled, pending again.
+        // Released by the node's answer, it records the time of that answer; a plain cancel keeps that answer, and a revival keeps it cancelled, pending again.
         let cleared = db.clear_queued_splice_pending("7", row.request_id, "the splice negotiation failed", 106).unwrap().unwrap();
         assert_eq!((cleared.status.as_str(), cleared.pending_on_node, cleared.last_attempt_at), ("cancelled", false, Some(106)));
+        assert!(db.cancel_queued_splice("7", Some("again"), false, "the splice negotiation failed", 106).unwrap().is_none(), "already cancelled, not released");
+        assert_eq!(db.load_queued_splice("7").unwrap().unwrap().last_error.as_deref(), Some("the splice negotiation failed"));
         let held = db.revive_queued_splice_negotiated("7", row.request_id, "dd:0", "the splice negotiation failed", 107).unwrap().unwrap();
         assert_eq!((held.status.as_str(), held.pending_on_node, held.funding_txo.as_deref()), ("cancelled", true, Some("dd:0")));
         // Released by the operator, it records nothing and cannot be revived.
@@ -8830,6 +8834,17 @@ mod tests {
         db.fail_queued_splice("8", row.request_id, "negotiated", "the splice negotiation failed", 114, 5).unwrap();
         let called = db.mark_queued_splice_splicing("8", row.request_id, Some("aa:0"), 500_000, 400_000, 115).unwrap().unwrap();
         assert_eq!((called.funding_txo, called.negotiated_at), (None, None));
+
+        // A plain cancel on a row still showing the node's answer keeps that answer, so the call can still be revived; a forced one records the release.
+        let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("9", "peer", 1, 120).unwrap() else { panic!("queued") };
+        db.mark_queued_splice_splicing("9", row.request_id, Some("aa:0"), 500_000, 400_000, 121).unwrap();
+        db.fail_queued_splice("9", row.request_id, "splicing", "the splice negotiation failed", 122, 5).unwrap();
+        let cancelled = db.cancel_queued_splice("9", Some("by the operator"), false, "the splice negotiation failed", 123).unwrap().unwrap();
+        assert_eq!((cancelled.status.as_str(), cancelled.last_error.as_deref()), ("cancelled", Some("the splice negotiation failed")));
+        let held = db.revive_queued_splice_negotiated("9", row.request_id, "bb:1", "the splice negotiation failed", 124).unwrap().unwrap();
+        assert_eq!((held.status.as_str(), held.pending_on_node), ("cancelled", true));
+        let released = db.cancel_queued_splice("9", None, true, "the splice negotiation failed", 125).unwrap().unwrap();
+        assert_eq!((released.pending_on_node, released.last_error.as_deref()), (false, Some("released by the operator")));
     }
 
     #[test]
