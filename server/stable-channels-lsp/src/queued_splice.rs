@@ -212,9 +212,9 @@ pub(crate) async fn queue(
     if channel.counterparty_node_id != counterparty {
         return (false, format!("channel {key} is with {}, not {counterparty}", channel.counterparty_node_id));
     }
-    // A call the last request made may have locked since the job last looked.
+    // A call the last request made may have locked since the job last looked; not one the node or the operator said is over, whose channel may since have been spliced by hand.
     match db.load_queued_splice(&key) {
-        Ok(Some(existing)) if existing.channel_funding_txo.is_some() && existing.status != "locked" => {
+        Ok(Some(existing)) if existing.channel_funding_txo.is_some() && existing.status != "locked" && !released_for_good(&existing) => {
             if lock_if_shown(db, ldk, &existing, channel, now).await == LockCheck::Unknown {
                 return (
                     false,
@@ -227,15 +227,7 @@ pub(crate) async fn queue(
     }
     // A failure event may have released the last call by mistake, and its signing can still revive the row inside the backoff; a replacement could not take that signing, so none goes out before then.
     match db.load_queued_splice(&key) {
-        Ok(Some(existing)) if released_by_a_failure_event(&existing, now) => {
-            return (
-                false,
-                format!(
-                    "the node reported the last splice-in call's negotiation failed {}s ago; a new request can replace it once {RETRY_BACKOFF_SECS}s have passed, in case that call's splice is signed after all",
-                    now - existing.last_attempt_at.unwrap_or(now)
-                ),
-            );
-        }
+        Ok(Some(existing)) if released_by_a_failure_event(&existing, now) => return (false, revivable_refusal(&existing, now)),
         Ok(_) => {}
         Err(error) => return (false, format!("could not read the queued splice: {error}")),
     }
@@ -261,7 +253,7 @@ pub(crate) async fn queue(
             ),
         );
     }
-    match db.queue_splice_in(&key, counterparty, amount_sats, now) {
+    match db.queue_splice_in(&key, counterparty, amount_sats, now, RETRY_BACKOFF_SECS, NEGOTIATION_FAILED_ERROR) {
         Ok(QueueSpliceOutcome::Queued(row)) => {
             audit("QUEUED_SPLICE_CREATED", &row, &[("dedup_key", dedup_key("created", &row, ""))]);
             (true, format!("queued {amount_sats} sats; the phone is woken by push and the splice runs once the channel is usable"))
@@ -279,6 +271,8 @@ pub(crate) async fn queue(
                 row.last_error.as_deref().unwrap_or(&row.status)
             ),
         ),
+        // The event landed while this request was away from the table, after its own check above.
+        Ok(QueueSpliceOutcome::Revivable(row)) => (false, revivable_refusal(&row, now)),
         Err(error) => {
             let message = format!("could not save the queued splice: {error}");
             db_failed("queue_splice_in", &key, error);
@@ -809,6 +803,19 @@ fn released_by_a_failure_event(row: &QueuedSplice, now: i64) -> bool {
         && row.last_attempt_at.is_some_and(|failed_at| now < failed_at + RETRY_BACKOFF_SECS)
 }
 
+/// Why a request is refused while a signing could still revive the row's last call.
+fn revivable_refusal(row: &QueuedSplice, now: i64) -> String {
+    format!(
+        "the node reported the last splice-in call's negotiation failed {}s ago; a new request can replace it once {RETRY_BACKOFF_SECS}s have passed, in case that call's splice is signed after all",
+        now - row.last_attempt_at.unwrap_or(now)
+    )
+}
+
+/// A cancelled row whose call is over on the node's or the operator's word: the node refused it, or the operator cancelled after a refusal or with force, which left a text other than the failure event's. Nothing of it can still lock, so a splice the channel shows later is someone else's, the operator's own by hand included, and is not taken for the row's.
+fn released_for_good(row: &QueuedSplice) -> bool {
+    row.status == "cancelled" && !row.pending_on_node && row.last_error.as_deref() != Some(NEGOTIATION_FAILED_ERROR)
+}
+
 /// The node negotiated a splice on the channel. Every row with a call pending records it, whatever its status, since a signed splice keeps the call through a later negotiation failure; whether the splice was the row's own is settled at the lock. A row a failure event released this side of the retry backoff is made pending again, since the event may have been for someone else's splice.
 pub(crate) fn on_splice_negotiated(db: &Database, user_channel_id: &str, funding_txo: &str, now: i64) {
     let Some(key) = row_key(user_channel_id) else { return };
@@ -849,11 +856,13 @@ pub(crate) fn on_channel_closed(db: &Database, user_channel_id: &str, now: i64) 
     end_for_channel(db, &row, "the channel closed", true, now);
 }
 
-/// The channel's queued splice while the job may still call for it: any row but a locked one or a cancelled one, since the job retries a failed or stalled row too, plus a cancelled row whose last call may still be pending on the node or could still be revived by a signing. A manual splice-in then would be a second splice for the request, or be taken for its lock, so the operator route refuses one; an unreadable queue counts as open.
+/// The channel's queued splice while the job may still call for it, or a splice of its own may still land: any row but a locked one or a cancelled one, since the job retries a failed or stalled row too, plus a cancelled row whose last call may still be pending on the node or that the node's failure event released, since a signing can revive such a call inside the backoff and its splice is still looked for at the next request after it; only a forced cancel ends that. A manual splice-in then would be a second splice for the request, or be taken for its lock, so the operator route refuses one; an unreadable queue counts as open.
 pub(crate) fn open_row(db: &Database, user_channel_id: &str, now: i64) -> Result<Option<QueuedSplice>, rusqlite::Error> {
     let Some(key) = row_key(user_channel_id) else { return Ok(None) };
-    Ok(db.load_queued_splice(&key)?.filter(|row| {
-        !matches!(row.status.as_str(), "locked" | "cancelled") || row.pending_on_node || released_by_a_failure_event(row, now)
+    Ok(db.load_queued_splice(&key)?.filter(|row| match row.status.as_str() {
+        "locked" => false,
+        "cancelled" => row.pending_on_node || released_by_a_failure_event(row, now) || row.last_error.as_deref() == Some(NEGOTIATION_FAILED_ERROR),
+        _ => true,
     }))
 }
 
@@ -936,7 +945,7 @@ mod tests {
     }
 
     fn queued(db: &Database, now: i64) -> QueuedSplice {
-        match db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, now).unwrap() {
+        match db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, now, RETRY_BACKOFF_SECS, NEGOTIATION_FAILED_ERROR).unwrap() {
             QueueSpliceOutcome::Queued(row) => row,
             other => panic!("not queued: {other:?}"),
         }
@@ -1660,7 +1669,7 @@ mod tests {
         let stale = queued(&db, 100);
         // The operator cancels and queues a different amount while a pass holds the old row.
         cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 101);
-        db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 3, 102).unwrap();
+        db.queue_splice_in(USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 3, 102, RETRY_BACKOFF_SECS, NEGOTIATION_FAILED_ERROR).unwrap();
         stable_channels::audit::enable_test_capture();
 
         start_splice(&db, &ldk, &stale, &channel(true, TX_A, 0), 103, false).await;
@@ -2059,7 +2068,8 @@ mod tests {
         );
         on_splice_negotiation_failed(&db, USER_CHANNEL_ID_DECIMAL, 105);
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 105 + RETRY_BACKOFF_SECS - 1).unwrap().is_some(), "a signing could still revive the call");
-        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 105 + RETRY_BACKOFF_SECS).unwrap().is_none());
+        // Past the backoff its splice is still looked for at the next request, so the channel stays held until the operator releases it with force.
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 105 + 10 * RETRY_BACKOFF_SECS).unwrap().is_some(), "released by the node's event only");
         db.cancel_queued_splice(USER_CHANNEL_ID_DECIMAL, None, true, NEGOTIATION_FAILED_ERROR, 106).unwrap();
         assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 106).unwrap().is_none(), "released by the operator");
         db.mark_queued_splice_locked(USER_CHANNEL_ID_DECIMAL, request_id, &txo(TX_B, 1), 107).unwrap();
@@ -2269,8 +2279,66 @@ mod tests {
         let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 201 + RETRY_BACKOFF_SECS);
         assert!(ok);
         assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node), ("cancelled", false));
-        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 201 + RETRY_BACKOFF_SECS).unwrap().is_none());
+        // The row still carries the node's answer, so its splice is still looked for: the manual route stays shut until a forced cancel.
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 201 + RETRY_BACKOFF_SECS).unwrap().is_some());
         let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 202 + RETRY_BACKOFF_SECS).await;
         assert!(ok, "{status}");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_request_the_node_or_the_operator_released_is_not_locked_by_a_later_manual_splice() {
+        let _guard = guard();
+        let db = database();
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        // The operator releases the call with force, then splices by hand for most of the amount before queueing again.
+        called(&db, &ldk, &push, 100).await;
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, true, 101);
+        assert!(ok);
+        let dead = row(&db);
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 102).unwrap().is_none(), "the manual route is open");
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_B, 1, LSP_SATS + AMOUNT_SATS)];
+        wallet_funded_tx(&ldk, TX_B);
+        stable_channels::audit::enable_test_capture();
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 2, 103).await;
+        assert!(ok, "{status}");
+        assert_eq!(names(&capture()), ["QUEUED_SPLICE_CREATED"], "the manual splice is not the dead request's lock");
+        assert_ne!(row(&db).request_id, dead.request_id);
+        // The node refuses the new request's call, the operator cancels plainly, and splices by hand again.
+        *ldk.splice_in_error.lock().unwrap() = Some((LdkServerErrorCode::LightningError, "no such peer".into()));
+        pass(&db, &ldk, &push, 104).await;
+        assert_eq!((row(&db).status.as_str(), row(&db).pending_on_node, row(&db).channel_funding_txo.as_deref()), ("failed", false, Some(txo(TX_B, 1).as_str())));
+        let (ok, _) = cancel(&db, USER_CHANNEL_ID_DECIMAL, false, 105);
+        assert!(ok);
+        assert_eq!(row(&db).last_error.as_deref(), Some("cancelled by the operator"));
+        assert!(open_row(&db, USER_CHANNEL_ID_DECIMAL, 106).unwrap().is_none());
+        *ldk.splice_in_error.lock().unwrap() = None;
+        *ldk.channels.lock().unwrap() = vec![channel_with(true, TX_C, 1, LSP_SATS + AMOUNT_SATS * 3)];
+        wallet_funded_tx(&ldk, TX_C);
+        stable_channels::audit::enable_test_capture();
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS, 107).await;
+        assert!(ok, "{status}");
+        assert_eq!(names(&capture()), ["QUEUED_SPLICE_CREATED"]);
+    }
+
+    #[tokio::test]
+    async fn a_failure_event_during_the_requests_wallet_check_cannot_let_a_replacement_past_the_window() {
+        let _guard = guard();
+        let db = Arc::new(database());
+        let ldk = node(true);
+        let dir = tempfile::tempdir().unwrap();
+        let push = service(FakeSender::new(true), dir.path(), &[]);
+        called(&db, &ldk, &push, 100).await;
+        let first = row(&db);
+        // The event lands after the request's own window check and before its save.
+        let released = Arc::clone(&db);
+        *ldk.balances_hook.lock().unwrap() = Some(Box::new(move || on_splice_negotiation_failed(&released, USER_CHANNEL_ID_DECIMAL, 130)));
+        let (ok, status) = queue(&db, &ldk, USER_CHANNEL_ID_DECIMAL, COUNTERPARTY_HEX, AMOUNT_SATS * 2, 130).await;
+        assert!(!ok && status.contains("can replace it once"), "{status}");
+        assert_eq!((row(&db).request_id, row(&db).status.as_str()), (first.request_id, "failed"));
+        // So the signing revives that call instead of being lost to a replacement.
+        on_splice_negotiated(&db, USER_CHANNEL_ID_DECIMAL, &txo(TX_B, 1), 131);
+        assert_eq!((row(&db).request_id, row(&db).status.as_str(), row(&db).pending_on_node), (first.request_id, "negotiated", true));
     }
 }
