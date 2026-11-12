@@ -152,6 +152,12 @@ class StabilityProcessingService : Service() {
         // After the lock, long enough for a stability payment the LSP's tick sends to a usable
         // peer.
         private const val LSP_SPLICE_SETTLE_SECS = 10
+        /**
+         * How long the CPU is held for one run: the longest wait plus the node's start, connect and
+         * stop. A phone with its screen off suspends once the push's wake-up ends, and a suspended
+         * node answers nothing.
+         */
+        private const val CPU_HOLD_MS = 120_000L
         private const val LSP_CONNECT_ATTEMPTS = 5
         private const val LSP_CONNECT_RETRY_MS = 2_000L
         private const val DB_RETRY_BACKOFF_MS = 500L
@@ -321,6 +327,7 @@ class StabilityProcessingService : Service() {
         }
 
         isRunning = true
+        val cpuHold = CpuHold(this, "stablechannels:stability").also { it.hold(CPU_HOLD_MS) }
 
         Thread {
             try {
@@ -333,6 +340,7 @@ class StabilityProcessingService : Service() {
                 Log.e(TAG, "Stability processing failed", e)
                 FCMService.flagPendingPayment(this)
             } finally {
+                cpuHold.release()
                 isRunning = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
