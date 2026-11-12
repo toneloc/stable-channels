@@ -53,7 +53,7 @@ pub async fn splice_in(State(state): State<AppState>, body: Bytes) -> Response {
         Err(resp) => return resp,
     };
     // A queued splice-in the job is working on, or whose last call may still be pending on the node, owns the channel: a manual one now would splice twice, or be taken for the queued one's lock.
-    match crate::queued_splice::open_row(&state.db, &req.user_channel_id) {
+    match crate::queued_splice::open_row(&state.db, &req.user_channel_id, crate::revenue::now_secs()) {
         Ok(None) => {}
         Ok(Some(open)) => {
             let pending = if open.pending_on_node { ", its last call pending on the node" } else { "" };

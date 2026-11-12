@@ -4646,6 +4646,8 @@ pub(crate) mod tests {
 
     pub struct FakeLdkServer {
         pub channels: StdMutex<Vec<GrpcChannel>>,
+        /// What every listing after the next one returns: a change that lands between one listing and the next.
+        pub channels_after_listing: StdMutex<Option<Vec<GrpcChannel>>>,
         pub sends: StdMutex<Vec<SpontaneousSendRequest>>,
         pub send_should_fail: bool,
         pub verify_should_pass: bool,
@@ -4700,6 +4702,7 @@ pub(crate) mod tests {
         pub fn new(channels: Vec<GrpcChannel>) -> Self {
             Self {
                 channels: StdMutex::new(channels),
+                channels_after_listing: StdMutex::new(None),
                 sends: StdMutex::new(Vec::new()),
                 send_should_fail: false,
                 verify_should_pass: true,
@@ -4767,9 +4770,11 @@ pub(crate) mod tests {
             if self.list_channels_fails.load(Ordering::SeqCst) {
                 return Err(LdkServerError::new(LdkServerErrorCode::InternalServerError, "node unavailable"));
             }
-            Ok(ListChannelsResponse {
-                channels: self.channels.lock().unwrap().clone(),
-            })
+            let listed = self.channels.lock().unwrap().clone();
+            if let Some(next) = self.channels_after_listing.lock().unwrap().take() {
+                *self.channels.lock().unwrap() = next;
+            }
+            Ok(ListChannelsResponse { channels: listed })
         }
         async fn splice_in(&self, req: SpliceInRequest) -> Result<SpliceInResponse, LdkServerError> {
             if let Some((code, message)) = self.splice_in_error.lock().unwrap().clone() {
