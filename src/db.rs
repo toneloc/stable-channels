@@ -421,6 +421,14 @@ impl QueuedSplice {
     }
 }
 
+/// A splice-in the operator made by hand, noted so that a queued request for the channel waits until the channel has moved past the funding it was made on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManualSplice {
+    pub user_channel_id: String,
+    pub channel_funding_txo: String,
+    pub made_at: i64,
+}
+
 /// What queueing a splice-in did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueueSpliceOutcome {
@@ -998,6 +1006,17 @@ impl Database {
             );",
         )?;
 
+        // A splice-in the operator made by hand, with the funding the channel was on: a queued request
+        // for the channel waits until the channel has moved past it, so the hand-made splice is not
+        // taken for the request's lock. One note per channel.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS manual_splices (
+                user_channel_id TEXT PRIMARY KEY,
+                channel_funding_txo TEXT NOT NULL,
+                made_at INTEGER NOT NULL
+            );",
+        )?;
+
         // Append-only operator history. There is intentionally no pruning path.
         ledger::init_schema(&conn)?;
 
@@ -1319,16 +1338,43 @@ impl Database {
 
     /// The rows the wake job still looks at, oldest first: every row but a locked one, and a cancelled
     /// row only while a call it made may still be pending on the node (for `reconcile_for_secs` after the cancel).
-    pub fn list_open_queued_splices(&self, now: i64, reconcile_for_secs: i64) -> SqliteResult<Vec<QueuedSplice>> {
+    pub fn list_open_queued_splices(&self) -> SqliteResult<Vec<QueuedSplice>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(&format!(
             "SELECT {QUEUED_SPLICE_COLUMNS} FROM queued_splices
              WHERE status != 'locked'
-               AND (status != 'cancelled' OR (pending_on_node = 1 AND updated_at > ?1))
+               AND (status != 'cancelled' OR pending_on_node = 1)
              ORDER BY created_at, user_channel_id"
         ))?;
-        let rows = stmt.query_map(params![now - reconcile_for_secs], queued_splice_row)?;
+        let rows = stmt.query_map([], queued_splice_row)?;
         rows.collect()
+    }
+
+    /// Notes a splice-in the operator made by hand on the channel, with the funding it was on; a later note replaces it.
+    pub fn note_manual_splice(&self, user_channel_id: &str, channel_funding_txo: &str, now: i64) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO manual_splices (user_channel_id, channel_funding_txo, made_at) VALUES (?1, ?2, ?3)",
+            params![user_channel_id, channel_funding_txo, now],
+        )?;
+        Ok(())
+    }
+
+    /// The splice-in made by hand on the channel that the queue has not yet seen through, if any.
+    pub fn load_manual_splice(&self, user_channel_id: &str) -> SqliteResult<Option<ManualSplice>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT user_channel_id, channel_funding_txo, made_at FROM manual_splices WHERE user_channel_id = ?1",
+            params![user_channel_id],
+            |row| Ok(ManualSplice { user_channel_id: row.get(0)?, channel_funding_txo: row.get(1)?, made_at: row.get(2)? }),
+        )
+        .optional()
+    }
+
+    /// Forgets the channel's hand-made splice: it locked, the node refused it, or the operator released it. Whether there was one.
+    pub fn clear_manual_splice(&self, user_channel_id: &str) -> SqliteResult<bool> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM manual_splices WHERE user_channel_id = ?1", params![user_channel_id])? > 0)
     }
 
     /// Apply one update and return the row when it changed; None when the row is missing or not in a state the update applies to.
@@ -8738,6 +8784,25 @@ mod tests {
     }
 
     #[test]
+    fn manual_splice_note_is_one_per_channel_until_it_is_cleared() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.load_manual_splice("7").unwrap().is_none());
+        assert!(!db.clear_manual_splice("7").unwrap(), "nothing to clear");
+        db.note_manual_splice("7", "aa:0", 100).unwrap();
+        assert_eq!(
+            db.load_manual_splice("7").unwrap(),
+            Some(ManualSplice { user_channel_id: "7".into(), channel_funding_txo: "aa:0".into(), made_at: 100 })
+        );
+        // A later splice by hand replaces the note; another channel's is its own.
+        db.note_manual_splice("7", "bb:1", 101).unwrap();
+        db.note_manual_splice("8", "cc:0", 102).unwrap();
+        assert_eq!(db.load_manual_splice("7").unwrap().map(|note| (note.channel_funding_txo, note.made_at)), Some(("bb:1".into(), 101)));
+        assert!(db.clear_manual_splice("7").unwrap());
+        assert!(db.load_manual_splice("7").unwrap().is_none());
+        assert!(db.load_manual_splice("8").unwrap().is_some());
+    }
+
+    #[test]
     fn queued_splice_with_a_call_pending_on_the_node_blocks_a_new_request_until_it_is_cleared() {
         let db = Database::open_in_memory().unwrap();
         db.queue_splice_in("7", "peer", 50_000, 100, 0, "").unwrap();
@@ -8756,13 +8821,12 @@ mod tests {
         let cancelled = db.cancel_queued_splice("7", Some("by the operator"), false, "the splice negotiation failed", 104).unwrap().unwrap();
         assert!(cancelled.pending_on_node);
         assert!(matches!(db.queue_splice_in("7", "peer", 1, 105, 0, "").unwrap(), QueueSpliceOutcome::PendingOnNode(_)));
-        // The job keeps looking at the cancelled row while its call may still lock, within the window.
-        assert_eq!(db.list_open_queued_splices(105, 3_600).unwrap().len(), 1);
-        assert!(db.list_open_queued_splices(104 + 3_601, 3_600).unwrap().is_empty());
+        // The job keeps looking at the cancelled row for as long as its call may still lock, however long that takes.
+        assert_eq!(db.list_open_queued_splices().unwrap().len(), 1);
         // Once the node answers, or the operator releases the row, a new request may replace it.
         db.clear_queued_splice_pending("7", request_id, "the node dropped it", 106).unwrap().unwrap();
         assert!(db.clear_queued_splice_pending("7", request_id, "again", 107).unwrap().is_none(), "already clear");
-        assert!(db.list_open_queued_splices(107, 3_600).unwrap().is_empty(), "nothing left to watch");
+        assert!(db.list_open_queued_splices().unwrap().is_empty(), "nothing left to watch");
         assert!(matches!(db.queue_splice_in("7", "peer", 1, 108, 0, "").unwrap(), QueueSpliceOutcome::Queued(_)));
         let request_id = db.load_queued_splice("7").unwrap().unwrap().request_id;
         db.mark_queued_splice_splicing("7", request_id, Some("aa:0"), 500_000, 400_000, 109).unwrap().unwrap();
@@ -8794,7 +8858,7 @@ mod tests {
         assert_eq!((pushed.status.as_str(), pushed.wake_sent_at), ("negotiated", Some(105)));
         let locked = db.mark_queued_splice_locked("7", request_id, "bb:1", 106).unwrap().unwrap();
         assert_eq!((locked.status.as_str(), locked.pending_on_node, locked.funding_txo.as_deref()), ("locked", false, Some("bb:1")));
-        assert!(db.list_open_queued_splices(106, 3_600).unwrap().is_empty());
+        assert!(db.list_open_queued_splices().unwrap().is_empty());
         assert!(db.cancel_queued_splice("7", None, true, "the splice negotiation failed", 107).unwrap().is_none(), "a locked row stays locked");
         assert!(db.mark_queued_splice_locked("7", request_id, "bb:1", 108).unwrap().is_none());
         assert!(db.note_queued_splice_wake_sent("7", request_id, 109).unwrap().is_none());
@@ -8819,7 +8883,7 @@ mod tests {
         let stalled = db.fail_queued_splice("7", request_id, "splicing", "splice_in: no such peer", 105, 2).unwrap().unwrap();
         assert_eq!((stalled.status.as_str(), stalled.attempts), ("stalled", 2));
         // A stalled row stays open: the splice still runs if the phone shows up, and it can be cancelled.
-        assert!(db.list_open_queued_splices(105, 3_600).unwrap().iter().any(|row| row.status == "stalled"));
+        assert!(db.list_open_queued_splices().unwrap().iter().any(|row| row.status == "stalled"));
         db.note_queued_splice_wake_issue("7", request_id + 1, "no push token", 106).unwrap();
         assert_eq!(db.load_queued_splice("7").unwrap().unwrap().wake_note, None, "another request's id");
         db.note_queued_splice_wake_issue("7", request_id, "no push token", 106).unwrap();
@@ -8828,7 +8892,7 @@ mod tests {
         let cancelled = db.cancel_queued_splice("7", Some("channel closed"), false, "the splice negotiation failed", 107).unwrap().unwrap();
         assert_eq!((cancelled.status.as_str(), cancelled.last_error.as_deref(), cancelled.wake_note), ("cancelled", Some("channel closed"), None));
         // Nothing of it may still lock, so the job stops looking at it.
-        assert!(db.list_open_queued_splices(107, 3_600).unwrap().is_empty());
+        assert!(db.list_open_queued_splices().unwrap().is_empty());
     }
 
     #[test]
@@ -8948,11 +9012,11 @@ mod tests {
             ("cancelled", Some("not listed"), true, None)
         );
         assert!(db.close_queued_splice_channel("7", "not listed", false, 103).unwrap().is_none(), "already cancelled");
-        assert_eq!(db.list_open_queued_splices(103, 3_600).unwrap().len(), 1, "the job still watches for its lock");
+        assert_eq!(db.list_open_queued_splices().unwrap().len(), 1, "the job still watches for its lock");
         let closed = db.close_queued_splice_channel("7", "the channel closed", true, 104).unwrap().unwrap();
         assert_eq!((closed.status.as_str(), closed.last_error.as_deref(), closed.pending_on_node), ("cancelled", Some("not listed"), false));
         assert!(db.close_queued_splice_channel("7", "again", true, 105).unwrap().is_none(), "nothing left to end");
-        assert!(db.list_open_queued_splices(105, 3_600).unwrap().is_empty());
+        assert!(db.list_open_queued_splices().unwrap().is_empty());
         // A cancelled row whose call may still lock is ended by the closed event too, keeping the operator's reason.
         let QueueSpliceOutcome::Queued(row) = db.queue_splice_in("8", "peer", 1, 106, 0, "").unwrap() else { panic!("queued") };
         db.mark_queued_splice_splicing("8", row.request_id, Some("aa:0"), 500_000, 400_000, 107).unwrap();

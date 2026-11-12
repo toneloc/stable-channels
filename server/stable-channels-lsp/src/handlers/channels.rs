@@ -64,9 +64,25 @@ pub async fn splice_in(State(state): State<AppState>, body: Bytes) -> Response {
         }
         Err(error) => return error_response(ErrorCode::InternalServerError, format!("could not check the splice queue: {error}")),
     }
+    // Noted before the call, so a queued request waits until the channel shows this splice through, locked or gone.
+    let user_channel_id = req.user_channel_id.clone();
+    if let Err(message) = crate::queued_splice::before_manual_splice(
+        &state.db,
+        state.ldk_server.as_ref() as &dyn crate::stable_manager::LdkServerCalls,
+        &user_channel_id,
+        crate::revenue::now_secs(),
+    )
+    .await
+    {
+        return error_response(ErrorCode::InvalidRequestError, format!("the splice-in was not made: {message}"));
+    }
     match state.ldk_server.splice_in(req).await {
         Ok(resp) => ok_response(resp),
-        Err(e) => map_grpc_error(e),
+        Err(e) => {
+            // The node refused it outright, so nothing of it is on the channel.
+            crate::queued_splice::manual_splice_refused(&state.db, &user_channel_id);
+            map_grpc_error(e)
+        }
     }
 }
 
