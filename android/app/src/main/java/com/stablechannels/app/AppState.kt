@@ -7,6 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.google.firebase.messaging.FirebaseMessaging
 import com.stablechannels.app.models.*
+import com.stablechannels.app.push.CpuHold
 import com.stablechannels.app.push.FCMService
 import com.stablechannels.app.push.LspSpliceExpectation
 import com.stablechannels.app.push.LspSpliceHoldBridge
@@ -632,6 +633,9 @@ class AppState(private val context: Context) : ViewModel() {
     @Volatile private var lspSpliceHoldUntilMs = 0L
     private val isHoldingForLspSplice: Boolean
         get() = lspSpliceHoldUntilMs > System.currentTimeMillis()
+
+    /** Keeps the phone from suspending while it holds the node for the LSP's splice. */
+    private val lspSpliceCpuHold by lazy { CpuHold(context, "stablechannels:lsp-splice") }
 
     private val _errorMessage = MutableStateFlow("")
     val errorMessage: StateFlow<String> = _errorMessage
@@ -1426,6 +1430,7 @@ class AppState(private val context: Context) : ViewModel() {
     fun stop() {
         LspSpliceHoldBridge.holder = null
         lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
         // A push in the seconds after this would otherwise be left to an app with no node.
         FCMService.clearHeartbeat(context)
         cancelBackgroundStop()
@@ -1501,6 +1506,7 @@ class AppState(private val context: Context) : ViewModel() {
                 return@launch
             }
             lspSpliceHoldUntilMs = System.currentTimeMillis() + LSP_SPLICE_HOLD_MS
+            lspSpliceCpuHold.hold(LSP_SPLICE_HOLD_MS)
             AuditService.log(
                 "LSP_SPLICE_HOLD",
                 mapOf("in_background" to isInBackground, "hold_ms" to LSP_SPLICE_HOLD_MS),
@@ -1530,6 +1536,7 @@ class AppState(private val context: Context) : ViewModel() {
         viewModelScope.launch {
             if (lspSpliceHoldUntilMs == 0L) return@launch
             lspSpliceHoldUntilMs = 0L
+            lspSpliceCpuHold.release()
             AuditService.log("LSP_SPLICE_HOLD_RELEASED", mapOf("reason" to reason))
             if (isInBackground && !isWaitingForPayment && !isPickingMedia && !isNegotiatingSplice) {
                 launchBackgroundStop(delayMs = QUICK_SWITCH_GRACE_MS)
@@ -1599,6 +1606,7 @@ class AppState(private val context: Context) : ViewModel() {
             Log.e("AppState", "Failed to stop LdkBackgroundService", e)
         }
         lspSpliceHoldUntilMs = 0L
+        lspSpliceCpuHold.release()
         heartbeatJob?.cancel()
         heartbeatJob = null
         // Without this a push in the seconds after the stop would be left to an app that no
