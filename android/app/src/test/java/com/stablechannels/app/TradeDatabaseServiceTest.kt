@@ -179,6 +179,77 @@ class TradeDatabaseServiceTest {
     }
 
     @Test
+    fun acceptanceChecksTheRebasedBackingAgainstTheReceiver() {
+        val service = DatabaseService(context)
+        val sync = prepareBuyThenPayStabilityInFlight(service)
+        // A receiver below the prepared 90,000 but above the rebased 70,000.
+        service.saveChannelPreservingBacking(
+            channelId = sync.channelId,
+            userChannelId = "7",
+            expectedUSD = 100.0,
+            note = null,
+            receiverSats = 84_900,
+            latestPrice = 125_000.0,
+        )
+
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        assertEquals(70_000L, service.loadChannel("7")?.backingSats)
+        service.close()
+    }
+
+    @Test
+    fun acceptanceAfterASendInFlightDoesNotRebaseOntoTheSend() {
+        val service = DatabaseService(context)
+        val sync = prepareBuy(service)
+        // A send leaves 50,000 sats: the target and backing drop to $50 / 50,000.
+        assertNotNull(
+            service.reconcileOutgoingBacking(
+                channelId = sync.channelId,
+                userChannelId = "7",
+                note = null,
+                receiverSats = 50_000,
+                latestPrice = 100_000.0,
+                price = 100_000.0,
+            )
+        )
+
+        assertEquals(
+            TradeControlApplyStatus.RETRY,
+            service.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        val held = service.loadChannel("7")!!
+        assertEquals(50.0, held.expectedUSD, 0.000000001)
+        assertEquals(50_000L, held.backingSats)
+
+        // An uncorrelated sync from the LSP sets the row; the trade result then applies
+        // without changing it.
+        val lspSync =
+            TradeControlMessage.Sync(
+                channelId = sync.channelId,
+                userChannelId = "7",
+                expectedUsd = 50.0,
+                backingSats = 50_000,
+                syncVersion = 2,
+                correlation = null,
+            )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyUncorrelatedSyncIfNewer(lspSync, trustedPrice = 100_000.0).status,
+        )
+        assertEquals(
+            TradeControlApplyStatus.APPLIED,
+            service.applyCorrelatedTradeAcceptance(sync).status,
+        )
+        val settled = service.loadChannel("7")!!
+        assertEquals(50.0, settled.expectedUSD, 0.000000001)
+        assertEquals(50_000L, settled.backingSats)
+        service.close()
+    }
+
+    @Test
     fun feePaymentDoesNotApplyAllocationBeforeCorrelatedAcceptance() {
         val identifier = "ab".repeat(32)
         val paymentId = "cd".repeat(32)
@@ -1228,6 +1299,21 @@ class TradeDatabaseServiceTest {
     private fun prepareBuyThenPayStabilityInFlight(
         service: DatabaseService
     ): TradeControlMessage.Sync {
+        val sync = prepareBuy(service)
+        service.recordPaymentAndMaybeUpdateBacking(
+            paymentId = "12".repeat(32),
+            paymentType = "stability",
+            direction = "sent",
+            amountMsat = 20_000_000,
+            userChannelId = "7",
+            backingDeltaSats = -20_000,
+        )
+        assertEquals(80_000L, service.loadChannel("7")?.backingSats)
+        return sync
+    }
+
+    /** Buy $10 of $100 at $100k (100,000 -> 90,000 sats), prepared and paid, result pending. */
+    private fun prepareBuy(service: DatabaseService): TradeControlMessage.Sync {
         val identifier = "ab".repeat(32)
         val paymentId = "cd".repeat(32)
         val tradeId = "ef".repeat(32)
@@ -1262,16 +1348,6 @@ class TradeDatabaseServiceTest {
         assertEquals(90_000L, prepared.newBackingSats)
         service.recordPreparedTrade(prepared)
         assertNotNull(service.adoptUnattachedPreparedTrade(paymentId, prepared.feeMsat))
-
-        service.recordPaymentAndMaybeUpdateBacking(
-            paymentId = "12".repeat(32),
-            paymentType = "stability",
-            direction = "sent",
-            amountMsat = 20_000_000,
-            userChannelId = "7",
-            backingDeltaSats = -20_000,
-        )
-        assertEquals(80_000L, service.loadChannel("7")?.backingSats)
 
         return TradeControlMessage.Sync(
             channelId = identifier,

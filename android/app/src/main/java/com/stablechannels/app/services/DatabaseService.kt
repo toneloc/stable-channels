@@ -1148,7 +1148,8 @@ class DatabaseService(context: Context) :
                 db.rawQuery(
                         """
                         SELECT id, channel_id, user_channel_id, trade_payment_id, new_expected_usd,
-                               new_backing_sats, status, action, old_backing_sats
+                               new_backing_sats, status, action, old_backing_sats,
+                               old_expected_usd
                         FROM trades
                         WHERE trade_id = ? AND request_hash = ?
                           AND (trade_payment_id = ? OR trade_payment_id IS NULL)
@@ -1174,6 +1175,7 @@ class DatabaseService(context: Context) :
                                 c.getString(6),
                                 c.getString(7),
                                 c.getLongOrNull(8),
+                                if (c.isNull(9)) null else c.getDouble(9),
                             )
                     } ?: return rollbackResult(db, TradeControlApplyStatus.INVALID)
             val tradeId = trade[0] as Long
@@ -1185,6 +1187,7 @@ class DatabaseService(context: Context) :
             val status = trade[6] as String
             val action = trade[7] as String
             val storedOldBacking = trade[8] as Long?
+            val storedOldExpected = trade[9] as Double?
             if (
                 tradeChannelId != sync.channelId ||
                     tradeUserChannelId != sync.userChannelId ||
@@ -1207,7 +1210,7 @@ class DatabaseService(context: Context) :
             }
             val channel =
                 db.rawQuery(
-                        "SELECT channel_id, receiver_sats, sync_version, stable_sats FROM channels WHERE user_channel_id = ?",
+                        "SELECT channel_id, receiver_sats, sync_version, stable_sats, expected_usd FROM channels WHERE user_channel_id = ?",
                         arrayOf(sync.userChannelId),
                     )
                     .use { c ->
@@ -1218,6 +1221,7 @@ class DatabaseService(context: Context) :
                                 c.getLong(1),
                                 c.getLong(2),
                                 c.getLong(3),
+                                c.getDouble(4),
                             )
                     } // A missing row means the channel has since closed (deleteChannel runs on
                     // close) —
@@ -1229,9 +1233,22 @@ class DatabaseService(context: Context) :
             val receiverSats = channel[1] as Long
             val currentVersion = channel[2] as Long
             val currentBacking = channel[3] as Long
+            val currentExpected = channel[4] as Double
             val allocationApplied = sync.syncVersion > currentVersion
+            // Rebase only onto the target the trade started from. A send or a backing repair
+            // changes the target along with the backing; then the prepared backing is used,
+            // bounded by the receiver below.
+            val targetUnchanged =
+                storedOldExpected != null &&
+                    kotlin.math.abs(currentExpected - storedOldExpected) <= 0.000000001
             val acceptedBacking =
-                TradeProtocol.acceptedTradeBacking(storedBacking, storedOldBacking, currentBacking)
+                if (targetUnchanged)
+                    TradeProtocol.acceptedTradeBacking(
+                        storedBacking,
+                        storedOldBacking,
+                        currentBacking,
+                    )
+                else storedBacking
             if (allocationApplied) {
                 if (acceptedBacking < 0L || acceptedBacking > receiverSats) {
                     return rollbackResult(db, TradeControlApplyStatus.RETRY)
