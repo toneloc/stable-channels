@@ -9,6 +9,7 @@ import androidx.core.app.NotificationCompat
 import com.stablechannels.app.R
 import com.stablechannels.app.StableChannelsApp
 import com.stablechannels.app.services.AuditService
+import com.stablechannels.app.services.ChannelValue
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.LdkNodeOwner
 import com.stablechannels.app.services.LightningPaymentRecovery
@@ -106,15 +107,30 @@ class StabilityProcessingService : Service() {
         }
     }
 
-    /** Both background loops commit splice details before removing the event from LDK. */
+    /**
+     * Both background loops commit splice details before removing the event from LDK. With
+     * [lspSplice] the splice is known to be the LSP's, so no Move of the user's is given it.
+     */
     internal fun persistSpliceEvent(
         event: Event,
         fundingForReady: (Event.ChannelReady) -> OutPoint?,
+        lspSplice: Boolean = false,
+        channelValue: (String, String) -> ChannelValue? = { _, _ -> null },
+        channelValueSeen: (String, String) -> ChannelValue? = { u, c -> channelsSeen[u to c] },
         acknowledge: () -> Unit,
     ) {
         try {
             DatabaseService(this).use { db ->
-                check(SpliceEventRecorder.record(db, event, fundingForReady))
+                check(
+                    SpliceEventRecorder.record(
+                        db,
+                        event,
+                        lspSplice = lspSplice,
+                        channelValue = channelValue,
+                        channelValueSeen = channelValueSeen,
+                        fundingForReady = fundingForReady,
+                    )
+                )
             }
         } catch (e: Exception) {
             throw BackingUpdateFailed("Cannot persist splice event: ${e.message}")
@@ -146,6 +162,20 @@ class StabilityProcessingService : Service() {
         // Matches the LSP's wake watch, so a receiver is still up when the top-up follows a slow
         // reconnect. Only the lsp_to_user wait uses it: that loop returns once the payment lands.
         private const val LSP_TO_USER_POLL_TIMEOUT_SECS = 60
+        // An LSP splice-in: the LSP's job waits up to 60 s for the channel to be usable and sends
+        // splice_init a few seconds after the push; the lock follows within seconds.
+        private const val LSP_SPLICE_POLL_TIMEOUT_SECS = 60
+        // After the lock, long enough for a stability payment the LSP's tick sends to a usable
+        // peer.
+        private const val LSP_SPLICE_SETTLE_SECS = 10
+        /**
+         * How long the CPU is held for one run: the longest wait plus the node's start, connect and
+         * stop. A phone with its screen off suspends once the push's wake-up ends, and a suspended
+         * node answers nothing.
+         */
+        private const val CPU_HOLD_MS = 120_000L
+        private const val LSP_CONNECT_ATTEMPTS = 5
+        private const val LSP_CONNECT_RETRY_MS = 2_000L
         private const val DB_RETRY_BACKOFF_MS = 500L
         private const val SYNC_FRESHNESS_POLL_MS = 500L
 
@@ -159,6 +189,9 @@ class StabilityProcessingService : Service() {
      * Lightning-sync timestamp, so the freshness gate can't inherit the app's last sync.
      */
     private var nodeMetricsReset = false
+
+    /** Every channel as last listed before the event at hand, for the value before a splice. */
+    private var channelsSeen: Map<Pair<String, String>, ChannelValue> = emptyMap()
 
     private val httpClient =
         OkHttpClient.Builder()
@@ -313,6 +346,7 @@ class StabilityProcessingService : Service() {
         }
 
         isRunning = true
+        val cpuHold = CpuHold(this, "stablechannels:stability").also { it.hold(CPU_HOLD_MS) }
 
         Thread {
             try {
@@ -325,6 +359,7 @@ class StabilityProcessingService : Service() {
                 Log.e(TAG, "Stability processing failed", e)
                 FCMService.flagPendingPayment(this)
             } finally {
+                cpuHold.release()
                 isRunning = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
@@ -411,6 +446,8 @@ class StabilityProcessingService : Service() {
             val startedNode = builder.build(nodeEntropy)
             node = startedNode
             startedNode.start()
+            // Before the LSP can splice: a 0-conf splice locks before its events are handled.
+            noteChannelsSeen(startedNode)
 
             // Connect to LSP
             try {
@@ -425,6 +462,7 @@ class StabilityProcessingService : Service() {
                 "lsp_to_user" -> handleLspToUser(startedNode, dbPath)
                 "user_to_lsp" -> handleUserToLsp(startedNode, dbPath)
                 "incoming_payment" -> handleIncomingPayment(startedNode, dbPath)
+                LSP_SPLICE_IN_DIRECTION -> handleLspSpliceIn(startedNode, dbPath)
                 else -> Log.w(TAG, "Unknown direction: $direction")
             }
         } finally {
@@ -441,7 +479,7 @@ class StabilityProcessingService : Service() {
         Log.d(TAG, "Polling for incoming payment...")
         val deadline = System.currentTimeMillis() + LSP_TO_USER_POLL_TIMEOUT_SECS * 1000L
         var hasUnpersistedEvent = false
-        var price = 0.0
+        val price = RunPrice()
 
         while (System.currentTimeMillis() < deadline) {
             try {
@@ -452,111 +490,13 @@ class StabilityProcessingService : Service() {
                         continue
                     }
                 when (event) {
-                    is Event.PaymentReceived -> {
-                        Log.d(TAG, "Payment received: ${event.amountMsat} msat")
-                        if (hasStableControlMessage(event.customRecords)) {
-                            if (
-                                handleStableControlMessage(
-                                    node,
-                                    event.customRecords,
-                                    event.amountMsat.toLong(),
-                                )
-                            ) {
-                                node.eventHandled()
-                                hasUnpersistedEvent = false
-                                continue
-                            }
-                            throw BackingUpdateFailed(
-                                "Unrecognized stable-control message — leaving for foreground"
-                            )
+                    is Event.PaymentReceived ->
+                        when (handleReceivedPayment(node, dbPath, event, price)) {
+                            ReceiveOutcome.STABILITY_SETTLED -> return
+                            ReceiveOutcome.RECORDED -> hasUnpersistedEvent = false
+                            ReceiveOutcome.UNPERSISTED -> hasUnpersistedEvent = true
+                            ReceiveOutcome.IGNORED -> {}
                         }
-                        if (event.amountMsat.toLong() < 1000L) {
-                            node.eventHandled()
-                            Log.d(TAG, "Ignored sub-sat incoming event")
-                            continue
-                        }
-                        val inbound =
-                            classifyInboundPayment(
-                                node,
-                                event.customRecords,
-                                event.amountMsat.toLong(),
-                            )
-                        if (inbound.stateUnavailable) {
-                            throw BackingUpdateFailed(
-                                "Channel state unavailable for signed settlement — not acknowledging, foreground will heal"
-                            )
-                        }
-                        val isStabilityPayment = inbound.isStability
-                        val paymentId = event.paymentId ?: event.paymentHash
-                        if (price <= 0) price = fetchMedianPrice()
-                        if (isStabilityPayment) {
-                            val amountSats = event.amountMsat.toLong() / 1000
-                            val result =
-                                recordPaymentAtomicInDB(
-                                    dbPath,
-                                    paymentId,
-                                    "stability",
-                                    "received",
-                                    event.amountMsat.toLong(),
-                                    price,
-                                    amountSats,
-                                    userChannelId = activeUserChannelId(),
-                                    settlementId = inbound.settlementId,
-                                )
-                            when (result) {
-                                InsertResult.INSERTED,
-                                InsertResult.DUPLICATE -> {
-                                    node.eventHandled()
-                                    if (result == InsertResult.INSERTED) {
-                                        Log.d(
-                                            TAG,
-                                            "Applied incoming stability payment at the local target",
-                                        )
-                                    }
-                                }
-                                InsertResult.MISSING_CHANNEL ->
-                                    throw BackingUpdateFailed(
-                                        "No channel row for stability payment — not acknowledging, foreground will heal"
-                                    )
-                                InsertResult.FAILED ->
-                                    throw BackingUpdateFailed(
-                                        "DB write failed for stability payment — not acknowledging, LDK will retry"
-                                    )
-                            }
-                            return
-                        } else {
-                            Log.d(
-                                TAG,
-                                "Non-stability payment received, recording as lightning and continuing to poll",
-                            )
-                            val result =
-                                recordPaymentAtomicInDB(
-                                    dbPath,
-                                    paymentId,
-                                    "lightning",
-                                    "received",
-                                    event.amountMsat.toLong(),
-                                    price,
-                                    null,
-                                )
-                            when (result) {
-                                InsertResult.INSERTED,
-                                InsertResult.DUPLICATE -> {
-                                    node.eventHandled()
-                                    hasUnpersistedEvent = false
-                                }
-                                InsertResult.MISSING_CHANNEL,
-                                InsertResult.FAILED -> {
-                                    hasUnpersistedEvent = true
-                                    Log.e(
-                                        TAG,
-                                        "DB write failed for non-stability payment — backing off before retry",
-                                    )
-                                    Thread.sleep(DB_RETRY_BACKOFF_MS)
-                                }
-                            }
-                        }
-                    }
                     is Event.PaymentFailed -> {
                         persistPaymentFailure(node, event)
                         node.eventHandled()
@@ -567,17 +507,10 @@ class StabilityProcessingService : Service() {
                     }
                     is Event.SpliceNegotiated,
                     is Event.ChannelReady -> {
-                        persistSpliceEvent(
+                        persistSpliceEventFrom(
+                            node,
                             event,
-                            { ready ->
-                                node
-                                    .listChannels()
-                                    .singleOrNull {
-                                        it.userChannelId == ready.userChannelId &&
-                                            it.channelId == ready.channelId
-                                    }
-                                    ?.fundingTxo
-                            },
+                            lspSplice = LspSpliceExpectation.isExpected(this),
                         ) {
                             node.eventHandled()
                         }
@@ -597,6 +530,290 @@ class StabilityProcessingService : Service() {
             )
         }
         Log.d(TAG, "Poll timeout — no payment received")
+    }
+
+    private enum class ReceiveOutcome {
+        /** A stability payment was applied; the lsp_to_user wait is over. */
+        STABILITY_SETTLED,
+        /** The payment was recorded, or a control message handled, and the event acknowledged. */
+        RECORDED,
+        /** The record failed; the event stays in LDK and the loop will see it again. */
+        UNPERSISTED,
+        /** Nothing to record. */
+        IGNORED,
+    }
+
+    /** One run's price, fetched the first time a payment needs it. */
+    private inner class RunPrice {
+        private var value = 0.0
+
+        fun get(): Double {
+            if (value <= 0) value = fetchMedianPrice()
+            return value
+        }
+    }
+
+    /** The lsp_to_user wait's handling of one incoming payment, shared with the LSP splice wait. */
+    private fun handleReceivedPayment(
+        node: Node,
+        dbPath: String,
+        event: Event.PaymentReceived,
+        price: RunPrice,
+    ): ReceiveOutcome {
+        Log.d(TAG, "Payment received: ${event.amountMsat} msat")
+        if (hasStableControlMessage(event.customRecords)) {
+            if (handleStableControlMessage(node, event.customRecords, event.amountMsat.toLong())) {
+                node.eventHandled()
+                return ReceiveOutcome.RECORDED
+            }
+            throw BackingUpdateFailed(
+                "Unrecognized stable-control message — leaving for foreground"
+            )
+        }
+        if (event.amountMsat.toLong() < 1000L) {
+            node.eventHandled()
+            Log.d(TAG, "Ignored sub-sat incoming event")
+            return ReceiveOutcome.IGNORED
+        }
+        val inbound = classifyInboundPayment(node, event.customRecords, event.amountMsat.toLong())
+        if (inbound.stateUnavailable) {
+            throw BackingUpdateFailed(
+                "Channel state unavailable for signed settlement — not acknowledging, foreground will heal"
+            )
+        }
+        val isStabilityPayment = inbound.isStability
+        val paymentId = event.paymentId ?: event.paymentHash
+        if (isStabilityPayment) {
+            val amountSats = event.amountMsat.toLong() / 1000
+            val result =
+                recordPaymentAtomicInDB(
+                    dbPath,
+                    paymentId,
+                    "stability",
+                    "received",
+                    event.amountMsat.toLong(),
+                    price.get(),
+                    amountSats,
+                    userChannelId = activeUserChannelId(),
+                    settlementId = inbound.settlementId,
+                )
+            when (result) {
+                InsertResult.INSERTED,
+                InsertResult.DUPLICATE -> {
+                    node.eventHandled()
+                    if (result == InsertResult.INSERTED) {
+                        Log.d(TAG, "Applied incoming stability payment at the local target")
+                    }
+                }
+                InsertResult.MISSING_CHANNEL ->
+                    throw BackingUpdateFailed(
+                        "No channel row for stability payment — not acknowledging, foreground will heal"
+                    )
+                InsertResult.FAILED ->
+                    throw BackingUpdateFailed(
+                        "DB write failed for stability payment — not acknowledging, LDK will retry"
+                    )
+            }
+            return ReceiveOutcome.STABILITY_SETTLED
+        }
+        Log.d(
+            TAG,
+            "Non-stability payment received, recording as lightning and continuing to poll",
+        )
+        val result =
+            recordPaymentAtomicInDB(
+                dbPath,
+                paymentId,
+                "lightning",
+                "received",
+                event.amountMsat.toLong(),
+                price.get(),
+                null,
+            )
+        return when (result) {
+            InsertResult.INSERTED,
+            InsertResult.DUPLICATE -> {
+                node.eventHandled()
+                ReceiveOutcome.RECORDED
+            }
+            InsertResult.MISSING_CHANNEL,
+            InsertResult.FAILED -> {
+                Log.e(
+                    TAG,
+                    "DB write failed for non-stability payment — backing off before retry",
+                )
+                Thread.sleep(DB_RETRY_BACKOFF_MS)
+                ReceiveOutcome.UNPERSISTED
+            }
+        }
+    }
+
+    /** The live funding outpoint of the channel a ready event is for. */
+    private fun fundingOf(node: Node, ready: Event.ChannelReady): OutPoint? =
+        node
+            .listChannels()
+            .singleOrNull {
+                it.userChannelId == ready.userChannelId && it.channelId == ready.channelId
+            }
+            ?.fundingTxo
+
+    /**
+     * Persists a splice event from the live node and, once the channel is ready on new funding,
+     * takes the listing it leaves behind, so a later splice knows the value before it.
+     */
+    private fun persistSpliceEventFrom(
+        node: Node,
+        event: Event,
+        lspSplice: Boolean,
+        acknowledge: () -> Unit,
+    ) {
+        persistSpliceEvent(
+            event,
+            { ready -> fundingOf(node, ready) },
+            lspSplice = lspSplice,
+            channelValue = channelValueOf(node),
+            acknowledge = acknowledge,
+        )
+        if (event is Event.ChannelReady) noteChannelsSeen(node)
+    }
+
+    /** The live value of a channel and the funding it is on, for the size of an LSP splice. */
+    private fun channelValueOf(node: Node): (String, String) -> ChannelValue? =
+        { userChannelId, channelId ->
+            node
+                .listChannels()
+                .singleOrNull { it.userChannelId == userChannelId && it.channelId == channelId }
+                ?.let { ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong()) }
+        }
+
+    /** Remembers every channel's value on the funding it is on now. */
+    private fun noteChannelsSeen(node: Node) {
+        channelsSeen =
+            node.listChannels().associate {
+                (it.userChannelId to it.channelId) to
+                    ChannelValue(it.fundingTxo?.txid, it.channelValueSats.toLong())
+            }
+    }
+
+    /** The funding outpoint of the channel with the LSP, if there is one. */
+    private fun lspChannelFunding(node: Node, lspPubkey: String): OutPoint? =
+        node.listChannels().firstOrNull { it.counterpartyNodeId == lspPubkey }?.fundingTxo
+
+    /**
+     * Connects to the LSP until the channel with it is usable, which is what the LSP's job waits
+     * for before it sends splice_init. True once it is; false when the attempts run out.
+     */
+    private fun connectToLspWithRetry(node: Node, lspPubkey: String, lspAddress: String): Boolean {
+        fun usable() = node.listChannels().any { it.counterpartyNodeId == lspPubkey && it.isUsable }
+        repeat(LSP_CONNECT_ATTEMPTS) { attempt ->
+            if (usable()) return true
+            try {
+                node.connect(lspPubkey, lspAddress, true)
+            } catch (e: Exception) {
+                Log.w(TAG, "LSP connect attempt ${attempt + 1}: ${e.message}")
+            }
+            Thread.sleep(LSP_CONNECT_RETRY_MS)
+        }
+        return usable()
+    }
+
+    /**
+     * The LSP queued a splice-in of its own funds and woke this phone for it. The node has to stay
+     * up through the negotiation: the LSP sends splice_init once it sees the channel usable, both
+     * sides sign, and the channel locks the new funding 0-conf. The wait ends at the lock plus a
+     * short settle window, at a failed negotiation, or at the deadline. Splice events are persisted
+     * the way the other waits persist them, so the app's bookkeeping sees them; an incoming payment
+     * in the window is recorded like one in an lsp_to_user wait.
+     */
+    private fun handleLspSpliceIn(node: Node, dbPath: String) {
+        val lspPubkey = LspPreferencesManager.getLspPubkey(this)
+        val lspAddress = LspPreferencesManager.getLspAddress(this)
+        val startMs = System.currentTimeMillis()
+        val connected = connectToLspWithRetry(node, lspPubkey, lspAddress)
+        val fundingBefore = lspChannelFunding(node, lspPubkey)
+        AuditService.log(
+            "LSP_SPLICE_WAKE",
+            mapOf(
+                "connected" to connected,
+                "connect_ms" to (System.currentTimeMillis() - startMs),
+                "funding_txid" to fundingBefore?.txid,
+                "wait_secs" to LSP_SPLICE_POLL_TIMEOUT_SECS,
+            ),
+        )
+        val wait =
+            LspSpliceWait(
+                startMs,
+                LSP_SPLICE_POLL_TIMEOUT_SECS * 1000L,
+                LSP_SPLICE_SETTLE_SECS * 1000L,
+            )
+        val price = RunPrice()
+        var hasUnpersistedEvent = false
+
+        while (!wait.isDone(System.currentTimeMillis())) {
+            try {
+                val event =
+                    try {
+                        runBlocking { withTimeout(1000L) { node.nextEventAsync() } }
+                    } catch (e: TimeoutCancellationException) {
+                        continue
+                    }
+                when (event) {
+                    is Event.PaymentReceived ->
+                        when (handleReceivedPayment(node, dbPath, event, price)) {
+                            ReceiveOutcome.STABILITY_SETTLED,
+                            ReceiveOutcome.RECORDED -> hasUnpersistedEvent = false
+                            ReceiveOutcome.UNPERSISTED -> hasUnpersistedEvent = true
+                            ReceiveOutcome.IGNORED -> {}
+                        }
+                    is Event.PaymentFailed -> {
+                        persistPaymentFailure(node, event)
+                        node.eventHandled()
+                    }
+                    is Event.PaymentSuccessful -> {
+                        persistPaymentSuccess(event)
+                        node.eventHandled()
+                    }
+                    is Event.SpliceNegotiated -> {
+                        persistSpliceEventFrom(node, event, lspSplice = true) {
+                            node.eventHandled()
+                        }
+                    }
+                    is Event.ChannelReady -> {
+                        persistSpliceEventFrom(node, event, lspSplice = true) {
+                            node.eventHandled()
+                        }
+                        // The splice has locked once the LSP's channel is ready on new funding; a
+                        // replayed ready event, or one for another channel, moves nothing.
+                        val fundingNow = lspChannelFunding(node, lspPubkey)
+                        if (fundingNow != null && fundingNow.txid != fundingBefore?.txid) {
+                            wait.onLocked(System.currentTimeMillis())
+                        }
+                    }
+                    is Event.SpliceNegotiationFailed -> {
+                        deferSpliceFailure { node.eventHandled() }
+                        wait.onFailed()
+                    }
+                    else -> node.eventHandled()
+                }
+            } catch (e: Exception) {
+                if (e is BackingUpdateFailed)
+                    throw e // permanent; let onStartCommand flag for retry
+                Thread.sleep(500)
+            }
+        }
+        AuditService.log(
+            "LSP_SPLICE_WAKE_DONE",
+            mapOf(
+                "outcome" to wait.outcome.name.lowercase(),
+                "waited_ms" to (System.currentTimeMillis() - startMs),
+                "funding_txid" to lspChannelFunding(node, lspPubkey)?.txid,
+            ),
+        )
+        if (hasUnpersistedEvent) {
+            throw BackingUpdateFailed(
+                "DB write still failing for incoming payment — leaving pending for foreground retry"
+            )
+        }
     }
 
     /**
@@ -872,17 +1089,10 @@ class StabilityProcessingService : Service() {
                     }
                     is Event.SpliceNegotiated,
                     is Event.ChannelReady -> {
-                        persistSpliceEvent(
+                        persistSpliceEventFrom(
+                            node,
                             event,
-                            { ready ->
-                                node
-                                    .listChannels()
-                                    .singleOrNull {
-                                        it.userChannelId == ready.userChannelId &&
-                                            it.channelId == ready.channelId
-                                    }
-                                    ?.fundingTxo
-                            },
+                            lspSplice = LspSpliceExpectation.isExpected(this),
                         ) {
                             node.eventHandled()
                         }

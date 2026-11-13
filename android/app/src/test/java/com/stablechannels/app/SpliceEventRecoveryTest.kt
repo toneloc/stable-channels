@@ -8,6 +8,7 @@ import com.stablechannels.app.models.Bitcoin
 import com.stablechannels.app.models.PendingSplice
 import com.stablechannels.app.models.StableChannel
 import com.stablechannels.app.models.USD
+import com.stablechannels.app.push.LspSpliceExpectation
 import com.stablechannels.app.push.StabilityProcessingService
 import com.stablechannels.app.services.DatabaseService
 import com.stablechannels.app.services.LdkBackgroundService
@@ -545,6 +546,64 @@ class SpliceEventRecoveryTest {
         db.saveChannel(channel, "9", 5.0, 5_000, null)
         handle(state, firstReady)
         assertEquals(5_000L, db.loadChannel("9")!!.backingSats)
+    }
+
+    @Test
+    fun aFailureWithNoMoveOfTheAppsOwnLeavesALeftoverOperationAlone() {
+        val id = pending()
+        val state = appState()
+        setChannel(state, "7")
+        resume(state)
+        assertTrue("the leftover still blocks a new Move", state.isSpliceInFlight)
+        // The LSP's splice failed; the app is negotiating nothing of its own.
+        handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
+        assertEquals("pending", payment(id).status)
+        assertTrue(db.hasPendingSplice())
+        // The leftover expires on its own, as before.
+        expire(id)
+        assertFalse(db.hasPendingSplice())
+    }
+
+    @Test
+    fun theAppsOwnPreNegotiationFailureStillFailsItsRow() {
+        val id = pending()
+        val state = appState()
+        setChannel(state, "7")
+        set(state, "pendingSplice", PendingSplice("out", 1_000, "addr", id))
+        handle(state, Event.SpliceNegotiationFailed(channel, "7", "peer"))
+        assertEquals("failed", payment(id).status)
+        assertNull(read(state, "pendingSplice"))
+        assertFalse(state.isSpliceInFlight)
+    }
+
+    @Test
+    fun theLspsSpliceIsRecordedByTheForegroundOutsideTheUsersHistory() {
+        val state = appState()
+        setChannel(state, "7")
+        handle(state, negotiated)
+        assertEquals("negotiated", db.getLspSplice(txid)!!.status)
+        assertTrue(db.getRecentPayments(100).isEmpty())
+        assertFalse(db.hasPendingSplice())
+        handle(state, ready)
+        assertEquals("locked", db.getLspSplice(txid)!!.status)
+        assertTrue(db.getRecentPayments(100).isEmpty())
+    }
+
+    @Test
+    fun insideThePushWindowALeftoverMoveIsNotGivenTheLspsTransactionButAMoveInFlightKeepsItsOwn() {
+        val id = pending()
+        val state = appState()
+        setChannel(state, "7")
+        LspSpliceExpectation.note(context)
+        handle(state, negotiated)
+        assertNull(payment(id).txid)
+        assertEquals("negotiated", db.getLspSplice(txid)!!.status)
+        // A Move this process is negotiating takes the next negotiation as its own.
+        set(state, "pendingSplice", PendingSplice("out", 1_000, "addr", id))
+        val own = OutPoint("12".repeat(32), 0u)
+        handle(state, negotiated.copy(newFundingTxo = own))
+        assertEquals(own.txid, payment(id).txid)
+        assertNull(db.getLspSplice(own.txid))
     }
 
     @Test
