@@ -6,7 +6,13 @@ import com.stablechannels.app.services.EmailRegistration
 import com.stablechannels.app.services.EmailSubmissionService
 import com.stablechannels.app.services.EmailSubmitter
 import com.stablechannels.app.ui.email.EmailSettingsModel
+import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.Assert.assertEquals
@@ -325,6 +331,40 @@ class EmailSettingsModelTest {
         assertNull(store.savedEmail)
         assertNull(model.savedEmail)
         assertTrue(model.showsField)
+    }
+
+    // Like the real service: a blocking request on IO that the server finishes even if the caller
+    // is cancelled while it runs.
+    private class BlockingSubmitter : EmailSubmitter {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+
+        override suspend fun submit(email: EmailAddress?) {
+            withContext(Dispatchers.IO) {
+                started.countDown()
+                release.await()
+            }
+        }
+    }
+
+    @Test
+    fun save_whenSheetClosesMidRequest_stillRecordsTheSavedEmail() = runTest {
+        val service = BlockingSubmitter()
+        val store = InMemorySavedEmail()
+        var savedCount = 0
+        val model = EmailSettingsModel(service, store, onSaved = { savedCount++ })
+        model.onInputChange("user@example.com")
+        val sheetScope = CoroutineScope(Dispatchers.Default)
+
+        val job = sheetScope.launch { model.save() }
+        service.started.await()
+        sheetScope.cancel()
+        service.release.countDown()
+        job.join()
+
+        assertEquals("user@example.com", store.savedEmail?.value)
+        assertEquals(EmailSettingsModel.Status.SAVED, model.status)
+        assertEquals(1, savedCount)
     }
 
     @Test

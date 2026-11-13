@@ -123,15 +123,16 @@ class EmailSettingsModel(
     private suspend fun submit(email: EmailAddress?) {
         status = Status.SAVING
         failure = null
-        try {
-            service.submit(email)
-        } catch (e: EmailSaveException) {
-            failure = e.failure
-            status = Status.FAILED
-            return
-        }
-        // The server already holds the change, so finish recording it even if the sheet closes now.
+        // A request in flight still reaches the server, so finish it and record the result even if
+        // the sheet closes; callTimeout bounds the wait.
         withContext(NonCancellable) {
+            try {
+                service.submit(email)
+            } catch (e: EmailSaveException) {
+                failure = e.failure
+                status = Status.FAILED
+                return@withContext
+            }
             savedStore.savedEmail = email
             savedEmail = email
             isChanging = false
