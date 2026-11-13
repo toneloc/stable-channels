@@ -64,11 +64,14 @@ impl Emails {
         max_rows: i64,
         max_new_per_hour: i64,
     ) -> rusqlite::Result<Self> {
-        Self::with_connection(
-            Connection::open(data_dir.join("emails.db"))?,
-            max_rows,
-            max_new_per_hour,
-        )
+        let path = data_dir.join("emails.db");
+        create_owner_only(&path).map_err(|e| {
+            rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CANTOPEN),
+                Some(e.to_string()),
+            )
+        })?;
+        Self::with_connection(Connection::open(path)?, max_rows, max_new_per_hour)
     }
 
     fn with_connection(
@@ -146,6 +149,17 @@ impl Emails {
         .await
         .unwrap_or(SaveOutcome::Failed)
     }
+}
+
+/// Create emails.db readable by its owner only, or make an existing one so; SQLite gives its journal the same mode.
+fn create_owner_only(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)?;
+    crate::secret_file::make_owner_only(&file).map(|_| ())
 }
 
 fn save_at(
@@ -398,6 +412,20 @@ mod tests {
             reopened.save("n2", "a@example.com", 1, false).await,
             SaveOutcome::Full
         );
+    }
+
+    #[test]
+    fn emails_db_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("emails.db");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        Emails::open(dir.path()).unwrap();
+        assert_eq!(mode(&path), 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Emails::open(dir.path()).unwrap();
+        assert_eq!(mode(&path), 0o600, "an existing file is made owner only");
     }
 
     // Email is optional: a store that cannot open turns the feature off instead of stopping the LSP.

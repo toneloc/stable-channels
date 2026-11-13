@@ -17,6 +17,10 @@ const REGISTER_EMAIL_TYPE: &str = "REGISTER_EMAIL_V1";
 const EMAIL_SIG_WINDOW_SECS: u64 = 300;
 const MAX_EMAIL_LEN: usize = 254;
 const MAX_EMAIL_LOCAL_LEN: usize = 64;
+/// Longest DNS label.
+const MAX_LABEL_LEN: usize = 63;
+/// Longest signed payload accepted; real ones are a few hundred bytes, so a bigger one is refused before any parse or verify.
+const MAX_PAYLOAD_LEN: usize = 1024;
 
 /// What the caller is told, and the audit record, which never keeps the email or any other text from the request.
 #[derive(Debug)]
@@ -85,6 +89,7 @@ pub fn is_valid_email(email: &str) -> bool {
             .all(|part| !part.is_empty() && part.chars().all(local_char));
     let label_ok = |l: &str| {
         !l.is_empty()
+            && l.len() <= MAX_LABEL_LEN
             && !l.starts_with('-')
             && !l.ends_with('-')
             && l.chars()
@@ -109,6 +114,9 @@ pub async fn register(
     let Ok(envelope) = serde_json::from_slice::<SignedEnvelope>(body) else {
         return invalid("envelope");
     };
+    if envelope.payload.len() > MAX_PAYLOAD_LEN {
+        return invalid("payload");
+    }
     let Ok(serde_json::Value::Object(payload)) =
         serde_json::from_str::<serde_json::Value>(&envelope.payload)
     else {
@@ -577,7 +585,7 @@ mod tests {
         assert_eq!(emails.email_of(NODE).await.as_deref(), Some(EMAIL));
     }
 
-    // The exact payload the iOS and Android tests assert; the signature must cover these bytes as sent.
+    // The form the wallets sign: sorted-key JSON {"email","node_id","ts","type"}; the signature must cover these bytes as sent.
     const APP_PAYLOAD: &str = r#"{"email":"you@example.com","node_id":"02eec7245d6b7d2ccb30380bfbe2a3648cd7a942653f5aa340edcea1f283686619","ts":1762790000,"type":"REGISTER_EMAIL_V1"}"#;
 
     #[tokio::test]
@@ -621,6 +629,81 @@ mod tests {
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{ts}");
         }
         assert_eq!(emails.email_of(NODE).await, None);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_payload_is_refused_before_its_signature_is_checked() {
+        let emails = Emails::in_memory(10);
+        let padded = |len: usize| {
+            let mut payload = serde_json::json!({ "email": EMAIL, "node_id": NODE, "pad": "", "ts": NOW, "type": REGISTER_EMAIL_TYPE });
+            let pad = len - payload.to_string().len();
+            payload["pad"] = serde_json::Value::String("x".repeat(pad));
+            let payload = payload.to_string();
+            assert_eq!(payload.len(), len);
+            serde_json::json!({ "payload": payload, "signature": "sig" })
+                .to_string()
+                .into_bytes()
+        };
+        // A verify call would fail as unavailable (503), so a 400 shows it was never made.
+        let reply = send(None, &emails, &padded(MAX_PAYLOAD_LEN + 1)).await;
+        assert_eq!(
+            (reply.status, error_of(&reply)),
+            (StatusCode::BAD_REQUEST, "invalid payload")
+        );
+        assert_eq!(
+            send(Some(true), &emails, &padded(MAX_PAYLOAD_LEN))
+                .await
+                .status,
+            StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn a_domain_label_is_at_most_63_bytes() {
+        assert!(is_valid_email(&format!(
+            "a@{}.com",
+            "b".repeat(MAX_LABEL_LEN)
+        )));
+        assert!(!is_valid_email(&format!(
+            "a@{}.com",
+            "b".repeat(MAX_LABEL_LEN + 1)
+        )));
+        assert!(!is_valid_email(&format!(
+            "a@example.{}",
+            "c".repeat(MAX_LABEL_LEN + 1)
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_node_with_a_channel_skips_the_hourly_limit_and_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let registrations =
+            std::sync::Arc::new(crate::push::registrations::Registrations::new(dir.path()));
+        registrations
+            .set_channel_peers([NODE.to_string()].into())
+            .await
+            .unwrap();
+        let has_channel = |node: &str| registrations.has_channel(node);
+        let stranger = format!("03{}", &NODE[2..]);
+        for (emails, reason) in [
+            (Emails::in_memory_limited(10, 0), "hourly_limit"),
+            (Emails::in_memory_limited(0, 10), "full"),
+        ] {
+            let ldk = VerifyFake { valid: Some(true) };
+            let reply = register(
+                &ldk,
+                &emails,
+                &has_channel,
+                &body(EMAIL, &stranger, NOW),
+                NOW,
+            )
+            .await;
+            assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{reason}");
+            assert_eq!(reply.audit.unwrap().1["reason"], reason);
+            let reply = register(&ldk, &emails, &has_channel, &body(EMAIL, NODE, NOW), NOW).await;
+            assert_eq!(reply.status, StatusCode::OK, "{reason}");
+            assert_eq!(emails.email_of(NODE).await.as_deref(), Some(EMAIL));
+        }
     }
 
     #[test]

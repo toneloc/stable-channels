@@ -201,7 +201,30 @@ async fn main() -> Result<()> {
     trade_response_retry::spawn(state.clone());
     revenue::spawn(state.clone());
 
-    let router = Router::new()
+    let router = build_router(state);
+
+    let listen_addr: std::net::SocketAddr =
+        cfg.node.rest_service_address.parse().with_context(|| {
+            format!(
+                "Failed to parse listen address '{}'",
+                cfg.node.rest_service_address
+            )
+        })?;
+
+    info!("listening on https://{}", listen_addr);
+
+    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config));
+    axum_server::bind_rustls(listen_addr, rustls_config)
+        .serve(router.into_make_service())
+        .await
+        .context("axum_server crashed")?;
+
+    Ok(())
+}
+
+/// Every route the daemon serves; the wallet routes added after the auth layer are exempt from it.
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/GetNodeInfo", post(handlers::proxy::get_node_info))
         .route("/GetBalances", post(handlers::proxy::get_balances))
         .route("/ListChannels", post(handlers::proxy::list_channels))
@@ -314,25 +337,7 @@ async fn main() -> Result<()> {
         // that never reach the auth middleware's own capped read.
         .layer(axum::extract::DefaultBodyLimit::max(auth::MAX_AUTH_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
-
-    let listen_addr: std::net::SocketAddr =
-        cfg.node.rest_service_address.parse().with_context(|| {
-            format!(
-                "Failed to parse listen address '{}'",
-                cfg.node.rest_service_address
-            )
-        })?;
-
-    info!("listening on https://{}", listen_addr);
-
-    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(tls_config));
-    axum_server::bind_rustls(listen_addr, rustls_config)
-        .serve(router.into_make_service())
-        .await
-        .context("axum_server crashed")?;
-
-    Ok(())
+        .with_state(state)
 }
 
 /// Size of the SC daemon's api key in bytes.
@@ -535,6 +540,78 @@ mod tests {
             assert!(error.contains("expected exactly 32"), "size {size}: {error}");
             assert_eq!(std::fs::read(&path).unwrap().len(), size, "the file is left for the operator");
         }
+    }
+
+    /// A state that never reaches LDK Server: enough to route requests.
+    fn offline_state(dir: &std::path::Path) -> AppState {
+        let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
+        tls::get_or_generate_tls_config(None, dir.to_str().unwrap()).unwrap();
+        let cert = std::fs::read(dir.join("tls.crt")).unwrap();
+        let db = Arc::new(Database::open(dir).unwrap());
+        AppState {
+            ldk_server: Arc::new(
+                LdkServerClient::new("localhost:1".into(), String::new(), &cert).unwrap(),
+            ),
+            api_key: Arc::new(vec![0x42; API_KEY_LEN]),
+            data_dir: dir.to_path_buf(),
+            network: "regtest".into(),
+            db: Arc::clone(&db),
+            push: Arc::new(tokio::sync::Mutex::new(push::PushService::new(
+                &Default::default(),
+                dir,
+            ))),
+            push_registrations: Arc::new(push::registrations::Registrations::new(dir)),
+            emails: None,
+            stable_manager: Arc::new(tokio::sync::Mutex::new(
+                stable_manager::StableChannelManager::new(db, dir.to_path_buf()),
+            )),
+            geoip: geoip::load(None),
+            geoip_record_ips: false,
+            geoip_retention_secs: 0,
+            revenue: Arc::new(revenue::RevenueStore::default()),
+            ldk_log_file: None,
+            last_event_before_start_ms: None,
+            funding_outpoints: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn register_email_needs_no_admin_auth_but_keeps_the_body_cap() {
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let router = build_router(offline_state(dir.path()));
+        let post = |path: &str, body: Vec<u8>| {
+            Request::post(path)
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+
+        let admin = router
+            .clone()
+            .oneshot(post("/GetNodeInfo", vec![]))
+            .await
+            .unwrap();
+        assert_eq!(
+            admin.status(),
+            StatusCode::UNAUTHORIZED,
+            "admin routes need X-Auth"
+        );
+        // With emails.db off the handler itself answers 503, so this status proves the request got past auth to it.
+        let reached = router
+            .clone()
+            .oneshot(post("/api/register-email", b"{}".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(reached.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let oversized = router
+            .oneshot(post(
+                "/api/register-email",
+                vec![b'x'; auth::MAX_AUTH_BODY_BYTES + 1],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
