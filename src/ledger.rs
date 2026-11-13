@@ -950,6 +950,13 @@ pub const CHANNEL_STATE_EVENTS: &[&str] = &[
     "SPLICE_OUT_STABLE_DEDUCTED",
     "SPLICE_OUT_STABLE_RECONCILED",
     "SPLICE_RECONSTRUCTED",
+    // An operator-queued LSP splice-in: queued, started on the node, locked, failed, stalled or cancelled.
+    "QUEUED_SPLICE_CREATED",
+    "QUEUED_SPLICE_STARTED",
+    "QUEUED_SPLICE_LOCKED",
+    "QUEUED_SPLICE_FAILED",
+    "QUEUED_SPLICE_STALLED",
+    "QUEUED_SPLICE_CANCELLED",
     "AUTO_SPLICE_CONFIRMED",
     "SWEEP_TO_CHANNEL",
     "SWEEP_PROGRESS",
@@ -1111,6 +1118,10 @@ pub const OPERATIONAL_EVENTS: &[&str] = &[
     // A wake watch starting or expiring is diagnostic; only the reconnect reaches the channel ledger.
     "STABILITY_WAKE_POLL_STARTED",
     "STABILITY_WAKE_POLL_TIMEOUT",
+    // A refused request, each push for a queued splice and the negotiation step; QUEUED_SPLICE_STARTED, _LOCKED and _FAILED are the durable records.
+    "QUEUED_SPLICE_UNFUNDED",
+    "QUEUED_SPLICE_WAKE_SENT",
+    "QUEUED_SPLICE_NEGOTIATED",
     // Event-stream transport; EVENT_STREAM_GAP_STARTED, EVENT_STREAM_GAP_CLOSED and RECONCILIATION_RESULT are the durable records.
     "EVENT_STREAM_CONNECTED", "EVENT_STREAM_CONNECT_FAILED", "EVENT_STREAM_DISCONNECTED", "RECONCILIATION_STARTED",
     // Price-feed transport.

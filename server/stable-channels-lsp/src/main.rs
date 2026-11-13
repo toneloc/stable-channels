@@ -11,6 +11,7 @@ mod observability;
 mod price_task;
 mod payment_filter;
 mod push;
+mod queued_splice;
 mod record_limits;
 mod revenue;
 mod secret_file;
@@ -32,8 +33,9 @@ use ldk_server_client::client::LdkServerClient;
 use ldk_server_client::config as ldk_config;
 use sc_protos::revenue::{GET_REVENUE_PATH, REFUND_TRADE_FEE_PATH};
 use sc_protos::stable::{
-    AUDIT_LOG_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH, LDK_LOG_PATH,
-    LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH,
+    AUDIT_LOG_PATH, CANCEL_QUEUED_SPLICE_PATH, EDIT_STABLE_CHANNEL_PATH, GET_PRICE_PATH,
+    LDK_LOG_PATH, LIST_CHANNEL_LEDGER_EVENTS_PATH, LIST_QUEUED_SPLICES_PATH,
+    LIST_SETTLEMENT_PAYMENTS_PATH, LIST_STABLE_CHANNELS_PATH, QUEUE_SPLICE_IN_PATH,
     REGISTER_PUSH_PATH, RELEASE_STABILITY_PAYMENT_PATH,
 };
 use ldk_server_client::ldk_server_grpc::endpoints::{
@@ -195,6 +197,7 @@ async fn main() -> Result<()> {
     }
     event_loop::spawn(state.clone());
     stability_tick::spawn(state.clone());
+    queued_splice::spawn(state.clone());
     observability::spawn(state.clone());
     trade_response_retry::spawn(state.clone());
     revenue::spawn(state.clone());
@@ -280,6 +283,18 @@ async fn main() -> Result<()> {
         .route(
             &format!("/{}", REFUND_TRADE_FEE_PATH),
             post(handlers::revenue::refund_trade_fee),
+        )
+        .route(
+            &format!("/{}", QUEUE_SPLICE_IN_PATH),
+            post(handlers::queued_splices::queue_splice_in),
+        )
+        .route(
+            &format!("/{}", LIST_QUEUED_SPLICES_PATH),
+            post(handlers::queued_splices::list_queued_splices),
+        )
+        .route(
+            &format!("/{}", CANCEL_QUEUED_SPLICE_PATH),
+            post(handlers::queued_splices::cancel_queued_splice),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
